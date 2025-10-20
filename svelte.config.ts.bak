@@ -1,0 +1,18 @@
+// svelte.config.ts
+import adapter from '@sveltejs/adapter-node';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+const config = {
+  preprocess: vitePreprocess(),
+  kit: {
+    adapter: adapter({ precompress: true }), // optional but nice
+    csp: {
+      mode: 'auto',
+      directives: {
+        "img-src": ["'self'", 'data:', 'blob:', 'https:', '*.googleusercontent.com']
+      }
+    }
+  }
+};
+
+export default config;

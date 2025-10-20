@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* Base polish */
+:root {
+  --surface: 15 15 20;          /* slate-ish */
+  --card: 255 255 255 / .06;
+  --border: 255 255 255 / .08;
+  --muted: 255 255 255 / .6;
+  --ring: 99 102 241;           /* indigo-500 */
+}
+
+html, body, #app { height: 100%; }
+* { -webkit-tap-highlight-color: transparent; }
+::selection { background: rgba(99,102,241,.24); }
+
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.22) transparent;
+}
+*::-webkit-scrollbar { height: 10px; width: 10px; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,.22); border-radius: 9999px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* Cards / Surfaces */
+.surface {
+  @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl;
+}
+.card {
+  background: color-mix(in oklab, rgb(var(--surface)) 92%, white 8%);
+  @apply rounded-2xl border border-white/10 backdrop-blur-xl shadow-2xl;
+}
+
+/* Inputs */
+.input {
+  @apply w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2.5 placeholder:text-white/40 outline-none;
+}
+.input:focus { box-shadow: 0 0 0 4px rgba(var(--ring) / .25); }
+
+/* Buttons */
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2.5 text-sm font-medium transition active:scale-[.99];
+}
+.btn-primary { @apply bg-white text-slate-900 hover:bg-white/90; }
+.btn-ghost   { @apply bg-white/10 hover:bg-white/15 border border-white/10 text-white; }
+
+/* Avatars */
+.avatar {
+  @apply grid place-items-center rounded-full bg-white/10 border border-white/10 text-xs text-white/80;
+}
