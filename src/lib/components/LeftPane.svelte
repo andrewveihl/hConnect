@@ -1,41 +1,71 @@
 <script lang="ts">
-  export let servers: { id: string; name: string; emoji?: string|null }[] = [];
-  export let activeId: string | null = null;
-  export let onCreateServer: () => void = () => {};
-  export let onPickServer: (id: string) => void = () => {};
-  export let onOpenDMs: () => void = () => {};
+  import { onDestroy } from 'svelte';
+  import { user } from '$lib/stores/user';
+  import { subscribeUserServers } from '$lib/db/servers';
+
+  export let activeServerId: string | null = null;
+  export let onCreateServer: (() => void) | null = null;
+
+  let servers: { id: string; name: string; icon?: string|null }[] = [];
+  let unsub: (() => void) | undefined;
+
+  $: if ($user) { unsub?.(); unsub = subscribeUserServers($user.uid, (rows) => { servers = rows; }); }
+  onDestroy(() => unsub?.());
+
+  const handleCreateClick = () => { if (onCreateServer) onCreateServer(); };
 </script>
 
-<aside class="w-[72px] h-full bg-[#0b0f1a] border-r border-white/10 flex flex-col items-center py-3 gap-3">
-  <button type="button" class="relative h-12 w-12 rounded-2xl grid place-items-center border border-white/10 bg-white/10 hover:bg-white/15"
-    on:click={onOpenDMs} title="Direct Messages" aria-label="Open direct messages">
-    <svg viewBox="0 0 24 24" class="h-6 w-6" fill="currentColor" aria-hidden="true">
-      <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-5.33 0-8 2.667-8 4v2h16v-2c0-1.333-2.67-4-8-4Z"/>
-    </svg>
-  </button>
+<aside class="h-dvh w-[72px] bg-[#1e1f22] border-r border-black/40 text-white select-none flex flex-col items-center">
+  <div class="h-3 shrink-0"></div>
 
-  <div class="w-10 h-px bg-white/10" aria-hidden="true"></div>
+  <!-- Home / DMs -->
+  <a
+    href="/dms"
+    class="my-1 rounded-3xl w-12 h-12 bg-[#313338] hover:rounded-xl hover:bg-[#5865f2] transition-all grid place-items-center"
+    aria-label="Home / DMs" role="button"
+  >
+    <i class="bx bx-message-dots text-xl"></i>
+  </a>
 
-  {#each servers as s}
-    <button
-      type="button"
-      class="relative h-12 w-12 rounded-2xl grid place-items-center border border-white/10 transition
-             {activeId === s.id ? 'bg-white text-slate-900 shadow-lg' : 'bg-white/10 hover:bg-white/15'}"
-      on:click={() => onPickServer(s.id)}
-      title={s.name}
-      aria-label={`Open server ${s.name}`}
-    >
-      {#if activeId === s.id}
-        <span class="absolute -left-2 h-7 w-1.5 rounded-full bg-white/90" aria-hidden="true"></span>
+  <div class="h-px w-8 bg-white/10 my-2"></div>
+
+  <!-- Servers -->
+  <div class="flex-1 w-full overflow-y-auto">
+    <div class="flex flex-col items-center">
+      {#each servers as s (s.id)}
+        <a
+          href={`/servers/${s.id}`}
+          class={`my-1 rounded-3xl w-12 h-12 transition-all grid place-items-center hover:rounded-xl
+            ${activeServerId === s.id ? '!bg-[#5865f2] hover:!bg-[#5865f2]' : 'bg-[#313338] hover:bg-[#5865f2]'}`}
+          aria-label={s.name} role="button"
+        >
+          {#if s.icon}
+            <img src={s.icon} alt={s.name} class="w-12 h-12 rounded-3xl pointer-events-none" />
+          {:else}
+            <span class="text-sm font-semibold">{s.name.slice(0,2).toUpperCase()}</span>
+          {/if}
+        </a>
+      {/each}
+
+      <!-- Create (opens local modal if provided by parent) -->
+      <button
+        class="my-1 rounded-3xl w-12 h-12 bg-[#313338] hover:rounded-xl hover:bg-emerald-600 transition-all grid place-items-center"
+        on:click={handleCreateClick} aria-label="Create server"
+      >
+        <i class="bx bx-plus text-2xl"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- Bottom: Settings -->
+  <div class="w-full grid place-items-center gap-2 p-2">
+    <a href="/settings" class="rounded-2xl w-12 h-12 bg-[#313338] grid place-items-center overflow-hidden" title="Settings" role="button">
+      {#if $user?.photoURL}
+        <img src={$user.photoURL} alt="Me" class="w-full h-full object-cover" />
+      {:else}
+        <i class="bx bx-user text-xl"></i>
       {/if}
-      <span class="text-lg" aria-hidden="true">{s.emoji || s.name.slice(0,1).toUpperCase()}</span>
-    </button>
-  {/each}
-
-  <div class="mt-auto" aria-hidden="true"></div>
-
-  <button type="button" class="h-12 w-12 rounded-2xl border border-emerald-400/40 bg-emerald-500/20 hover:bg-emerald-500/30 grid place-items-center"
-    title="Create server" aria-label="Create server" on:click={onCreateServer}>
-    <span class="text-2xl leading-none">+</span>
-  </button>
+    </a>
+    <div class="text-[10px] text-white/60 max-w-[60px] text-center truncate">Settings</div>
+  </div>
 </aside>

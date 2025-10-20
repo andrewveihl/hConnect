@@ -1,22 +1,30 @@
 <script lang="ts">
-  export let items: { id: string; authorUid: string; text: string; createdAt?: any }[] = [];
-  const avatar = (uid: string) => uid?.slice(0,2).toUpperCase();
+  export let messages: Array<{ id: string; authorId: string; content: string; gifUrl?: string|null; createdAt: any }>=[];
+  export let users: Record<string, { displayName?: string; photoURL?: string|null }> = {};
 </script>
 
-<div class="flex-1 overflow-y-auto px-4 py-5 space-y-3">
-  {#if items.length}
-    {#each items as m}
-      <div class="flex items-start gap-3">
-        <div class="h-8 w-8 rounded-full bg-white/10 border border-white/10 grid place-items-center text-xs">{avatar(m.authorUid)}</div>
-        <div class="min-w-0">
-          <div class="text-xs text-white/50 -mb-1">{m.authorUid}</div>
-          <div class="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 max-w-[72ch]">
-            <div class="text-white/90 leading-relaxed break-words">{m.text}</div>
-          </div>
-        </div>
+<div class="flex flex-col gap-4">
+  {#each messages as m (m.id)}
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-full overflow-hidden bg-[#3f4248] grid place-items-center">
+        {#if users[m.authorId]?.photoURL}
+          <img src={users[m.authorId].photoURL} alt="" class="w-full h-full object-cover" />
+        {:else}
+          <i class="bx bx-user text-white/70"></i>
+        {/if}
       </div>
-    {/each}
-  {:else}
-    <div class="text-white/50 text-sm">No messages yet.</div>
-  {/if}
+      <div class="flex-1">
+        <div class="text-sm">
+          <span class="font-semibold">{users[m.authorId]?.displayName ?? 'User'}</span>
+          <span class="text-white/40 ml-2 text-xs">
+            {new Date(m.createdAt?.toMillis?.() ?? m.createdAt).toLocaleString()}
+          </span>
+        </div>
+        <div class="whitespace-pre-wrap text-[15px] leading-6">{m.content}</div>
+        {#if m.gifUrl}
+          <img src={m.gifUrl} alt="gif" class="mt-2 rounded-lg max-h-64 object-contain" />
+        {/if}
+      </div>
+    </div>
+  {/each}
 </div>
