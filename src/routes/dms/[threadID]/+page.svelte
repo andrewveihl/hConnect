@@ -1,6 +1,4 @@
 <script lang="ts">
-  export const ssr = false
-
   import { user } from '$lib/stores/user'
   import { db } from '$lib/db'
   import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore'
@@ -10,9 +8,11 @@
 
   let email = ''
   let threads: any[] = []
-  $: me = $user
 
-  function watchThreads(uid?: string) {
+  let stopPrimary: (() => void) | undefined
+  let stopFallback: (() => void) | undefined
+
+  function startWatch(uid?: string) {
     if (!uid) return
 
     const database = db()
@@ -28,15 +28,13 @@
       where('participants', 'array-contains', uid)
     )
 
-    let fallbackStop: (() => void) | undefined
-
-    const stopPrimary = onSnapshot(
+    stopPrimary = onSnapshot(
       q1,
       snap => {
         threads = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       },
       _err => {
-        fallbackStop = onSnapshot(q2, snap2 => {
+        stopFallback = onSnapshot(q2, snap2 => {
           threads = snap2.docs
             .map(d => ({ id: d.id, ...d.data() }))
             .sort(
@@ -46,16 +44,20 @@
         })
       }
     )
-
-    return () => {
-      stopPrimary()
-      fallbackStop?.()
-    }
   }
 
+  function stopWatch() {
+    stopPrimary?.()
+    stopFallback?.()
+    stopPrimary = undefined
+    stopFallback = undefined
+  }
+
+  // Runes-friendly: react to $user changes and clean up
   $effect(() => {
-    const stop = watchThreads(me?.uid)
-    return () => stop?.()
+    stopWatch()
+    startWatch($user?.uid)
+    return () => stopWatch()
   })
 
   async function addByEmail() {
