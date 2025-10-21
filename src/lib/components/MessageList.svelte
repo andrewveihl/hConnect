@@ -81,8 +81,8 @@
   // Ensure drafts exist for form messages
   $: {
     for (const m of messages) {
-      if (m && m.type === 'form' && m.form?.questions) {
-        const len = m.form.questions.length;
+      if (m && (m as any).type === 'form' && (m as any).form?.questions) {
+        const len = (m as any).form.questions.length;
         if (!formDrafts[m.id] || formDrafts[m.id].length !== len) {
           formDrafts[m.id] = Array(len).fill('');
         }
@@ -96,6 +96,9 @@
     // optional local clear
     formDrafts[m.id] = Array(m.form.questions.length).fill('');
   }
+
+  // ------- IDs for a11y labels -------
+  const formInputId = (mId: string, idx: number) => `form-${mId}-${idx}`;
 </script>
 
 <style>
@@ -120,7 +123,7 @@
         <div class="pl-12">
           <!-- BODY -->
           {#if !m.type || m.type === 'text'}
-            <div class="whitespace-pre-wrap leading-relaxed text-white/90 break-words">{m.text ?? (m as any).content ?? ''}</div>
+            <div class="whitespace-pre-wrap leading-relaxed text-white/90 break-words">{(m as any).text ?? (m as any).content ?? ''}</div>
           {:else if m.type === 'gif' && (m as any).url}
             <img class="max-w-[60%] rounded-lg border border-white/10" src={(m as any).url} alt="GIF" />
           {:else if m.type === 'file' && (m as any).file}
@@ -151,8 +154,10 @@
             <div class="rounded-lg border border-white/10 p-3 bg-white/5">
               <div class="font-medium mb-2">📝 {(m as any).form.title}</div>
               {#each (m as any).form.questions as q, qi}
-                <label class="block text-sm mb-1">{qi + 1}. {q}</label>
-                <input class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                {#key `${m.id}-${qi}`}
+                  <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
+                  <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                {/key}
               {/each}
               <div class="flex justify-end">
                 <button class="rounded-md px-3 py-2 bg-[#5865f2] hover:bg-[#4752c4]" on:click={() => submitForm(m)}>Submit</button>
@@ -187,7 +192,7 @@
             <div class="mt-1">
               <!-- BODY -->
               {#if !m.type || m.type === 'text'}
-                <div class="whitespace-pre-wrap leading-relaxed text-white/90 break-words">{m.text ?? (m as any).content ?? ''}</div>
+                <div class="whitespace-pre-wrap leading-relaxed text-white/90 break-words">{(m as any).text ?? (m as any).content ?? ''}</div>
               {:else if m.type === 'gif' && (m as any).url}
                 <img class="max-w-[60%] rounded-lg border border-white/10" src={(m as any).url} alt="GIF" />
               {:else if m.type === 'file' && (m as any).file}
@@ -221,8 +226,10 @@
                 <div class="rounded-lg border border-white/10 p-3 bg-white/5">
                   <div class="font-medium mb-2">📝 {(m as any).form.title}</div>
                   {#each (m as any).form.questions as q, qi}
-                    <label class="block text-sm mb-1">{qi + 1}. {q}</label>
-                    <input class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                    {#key `${m.id}-${qi}`}
+                      <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
+                      <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                    {/key}
                   {/each}
                   <div class="flex justify-end">
                     <button class="rounded-md px-3 py-2 bg-[#5865f2] hover:bg-[#4752c4]" on:click={() => submitForm(m)}>Submit</button>
