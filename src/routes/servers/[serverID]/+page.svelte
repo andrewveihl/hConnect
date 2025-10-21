@@ -155,7 +155,7 @@
   }
 </script>
 
-<div class="min-h-dvh grid" style="grid-template-columns: 72px 256px 1fr 288px; grid-template-rows: 48px 1fr auto;">
+<div class="h-dvh overflow-hidden grid" style="grid-template-columns: 72px 256px 1fr 288px; grid-template-rows: 48px 1fr auto;">
   <div class="row-span-3">
     <!-- LeftPane expects the active server id -->
     <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
@@ -180,11 +180,11 @@
   <main class="bg-[#313338] col-start-3 row-start-2 row-end-3 overflow-hidden">
     {#if serverId && activeChannel}
       <div class="h-full flex flex-col">
-        <div class="flex-1 overflow-y-auto p-4">
+        <div class="flex-1 overflow-hidden p-4">
           <MessageList {messages} users={profiles} />
         </div>
 
-        <div class="border-t border-black/40 bg-[#2b2d31] p-3">
+        <div class="shrink-0 border-t border-black/40 bg-[#2b2d31] p-3">
           <ChatInput
             placeholder={`Message #${activeChannel?.name ?? ''}`}
             onSend={handleSend}

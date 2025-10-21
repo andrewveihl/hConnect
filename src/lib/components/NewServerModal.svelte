@@ -9,10 +9,15 @@
 
   let name = '';
   let isPublic = true;
+  let busy = false;
 
-  function close() { onClose(); }
+  function close() {
+    // keep your onClose behavior; also reflect local state
+    open = false;
+    onClose();
+  }
 
-  // ✅ fixed syntax
+  // ✅ fixed syntax (kept)
   const handleKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && open) close();
   };
@@ -26,15 +31,25 @@
   });
 
   async function submit() {
-    if (!name.trim() || !$user) return;
-    const serverId = await createServer({
-      ownerId: $user.uid,
-      name: name.trim(),
-      isPublic,
-      icon: null
-    });
-    close();
-    await goto(`/servers/${serverId}`);
+    if (busy) return;
+    const owner = $user?.uid;
+    if (!name.trim() || !owner) return;
+
+    try {
+      busy = true;
+      // ⬇️ unchanged shape; matches your server.ts signature
+      const serverId = await createServer({
+        ownerId: owner,
+        name: name.trim(),
+        isPublic,
+        icon: null
+      });
+
+      close();
+      await goto(`/servers/${serverId}`);
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
@@ -59,7 +74,12 @@
         <h2 id="create-server-title" class="text-xl font-semibold mb-4">Create a server</h2>
 
         <div class="space-y-4">
-          <input class="input" placeholder="Server name" bind:value={name} />
+          <input
+            class="input"
+            placeholder="Server name"
+            bind:value={name}
+            on:keydown={(e) => (e.key === 'Enter' ? submit() : null)}
+          />
 
           <div class="flex items-center gap-4 text-sm">
             <label class="flex items-center gap-2">
@@ -73,8 +93,15 @@
           </div>
 
           <div class="flex gap-2">
-            <button type="button" class="btn btn-ghost flex-1" on:click={close}>Cancel</button>
-            <button type="button" class="btn btn-primary flex-1" on:click={submit}>Create</button>
+            <button type="button" class="btn btn-ghost flex-1" on:click={close} disabled={busy}>Cancel</button>
+            <button
+              type="button"
+              class="btn btn-primary flex-1 disabled:opacity-50"
+              on:click={submit}
+              disabled={busy || !name.trim() || !$user}
+            >
+              {#if busy}Creating…{:else}Create{/if}
+            </button>
           </div>
         </div>
       </div>
