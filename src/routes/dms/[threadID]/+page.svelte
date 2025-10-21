@@ -1,55 +1,62 @@
 <script lang="ts">
-  import { user } from '$lib/stores/user';
-  import { db } from '$lib/db';
-  import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore';
-  import { openDmThread } from '$lib/db/dms';
-  import { goto } from '$app/navigation';
-  import LeftPane from '$lib/components/LeftPane.svelte';
+  export const ssr = false
 
-  let email = '';
-  let threads: any[] = [];
-  $: me = $user;
+  import { user } from '$lib/stores/user'
+  import { db } from '$lib/db'
+  import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore'
+  import { openDmThread } from '$lib/db/dms'
+  import { goto } from '$app/navigation'
+  import LeftPane from '$lib/components/LeftPane.svelte'
 
-  function watchThreads() {
-    if (!me) return;
-    const database = db();
+  let email = ''
+  let threads: any[] = []
+  $: me = $user
 
-    // preferred (needs index)
+  function watchThreads(uid?: string) {
+    if (!uid) return
+
+    const database = db()
+
     const q1 = query(
       collection(database, 'dms'),
-      where('participants', 'array-contains', me.uid),
+      where('participants', 'array-contains', uid),
       orderBy('lastMessageAt', 'desc')
-    );
+    )
 
-    // fallback (no orderBy — no index needed)
     const q2 = query(
       collection(database, 'dms'),
-      where('participants', 'array-contains', me.uid)
-    );
+      where('participants', 'array-contains', uid)
+    )
 
-    // try preferred; on index error, switch to fallback
-    const stop = onSnapshot(
+    let fallbackStop: (() => void) | undefined
+
+    const stopPrimary = onSnapshot(
       q1,
-      (snap) => { threads = snap.docs.map(d => ({ id: d.id, ...d.data() })); },
-      (_err) => {
-        // index not ready -> use fallback
-        onSnapshot(q2, (snap2) => {
-          // no guaranteed order; sort client-side by lastMessageAt desc
+      snap => {
+        threads = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      },
+      _err => {
+        fallbackStop = onSnapshot(q2, snap2 => {
           threads = snap2.docs
             .map(d => ({ id: d.id, ...d.data() }))
-            .sort((a,b) => (b.lastMessageAt?.seconds ?? 0) - (a.lastMessageAt?.seconds ?? 0));
-        });
+            .sort(
+              (a, b) =>
+                (b.lastMessageAt?.seconds ?? 0) - (a.lastMessageAt?.seconds ?? 0)
+            )
+        })
       }
-    );
+    )
 
-    return stop;
+    return () => {
+      stopPrimary()
+      fallbackStop?.()
+    }
   }
 
-  $: {
-    // re-watch when user changes
-    const stop = watchThreads();
-    return () => stop && stop();
-  }
+  $effect(() => {
+    const stop = watchThreads(me?.uid)
+    return () => stop?.()
+  })
 
   async function addByEmail() {
     // ...your existing code...
