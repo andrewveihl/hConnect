@@ -14,9 +14,12 @@
   import { collection, doc, onSnapshot, orderBy, query } from 'firebase/firestore';
   import { sendChannelMessage } from '$lib/db/messages';
 
-  // ✅ Comes from +page.ts (guaranteed now)
-  export let data: { serverId: string };
-  const serverId = data.serverId;
+import { page } from '$app/stores';
+
+// ✅ Comes from +page.ts, but fall back to route params if needed
+export let data: { serverId?: string };
+const serverId = data?.serverId ?? $page.params.serverId ?? null;
+
 
   type Channel = { id: string; name?: string; type?: 'text' | 'voice'; position?: number };
 

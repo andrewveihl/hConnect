@@ -1,13 +1,11 @@
-// src/routes/servers/[serverId]/+page.ts
-export const ssr = false; // client-side, for Firebase
+export const ssr = false;
 
 import type { PageLoad } from './$types';
 
-export const load: PageLoad = async ({ params }) => {
-  if (!params.serverId) {
-    console.error('[+page.ts] Missing params.serverId!');
-  }
-  return { serverId: params.serverId };
-  
+export const load: PageLoad = ({ params }) => {
+  // IMPORTANT: your folder is [serversID], so the param name is "serversID"
+  // Map it to "serverId" so the rest of your code can keep using serverId
+  return {
+    serverId: params.serversID
+  };
 };
-
