@@ -2,51 +2,61 @@
   import { page } from '$app/stores';
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
-  import { collection, onSnapshot, orderBy, query, doc, getDoc, type Unsubscribe } from 'firebase/firestore';
+  import {
+    collection, onSnapshot, orderBy, query, doc, getDoc, type Unsubscribe
+  } from 'firebase/firestore';
   import ChannelCreateModal from '$lib/components/ChannelCreateModal.svelte';
 
   export let serverId: string | undefined;
   export let activeChannelId: string | null = null;
 
-  // Your page uses a prop-callback (not a Svelte event)
+  // Parent is using a prop callback; also emit an event for flexibility.
   export let onPickChannel: (id: string) => void = () => {};
   const dispatch = createEventDispatcher<{ pick: string }>();
 
-  // Compute once, but only re-subscribe when the value actually changes
+  // Resolve current server id from prop OR route params (supports `[serverID]`)
   $: computedServerId =
     serverId ??
-    $page.params.serverId ??
-    ($page.params as any).serversID ??
-    ($page.params as any).id;
+    $page.params.serverId ??           // if folder is [serverId]
+    ($page.params as any).serverID ??  // if folder is [serverID]
+    null;
 
-  type Chan = { id: string; name: string; type: 'text'|'voice'; position?: number; isPrivate?: boolean };
+  type Chan = {
+    id: string; name: string; type: 'text' | 'voice';
+    position?: number; isPrivate?: boolean
+  };
 
   let channels: Chan[] = [];
   let serverName = 'Server';
   let unsub: Unsubscribe | null = null;
   let showCreate = false;
 
-  // Track last subscribed id & one-time autopick per server
+  // Track last server so we only resubscribe when it truly changes
   let lastServerId: string | null = null;
   let didAutopick = false;
 
   async function subscribe(server: string) {
+    // Clear previous
     unsub?.();
     channels = [];
     didAutopick = false;
 
     const db = getDb();
 
+    // ✅ FIX: correct collection is "servers"
     try {
-      const meta = await getDoc(doc(db, 'servers', server));
-      serverName = meta.exists() ? ((meta.data() as any)?.name ?? 'Server') : 'Server';
-    } catch { serverName = 'Server'; }
+      const metaSnap = await getDoc(doc(db, 'servers', server));
+      serverName = metaSnap.exists() ? ((metaSnap.data() as any)?.name ?? 'Server') : 'Server';
+    } catch {
+      serverName = 'Server';
+    }
 
+    // Channels for this server
     const qRef = query(collection(db, 'servers', server, 'channels'), orderBy('position'));
     unsub = onSnapshot(qRef, (snap) => {
       channels = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
 
-      // Only auto-pick once per server, and only if parent hasn't selected yet
+      // Auto-pick first channel once per server if parent hasn't selected one
       if (!didAutopick && !activeChannelId && channels.length) {
         didAutopick = true;
         pick(channels[0].id);
@@ -54,7 +64,7 @@
     });
   }
 
-  // ✅ subscribe only when the server id actually changes
+  // 🔁 Re-subscribe when server id actually changes
   $: if (computedServerId && computedServerId !== lastServerId) {
     lastServerId = computedServerId;
     subscribe(computedServerId);
@@ -64,8 +74,8 @@
 
   function pick(id: string) {
     if (!id) return;
-    onPickChannel(id);    // prop callback (parent sets activeChannel and passes activeChannelId back)
-    dispatch('pick', id); // optional event for flexibility
+    onPickChannel(id);     // prop callback used by parent
+    dispatch('pick', id);  // also emit an event
   }
 </script>
 
