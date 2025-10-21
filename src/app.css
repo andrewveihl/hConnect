@@ -9,7 +9,7 @@
   --ring: 99 102 241;           /* indigo-500 */
 }
 
-html, body, #app { height: 100%; }
+html, body, #app { height: 100%; margin: 0; overflow: hidden;}
 * { -webkit-tap-highlight-color: transparent; }
 ::selection { background: rgba(99,102,241,.24); }
 
