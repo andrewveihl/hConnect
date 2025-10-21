@@ -1,13 +1,6 @@
 // src/lib/firebase.ts
 import { browser } from '$app/environment';
-import {
-  PUBLIC_FIREBASE_API_KEY,
-  PUBLIC_FIREBASE_AUTH_DOMAIN,
-  PUBLIC_FIREBASE_PROJECT_ID,
-  PUBLIC_FIREBASE_APP_ID,
-  PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  PUBLIC_FIREBASE_STORAGE_BUCKET
-} from '$env/static/public';
+import { env as dynamicPublic } from '$env/dynamic/public'; // runtime PUBLIC_* if present
 
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import {
@@ -19,6 +12,35 @@ import {
 } from 'firebase/firestore';
 import { user } from '$lib/stores/user';
 
+/** Resolve Firebase web config from PUBLIC_* or FIREBASE_WEBAPP_CONFIG */
+function loadFirebaseConfig() {
+  // 1) Local/CI: PUBLIC_* via $env/dynamic/public
+  if (dynamicPublic.PUBLIC_FIREBASE_API_KEY) {
+    return {
+      apiKey: dynamicPublic.PUBLIC_FIREBASE_API_KEY,
+      authDomain: dynamicPublic.PUBLIC_FIREBASE_AUTH_DOMAIN,
+      projectId: dynamicPublic.PUBLIC_FIREBASE_PROJECT_ID,
+      appId: dynamicPublic.PUBLIC_FIREBASE_APP_ID,
+      messagingSenderId: dynamicPublic.PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+      storageBucket: dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET
+    };
+  }
+
+  // 2) Firebase Hosting build: FIREBASE_WEBAPP_CONFIG (JSON string)
+  const raw =
+    (typeof process !== 'undefined' && (process as any)?.env?.FIREBASE_WEBAPP_CONFIG) || '';
+  try {
+    const cfg = raw ? JSON.parse(raw) : {};
+    if (cfg?.apiKey && cfg?.projectId && cfg?.appId) return cfg;
+  } catch {
+    /* ignore */
+  }
+
+  throw new Error(
+    'Firebase config not found. Provide PUBLIC_FIREBASE_* envs locally or rely on FIREBASE_WEBAPP_CONFIG in Hosting.'
+  );
+}
+
 let app: FirebaseApp | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
@@ -28,20 +50,14 @@ export function getFirebase() {
   if (!browser) return { app: undefined, auth: undefined };
 
   if (!getApps().length) {
-    app = initializeApp({
-      apiKey: PUBLIC_FIREBASE_API_KEY,
-      authDomain: PUBLIC_FIREBASE_AUTH_DOMAIN,
-      projectId: PUBLIC_FIREBASE_PROJECT_ID,
-      appId: PUBLIC_FIREBASE_APP_ID,
-      messagingSenderId: PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-      storageBucket: PUBLIC_FIREBASE_STORAGE_BUCKET
-    });
+    app = initializeApp(loadFirebaseConfig());
   } else {
-    app = getApps()[0];
+    app = getApps()[0]!;
   }
 
   if (!auth) {
-    auth = getAuth();
+    auth = getAuth(app);
+    // best-effort; ignore failures (e.g., private mode)
     setPersistence(auth, browserLocalPersistence).catch(() => {});
   }
 
@@ -51,7 +67,7 @@ export function getFirebase() {
 /** Use the DEFAULT Firestore database (fixes hanging writes). */
 export function getDb() {
   const { app } = getFirebase();
-  if (!db) db = getFirestore(app); // <-- no named DB id here
+  if (!db) db = getFirestore(app); // default DB
   return db!;
 }
 
