@@ -1,17 +1,19 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
   import { collection, onSnapshot, orderBy, query, doc, getDoc, type Unsubscribe } from 'firebase/firestore';
-  import { user } from '$lib/stores/user';
   import ChannelCreateModal from '$lib/components/ChannelCreateModal.svelte';
 
   export let serverId: string | undefined;
   export let activeChannelId: string | null = null;
 
+  // Your page uses a prop-callback (not a Svelte event)
+  export let onPickChannel: (id: string) => void = () => {};
   const dispatch = createEventDispatcher<{ pick: string }>();
 
-  $: serverIdFinal =
+  // Compute once, but only re-subscribe when the value actually changes
+  $: computedServerId =
     serverId ??
     $page.params.serverId ??
     ($page.params as any).serversID ??
@@ -22,31 +24,48 @@
   let channels: Chan[] = [];
   let serverName = 'Server';
   let unsub: Unsubscribe | null = null;
-
   let showCreate = false;
 
-  onMount(async () => {
-    if (!serverIdFinal) return;
+  // Track last subscribed id & one-time autopick per server
+  let lastServerId: string | null = null;
+  let didAutopick = false;
+
+  async function subscribe(server: string) {
+    unsub?.();
+    channels = [];
+    didAutopick = false;
+
     const db = getDb();
 
     try {
-      const meta = await getDoc(doc(db, 'servers', serverIdFinal));
-      if (meta.exists()) serverName = (meta.data() as any)?.name ?? 'Server';
-    } catch { /* ignore */ }
+      const meta = await getDoc(doc(db, 'servers', server));
+      serverName = meta.exists() ? ((meta.data() as any)?.name ?? 'Server') : 'Server';
+    } catch { serverName = 'Server'; }
 
-    const q = query(collection(db, 'servers', serverIdFinal, 'channels'), orderBy('position'));
-    unsub = onSnapshot(q, (snap) => {
+    const qRef = query(collection(db, 'servers', server, 'channels'), orderBy('position'));
+    unsub = onSnapshot(qRef, (snap) => {
       channels = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
-    });
 
-    return () => unsub?.();
-  });
+      // Only auto-pick once per server, and only if parent hasn't selected yet
+      if (!didAutopick && !activeChannelId && channels.length) {
+        didAutopick = true;
+        pick(channels[0].id);
+      }
+    });
+  }
+
+  // ✅ subscribe only when the server id actually changes
+  $: if (computedServerId && computedServerId !== lastServerId) {
+    lastServerId = computedServerId;
+    subscribe(computedServerId);
+  }
 
   onDestroy(() => unsub?.());
 
   function pick(id: string) {
     if (!id) return;
-    dispatch('pick', id);
+    onPickChannel(id);    // prop callback (parent sets activeChannel and passes activeChannelId back)
+    dispatch('pick', id); // optional event for flexibility
   }
 </script>
 
@@ -115,7 +134,7 @@
   <!-- Create Channel Modal -->
   <ChannelCreateModal
     bind:open={showCreate}
-    serverId={serverIdFinal}
+    serverId={computedServerId}
     onClose={() => (showCreate = false)}
     onCreated={(id) => pick(id)}
   />

@@ -1,10 +1,32 @@
-import { db } from './index';
+// Robust writer: ensures fields your UI expects are present.
+// Works with your existing import: `import { sendChannelMessage } from '$lib/db/messages';`
+import { getDb } from '$lib/firebase';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 
-export async function sendChannelMessage(serverId: string, channelId: string, authorId: string, content: string) {
-  const database = db();
-  const gifUrl = content.trim().match(/https?:\/\/\S+\.gif(\?\S+)?$/i)?.[0] ?? null;
-  return addDoc(collection(database, 'servers', serverId, 'channels', channelId, 'messages'), {
-    authorId, content, gifUrl, attachments: [], createdAt: serverTimestamp(), editedAt: null, deleted: false
-  });
+export async function sendChannelMessage(
+  serverId: string,
+  channelId: string,
+  uid: string,
+  text: string
+) {
+  const db = getDb();
+  const clean = text.trim();
+  if (!clean) return;
+
+  // Write with overlapping field names so old/new readers see it:
+  // - text + content
+  // - uid + authorId
+  // - createdAt (for orderBy)
+  const payload = {
+    text: clean,
+    content: clean,
+    uid,
+    authorId: uid,
+    createdAt: serverTimestamp()
+  };
+
+  await addDoc(
+    collection(db, 'servers', serverId, 'channels', channelId, 'messages'),
+    payload
+  );
 }
