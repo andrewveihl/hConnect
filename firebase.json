@@ -1,13 +1,12 @@
 {
   "hosting": {
-    "source": ".",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ],
-    "frameworksBackend": {
-      "region": "us-central1"
-    }
+    "public": "build",
+    "ignore": ["**/.*", "**/node_modules/**"],
+    "rewrites": [
+      { "source": "/api/**",
+        "run": { "serviceId": "hconnectbackend", "region": "us-east5" }
+      },
+      { "source": "**", "destination": "/index.html" }
+    ]
   }
 }
