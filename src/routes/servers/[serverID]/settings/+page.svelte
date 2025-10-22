@@ -60,16 +60,15 @@
     if (!allowed) goto(`/servers/${serverId}`);
   }
 
-function goBack() {
-  // Prefer real back if there is history
-  if (history.length > 1) {
-    history.back();
-  } else {
-    // Fallback: go to the server page (or home)
-    goto(serverId ? `/servers/${serverId}` : '/');
+  function goBack() {
+    // Prefer real back if there is history
+    if (history.length > 1) {
+      history.back();
+    } else {
+      // Fallback: go to the server page (or home)
+      goto(serverId ? `/servers/${serverId}` : '/');
+    }
   }
-}
-
 
   function watchMembers() {
     const db = getDb();
@@ -235,23 +234,23 @@ function goBack() {
 {#if allowed}
   <div class="min-h-dvh bg-[rgb(3,7,18)] text-white">
     <div class="max-w-5xl mx-auto px-4 py-6">
-<div class="mb-6 flex items-center gap-3">
-  <button
-    type="button"
-    class="h-9 w-9 grid place-items-center rounded-lg bg-white/10 hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-white/30"
-    aria-label="Go back"
-    title="Back"
-    on:click={goBack}
-  >
-    <i class="bx bx-left-arrow-alt text-xl leading-none"></i>
-  </button>
 
-  <div>
-    <h1 class="text-2xl font-semibold">Server Settings</h1>
-    <p class="text-white/60">Manage roles, members, channels, and dangerous actions.</p>
-  </div>
-</div>
+      <div class="mb-6 flex items-center gap-3">
+        <button
+          type="button"
+          class="h-9 w-9 grid place-items-center rounded-lg bg-white/10 hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-white/30"
+          aria-label="Go back"
+          title="Back"
+          on:click={goBack}
+        >
+          <i class="bx bx-left-arrow-alt text-xl leading-none"></i>
+        </button>
 
+        <div>
+          <h1 class="text-2xl font-semibold">Server Settings</h1>
+          <p class="text-white/60">Manage roles, members, channels, and dangerous actions.</p>
+        </div>
+      </div>
 
       <!-- Tabs -->
       <div class="flex gap-2 mb-4">
@@ -270,12 +269,26 @@ function goBack() {
         <div class="space-y-4">
           <div class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-white/5">
-              <label class="block text-sm text-white/70 mb-1">Server name</label>
-              <input class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverName} />
+              <label for="server-name" class="block text-sm text-white/70 mb-1">Server name</label>
+              <input
+                id="server-name"
+                type="text"
+                class="w-full rounded bg-white/10 px-3 py-2"
+                bind:value={serverName}
+                aria-label="Server name"
+              />
             </div>
             <div class="p-4 rounded-lg bg-white/5">
-              <label class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
-              <input class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverIcon} placeholder="https://…" />
+              <label for="server-icon" class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
+              <input
+                id="server-icon"
+                type="url"
+                class="w-full rounded bg-white/10 px-3 py-2"
+                bind:value={serverIcon}
+                placeholder="https://…"
+                inputmode="url"
+                aria-label="Server icon URL"
+              />
               {#if serverIcon}
                 <div class="mt-2">
                   <img src={serverIcon} alt="Server icon" class="h-14 w-14 rounded" />
@@ -354,7 +367,7 @@ function goBack() {
           {#each channels as c (c.id)}
             <div class="flex items-center gap-2 p-2 rounded hover:bg-white/10">
               <div class="w-6 text-center">
-                {#if c.type === 'text'}<i class="bx bx-hash"></i>{:else}<i class="bx bx-headphone"></i>{/if}
+                {#if c.type === 'text'}<i class="bx bx-hash" aria-hidden="true"></i>{:else}<i class="bx bx-headphone" aria-hidden="true"></i>{/if}
               </div>
               <div class="flex-1 truncate">{c.name}</div>
               {#if isOwner || isAdmin}
