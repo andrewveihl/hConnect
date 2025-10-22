@@ -94,6 +94,22 @@ export async function ensureFirebaseReady() {
   return { app: _app, auth: auth!, db: db! };
 }
 
+// ---- Firestore getter -------------------------------------------------
+import type { Firestore } from 'firebase/firestore'; // if not already imported at top
+
+/** Return the initialized Firestore instance.
+ *  IMPORTANT: Call ensureFirebaseReady() early (e.g., +layout onMount) before using this.
+ */
+export function getDb(): Firestore {
+  if (!db) {
+    throw new Error('Firestore not initialized. Call ensureFirebaseReady() early (e.g., in +layout onMount).');
+  }
+  return db!;
+}
+
+// (Optional) keep compatibility with code that does `import getDb from '$lib/firebase'`
+export default getDb;
+
 /* Optional: wait for the first auth resolution so auth.currentUser is reliable */
 export async function waitForAuthInit(): Promise<void> {
   await ensureFirebaseReady();
