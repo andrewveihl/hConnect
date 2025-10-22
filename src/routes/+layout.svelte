@@ -1,14 +1,16 @@
+<!-- src/routes/+layout.svelte -->
 <script lang="ts">
   import '../app.css';
-  import { user as userStore } from '$lib/stores/user';
+  import { onMount } from 'svelte';
+  import { startAuthListener } from '$lib/firebase';
 
-  export let data: { user: any };
-
-  // Keep your global user store in sync for the rest of the app.
-  $: userStore.set(data?.user ?? null);
+  onMount(() => {
+    const stop = startAuthListener();
+    return () => stop?.();
+  });
 </script>
 
-<!-- App surface -->
+<!-- Full-screen app surface -->
 <div class="min-h-dvh bg-[rgb(3,7,18)] text-white">
   <slot />
 </div>

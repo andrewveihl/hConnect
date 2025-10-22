@@ -26,6 +26,7 @@ import {
 
 import { user as userStore } from '$lib/stores/user';
 
+
 /* ------------------------------------------------------------------ */
 /* Firebase config resolution                                          */
 /* ------------------------------------------------------------------ */
@@ -63,6 +64,25 @@ function loadFirebaseConfig() {
 let app: FirebaseApp | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
+
+
+// Waits for the first auth state resolution so `auth.currentUser` is reliable.
+export function waitForAuthInit(): Promise<void> {
+  const { auth } = getFirebase();
+  // If Firebase already resolved auth state, currentUser is non-undefined.
+  // In v9, it’s undefined until the first onAuthStateChanged fires.
+  if ((auth as any)._initializationComplete || auth.currentUser !== undefined) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const unsub = onAuthStateChanged(auth, () => {
+      // Mark as initialized to avoid future waits in this session
+      (auth as any)._initializationComplete = true;
+      unsub();
+      resolve();
+    });
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* Core init (no Firestore usage here)                                */

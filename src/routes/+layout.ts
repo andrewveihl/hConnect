@@ -1,44 +1,27 @@
-// ✅ Client-only; avoids SSR + Firebase mismatches
+// src/routes/+layout.ts
 export const ssr = false;
 
-import { redirect, type Load } from '@sveltejs/kit';
+import { redirect } from '@sveltejs/kit';
 
-export const load: Load = async ({ url }) => {
-  const isSignIn = url.pathname === '/sign-in';
+export async function load({ url }) {
+  const { getFirebase, completeRedirectIfNeeded, waitForAuthInit } = await import('$lib/firebase');
 
-  // Lazy-load to avoid SSR issues
-  const { getFirebase, completeRedirectIfNeeded } = await import('$lib/firebase');
-
-  // If an OAuth redirect is pending (e.g., Apple/Safari), finish it
-  if (typeof completeRedirectIfNeeded === 'function') {
-    await completeRedirectIfNeeded();
-  }
+  await completeRedirectIfNeeded?.();
+  // Wait for Firebase to finish resolving the current session.
+  await waitForAuthInit();
 
   const { auth } = getFirebase();
+  const isSignedIn = !!auth.currentUser;
 
-  // 🔒 Allow the sign-in route to render WITHOUT any Firestore/Auth gating side-effects.
-  // (Do not subscribe and do not query Firestore here.)
-  if (isSignIn) {
-    // If already signed in, bounce to next/home right away
-    if (auth.currentUser) {
-      const next = url.searchParams.get('next') || '/';
-      throw redirect(302, next);
-    }
-    return { user: null };
+  // Only public path is /sign-in (and its children if you ever add any)
+  const isSignInRoute = url.pathname === '/sign-in' || url.pathname.startsWith('/sign-in/');
+
+  if (!isSignedIn && !isSignInRoute) {
+    throw redirect(302, '/sign-in');
+  }
+  if (isSignedIn && isSignInRoute) {
+    throw redirect(302, '/');
   }
 
-  // 🔑 For every other route, wait exactly once for auth state.
-  const user = await new Promise<import('firebase/auth').User | null>((resolve) => {
-    const unsub = auth.onAuthStateChanged((u) => {
-      resolve(u);
-      unsub();
-    });
-  });
-
-  if (!user) {
-    const next = encodeURIComponent(url.pathname + url.search);
-    throw redirect(302, `/sign-in?next=${next}`);
-  }
-
-  return { user };
-};
+  return {};
+}
