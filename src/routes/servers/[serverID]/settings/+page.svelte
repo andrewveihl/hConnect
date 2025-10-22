@@ -270,12 +270,12 @@ function goBack() {
         <div class="space-y-4">
           <div class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-white/5">
-<label for="server-name" class="block text-sm text-white/70 mb-1">Server name</label>
-<input id="server-name" class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverName} />
+              <label class="block text-sm text-white/70 mb-1">Server name</label>
+              <input class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverName} />
             </div>
             <div class="p-4 rounded-lg bg-white/5">
-              <label for="server-icon" class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
-<input id="server-icon" class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverIcon} placeholder="https://…" />
+              <label class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
+              <input class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverIcon} placeholder="https://…" />
               {#if serverIcon}
                 <div class="mt-2">
                   <img src={serverIcon} alt="Server icon" class="h-14 w-14 rounded" />

@@ -3,6 +3,7 @@
   import { db } from '$lib/db';
   import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
   import LeftPane from '$lib/components/LeftPane.svelte';
+  import { signOutUser } from '$lib/firebase';  // ✅ NEW
 
   let displayName = '';
   let photoURL = '';
@@ -35,7 +36,14 @@
 <div class="grid grid-cols-[72px_1fr] min-h-dvh text-white">
   <LeftPane activeServerId={null} />
   <div class="bg-[#313338] p-6">
-    <h1 class="text-xl font-semibold mb-4">User Settings</h1>
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-xl font-semibold">User Settings</h1>
+      <!-- ✅ NEW -->
+      <button class="btn btn-ghost" on:click={signOutUser}>
+        <i class="bx bx-log-out mr-1"></i> Sign out
+      </button>
+    </div>
+
     <div class="surface p-4 max-w-xl space-y-3">
       <label class="block">
         <div class="mb-1 text-sm text-white/70">Display name</div>

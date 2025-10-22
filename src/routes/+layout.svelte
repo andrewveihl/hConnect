@@ -1,18 +1,14 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
-  import { user } from '$lib/stores/user';
-  import { getFirebase } from '$lib/firebase';
-  import { onAuthStateChanged } from 'firebase/auth';
+  import { user as userStore } from '$lib/stores/user';
 
-  onMount(() => {
-    const { auth } = getFirebase();
-    const unsub = onAuthStateChanged(auth, (u) => user.set(u));
-    return () => unsub();
-  });
+  export let data: { user: any };
+
+  // Keep your global user store in sync for the rest of the app.
+  $: userStore.set(data?.user ?? null);
 </script>
 
-<!-- Full-screen app surface (no header) -->
+<!-- App surface -->
 <div class="min-h-dvh bg-[rgb(3,7,18)] text-white">
   <slot />
 </div>

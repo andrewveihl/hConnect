@@ -1,20 +1,36 @@
 // src/lib/firebase.ts
 import { browser } from '$app/environment';
-import { env as dynamicPublic } from '$env/dynamic/public'; // runtime PUBLIC_* if present
+import { env as dynamicPublic } from '$env/dynamic/public';
 
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import {
-  getAuth, type Auth, setPersistence, browserLocalPersistence,
-  GoogleAuthProvider, OAuthProvider, signInWithPopup, onAuthStateChanged, signOut
+  getAuth,
+  type Auth,
+  setPersistence,
+  browserLocalPersistence,
+  GoogleAuthProvider,
+  OAuthProvider,
+  signInWithPopup,
+  onAuthStateChanged,
+  signOut
 } from 'firebase/auth';
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, type Firestore
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+  type Firestore
 } from 'firebase/firestore';
-import { user } from '$lib/stores/user';
 
-/** Resolve Firebase web config from PUBLIC_* or FIREBASE_WEBAPP_CONFIG */
+import { user as userStore } from '$lib/stores/user';
+
+/* ------------------------------------------------------------------ */
+/* Firebase config resolution                                          */
+/* ------------------------------------------------------------------ */
 function loadFirebaseConfig() {
-  // 1) Local/CI: PUBLIC_* via $env/dynamic/public
+  // 1) Local/CI via PUBLIC_* (runtime)
   if (dynamicPublic.PUBLIC_FIREBASE_API_KEY) {
     return {
       apiKey: dynamicPublic.PUBLIC_FIREBASE_API_KEY,
@@ -26,7 +42,7 @@ function loadFirebaseConfig() {
     };
   }
 
-  // 2) Firebase Hosting build: FIREBASE_WEBAPP_CONFIG (JSON string)
+  // 2) Firebase Hosting build-time injected JSON
   const raw =
     (typeof process !== 'undefined' && (process as any)?.env?.FIREBASE_WEBAPP_CONFIG) || '';
   try {
@@ -41,13 +57,20 @@ function loadFirebaseConfig() {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Singletons                                                         */
+/* ------------------------------------------------------------------ */
 let app: FirebaseApp | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
 
-/* ---------------- Core init ---------------- */
+/* ------------------------------------------------------------------ */
+/* Core init (no Firestore usage here)                                */
+/* ------------------------------------------------------------------ */
 export function getFirebase() {
-  if (!browser) return { app: undefined, auth: undefined };
+  if (!browser) {
+    return { app: undefined as any, auth: undefined as any, db: undefined as any };
+  }
 
   if (!getApps().length) {
     app = initializeApp(loadFirebaseConfig());
@@ -61,20 +84,28 @@ export function getFirebase() {
     setPersistence(auth, browserLocalPersistence).catch(() => {});
   }
 
-  return { app: app!, auth: auth! };
+  return { app: app!, auth: auth!, db: db as Firestore | undefined };
 }
 
-/** Use the DEFAULT Firestore database (fixes hanging writes). */
+/** Get the default Firestore instance (lazy). */
 export function getDb() {
   const { app } = getFirebase();
-  if (!db) db = getFirestore(app); // default DB
+  if (!db) db = getFirestore(app);
   return db!;
 }
 
-/* ---------------- Auth flows ---------------- */
+/** Optional helper for redirect-based providers (safe no-op for popup flow). */
+export async function completeRedirectIfNeeded() {
+  // If you ever switch to signInWithRedirect, handle the result here.
+}
+
+/* ------------------------------------------------------------------ */
+/* Auth flows (popup only; no window.close; minimal Firestore writes) */
+/* ------------------------------------------------------------------ */
 export async function signInWithGoogle() {
   const { auth } = getFirebase();
-  await signInWithPopup(auth, new GoogleAuthProvider());
+  const provider = new GoogleAuthProvider();
+  await signInWithPopup(auth, provider);
   await afterLoginEnsureDoc();
 }
 
@@ -87,22 +118,35 @@ export async function signInWithApple() {
   await afterLoginEnsureDoc();
 }
 
+export async function signOutUser() {
+  const { auth } = getFirebase();
+  await signOut(auth);
+}
+
+/* ------------------------------------------------------------------ */
+/* Minimal profile upsert after login                                 */
+/* ------------------------------------------------------------------ */
 async function afterLoginEnsureDoc() {
   const { auth } = getFirebase();
   const u = auth.currentUser;
-  if (u) {
-    await ensureUserDoc(u.uid, {
-      email: u.email,
-      name: u.displayName,
-      photoURL: u.photoURL
-    });
-  }
+  if (!u) return;
+
+  // Single, guarded write to profiles/{uid}; no listeners.
+  await ensureUserDoc(u.uid, {
+    email: u.email,
+    name: u.displayName,
+    photoURL: u.photoURL
+  });
 }
 
+/* ------------------------------------------------------------------ */
+/* App-level auth listener (call once from root)                      */
+/* ------------------------------------------------------------------ */
 export function startAuthListener() {
   const { auth } = getFirebase();
-  onAuthStateChanged(auth, async (u) => {
-    user.set(u);
+  return onAuthStateChanged(auth, async (u) => {
+    userStore.set(u);
+    // Optional: keep profile doc warm after refresh
     if (u) {
       await ensureUserDoc(u.uid, {
         email: u.email,
@@ -113,29 +157,28 @@ export function startAuthListener() {
   });
 }
 
-export async function signOutUser() {
-  const { auth } = getFirebase();
-  await signOut(auth);
+/* ------------------------------------------------------------------ */
+/* profiles/{uid} helpers (keeps your Settings page working)          */
+/* ------------------------------------------------------------------ */
+function profileRef(uid: string) {
+  return doc(getDb(), 'profiles', uid);
 }
 
-/* ---------------- users/{uid} ---------------- */
-function userRef(uid: string) {
-  return doc(getDb(), 'users', uid);
-}
-
-/** Create or merge users/{uid} with defaults */
+/** Create/merge profiles/{uid} with sane defaults. */
 export async function ensureUserDoc(
   uid: string,
   data?: { email?: string | null; name?: string | null; photoURL?: string | null }
 ) {
   await setDoc(
-    userRef(uid),
+    profileRef(uid),
     {
-      createdAt: serverTimestamp(),
+      uid,
       email: data?.email ?? null,
-      name: data?.name ?? null,
+      displayName: data?.name ?? null,
       photoURL: data?.photoURL ?? null,
-      settings: { theme: 'dark', notifications: true }
+      settings: { theme: 'dark', notifications: true },
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
     },
     { merge: true }
   );
@@ -143,11 +186,11 @@ export async function ensureUserDoc(
 
 /** Read user settings ({} if missing). */
 export async function getUserSettings(uid: string) {
-  const snap = await getDoc(userRef(uid));
+  const snap = await getDoc(profileRef(uid));
   return snap.exists() ? (snap.data().settings ?? {}) : {};
 }
 
-/** Merge-update user settings. */
+/** Merge-update user settings (shallow merge of the 'settings' object). */
 export async function updateUserSettings(uid: string, partial: Record<string, unknown>) {
-  await updateDoc(userRef(uid), { settings: partial });
+  await updateDoc(profileRef(uid), { settings: partial, updatedAt: serverTimestamp() });
 }
