@@ -26,7 +26,6 @@ import {
 
 import { user as userStore } from '$lib/stores/user';
 
-
 /* ------------------------------------------------------------------ */
 /* Firebase config resolution                                          */
 /* ------------------------------------------------------------------ */
@@ -143,6 +142,9 @@ export async function signOutUser() {
   await signOut(auth);
 }
 
+// Alias used by some components (e.g., SignOutButton.svelte)
+export const signOutNow = signOutUser;
+
 /* ------------------------------------------------------------------ */
 /* Minimal profile upsert after login                                 */
 /* ------------------------------------------------------------------ */
@@ -154,7 +156,7 @@ async function afterLoginEnsureDoc() {
   // Single, guarded write to profiles/{uid}; no listeners.
   await ensureUserDoc(u.uid, {
     email: u.email,
-    name: u.displayName,
+    name: u.displayName ?? (u.email ? u.email.split('@')[0] : null),
     photoURL: u.photoURL
   });
 }
@@ -170,7 +172,7 @@ export function startAuthListener() {
     if (u) {
       await ensureUserDoc(u.uid, {
         email: u.email,
-        name: u.displayName,
+        name: u.displayName ?? (u.email ? u.email.split('@')[0] : null),
         photoURL: u.photoURL
       });
     }
@@ -178,23 +180,33 @@ export function startAuthListener() {
 }
 
 /* ------------------------------------------------------------------ */
-/* profiles/{uid} helpers (keeps your Settings page working)          */
+/* profiles/{uid} helpers (keeps your Settings & DMs working)         */
 /* ------------------------------------------------------------------ */
 function profileRef(uid: string) {
   return doc(getDb(), 'profiles', uid);
 }
 
-/** Create/merge profiles/{uid} with sane defaults. */
+/** Create/merge profiles/{uid} with sane defaults. 
+ *  Minimal change: adds `name` and `nameLower` (for DMs search/list),
+ *  keeps your `displayName` field for backward compatibility.
+ */
 export async function ensureUserDoc(
   uid: string,
   data?: { email?: string | null; name?: string | null; photoURL?: string | null }
 ) {
+  const name = data?.name ?? null;
   await setDoc(
     profileRef(uid),
     {
       uid,
       email: data?.email ?? null,
+      // New fields to support DMs sidebar & search:
+      name,
+      nameLower: typeof name === 'string' ? name.toLowerCase() : null,
+
+      // Keep legacy field so existing pages don’t break:
       displayName: data?.name ?? null,
+
       photoURL: data?.photoURL ?? null,
       settings: { theme: 'dark', notifications: true },
       createdAt: serverTimestamp(),
