@@ -121,10 +121,15 @@
     const qRef = query(collection(db, 'servers', server, 'channels'), orderBy('position'));
     unsubChannels = onSnapshot(qRef, (snap) => {
       channels = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
-      if (!didAutopick && !activeChannelId && channels.length) {
-        didAutopick = true;
-        pick(channels[0].id);
-      }
+const isDesktop =
+  typeof window !== 'undefined' &&
+  window.matchMedia('(min-width: 768px)').matches;
+
+if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
+  didAutopick = true;
+  pick(channels[0].id);
+}
+
     });
   }
 
@@ -195,7 +200,8 @@
   }
 </script>
 
-<aside class="h-dvh w-64 bg-[#2b2d31] border-r border-black/40 text-white flex flex-col">
+<!-- Desktop rail content; used directly in desktop column or inside mobile overlay container -->
+<aside class="h-dvh w-64 bg-[#2b2d31] border-r border-black/40 text-white flex flex-col" aria-label="Channels">
   <!-- Header -->
   <div class="h-12 px-3 flex items-center justify-between border-b border-black/40">
     <div class="flex items-center gap-2 min-w-0">
