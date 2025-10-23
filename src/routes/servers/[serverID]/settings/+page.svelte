@@ -7,7 +7,8 @@
 
   import {
     collection, doc, getDoc, onSnapshot, getDocs,
-    query, orderBy, where, setDoc, updateDoc, deleteDoc
+    query, orderBy, where, setDoc, updateDoc, deleteDoc, addDoc,
+    limit, serverTimestamp
   } from 'firebase/firestore';
 
   // routing
@@ -24,12 +25,22 @@
 
   // tabs
   type Tab = 'overview' | 'members' | 'channels' | 'danger';
-  let tab: Tab = 'overview';
+  let tab: Tab = 'members'; // land on Members where Invite lives
 
   // live lists
   let members: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string }> = [];
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = [];
   let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number }> = [];
+
+  // profiles (people who have logged in)
+  type Profile = {
+    uid: string;
+    displayName?: string;
+    nameLower?: string;
+    email?: string;
+    photoURL?: string;
+  };
+  let allProfiles: Profile[] = [];  // we’ll filter this as you type
 
   function ownerFrom(data: any) {
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
@@ -61,13 +72,8 @@
   }
 
   function goBack() {
-    // Prefer real back if there is history
-    if (history.length > 1) {
-      history.back();
-    } else {
-      // Fallback: go to the server page (or home)
-      goto(serverId ? `/servers/${serverId}` : '/');
-    }
+    if (history.length > 1) history.back();
+    else goto(serverId ? `/servers/${serverId}` : '/');
   }
 
   function watchMembers() {
@@ -92,21 +98,40 @@
     });
   }
 
+  // NEW: watch first N profiles ordered by nameLower (users who have logged in)
+  function watchProfiles() {
+    const db = getDb();
+    const qRef = query(collection(db, 'profiles'), orderBy('nameLower'), limit(200));
+    return onSnapshot(qRef, (snap) => {
+      allProfiles = snap.docs.map((d) => {
+        const p = d.data() as any;
+        return {
+          uid: d.id,
+          displayName: p.displayName ?? p.name ?? '',
+          nameLower: p.nameLower ?? (p.displayName || '').toLowerCase(),
+          email: p.email ?? '',
+          photoURL: p.photoURL ?? ''
+        } as Profile;
+      });
+    });
+  }
+
   onMount(async () => {
     serverId = $page.params.serverId || ($page.params as any).serverID || null;
     if (!serverId) return goto('/');
 
     await gate();
 
-    // live watchers
     const offMembers = watchMembers();
     const offBans = watchBans();
     const offChannels = watchChannels();
+    const offProfiles = watchProfiles();
 
     return () => {
       offMembers?.();
       offBans?.();
       offChannels?.();
+      offProfiles?.();
     };
   });
 
@@ -127,7 +152,7 @@
 
   // ----- actions: Members / Roles -----
   async function setRole(uid: string, role: 'admin' | 'member') {
-    if (!isOwner && role === 'admin' && !isAdmin) return; // safety
+    if (!isOwner && role === 'admin' && !isAdmin) return;
     const db = getDb();
     try {
       await updateDoc(doc(db, 'servers', serverId!, 'members', uid), { role });
@@ -211,7 +236,6 @@
 
     const db = getDb();
     try {
-      // Best-effort recursive deletes (collections: channels, members, bans)
       const colls = ['channels', 'members', 'bans'];
       for (const c of colls) {
         const snap = await getDocs(collection(db, 'servers', serverId!, c));
@@ -225,6 +249,54 @@
       alert('Failed to delete server. (Consider a Cloud Function for large deletes.)');
     }
   }
+
+  // ===== INLINE INVITE (filter in-memory; no dialogs) =====
+  let search = '';
+  $: q = (search || '').trim().toLowerCase();
+
+  // Derived: filter and exclude users already in this server (optional)
+  $: memberSet = new Set(members.map(m => m.uid));
+  $: filtered = allProfiles
+    .filter(p => {
+      // don’t show people already in the server
+      if (memberSet.has(p.uid)) return false;
+      if (!q) return true;
+      const n = (p.nameLower || '').toLowerCase();
+      const d = (p.displayName || '').toLowerCase();
+      const e = (p.email || '').toLowerCase();
+      const u = (p.uid || '').toLowerCase();
+      return n.includes(q) || d.includes(q) || e.includes(q) || u.includes(q);
+    })
+    .slice(0, 50); // keep list tidy
+
+  // invite to first text channel (keeps your current accept flow)
+  async function inviteUser(toUid: string) {
+    if (!(isOwner || isAdmin)) return;
+    if (!isOwner) { // matches your current security rules
+      alert('Per current security rules, only channel owners can send invites.');
+      return;
+    }
+    const fallback = channels.find((c) => c.type === 'text') ?? channels[0];
+    if (!fallback) { alert('Create a channel first.'); return; }
+
+    const db = getDb();
+    try {
+      await addDoc(collection(db, 'users', toUid, 'invites'), {
+        type: 'channel',
+        serverId,
+        channelId: fallback.id,
+        serverName,
+        channelName: fallback.name,
+        invitedBy: $user?.uid ?? null,
+        status: 'pending',
+        createdAt: serverTimestamp()
+      });
+      (window as any)?.navigator?.vibrate?.(10);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to send invite.');
+    }
+  }
 </script>
 
 <svelte:head>
@@ -232,10 +304,11 @@
 </svelte:head>
 
 {#if allowed}
-  <div class="min-h-dvh bg-[rgb(3,7,18)] text-white">
-    <div class="max-w-5xl mx-auto px-4 py-6">
+  <div class="min-h-dvh bg-[rgb(3,7,18)] text-white pb-16" style="padding-bottom: max(env(safe-area-inset-bottom), 4rem);">
+    <div class="max-w-5xl mx-auto px-4 py-4 sm:py-6">
 
-      <div class="mb-6 flex items-center gap-3">
+      <!-- header -->
+      <div class="mb-4 flex items-center gap-3">
         <button
           type="button"
           class="h-9 w-9 grid place-items-center rounded-lg bg-white/10 hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-white/30"
@@ -246,77 +319,98 @@
           <i class="bx bx-left-arrow-alt text-xl leading-none"></i>
         </button>
 
-        <div>
-          <h1 class="text-2xl font-semibold">Server Settings</h1>
+        <div class="flex-1 min-w-0">
+          <h1 class="text-2xl font-semibold truncate">Server Settings</h1>
           <p class="text-white/60">Manage roles, members, channels, and dangerous actions.</p>
         </div>
       </div>
 
-      <!-- Tabs -->
-      <div class="flex gap-2 mb-4">
-        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15"
-          class:selected={tab==='overview'} on:click={() => tab='overview'}>Overview</button>
-        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15"
-          class:selected={tab==='members'} on:click={() => tab='members'}>Members</button>
-        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15"
-          class:selected={tab==='channels'} on:click={() => tab='channels'}>Channels</button>
-        <button class="px-3 py-1.5 rounded bg-red-950/40 text-red-300 hover:bg-red-900/40"
-          class:selected={tab==='danger'} on:click={() => tab='danger'}>Danger Zone</button>
+      <!-- tabs -->
+      <div class="flex gap-2 mb-3 overflow-x-auto no-scrollbar">
+        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='overview'} on:click={() => tab='overview'}>Overview</button>
+        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='members'} on:click={() => tab='members'}>Members</button>
+        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='channels'} on:click={() => tab='channels'}>Channels</button>
+        <button class="px-3 py-1.5 rounded bg-red-950/40 text-red-300 hover:bg-red-900/40" class:selected={tab==='danger'} on:click={() => tab='danger'}>Danger Zone</button>
       </div>
 
-      <!-- Overview -->
+      <!-- overview -->
       {#if tab === 'overview'}
         <div class="space-y-4">
           <div class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-white/5">
-              <label for="server-name" class="block text-sm text-white/70 mb-1">Server name</label>
-              <input
-                id="server-name"
-                type="text"
-                class="w-full rounded bg-white/10 px-3 py-2"
-                bind:value={serverName}
-                aria-label="Server name"
-              />
+              <label class="block text-sm text-white/70 mb-1">Server name</label>
+              <input class="w-full rounded bg-white/10 px-3 py-2" bind:value={serverName} aria-label="Server name" />
             </div>
             <div class="p-4 rounded-lg bg-white/5">
-              <label for="server-icon" class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
-              <input
-                id="server-icon"
-                type="url"
-                class="w-full rounded bg-white/10 px-3 py-2"
-                bind:value={serverIcon}
-                placeholder="https://…"
-                inputmode="url"
-                aria-label="Server icon URL"
-              />
+              <label class="block text-sm text-white/70 mb-1">Server icon URL (optional)</label>
+              <input class="w-full rounded bg-white/10 px-3 py-2" type="url" bind:value={serverIcon} placeholder="https://…" inputmode="url" aria-label="Server icon URL" />
               {#if serverIcon}
-                <div class="mt-2">
-                  <img src={serverIcon} alt="Server icon" class="h-14 w-14 rounded" />
-                </div>
+                <div class="mt-2"><img src={serverIcon} alt="Server icon" class="h-14 w-14 rounded" /></div>
               {/if}
             </div>
           </div>
-          <button class="px-4 py-2 rounded bg-[#5865f2] hover:bg-[#4955d4]" on:click={saveOverview}>
-            Save
-          </button>
+          <button class="w-full sm:w-auto px-4 py-2 rounded bg-[#5865f2] hover:bg-[#4955d4]" on:click={saveOverview}>Save</button>
         </div>
       {/if}
 
-      <!-- Members -->
+      <!-- members -->
       {#if tab === 'members'}
+        <!-- Inline invite (sticky on mobile for easy access) -->
+        <div class="sticky top-0 z-10 -mx-4 px-4 py-3 mb-3 bg-[rgb(3,7,18)]/95 backdrop-blur supports-[backdrop-filter]:bg-[rgb(3,7,18)]/75 border-b border-white/10">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div class="i h-10 w-10 grid place-items-center rounded-lg bg-white/10"><i class="bx bx-user-plus text-2xl"></i></div>
+            <input
+              class="flex-1 rounded-lg bg-white/10 px-3 py-2"
+              placeholder="Invite people by name, email, or UID…"
+              bind:value={search}
+            />
+          </div>
+
+          <!-- results -->
+          <div class="mt-2 rounded-lg bg-white/5 border border-white/10 max-h-72 overflow-y-auto">
+            {#if !q}
+              <div class="px-3 py-2 text-sm text-white/60">Type to filter users who have logged in.</div>
+            {:else if filtered.length === 0}
+              <div class="px-3 py-2 text-sm text-white/60">No users match “{search}”.</div>
+            {:else}
+              {#each filtered as r (r.uid)}
+                <div class="px-3 py-2 flex items-center gap-3 hover:bg-white/10">
+                  <img src={r.photoURL || ''} alt="" class="h-9 w-9 rounded-full bg-white/10"
+                       on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
+                  <div class="flex-1 min-w-0">
+                    <div class="truncate">{r.displayName || r.email || r.uid}</div>
+                    {#if r.email}<div class="text-xs text-white/60 truncate">{r.email}</div>{/if}
+                  </div>
+                  {#if isOwner || isAdmin}
+                    <button class="px-3 py-1.5 text-sm rounded bg-[#5865f2] hover:bg-[#4955d4]" on:click={() => inviteUser(r.uid)}>
+                      Invite
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          </div>
+
+          <!-- owner/admin hint -->
+          {#if (isOwner || isAdmin) && !isOwner}
+            <div class="mt-2 text-[11px] text-white/50">Only the channel owner can send invites under current rules.</div>
+          {/if}
+        </div>
+
+        <!-- current members list -->
         <div class="p-4 rounded-lg bg-white/5 space-y-2">
           {#if members.length === 0}
             <div class="text-white/60">No members yet.</div>
           {/if}
           {#each members as m (m.uid)}
             <div class="flex items-center gap-3 p-2 rounded hover:bg-white/10">
-              <img src={m.photoURL || ''} alt="" class="h-8 w-8 rounded-full bg-white/10" on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
+              <img src={m.photoURL || ''} alt="" class="h-9 w-9 rounded-full bg-white/10"
+                   on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
               <div class="flex-1 min-w-0">
                 <div class="truncate">{m.displayName || m.uid}</div>
                 <div class="text-xs text-white/50">{m.role || 'member'}</div>
               </div>
 
-              <!-- role controls (owner/admin) -->
               {#if isOwner || isAdmin}
                 <div class="flex items-center gap-1">
                   <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
@@ -327,7 +421,6 @@
                 </div>
               {/if}
 
-              <!-- kick / ban -->
               {#if isOwner || isAdmin}
                 <button class="ml-2 px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
                   on:click={() => kick(m.uid)}>Kick</button>
@@ -358,7 +451,7 @@
         </div>
       {/if}
 
-      <!-- Channels -->
+      <!-- channels -->
       {#if tab === 'channels'}
         <div class="p-4 rounded-lg bg-white/5 space-y-2">
           {#if channels.length === 0}
@@ -381,14 +474,14 @@
         </div>
       {/if}
 
-      <!-- Danger Zone -->
+      <!-- danger -->
       {#if tab === 'danger'}
         <div class="p-4 rounded-lg bg-red-950/30 border border-red-900/30">
           <div class="text-lg font-semibold text-red-300 mb-2">Danger Zone</div>
           <p class="text-sm text-red-200/80 mb-4">
             Deleting the server will remove channels, members, and bans. This cannot be undone.
           </p>
-          <button class="px-4 py-2 rounded bg-red-700 hover:bg-red-800 disabled:opacity-50"
+          <button class="w-full sm:w-auto px-4 py-2 rounded bg-red-700 hover:bg-red-800 disabled:opacity-50"
             disabled={!isOwner} on:click={deleteServer}>
             Delete Server
           </button>

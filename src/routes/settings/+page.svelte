@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { user } from '$lib/stores/user';
   import { db } from '$lib/db';
   import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+
+  // NEW: minimal Firestore + invites helpers
+  import { collection, onSnapshot, orderBy, query, type Unsubscribe } from 'firebase/firestore';
+  import { acceptInvite, declineInvite } from '$lib/db/invites';
 
   import LeftPane from '$lib/components/LeftPane.svelte';
   import SignOutButton from '$lib/components/SignOutButton.svelte';
@@ -11,6 +15,11 @@
   let photoURL = '';
   let loading = true;
   let loadedUid: string | null = null;
+
+  // NEW: local state for invites
+  type InviteRow = { id: string; path: string; data: any };
+  let invites: InviteRow[] = [];
+  let unsubInvites: Unsubscribe | undefined;
 
   async function loadProfile(uid: string) {
     const database = db();
@@ -34,18 +43,44 @@
     loadedUid = uid;
   }
 
+  // NEW: attach invites listener for current user
+  function bindInvites(uid: string) {
+    unsubInvites?.();
+    const database = db();
+    const qy = query(
+      collection(database, 'users', uid, 'invites'),
+      orderBy('createdAt', 'desc')
+    );
+    unsubInvites = onSnapshot(qy, (snap) => {
+      invites = snap.docs.map((d) => ({
+        id: d.id,
+        path: `users/${uid}/invites/${d.id}`,
+        data: d.data()
+      }));
+    });
+  }
+
   // run once mounted, then react to $user changes
   onMount(async () => {
     loading = true;
-    if ($user?.uid) await loadProfile($user.uid);
+    if ($user?.uid) {
+      await loadProfile($user.uid);
+      bindInvites($user.uid); // NEW
+    }
     loading = false;
   });
 
   // If user was undefined at mount, load when it appears (first time only)
   $: if ($user?.uid && !loadedUid) {
     loading = true;
-    loadProfile($user.uid).finally(() => (loading = false));
+    loadProfile($user.uid)
+      .then(() => bindInvites($user!.uid)) // NEW
+      .finally(() => (loading = false));
   }
+
+  onDestroy(() => {
+    unsubInvites?.();
+  });
 
   async function save() {
     if (!$user?.uid) return;
@@ -60,6 +95,15 @@
 
   function useGooglePhoto() {
     if ($user?.photoURL) photoURL = $user.photoURL;
+  }
+
+  // NEW: simple handlers
+  async function onAccept(inv: InviteRow) {
+    if (!$user?.uid) return;
+    await acceptInvite({ invitePath: inv.path, toUid: $user.uid });
+  }
+  async function onDecline(inv: InviteRow) {
+    await declineInvite({ invitePath: inv.path });
   }
 </script>
 
@@ -105,6 +149,48 @@
         </label>
 
         <button class="btn btn-primary" on:click={save}>Save</button>
+
+        <!-- NEW: Invitations panel (non-invasive) -->
+        <div class="mt-6 border-t border-white/10 pt-4 space-y-3">
+          <h2 class="text-lg font-semibold">Invitations</h2>
+
+          {#if invites.length === 0}
+            <p class="text-white/60 text-sm">No invites right now.</p>
+          {:else}
+            <div class="space-y-3">
+              {#each invites as r}
+                <div class="rounded-lg bg-white/5 border border-white/10 p-3 flex items-center justify-between">
+                  <div class="min-w-0">
+                    <div class="text-sm">
+                      {#if r.data.type === 'channel'}
+                        <span class="font-medium">Channel:</span>
+                        <span class="text-white/90">{r.data.channelName}</span>
+                        <span class="text-white/60"> · </span>
+                        <span class="font-medium">Server:</span>
+                        <span class="text-white/90">{r.data.serverName}</span>
+                      {:else}
+                        <span class="text-white/90">Invite</span>
+                      {/if}
+                    </div>
+                    <div class="text-xs text-white/60 mt-0.5">
+                      From: {r.data.invitedBy} · Status: <span class="capitalize">{r.data.status}</span>
+                    </div>
+                  </div>
+
+                  {#if r.data.status === 'pending'}
+                    <div class="flex gap-2 shrink-0 pl-3">
+                      <button class="btn btn-ghost" on:click={() => onDecline(r)}>Decline</button>
+                      <button class="btn btn-primary" on:click={() => onAccept(r)}>Accept</button>
+                    </div>
+                  {:else}
+                    <span class="text-xs text-white/60 capitalize pl-3 shrink-0">{r.data.status}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <!-- /Invitations -->
       </div>
     {/if}
   </div>
