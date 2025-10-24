@@ -2,12 +2,14 @@
   import { onDestroy } from 'svelte';
   import { user } from '$lib/stores/user';
   import { subscribeUserServers } from '$lib/db/servers';
+  import NewServerModal from '$lib/components/NewServerModal.svelte';
 
   export let activeServerId: string | null = null;
   export let onCreateServer: (() => void) | null = null;
 
   let servers: { id: string; name: string; icon?: string | null }[] = [];
   let unsub: (() => void) | undefined;
+  let localCreateOpen = false;
 
   $: if ($user) {
     unsub?.();
@@ -15,7 +17,10 @@
   }
   onDestroy(() => unsub?.());
 
-  const handleCreateClick = () => onCreateServer?.();
+  const handleCreateClick = () => {
+    if (onCreateServer) onCreateServer();
+    else localCreateOpen = true;
+  };
 </script>
 
 <!-- Always-visible 72px rail. Sticky + z-index so it never falls behind content -->
@@ -103,3 +108,5 @@
     </a>
   </div>
 </aside>
+
+<NewServerModal bind:open={localCreateOpen} onClose={() => (localCreateOpen = false)} />

@@ -4,11 +4,12 @@
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
+  import { sendServerInvite } from '$lib/db/invites';
 
   import {
     collection, doc, getDoc, onSnapshot, getDocs,
-    query, orderBy, where, setDoc, updateDoc, deleteDoc, addDoc,
-    limit, serverTimestamp
+    query, orderBy, setDoc, updateDoc, deleteDoc,
+    limit
   } from 'firebase/firestore';
 
   // routing
@@ -41,6 +42,9 @@
     photoURL?: string;
   };
   let allProfiles: Profile[] = [];  // we’ll filter this as you type
+  let pendingInvitesByUid: Record<string, boolean> = {};
+  let inviteLoading: Record<string, boolean> = {};
+  let inviteError: string | null = null;
 
   function ownerFrom(data: any) {
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
@@ -132,6 +136,7 @@
       offBans?.();
       offChannels?.();
       offProfiles?.();
+      pendingInvitesByUid = {};
     };
   });
 
@@ -269,6 +274,19 @@
     })
     .slice(0, 50); // keep list tidy
 
+  $: if (members.length && Object.keys(pendingInvitesByUid).length) {
+    const memberIds = new Set(members.map((m) => m.uid));
+    const next = { ...pendingInvitesByUid };
+    let changed = false;
+    for (const uid of memberIds) {
+      if (next[uid]) {
+        delete next[uid];
+        changed = true;
+      }
+    }
+    if (changed) pendingInvitesByUid = next;
+  }
+
   // invite to first text channel (keeps your current accept flow)
   async function inviteUser(toUid: string) {
     if (!(isOwner || isAdmin)) return;
@@ -279,23 +297,54 @@
     const fallback = channels.find((c) => c.type === 'text') ?? channels[0];
     if (!fallback) { alert('Create a channel first.'); return; }
 
-    const db = getDb();
-    try {
-      await addDoc(collection(db, 'users', toUid, 'invites'), {
-        type: 'channel',
-        serverId,
-        channelId: fallback.id,
-        serverName,
-        channelName: fallback.name,
-        invitedBy: $user?.uid ?? null,
-        status: 'pending',
-        createdAt: serverTimestamp()
+    if (pendingInvitesByUid[toUid]) {
+      console.debug('[ServerSettings] inviteUser skipped; pending invite already exists', {
+        toUid,
+        invite: pendingInvitesByUid[toUid]
       });
+      return;
+    }
+
+    const fromUid = $user?.uid;
+    if (!fromUid) {
+      inviteError = 'You must be signed in to send invites.';
+      return;
+    }
+
+    inviteError = null;
+    inviteLoading = { ...inviteLoading, [toUid]: true };
+    try {
+      const res = await sendServerInvite({
+        toUid,
+        fromUid,
+        serverId: serverId!,
+        serverName: serverName || serverId!,
+        serverIcon,
+        channelId: fallback.id,
+        channelName: fallback.name || 'general'
+      });
+      if (!res.ok) {
+        inviteError = `Failed to invite ${toUid}: ${res.error ?? 'Unknown error'}`;
+        console.debug('[ServerSettings] sendServerInvite failed', { toUid, res });
+        if (pendingInvitesByUid[toUid]) {
+          const { [toUid]: _, ...rest } = pendingInvitesByUid;
+          pendingInvitesByUid = rest;
+        }
+      } else {
+        pendingInvitesByUid = { ...pendingInvitesByUid, [toUid]: true };
+        if (res.alreadyExisted) {
+          inviteError = `User already has a pending invite.`;
+          console.debug('[ServerSettings] sendServerInvite already existed', { toUid, res });
+        } else {
+          console.debug('[ServerSettings] sendServerInvite ok', { toUid, res });
+        }
+      }
       (window as any)?.navigator?.vibrate?.(10);
     } catch (e) {
-      console.error(e);
-      alert('Failed to send invite.');
+      console.error('[ServerSettings] inviteUser error', e);
+      inviteError = (e as Error)?.message ?? 'Failed to send invite.';
     }
+    inviteLoading = { ...inviteLoading, [toUid]: false };
   }
 </script>
 
@@ -382,14 +431,30 @@
                     {#if r.email}<div class="text-xs text-white/60 truncate">{r.email}</div>{/if}
                   </div>
                   {#if isOwner || isAdmin}
-                    <button class="px-3 py-1.5 text-sm rounded bg-[#5865f2] hover:bg-[#4955d4]" on:click={() => inviteUser(r.uid)}>
-                      Invite
+                    <button
+                      class="px-3 py-1.5 text-sm rounded bg-[#5865f2] hover:bg-[#4955d4] disabled:opacity-60 disabled:cursor-not-allowed"
+                      disabled={!isOwner || pendingInvitesByUid[r.uid] || inviteLoading[r.uid]}
+                      on:click={() => inviteUser(r.uid)}
+                    >
+                      {#if pendingInvitesByUid[r.uid]}
+                        Sent
+                      {:else if inviteLoading[r.uid]}
+                        Sending…
+                      {:else}
+                        Invite
+                      {/if}
                     </button>
                   {/if}
                 </div>
               {/each}
             {/if}
           </div>
+
+          {#if inviteError}
+            <div class="mt-2 px-3 py-2 text-xs text-red-300 bg-red-950/30 border border-red-900/40 rounded">
+              {inviteError}
+            </div>
+          {/if}
 
           <!-- owner/admin hint -->
           {#if (isOwner || isAdmin) && !isOwner}

@@ -12,7 +12,7 @@
 <!-- Always-on server rail + simple, calm home -->
 <div class="grid grid-cols-[72px_1fr] min-h-dvh text-white bg-[rgb(3,7,18)]">
   <aside class="bg-[#1e1f22] border-r border-white/10 overflow-y-auto">
-    <LeftPane activeServerId={null} onCreateServer={() => { /* no create here */ }} />
+    <LeftPane activeServerId={null} />
   </aside>
 
   <main class="relative bg-[#313338]">
