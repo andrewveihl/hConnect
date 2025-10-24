@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
@@ -43,10 +44,10 @@
   let ownerId: string | null = null;
   let myRole: 'owner' | 'admin' | 'member' | null = null; // keep old role path
   let myPerms: { [k: string]: any } | null = null;        // NEW: read perms safely
+  let myRoleIds: string[] = [];
 
   // tracking
   let lastServerId: string | null = null;
-  let didAutopick = false;
 
   // ===== Helpers =====
   function deriveOwnerId(data: any): string | null {
@@ -95,6 +96,7 @@
     unsubMyMember?.();
     myRole = computeIsOwner() ? 'owner' : null; // safe default
     myPerms = null;
+    myRoleIds = [];
 
     if (!$user?.uid) return;
     const db = getDb();
@@ -106,32 +108,35 @@
       myRole = computeIsOwner() ? 'owner' : (maybeRole as any);
       // NEW: read perms but don't require them
       myPerms = data?.perms ?? null;
+      myRoleIds = Array.isArray(data?.roleIds) ? data.roleIds : [];
     }, () => {
       myRole = computeIsOwner() ? 'owner' : null;
       myPerms = null;
+      myRoleIds = [];
     });
   }
 
   function watchChannels(server: string) {
     unsubChannels?.();
     channels = [];
-    didAutopick = false;
 
     const db = getDb();
     const qRef = query(collection(db, 'servers', server, 'channels'), orderBy('position'));
     unsubChannels = onSnapshot(qRef, (snap) => {
       channels = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
-const isDesktop =
-  typeof window !== 'undefined' &&
-  window.matchMedia('(min-width: 768px)').matches;
-
-if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
-  didAutopick = true;
-  pick(channels[0].id);
-}
-
     });
   }
+
+  function canSeeChannel(chan: Chan): boolean {
+    const allowed = (chan as any)?.allowedRoleIds;
+    if (!Array.isArray(allowed) || allowed.length === 0) return true;
+    if (isAdminLike) return true;
+    if (!Array.isArray(myRoleIds) || myRoleIds.length === 0) return false;
+    return allowed.some((roleId: string) => myRoleIds.includes(roleId));
+  }
+
+  let visibleChannels: Chan[] = [];
+  $: visibleChannels = channels.filter(canSeeChannel);
 
   function subscribeAll(server: string) {
     watchServerMeta(server);
@@ -148,6 +153,19 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
   // Also refresh member when auth resolves
   $: if (computedServerId && $user?.uid) {
     watchMyMember(computedServerId);
+  }
+
+  $: if (
+    browser &&
+    window.matchMedia('(min-width: 768px)').matches &&
+    computedServerId
+  ) {
+    if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
+      const fallback = visibleChannels[0];
+      if (fallback) pick(fallback.id);
+    } else if (!activeChannelId && visibleChannels.length) {
+      pick(visibleChannels[0].id);
+    }
   }
 
   onDestroy(() => {
@@ -244,7 +262,7 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
     <div>
       <div class="text-[10px] uppercase tracking-wider text-white/50 px-2 mb-1">Text channels</div>
       <div class="space-y-1">
-        {#each channels.filter(c => c.type === 'text') as c (c.id)}
+        {#each visibleChannels.filter(c => c.type === 'text') as c (c.id)}
           <div class={`group w-full flex items-center gap-1 rounded-md ${activeChannelId === c.id ? 'bg-white/10' : 'hover:bg-white/10'}`}>
             <button
               type="button"
@@ -254,7 +272,7 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
             >
               <i class="bx bx-hash" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
-              {#if c.isPrivate}
+              {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
                 <i class="bx bx-lock text-xs ml-auto opacity-70" aria-hidden="true"></i>
               {/if}
             </button>
@@ -281,8 +299,8 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
             {/if}
           </div>
         {/each}
-        {#if !channels.some(c => c.type === 'text')}
-          <div class="text-xs text-white/50 px-3 py-2">No text channels yet.</div>
+        {#if !visibleChannels.some(c => c.type === 'text')}
+          <div class="text-xs text-white/50 px-3 py-2">No accessible text channels.</div>
         {/if}
       </div>
     </div>
@@ -291,7 +309,7 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
     <div>
       <div class="text-[10px] uppercase tracking-wider text-white/50 px-2 mb-1">Voice channels</div>
       <div class="space-y-1">
-        {#each channels.filter(c => c.type === 'voice') as c (c.id)}
+        {#each visibleChannels.filter(c => c.type === 'voice') as c (c.id)}
           <div class={`group w-full flex items-center gap-1 rounded-md ${activeChannelId === c.id ? 'bg-white/10' : 'hover:bg-white/10'}`}>
             <button
               type="button"
@@ -301,7 +319,7 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
             >
               <i class="bx bx-headphone" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
-              {#if c.isPrivate}
+              {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
                 <i class="bx bx-lock text-xs ml-auto opacity-70" aria-hidden="true"></i>
               {/if}
             </button>
@@ -328,8 +346,8 @@ if (isDesktop && !didAutopick && !activeChannelId && channels.length) {
             {/if}
           </div>
         {/each}
-        {#if !channels.some(c => c.type === 'voice')}
-          <div class="text-xs text-white/50 px-3 py-2">No voice channels yet.</div>
+        {#if !visibleChannels.some(c => c.type === 'voice')}
+          <div class="text-xs text-white/50 px-3 py-2">No accessible voice channels.</div>
         {/if}
       </div>
     </div>

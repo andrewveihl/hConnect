@@ -9,7 +9,7 @@
   import {
     collection, doc, getDoc, onSnapshot, getDocs,
     query, orderBy, setDoc, updateDoc, deleteDoc,
-    limit
+    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove
   } from 'firebase/firestore';
 
   // routing
@@ -25,13 +25,18 @@
   let serverIcon: string | null = null;
 
   // tabs
-  type Tab = 'overview' | 'members' | 'channels' | 'danger';
+  type Tab = 'overview' | 'members' | 'channels' | 'roles' | 'danger';
   let tab: Tab = 'members'; // land on Members where Invite lives
 
   // live lists
   let members: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string }> = [];
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = [];
   let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number }> = [];
+  type Role = { id: string; name: string; color?: string | null };
+  let roles: Role[] = [];
+  let assignableRoles: Role[] = [];
+  let newRoleName = '';
+  let newRoleColor = '#5865f2';
 
   // profiles (people who have logged in)
   type Profile = {
@@ -102,6 +107,18 @@
     });
   }
 
+  function watchRoles() {
+    const db = getDb();
+    return onSnapshot(collection(db, 'servers', serverId!, 'roles'), (snap) => {
+      roles = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Role));
+    });
+  }
+
+  $: assignableRoles = roles.filter((role) => {
+    const lower = (role.name ?? '').toLowerCase();
+    return lower !== 'everyone' && lower !== 'admin';
+  });
+
   // NEW: watch first N profiles ordered by nameLower (users who have logged in)
   function watchProfiles() {
     const db = getDb();
@@ -130,12 +147,14 @@
     const offBans = watchBans();
     const offChannels = watchChannels();
     const offProfiles = watchProfiles();
+    const offRoles = watchRoles();
 
     return () => {
       offMembers?.();
       offBans?.();
       offChannels?.();
       offProfiles?.();
+      offRoles?.();
       pendingInvitesByUid = {};
     };
   });
@@ -205,6 +224,91 @@
     } catch (e) {
       console.error(e);
       alert('Failed to unban user.');
+    }
+  }
+
+  async function createRole() {
+    if (!isAdmin) return;
+    const name = newRoleName.trim();
+    if (!name) return;
+    const db = getDb();
+    try {
+      await addDoc(collection(db, 'servers', serverId!, 'roles'), {
+        name,
+        color: newRoleColor || null,
+        createdAt: serverTimestamp()
+      });
+      newRoleName = '';
+      newRoleColor = '#5865f2';
+    } catch (e) {
+      console.error(e);
+      alert('Failed to create role.');
+    }
+  }
+
+  async function deleteRole(roleId: string, roleName: string) {
+    if (!isOwner) return;
+    const canonical = roleName.trim().toLowerCase();
+    if (canonical === 'everyone' || canonical === 'admin') {
+      alert('Built-in roles cannot be deleted.');
+      return;
+    }
+    if (!confirm(`Delete role "${roleName}"? This will remove it from members and channels.`)) return;
+
+    const db = getDb();
+    try {
+      await deleteDoc(doc(db, 'servers', serverId!, 'roles', roleId));
+
+      const membersSnap = await getDocs(collection(db, 'servers', serverId!, 'members'));
+      await Promise.all(
+        membersSnap.docs.map((m) => {
+          const data = m.data() as any;
+          if (Array.isArray(data.roleIds) && data.roleIds.includes(roleId)) {
+            return updateDoc(m.ref, { roleIds: arrayRemove(roleId) });
+          }
+          return Promise.resolve();
+        })
+      );
+
+      const channelsSnap = await getDocs(collection(db, 'servers', serverId!, 'channels'));
+      await Promise.all(
+        channelsSnap.docs.map((c) => {
+          const data = c.data() as any;
+          if (Array.isArray(data.allowedRoleIds) && data.allowedRoleIds.includes(roleId)) {
+            return updateDoc(c.ref, { allowedRoleIds: arrayRemove(roleId) });
+          }
+          return Promise.resolve();
+        })
+      );
+    } catch (e) {
+      console.error(e);
+      alert('Failed to delete role.');
+    }
+  }
+
+  async function toggleMemberRole(uid: string, roleId: string, enabled: boolean) {
+    if (!isAdmin) return;
+    const db = getDb();
+    try {
+      await updateDoc(doc(db, 'servers', serverId!, 'members', uid), {
+        roleIds: enabled ? arrayUnion(roleId) : arrayRemove(roleId)
+      });
+    } catch (e) {
+      console.error(e);
+      alert('Failed to update member roles.');
+    }
+  }
+
+  async function toggleChannelRole(channelId: string, roleId: string, enabled: boolean) {
+    if (!isAdmin) return;
+    const db = getDb();
+    try {
+      await updateDoc(doc(db, 'servers', serverId!, 'channels', channelId), {
+        allowedRoleIds: enabled ? arrayUnion(roleId) : arrayRemove(roleId)
+      });
+    } catch (e) {
+      console.error(e);
+      alert('Failed to update channel access.');
     }
   }
 
@@ -379,6 +483,7 @@
         <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='overview'} on:click={() => tab='overview'}>Overview</button>
         <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='members'} on:click={() => tab='members'}>Members</button>
         <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='channels'} on:click={() => tab='channels'}>Channels</button>
+        <button class="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15" class:selected={tab==='roles'} on:click={() => tab='roles'}>Roles</button>
         <button class="px-3 py-1.5 rounded bg-red-950/40 text-red-300 hover:bg-red-900/40" class:selected={tab==='danger'} on:click={() => tab='danger'}>Danger Zone</button>
       </div>
 
@@ -468,29 +573,47 @@
             <div class="text-white/60">No members yet.</div>
           {/if}
           {#each members as m (m.uid)}
-            <div class="flex items-center gap-3 p-2 rounded hover:bg-white/10">
-              <img src={m.photoURL || ''} alt="" class="h-9 w-9 rounded-full bg-white/10"
-                   on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
-              <div class="flex-1 min-w-0">
-                <div class="truncate">{m.displayName || m.uid}</div>
-                <div class="text-xs text-white/50">{m.role || 'member'}</div>
+            <div class="p-2 rounded hover:bg-white/10 space-y-2">
+              <div class="flex items-center gap-3">
+                <img src={m.photoURL || ''} alt="" class="h-9 w-9 rounded-full bg-white/10"
+                     on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
+                <div class="flex-1 min-w-0">
+                  <div class="truncate">{m.displayName || m.uid}</div>
+                  <div class="text-xs text-white/50">{m.role || 'member'}</div>
+                </div>
+
+                {#if isOwner || isAdmin}
+                  <div class="flex items-center gap-1">
+                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                      disabled={!isOwner && m.role === 'admin'}
+                      on:click={() => setRole(m.uid, 'member')}>Member</button>
+                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                      on:click={() => setRole(m.uid, 'admin')}>Admin</button>
+                  </div>
+                {/if}
+
+                {#if isOwner || isAdmin}
+                  <button class="ml-2 px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                    on:click={() => kick(m.uid)}>Kick</button>
+                  <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                    on:click={() => ban(m.uid)}>Ban</button>
+                {/if}
               </div>
 
-              {#if isOwner || isAdmin}
-                <div class="flex items-center gap-1">
-                  <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                    disabled={!isOwner && m.role === 'admin'}
-                    on:click={() => setRole(m.uid, 'member')}>Member</button>
-                  <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                    on:click={() => setRole(m.uid, 'admin')}>Admin</button>
+              {#if assignableRoles.length > 0}
+                <div class="pl-12 flex flex-wrap gap-2 text-[12px] text-white/70">
+                  {#each assignableRoles as role}
+                    <label class="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/5 border border-white/10">
+                      <input
+                        type="checkbox"
+                        checked={Array.isArray(m.roleIds) && m.roleIds.includes(role.id)}
+                        disabled={!isAdmin}
+                        on:change={(e) => toggleMemberRole(m.uid, role.id, (e.currentTarget as HTMLInputElement).checked)}
+                      />
+                      <span>{role.name}</span>
+                    </label>
+                  {/each}
                 </div>
-              {/if}
-
-              {#if isOwner || isAdmin}
-                <button class="ml-2 px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                  on:click={() => kick(m.uid)}>Kick</button>
-                <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                  on:click={() => ban(m.uid)}>Ban</button>
               {/if}
             </div>
           {/each}
@@ -523,19 +646,97 @@
             <div class="text-white/60">No channels yet.</div>
           {/if}
           {#each channels as c (c.id)}
-            <div class="flex items-center gap-2 p-2 rounded hover:bg-white/10">
-              <div class="w-6 text-center">
-                {#if c.type === 'text'}<i class="bx bx-hash" aria-hidden="true"></i>{:else}<i class="bx bx-headphone" aria-hidden="true"></i>{/if}
+            <div class="flex flex-col gap-2 p-2 rounded hover:bg-white/10">
+              <div class="flex items-center gap-2">
+                <div class="w-6 text-center">
+                  {#if c.type === 'text'}<i class="bx bx-hash" aria-hidden="true"></i>{:else}<i class="bx bx-headphone" aria-hidden="true"></i>{/if}
+                </div>
+                <div class="flex-1 truncate">{c.name}</div>
+                {#if isOwner || isAdmin}
+                  <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                    on:click={() => renameChannel(c.id, c.name)}>Rename</button>
+                  <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                    on:click={() => deleteChannel(c.id, c.name)}>Delete</button>
+                {/if}
               </div>
-              <div class="flex-1 truncate">{c.name}</div>
-              {#if isOwner || isAdmin}
-                <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                  on:click={() => renameChannel(c.id, c.name)}>Rename</button>
-                <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                  on:click={() => deleteChannel(c.id, c.name)}>Delete</button>
+              {#if roles.length > 0}
+                <div class="pl-6 pr-3 pb-2 text-[12px] text-white/60 flex flex-wrap items-center gap-2">
+                  <span class="opacity-70">Allowed roles:</span>
+                  <div class="flex flex-wrap gap-2">
+                    {#each roles as role}
+                      <label class="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/5 border border-white/10">
+                        <input
+                          type="checkbox"
+                          checked={Array.isArray(c.allowedRoleIds) && c.allowedRoleIds.includes(role.id)}
+                          disabled={!canManageChannels}
+                          on:change={(e) => toggleChannelRole(c.id, role.id, (e.currentTarget as HTMLInputElement).checked)}
+                        />
+                        <span>{role.name}</span>
+                      </label>
+                    {/each}
+                  </div>
+                  {#if !c.allowedRoleIds || c.allowedRoleIds.length === 0}
+                    <span class="text-white/40">Everyone</span>
+                  {/if}
+                </div>
               {/if}
             </div>
           {/each}
+        </div>
+      {/if}
+
+      {#if tab === 'roles'}
+        <div class="p-4 rounded-lg bg-white/5 space-y-4">
+          <form class="flex flex-col sm:flex-row gap-2 sm:items-center" on:submit|preventDefault={createRole}>
+            <input
+              class="flex-1 rounded bg-white/10 px-3 py-2"
+              placeholder="Role name (e.g. Moderator)"
+              bind:value={newRoleName}
+            />
+            <input
+              class="h-10 w-20 rounded bg-white/10 border border-white/10"
+              type="color"
+              bind:value={newRoleColor}
+              title="Role color"
+            />
+            <button
+              type="submit"
+              class="px-4 py-2 rounded bg-[#5865f2] hover:bg-[#4955d4] disabled:opacity-60"
+              disabled={!newRoleName.trim() || !isAdmin}
+            >
+              Create
+            </button>
+          </form>
+
+          {#if roles.length === 0}
+            <div class="text-white/60 text-sm">No custom roles yet. Use the form above to add one.</div>
+          {:else}
+            <div class="space-y-2">
+              {#each roles as role}
+                <div class="flex items-center justify-between px-3 py-2 rounded bg-white/10 border border-white/10">
+                  <div class="flex items-center gap-3 min-w-0">
+                    <span
+                      class="inline-block w-3 h-3 rounded-full ring-2 ring-white/20"
+                      style={`background:${role.color || '#5865f2'}`}
+                    ></span>
+                    <div class="min-w-0">
+                      <div class="font-medium truncate">{role.name}</div>
+                      {#if role.color}
+                        <div class="text-xs text-white/50">{role.color}</div>
+                      {/if}
+                    </div>
+                  </div>
+                  <button
+                    class="px-3 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                    on:click={() => deleteRole(role.id, role.name)}
+                    disabled={!isOwner}
+                  >
+                    Delete
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
 
