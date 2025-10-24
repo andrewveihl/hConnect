@@ -8,6 +8,9 @@
     const stop = startAuthListener();
     return () => stop?.();
   });
+
+window.__DEBUG = true;
+
 </script>
 
 <!-- Full-screen app surface -->

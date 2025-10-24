@@ -38,8 +38,7 @@
     try {
       busy = true;
       // ⬇️ unchanged shape; matches your server.ts signature
-      const serverId = await createServer({
-        ownerId: owner,
+      const serverId = await createServer(owner, {
         name: name.trim(),
         isPublic,
         icon: null
