@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
   import { doc, getDoc } from 'firebase/firestore';
 
+  import DMsSidebar from '$lib/components/DMsSidebar.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import ChatInput from '$lib/components/ChatInput.svelte';
 
@@ -16,79 +18,361 @@
   $: me = $user;
 
   let messages: any[] = [];
+  let messageUsers: Record<string, any> = {};
   let unsub: (() => void) | null = null;
+  let mounted = false;
 
-  // Header meta
   let otherUid: string | null = null;
   let otherProfile: any = null;
+  let metaLoading = true;
+
+  let showThreads = false;
+  let showInfo = false;
+
+  const LEFT_RAIL = 72;
+  const EDGE_ZONE = 28;
+  const SWIPE_THRESHOLD = 64;
+
+  let tracking = false;
+  let startX = 0;
+  let startY = 0;
 
   async function loadThreadMeta() {
-    const db = getDb();
-    const tSnap = await getDoc(doc(db, 'dms', threadID));
-    const t: any = tSnap.data() ?? {};
-    const parts: string[] = t.participants ?? [];
-    otherUid = parts.find((p) => p !== me?.uid) ?? null;
+    if (!threadID || typeof window === 'undefined') return;
+    metaLoading = true;
+    try {
+      const database = getDb();
+      const snap = await getDoc(doc(database, 'dms', threadID));
+      const payload: any = snap.data() ?? {};
+      const parts: string[] = payload.participants ?? [];
+      otherUid = parts.find((p) => p !== me?.uid) ?? null;
 
-    if (otherUid) {
-      // try profiles, fall back to users if you still have that collection
-      let p = await getDoc(doc(db, 'profiles', otherUid));
-      if (!p.exists()) p = await getDoc(doc(db, 'users', otherUid));
-      if (p.exists()) otherProfile = { uid: p.id, ...p.data() };
+      if (otherUid) {
+        const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
+        if (profileDoc.exists()) {
+          otherProfile = { uid: profileDoc.id, ...profileDoc.data() };
+        } else {
+          otherProfile = { uid: otherUid };
+        }
+      } else {
+        otherProfile = null;
+      }
+    } catch (err) {
+      console.error('[DM thread] failed to load meta', err);
+      otherProfile = null;
+    } finally {
+      metaLoading = false;
     }
   }
 
-  onMount(async () => {
-    // stream messages immediately
+  $: if (threadID) {
+    loadThreadMeta();
+  }
+
+  $: {
+    const next: Record<string, any> = {};
+    if (me?.uid) {
+      next[me.uid] = {
+        uid: me.uid,
+        displayName: me.displayName ?? me.email ?? 'You',
+        name: me.displayName ?? me.email ?? 'You',
+        photoURL: me.photoURL ?? null
+      };
+    }
+    if (otherProfile?.uid) {
+      next[otherProfile.uid] = otherProfile;
+    }
+    messageUsers = next;
+  }
+
+  function setupGestures() {
+    if (typeof window === 'undefined') return () => {};
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        showThreads = false;
+        showInfo = false;
+      }
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+
+      const nearLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE;
+      const nearRight = window.innerWidth - startX <= EDGE_ZONE;
+
+      tracking = nearLeft || nearRight || showThreads || showInfo;
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!tracking || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+
+      if (Math.abs(dy) > Math.abs(dx) * 1.25) return;
+
+      if (!showThreads && !showInfo) {
+        const fromInnerLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE && dx >= SWIPE_THRESHOLD;
+        const fromRightEdge = window.innerWidth - startX <= EDGE_ZONE && dx <= -SWIPE_THRESHOLD;
+        if (fromInnerLeft) {
+          showThreads = true;
+          tracking = false;
+        }
+        if (fromRightEdge) {
+          showInfo = true;
+          tracking = false;
+        }
+        return;
+      }
+
+      if (showThreads && dx <= -SWIPE_THRESHOLD) {
+        showThreads = false;
+        tracking = false;
+      }
+      if (showInfo && dx >= SWIPE_THRESHOLD) {
+        showInfo = false;
+        tracking = false;
+      }
+    };
+
+    const onTouchEnd = () => {
+      tracking = false;
+    };
+
+    const mdMq = window.matchMedia('(min-width: 768px)');
+    const lgMq = window.matchMedia('(min-width: 1024px)');
+
+    const onMedia = () => {
+      if (mdMq.matches) showThreads = false;
+      if (lgMq.matches) showInfo = false;
+    };
+
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    mdMq.addEventListener('change', onMedia);
+    lgMq.addEventListener('change', onMedia);
+    onMedia();
+
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+      mdMq.removeEventListener('change', onMedia);
+      lgMq.removeEventListener('change', onMedia);
+    };
+  }
+
+  onMount(() => {
+    mounted = true;
+    const cleanupGestures = setupGestures();
+    return () => {
+      mounted = false;
+      unsub?.();
+      cleanupGestures();
+    };
+  });
+
+  $: if (mounted && threadID) {
+    unsub?.();
     unsub = streamDMMessages(threadID, async (msgs) => {
       messages = msgs;
       if (me?.uid) await markThreadRead(threadID, me.uid);
     });
-    // load header meta in parallel
-    loadThreadMeta();
-  });
-
-  onDestroy(() => unsub?.());
+  }
 
   async function handleSend(text: string) {
-    if (!text?.trim() || !me?.uid) return;
+    const trimmed = text?.trim();
+    if (!trimmed || !me?.uid) return;
     await sendDMMessage(threadID, {
       uid: me.uid,
-      text: text.trim(),
+      text: trimmed,
       displayName: me.displayName ?? null,
       photoURL: me.photoURL ?? null
     });
   }
 
-  // handle both {detail: string} and {detail: {text}}
   function onSend(e: CustomEvent<any>) {
     const val = typeof e.detail === 'string' ? e.detail : e.detail?.text;
     handleSend(val ?? '');
   }
+
+  $: displayName = otherProfile?.displayName || otherProfile?.name || otherUid || 'Direct Message';
 </script>
 
-<!-- Header -->
-<div class="h-14 border-b border-white/10 px-4 flex items-center gap-3">
-  <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden">
-    {#if otherProfile?.photoURL}
-      <img class="w-9 h-9 object-cover" src={otherProfile.photoURL} alt="" />
+<div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
+  <div class="hidden md:flex md:w-80 flex-col border-r border-black/40 bg-[#1e1f24]">
+    <DMsSidebar
+      activeThreadId={threadID}
+      on:select={() => (showThreads = false)}
+      on:delete={(e) => {
+        if (e.detail === threadID) {
+          showInfo = false;
+          void goto('/dms');
+        }
+      }}
+    />
+  </div>
+
+  <div class="flex flex-1 flex-col bg-[#2b2d31] overflow-hidden">
+    <header class="h-14 px-3 sm:px-4 flex items-center justify-between border-b border-black/40 bg-[#1e1f24]">
+      <div class="flex items-center gap-3 min-w-0">
+        <button
+          class="md:hidden p-2 rounded-md hover:bg-white/10 active:bg-white/15 transition"
+          aria-label="Open conversations"
+          on:click={() => (showThreads = true)}
+        >
+          <i class="bx bx-menu text-2xl"></i>
+        </button>
+        <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
+          {#if otherProfile?.photoURL}
+            <img class="w-9 h-9 object-cover" src={otherProfile.photoURL} alt="" />
+          {:else}
+            <i class="bx bx-user text-lg text-white/80"></i>
+          {/if}
+        </div>
+        <div class="min-w-0">
+          <div class="font-semibold leading-5 truncate">{displayName}</div>
+          {#if otherProfile?.email}<div class="text-xs text-white/60 truncate">{otherProfile.email}</div>{/if}
+        </div>
+      </div>
+      <button
+        class="md:hidden p-2 rounded-md hover:bg-white/10 active:bg-white/15 transition"
+        aria-label="View profile"
+        on:click={() => (showInfo = true)}
+      >
+        <i class="bx bx-user-circle text-2xl"></i>
+      </button>
+    </header>
+
+    <main class="flex-1 overflow-hidden bg-[#313338]">
+      <div class="h-full flex flex-col">
+        <div class="flex-1 overflow-hidden p-3 sm:p-4">
+          <MessageList {messages} users={messageUsers} currentUserId={me?.uid ?? null} />
+        </div>
+      </div>
+    </main>
+
+    <div class="border-t border-black/40 bg-[#2b2d31] p-3">
+      <ChatInput placeholder={`Message ${displayName}`} on:send={onSend} on:submit={onSend} />
+    </div>
+  </div>
+
+  <aside class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">
+    <div class="p-4 w-full">
+      {#if metaLoading}
+        <div class="animate-pulse text-white/50">Loading profile...</div>
+      {:else if otherProfile}
+        <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
+          <div class="w-20 h-20 rounded-full overflow-hidden bg-white/10 border border-white/10">
+            {#if otherProfile.photoURL}
+              <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+            {:else}
+              <div class="w-full h-full grid place-items-center text-3xl text-white/70">
+                <i class="bx bx-user"></i>
+              </div>
+            {/if}
+          </div>
+          <div class="text-lg font-semibold">{displayName}</div>
+          {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
+        </div>
+
+        <div class="mt-4 space-y-3 text-sm text-white/70">
+          {#if otherProfile.bio}
+            <p>{otherProfile.bio}</p>
+          {:else}
+            <p>This user hasn't added a bio yet.</p>
+          {/if}
+          {#if otherProfile.email}
+            <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
+              <i class="bx bx-envelope"></i>
+              <span>Send email</span>
+            </a>
+          {/if}
+        </div>
+      {:else}
+        <div class="text-white/50">Profile unavailable.</div>
+      {/if}
+    </div>
+  </aside>
+</div>
+
+<!-- Mobile overlays -->
+<div
+  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
+  style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
+  aria-label="Conversations"
+>
+  <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">
+    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15" aria-label="Close" on:click={() => (showThreads = false)}>
+      <i class="bx bx-chevron-left text-2xl"></i>
+    </button>
+    <div class="text-xs uppercase tracking-wide text-white/60">Conversations</div>
+  </div>
+  <div class="flex-1 overflow-y-auto">
+    <DMsSidebar
+      activeThreadId={threadID}
+      on:select={() => (showThreads = false)}
+      on:delete={(e) => {
+        showThreads = false;
+        showInfo = false;
+        if (e.detail === threadID) void goto('/dms');
+      }}
+    />
+  </div>
+</div>
+
+<div
+  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
+  style:transform={showInfo ? 'translateX(0)' : 'translateX(100%)'}
+  aria-label="Profile"
+>
+  <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">
+    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15" aria-label="Close" on:click={() => (showInfo = false)}>
+      <i class="bx bx-chevron-left text-2xl"></i>
+    </button>
+    <div class="text-xs uppercase tracking-wide text-white/60">Profile</div>
+  </div>
+
+  <div class="flex-1 overflow-y-auto p-4">
+    {#if metaLoading}
+      <div class="animate-pulse text-white/50">Loading profile…</div>
+    {:else if otherProfile}
+      <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
+        <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
+          {#if otherProfile.photoURL}
+            <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+          {:else}
+            <div class="w-full h-full grid place-items-center text-3xl text-white/70">
+              <i class="bx bx-user"></i>
+            </div>
+          {/if}
+        </div>
+        <div class="text-lg font-semibold">{displayName}</div>
+        {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
+      </div>
+
+      <div class="mt-4 space-y-3 text-sm text-white/70">
+        {#if otherProfile.bio}
+          <p>{otherProfile.bio}</p>
+        {:else}
+          <p>This user hasn’t added a bio yet.</p>
+        {/if}
+        {#if otherProfile.email}
+          <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
+            <i class="bx bx-envelope"></i>
+            <span>Send email</span>
+          </a>
+        {/if}
+      </div>
     {:else}
-      <i class="bx bx-user text-lg"></i>
+      <div class="text-white/50">Profile unavailable.</div>
     {/if}
   </div>
-  <div class="leading-5">
-    <div class="font-semibold">
-      {otherProfile?.name || otherProfile?.displayName || otherUid || 'Direct Message'}
-    </div>
-    {#if otherProfile?.email}<div class="text-xs text-white/60">{otherProfile.email}</div>{/if}
-  </div>
-</div>
-
-<!-- Messages -->
-<div class="flex-1 overflow-y-auto">
-  <MessageList {messages} users={{}} />
-</div>
-
-<!-- Composer -->
-<div class="border-t border-white/10 p-3">
-  <ChatInput on:send={onSend} on:submit={onSend} />
 </div>

@@ -82,70 +82,101 @@
   /* ===========================
      Mobile panels + gestures
      =========================== */
-  let showChannels = false; // mobile panels (leave rail visible)
+  let showChannels = false;
   let showMembers = false;
 
-  const LEFT_RAIL = 72; // px
-  const LEFT_EDGE = 24;
-  const RIGHT_EDGE = 24;
-  const SWIPE = 50;
+  const LEFT_RAIL = 72;
+  const EDGE_ZONE = 28;
+  const SWIPE = 64;
 
   let tracking = false;
   let startX = 0;
   let startY = 0;
 
-  onMount(() => {
+  function setupGestures() {
+    if (typeof window === 'undefined') return () => {};
+
+    const mdQuery = window.matchMedia('(min-width: 768px)');
+    const lgQuery = window.matchMedia('(min-width: 1024px)');
+
+    const onMedia = () => {
+      if (mdQuery.matches) showChannels = false;
+      if (lgQuery.matches) showMembers = false;
+    };
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { showChannels = false; showMembers = false; }
+      if (e.key === 'Escape') {
+        showChannels = false;
+        showMembers = false;
+      }
     };
 
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
-      const t = e.touches[0];
-      startX = t.clientX;
-      startY = t.clientY;
+      const touch = e.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
 
-      // open-channels starts just right of the rail; open-members from right edge
-      const nearLeft = startX >= LEFT_RAIL && startX <= (LEFT_RAIL + LEFT_EDGE);
-      const nearRight = (window.innerWidth - startX) <= RIGHT_EDGE;
-
-      tracking = (nearLeft || nearRight) || showChannels || showMembers;
+      const nearLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE;
+      const nearRight = window.innerWidth - startX <= EDGE_ZONE;
+      tracking = nearLeft || nearRight || showChannels || showMembers;
     };
 
     const onTouchMove = (e: TouchEvent) => {
       if (!tracking || e.touches.length !== 1) return;
-      const t = e.touches[0];
-      const dx = t.clientX - startX;
-      const dy = t.clientY - startY;
+      const touch = e.touches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
 
-      // ignore mostly vertical
-      if (Math.abs(dy) > Math.abs(dx) * 1.25) return;
+      if (Math.abs(dy) > Math.abs(dx) * 1.35) return;
 
       if (!showChannels && !showMembers) {
-        const fromInnerLeft = startX >= LEFT_RAIL && startX <= (LEFT_RAIL + LEFT_EDGE) && dx >= SWIPE;
-        const fromRightEdge = (window.innerWidth - startX) <= RIGHT_EDGE && dx <= -SWIPE;
-        if (fromInnerLeft) { showChannels = true; tracking = false; }
-        if (fromRightEdge) { showMembers = true; tracking = false; }
+        const fromLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE && dx >= SWIPE;
+        const fromRight = window.innerWidth - startX <= EDGE_ZONE && dx <= -SWIPE;
+        if (fromLeft) {
+          showChannels = true;
+          tracking = false;
+        } else if (fromRight) {
+          showMembers = true;
+          tracking = false;
+        }
         return;
       }
 
-      if (showChannels && dx <= -SWIPE) { showChannels = false; tracking = false; }
-      if (showMembers && dx >= SWIPE) { showMembers = false; tracking = false; }
+      if (showChannels && dx <= -SWIPE) {
+        showChannels = false;
+        tracking = false;
+      } else if (showMembers && dx >= SWIPE) {
+        showMembers = false;
+        tracking = false;
+      }
     };
 
-    const onTouchEnd = () => { tracking = false; };
+    const onTouchEnd = () => {
+      tracking = false;
+    };
 
     window.addEventListener('keydown', onKey);
     window.addEventListener('touchstart', onTouchStart, { passive: true });
     window.addEventListener('touchmove', onTouchMove, { passive: true });
     window.addEventListener('touchend', onTouchEnd, { passive: true });
+    mdQuery.addEventListener('change', onMedia);
+    lgQuery.addEventListener('change', onMedia);
+    onMedia();
 
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('touchstart', onTouchStart);
       window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onTouchEnd);
+      mdQuery.removeEventListener('change', onMedia);
+      lgQuery.removeEventListener('change', onMedia);
     };
+  }
+
+  onMount(() => {
+    const cleanup = setupGestures();
+    return () => cleanup();
   });
 
   // subscribe to channels
@@ -219,66 +250,55 @@ Layout:
 - md (≥768): rail + channels + chat
 - xl (≥1280): rail + channels + chat + members
 -->
-<div
-  class="h-dvh overflow-hidden grid
-         md:[grid-template-columns:72px_256px_1fr] md:[grid-template-rows:48px_1fr_auto]
-         xl:[grid-template-columns:72px_256px_1fr_288px]"
-  style="grid-template-columns: 72px 1fr; grid-template-rows: 48px 1fr auto;"
->
-  <!-- Left rail — ALWAYS visible -->
-  <div class="col-start-1 row-span-3 z-30">
-    <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
-  </div>
+<div class="flex h-dvh bg-[#0b111b] text-white overflow-hidden">
+  <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
+  <div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
+    <div class="hidden md:flex md:w-64 xl:w-72 flex-col border-r border-black/40 bg-[#1e1f24]">
+      {#if serverId}
+        <ServerSidebar
+          serverId={serverId}
+          activeChannelId={activeChannel?.id ?? null}
+          onPickChannel={(id) => pickChannel(id)}
+        />
+      {:else}
+        <div class="p-4 text-white/70">Select a server from the left to view channels.</div>
+      {/if}
+    </div>
 
-  <!-- Header -->
-  <div class="col-start-2 md:col-start-3 md:col-end-4 xl:col-end-5">
-    <ChannelHeader channel={activeChannel} />
-  </div>
-
-  <!-- Channels (desktop column) -->
-  <div class="hidden md:block col-start-2 row-start-2 row-end-4">
-    {#if serverId}
-      <ServerSidebar
-        serverId={serverId}
-        activeChannelId={activeChannel?.id ?? null}
-        onPickChannel={(id) => pickChannel(id)}
+    <div class="flex flex-1 flex-col bg-[#2b2d31] overflow-hidden">
+      <ChannelHeader
+        channel={activeChannel}
+        onOpenChannels={() => (showChannels = true)}
+        onOpenMembers={() => (showMembers = true)}
       />
-    {:else}
-      <div class="p-4 text-white/70">Select a server from the left to view channels.</div>
-    {/if}
-  </div>
 
-  <!-- Chat (flexes between channels and members) -->
-  <main class="bg-[#313338] col-start-2 row-start-2 row-end-3
-                md:col-start-3 md:row-start-2 md:row-end-3
-                overflow-hidden">
-    {#if serverId && activeChannel}
-      <div class="h-full flex flex-col">
-        <div class="flex-1 overflow-hidden p-4">
-          <MessageList {messages} users={profiles} />
-        </div>
-        <div class="shrink-0 border-t border-black/40 bg-[#2b2d31] p-3">
-          <ChatInput placeholder={`Message #${activeChannel?.name ?? ''}`} onSend={handleSend} />
-        </div>
-      </div>
-    {:else}
-      <div class="h-full grid place-items-center text-white/60">
-        {#if !serverId}
-          <div>Pick a server to start chatting.</div>
+      <div class="flex-1 overflow-hidden bg-[#313338]">
+        {#if serverId && activeChannel}
+          <div class="h-full flex flex-col">
+            <div class="flex-1 overflow-hidden p-3 sm:p-4">
+              <MessageList {messages} users={profiles} currentUserId={$user?.uid ?? null} />
+            </div>
+            <div class="shrink-0 border-t border-black/40 bg-[#2b2d31] p-3">
+              <ChatInput placeholder={`Message #${activeChannel?.name ?? ''}`} onSend={handleSend} />
+            </div>
+          </div>
         {:else}
-          <div>Pick a channel to start chatting.</div>
+          <div class="h-full grid place-items-center text-white/60">
+            {#if !serverId}
+              <div>Pick a server to start chatting.</div>
+            {:else}
+              <div>Pick a channel to start chatting.</div>
+            {/if}
+          </div>
         {/if}
       </div>
-    {/if}
-  </main>
+    </div>
 
-  <!-- Members (xl and up) -->
-  <div class="hidden xl:block col-start-4 row-start-2 row-end-4">
-    {#if serverId}
-      <MembersPane {serverId} />
-    {:else}
-      <div class="p-4 text-white/70">No server selected.</div>
-    {/if}
+    <div class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">`r`n      {#if serverId}`r`n        <MembersPane {serverId} />
+      {:else}
+        <div class="p-4 text-white/70">No server selected.</div>
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -329,7 +349,7 @@ Layout:
 
   <div class="flex-1 overflow-y-auto">
     {#if serverId}
-      <MembersPane {serverId} />
+      <MembersPane {serverId} showHeader={false} />
     {:else}
       <div class="p-4 text-white/70">No server selected.</div>
     {/if}
@@ -337,3 +357,4 @@ Layout:
 </div>
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
+

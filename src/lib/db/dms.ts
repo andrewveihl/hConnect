@@ -3,7 +3,7 @@ import { getDb } from '$lib/firebase';
 import {
   addDoc, collection, doc, getDoc, getDocs, onSnapshot,
   orderBy, query, serverTimestamp, setDoc, updateDoc,
-  where, limit, type Unsubscribe
+  where, limit, deleteField, type Unsubscribe
 } from 'firebase/firestore';
 
 /* ===========================
@@ -161,10 +161,18 @@ export async function sendDMMessage(
 
   // bump thread meta
   const tRef = doc(db, COL_DMS, threadId);
+  const tSnap = await getDoc(tRef);
+  const threadData: any = tSnap.exists() ? tSnap.data() : null;
+  const participants: string[] = threadData?.participants ?? [];
+  const resets: Record<string, any> = {};
+  for (const participant of participants) {
+    resets[`deletedFor.${participant}`] = deleteField();
+  }
   await updateDoc(tRef, {
     updatedAt: serverTimestamp(),
     lastMessage: payload.text,
-    lastSender: payload.uid
+    lastSender: payload.uid,
+    ...resets
   });
 }
 
@@ -186,8 +194,15 @@ export function streamMyThreads(uid: string, cb: (threads: any[]) => void): Unsu
     orderBy('updatedAt', 'desc')
   );
   return onSnapshot(q1, (snap) => {
-    cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    cb(rows.filter((row) => !row?.deletedFor?.[uid]));
   });
+}
+
+export async function deleteThreadForUser(threadId: string, uid: string) {
+  const db = getDb();
+  const ref = doc(db, COL_DMS, threadId);
+  await updateDoc(ref, { [`deletedFor.${uid}`]: serverTimestamp() });
 }
 
 /* ===========================

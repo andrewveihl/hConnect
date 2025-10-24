@@ -4,7 +4,7 @@
   import { user } from '$lib/stores/user';
   import {
     searchUsersByName, getOrCreateDMThread, streamMyThreads,
-    streamUnreadCount, streamProfiles, getProfile
+    streamUnreadCount, streamProfiles, getProfile, deleteThreadForUser
   } from '$lib/db/dms';
 
   const dispatch = createEventDispatcher();
@@ -106,29 +106,52 @@
   onDestroy(() => unsubPeople?.());
 
   /* ---------------- Actions ---------------- */
-async function openOrStartDM(targetUid: string) {
-  if (!me?.uid) return;
-  const t = await getOrCreateDMThread([me.uid, targetUid]);
-
-  // Optimistically insert at top if it's not in the list yet
-  if (!threads.find((x) => x.id === t.id)) {
-    threads = [
-      {
-        id: t.id,
-        participants: [me.uid, targetUid].sort(),
-        lastMessage: t.lastMessage ?? null,
-        updatedAt: new Date()
-      },
-      ...threads
-    ];
+  function openExisting(threadId: string) {
+    activeThreadId = threadId;
+    dispatch('select', threadId);
+    void goto(`/dms/${threadId}`);
   }
 
-    activeThreadId = t.id;
+  async function openOrStartDM(targetUid: string) {
+    if (!me?.uid) return;
+    const t = await getOrCreateDMThread([me.uid, targetUid]);
 
-  // Navigate
-  // (anchor is fine too; goto keeps SPA feel here)
-  await goto(`/dms/${t.id}`);
-}
+    if (!threads.find((x) => x.id === t.id)) {
+      threads = [
+        {
+          id: t.id,
+          participants: [me.uid, targetUid].sort(),
+          lastMessage: t.lastMessage ?? null,
+          updatedAt: new Date()
+        },
+        ...threads
+      ];
+    }
+
+    activeThreadId = t.id;
+    dispatch('select', t.id);
+    await goto(`/dms/${t.id}`);
+  }
+
+  async function deleteThread(threadId: string) {
+    if (!me?.uid) return;
+    const confirmDelete = window.confirm('Remove this conversation? You can start it again later.');
+    if (!confirmDelete) return;
+
+    try {
+      await deleteThreadForUser(threadId, me.uid);
+      threads = threads.filter((t) => t.id !== threadId);
+      const nextMap = { ...unreadMap };
+      delete nextMap[threadId];
+      unreadMap = nextMap;
+      if (activeThreadId === threadId) {
+        activeThreadId = null;
+      }
+      dispatch('delete', threadId);
+    } catch (err) {
+      console.error('Failed to delete DM thread', err);
+    }
+  }
 </script>
 
 <aside class="w-80 shrink-0 bg-[#0f172a] border-r border-white/10 h-[100dvh] flex flex-col">
@@ -181,26 +204,34 @@ async function openOrStartDM(targetUid: string) {
     <div class="text-xs uppercase tracking-wide text-white/40 px-2 mb-1">Messages</div>
     <ul class="space-y-0.5 overflow-y-auto pr-1" style="scrollbar-gutter: stable; max-height: calc(100dvh - 360px)">
       {#each threads as t}
+        {@const isActive = activeThreadId === t.id}
         <li>
-          <button
-            class={`w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-white/5 ${
-              activeThreadId === t.id ? 'bg-white/5' : ''
-            }`}
-            on:click={() => openExisting(t.id)}
-          >
-            <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
-              <i class="bx bx-user text-lg"></i>
-            </div>
-            <div class="flex-1 text-left">
-              <div class="text-sm font-medium leading-5">{otherOf(t)}</div>
-              <div class="text-xs text-white/50 line-clamp-1">{t.lastMessage || 'No messages yet'}</div>
-            </div>
-            {#if (unreadMap[t.id] ?? 0) > 0}
-              <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-indigo-600">
-                {unreadMap[t.id]}
-              </span>
-            {/if}
-          </button>
+          <div class={`flex items-center gap-2 px-2 py-2 rounded-lg ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+            <button
+              class="flex-1 flex items-center gap-3 text-left focus:outline-none"
+              on:click={() => openExisting(t.id)}
+            >
+              <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
+                <i class="bx bx-user text-lg"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
+                <div class="text-xs text-white/50 truncate">{t.lastMessage || 'No messages yet'}</div>
+              </div>
+              {#if (unreadMap[t.id] ?? 0) > 0}
+                <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-indigo-600">
+                  {unreadMap[t.id]}
+                </span>
+              {/if}
+            </button>
+            <button
+              class="p-2 rounded-md hover:bg-white/10 text-white/70 hover:text-white transition"
+              aria-label="Delete conversation"
+              on:click|stopPropagation={() => deleteThread(t.id)}
+            >
+              <i class="bx bx-trash"></i>
+            </button>
+          </div>
         </li>
       {/each}
       {#if threads.length === 0}
