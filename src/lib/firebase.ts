@@ -152,9 +152,10 @@ export const signOutNow = signOutUser;
 /* App-level auth listener (call once from root)                      */
 /* ------------------------------------------------------------------ */
 export function startAuthListener() {
-  // make sure initialized so onAuthStateChanged is available
+  let unsubscribe: (() => void) | null = null;
+
   ensureFirebaseReady().then(() => {
-    onAuthStateChanged(auth!, async (u) => {
+    unsubscribe = onAuthStateChanged(auth!, async (u) => {
       userStore.set(u);
       if (u) {
         await ensureUserDoc(u.uid, {
@@ -165,6 +166,11 @@ export function startAuthListener() {
       }
     });
   });
+
+  return () => {
+    unsubscribe?.();
+    unsubscribe = null;
+  };
 }
 
 /* ------------------------------------------------------------------ */

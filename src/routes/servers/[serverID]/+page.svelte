@@ -343,7 +343,9 @@ Layout:
       </div>
     </div>
 
-    <div class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">`r`n      {#if serverId}`r`n        <MembersPane {serverId} />
+    <div class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">
+      {#if serverId}
+        <MembersPane {serverId} />
       {:else}
         <div class="p-4 text-white/70">No server selected.</div>
       {/if}
