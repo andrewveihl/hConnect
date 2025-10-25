@@ -1,0 +1,29 @@
+// Paste this block inside your existing
+// match /servers/{serverId}/channels/{channelId} rule set.
+// It enables the voice/video call presence documents used by VideoChat.svelte.
+match /calls/{callId} {
+  allow read: if canViewChannel(serverId);
+  allow create: if canSendInChannel(serverId) || isServerAdmin(serverId);
+  allow update: if canSendInChannel(serverId) || isServerAdmin(serverId);
+  allow delete: if isServerAdmin(serverId);
+
+  match /offerCandidates/{candidateId} {
+    allow read: if canViewChannel(serverId);
+    allow create, delete: if canSendInChannel(serverId) || isServerAdmin(serverId);
+  }
+
+  match /answerCandidates/{candidateId} {
+    allow read: if canViewChannel(serverId);
+    allow create, delete: if canSendInChannel(serverId) || isServerAdmin(serverId);
+  }
+
+  match /participants/{uid} {
+    allow read: if canViewChannel(serverId);
+    allow create: if canViewChannel(serverId)
+      && request.auth != null && request.auth.uid == uid;
+    allow update: if canViewChannel(serverId)
+      && request.auth != null && request.auth.uid == uid;
+    allow delete: if (request.auth != null && request.auth.uid == uid)
+      || isServerAdmin(serverId);
+  }
+}
