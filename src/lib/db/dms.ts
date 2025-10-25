@@ -3,8 +3,9 @@ import { getDb } from '$lib/firebase';
 import {
   addDoc, collection, doc, getDoc, getDocs, onSnapshot,
   orderBy, query, serverTimestamp, setDoc, updateDoc,
-  where, limit, deleteField, type Unsubscribe
+  where, limit, deleteField, runTransaction, type Unsubscribe
 } from 'firebase/firestore';
+import { buildMessageDocument, reactionKeyFromEmoji, type MessageInput } from './messages';
 
 /* ===========================
    Types
@@ -26,10 +27,28 @@ export type DMThread = {
 };
 
 export type DMMessage = {
-  uid: string;            // author uid
-  text: string;
+  uid: string; // author uid
+  type?: 'text' | 'gif' | 'poll' | 'form';
+  text?: string;
+  content?: string;
+  url?: string;
+  poll?: {
+    question: string;
+    options: string[];
+    votesByUser?: Record<string, number>;
+  };
+  form?: {
+    title: string;
+    questions: string[];
+    responses?: Record<string, { answers: string[]; submittedAt?: any }>;
+  };
+  reactions?: Record<string, string[]>;
   displayName?: string | null;
   photoURL?: string | null;
+  author?: {
+    displayName?: string | null;
+    photoURL?: string | null;
+  };
   createdAt?: any;
 };
 
@@ -142,25 +161,50 @@ export async function getOrCreateDMThread(uids: string[]) {
 }
 
 /** Send a DM message into a thread (updates thread meta). */
-export async function sendDMMessage(
-  threadId: string,
-  payload: { uid: string; text: string; displayName?: string; photoURL?: string | null; }
-) {
+const THREAD_SUMMARY_MAX = 120;
+
+function trimValue(value: string | null | undefined) {
+  if (typeof value !== 'string') return '';
+  const next = value.trim();
+  return next.length ? next : '';
+}
+
+function summarizeMessageForThread(payload: MessageInput): string {
+  const type = payload.type ?? 'text';
+
+  if (type === 'gif') {
+    return 'sent a GIF';
+  }
+
+  if (type === 'poll' && 'poll' in payload) {
+    const question = trimValue(payload.poll?.question);
+    return question ? `created a poll: ${question}` : 'created a poll';
+  }
+
+  if (type === 'form' && 'form' in payload) {
+    const title = trimValue(payload.form?.title);
+    return title ? `shared a form: ${title}` : 'shared a form';
+  }
+
+  const text = trimValue('text' in payload ? payload.text : undefined);
+  if (!text) return 'sent a message';
+  return text.length > THREAD_SUMMARY_MAX
+    ? `${text.slice(0, THREAD_SUMMARY_MAX - 1)}…`
+    : text;
+}
+
+export async function sendDMMessage(threadId: string, payload: MessageInput) {
+  const cleanThreadId = trimValue(threadId);
+  if (!cleanThreadId) throw new Error('Missing DM thread id.');
+
   const db = getDb();
-  const messagesCol = collection(db, COL_DMS, threadId, SUB_MESSAGES);
+  const messagesCol = collection(db, COL_DMS, cleanThreadId, SUB_MESSAGES);
+  const docData = buildMessageDocument(payload);
 
-  const msg: DMMessage = {
-    uid: payload.uid,
-    text: payload.text,
-    displayName: payload.displayName ?? null,
-    photoURL: payload.photoURL ?? null,
-    createdAt: serverTimestamp()
-  };
-
-  await addDoc(messagesCol, msg);
+  await addDoc(messagesCol, docData);
 
   // bump thread meta
-  const tRef = doc(db, COL_DMS, threadId);
+  const tRef = doc(db, COL_DMS, cleanThreadId);
   const tSnap = await getDoc(tRef);
   const threadData: any = tSnap.exists() ? tSnap.data() : null;
   const participants: string[] = threadData?.participants ?? [];
@@ -168,15 +212,115 @@ export async function sendDMMessage(
   for (const participant of participants) {
     resets[`deletedFor.${participant}`] = deleteField();
   }
+
   await updateDoc(tRef, {
     updatedAt: serverTimestamp(),
-    lastMessage: payload.text,
+    lastMessage: summarizeMessageForThread(payload),
+    lastType: payload.type ?? 'text',
     lastSender: payload.uid,
     ...resets
   });
 }
 
 /** Live messages for a thread (ascending). */
+export async function toggleDMReaction(
+  threadId: string,
+  messageId: string,
+  uid: string,
+  emoji: string
+) {
+  const cleanThreadId = trimValue(threadId);
+  const cleanMessage = trimValue(messageId);
+  const cleanUid = trimValue(uid);
+  const symbol = trimValue(emoji);
+  if (!cleanThreadId || !cleanMessage || !cleanUid || !symbol) {
+    throw new Error('Missing reaction identifiers.');
+  }
+
+  const key = reactionKeyFromEmoji(symbol);
+  const db = getDb();
+  const messageRef = doc(db, COL_DMS, cleanThreadId, SUB_MESSAGES, cleanMessage);
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(messageRef);
+    if (!snap.exists()) throw new Error('Message not found.');
+    const data: any = snap.data() ?? {};
+    const reactions: Record<string, any> = data.reactions ?? {};
+    const entry = reactions[key] ?? { emoji: symbol, users: {} };
+    const users: Record<string, boolean> = { ...(entry.users ?? {}) };
+    const has = Boolean(users[cleanUid]);
+
+    if (has) {
+      delete users[cleanUid];
+      if (Object.keys(users).length === 0) {
+        tx.update(messageRef, {
+          [`reactions.${key}`]: deleteField()
+        });
+      } else {
+        tx.update(messageRef, {
+          [`reactions.${key}.users`]: users
+        });
+      }
+    } else {
+      users[cleanUid] = true;
+      tx.update(messageRef, {
+        [`reactions.${key}.emoji`]: symbol,
+        [`reactions.${key}.users`]: users
+      });
+    }
+  });
+}
+
+export async function voteOnDMPoll(
+  threadId: string,
+  messageId: string,
+  uid: string,
+  optionIndex: number
+) {
+  const cleanThreadId = trimValue(threadId);
+  const cleanMessage = trimValue(messageId);
+  const cleanUid = trimValue(uid);
+  if (!cleanThreadId || !cleanMessage || !cleanUid) {
+    throw new Error('Missing poll vote identifiers.');
+  }
+  const choice = Number(optionIndex);
+  if (!Number.isFinite(choice) || choice < 0) {
+    throw new Error('Invalid poll option index.');
+  }
+  const db = getDb();
+  await updateDoc(
+    doc(db, COL_DMS, cleanThreadId, SUB_MESSAGES, cleanMessage),
+    {
+      [`poll.votesByUser.${cleanUid}`]: Math.floor(choice)
+    }
+  );
+}
+
+export async function submitDMForm(
+  threadId: string,
+  messageId: string,
+  uid: string,
+  answers: string[]
+) {
+  const cleanThreadId = trimValue(threadId);
+  const cleanMessage = trimValue(messageId);
+  const cleanUid = trimValue(uid);
+  if (!cleanThreadId || !cleanMessage || !cleanUid) {
+    throw new Error('Missing form submission identifiers.');
+  }
+  const sanitized = (answers ?? []).map((ans) => trimValue(ans));
+  const db = getDb();
+  await updateDoc(
+    doc(db, COL_DMS, cleanThreadId, SUB_MESSAGES, cleanMessage),
+    {
+      [`form.responses.${cleanUid}`]: {
+        answers: sanitized,
+        submittedAt: serverTimestamp()
+      }
+    }
+  );
+}
+
 export function streamDMMessages(threadId: string, cb: (msgs: any[]) => void): Unsubscribe {
   const db = getDb();
   const q1 = query(collection(db, COL_DMS, threadId, SUB_MESSAGES), orderBy('createdAt', 'asc'));

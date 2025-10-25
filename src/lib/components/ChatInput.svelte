@@ -62,13 +62,11 @@
     onCreatePoll(poll);
     dispatch('createPoll', poll);
     showPoll = false;
-    onSend(`/poll "${poll.question}" | ${poll.options.join(' | ')}`); // fallback text
   }
   function onFormCreate(form: { title: string; questions: string[] }) {
     onCreateForm(form);
     dispatch('createForm', form);
     showForm = false;
-    onSend(`/form "${form.title}" → ${form.questions.map((q,i)=>`${i+1}. ${q}`).join(' | ')}`); // fallback text
   }
 
   function onEsc(e: KeyboardEvent) {
