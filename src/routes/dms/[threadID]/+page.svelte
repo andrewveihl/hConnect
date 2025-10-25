@@ -9,7 +9,7 @@
   import MessageList from '$lib/components/MessageList.svelte';
   import ChatInput from '$lib/components/ChatInput.svelte';
 
-  import { sendDMMessage, streamDMMessages, markThreadRead } from '$lib/db/dms';
+  import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/db/dms';
 
   export let data: { threadID: string };
   $: threadID = data.threadID;
@@ -37,6 +37,122 @@
   let startX = 0;
   let startY = 0;
 
+  function pickString(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : undefined;
+  }
+
+  function normalizePoll(raw: any) {
+    const question = pickString(raw?.question) ?? '';
+    const options = Array.isArray(raw?.options) ? raw.options : [];
+    const votesByUser =
+      raw?.votesByUser && typeof raw.votesByUser === 'object'
+        ? raw.votesByUser
+        : raw?.votes && typeof raw.votes === 'object'
+          ? raw.votes
+          : {};
+    const voteCounts: Record<number, number> = {};
+    for (const voter in votesByUser) {
+      const idx = votesByUser[voter];
+      if (typeof idx === 'number' && Number.isFinite(idx)) {
+        voteCounts[idx] = (voteCounts[idx] ?? 0) + 1;
+      }
+    }
+    return { question, options, votesByUser, votes: voteCounts };
+  }
+
+  function normalizeForm(raw: any) {
+    const title = pickString(raw?.title) ?? '';
+    const questions = Array.isArray(raw?.questions) ? raw.questions : [];
+    const responses =
+      raw?.responses && typeof raw.responses === 'object' ? raw.responses : {};
+    return { title, questions, responses };
+  }
+
+  function toChatMessage(id: string, raw: any) {
+    const uid = pickString(raw?.uid) ?? pickString(raw?.authorId) ?? 'unknown';
+    const displayName =
+      pickString(raw?.displayName) ?? pickString(raw?.author?.displayName);
+    const photoURL =
+      pickString(raw?.photoURL) ?? pickString(raw?.author?.photoURL);
+    const createdAt = raw?.createdAt ?? null;
+    const inferredType =
+      raw?.type ??
+      (raw?.file
+        ? 'file'
+        : raw?.poll
+          ? 'poll'
+          : raw?.form
+            ? 'form'
+            : raw?.url
+              ? 'gif'
+              : 'text');
+
+    const message: any = {
+      id,
+      uid,
+      type: inferredType,
+      createdAt,
+      displayName: displayName ?? undefined,
+      photoURL: photoURL ?? undefined,
+      reactions: raw?.reactions ?? {}
+    };
+
+    if (raw?.text !== undefined || raw?.content !== undefined) {
+      message.text = raw?.text ?? raw?.content ?? '';
+    }
+
+    if (raw?.url) {
+      message.url = raw.url;
+    }
+
+    if (raw?.file) {
+      message.file = raw.file;
+    }
+
+    if (inferredType === 'poll') {
+      message.poll = normalizePoll(raw?.poll ?? {});
+    }
+
+    if (inferredType === 'form') {
+      message.form = normalizeForm(raw?.form ?? {});
+    }
+
+    return message;
+  }
+
+  function deriveMeDisplayName() {
+    return (
+      pickString(me?.displayName) ??
+      pickString(me?.email) ??
+      'You'
+    );
+  }
+
+  function deriveMePhotoURL() {
+    return pickString(me?.photoURL) ?? null;
+  }
+
+  function normalizeUserRecord(uid: string, data: any = {}) {
+    const displayName =
+      pickString(data?.displayName) ??
+      pickString(data?.name) ??
+      pickString(data?.email) ??
+      'Member';
+    const name =
+      pickString(data?.name) ??
+      displayName;
+    const photoURL = pickString(data?.photoURL) ?? null;
+    return {
+      ...data,
+      uid,
+      displayName,
+      name,
+      photoURL
+    };
+  }
+
   async function loadThreadMeta() {
     if (!threadID || typeof window === 'undefined') return;
     metaLoading = true;
@@ -50,9 +166,9 @@
       if (otherUid) {
         const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
         if (profileDoc.exists()) {
-          otherProfile = { uid: profileDoc.id, ...profileDoc.data() };
+          otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
         } else {
-          otherProfile = { uid: otherUid };
+          otherProfile = normalizeUserRecord(otherUid, {});
         }
       } else {
         otherProfile = null;
@@ -72,15 +188,34 @@
   $: {
     const next: Record<string, any> = {};
     if (me?.uid) {
-      next[me.uid] = {
-        uid: me.uid,
-        displayName: me.displayName ?? me.email ?? 'You',
-        name: me.displayName ?? me.email ?? 'You',
-        photoURL: me.photoURL ?? null
-      };
+      next[me.uid] = normalizeUserRecord(me.uid, {
+        displayName: deriveMeDisplayName(),
+        name: deriveMeDisplayName(),
+        photoURL: deriveMePhotoURL(),
+        email: pickString(me?.email) ?? undefined
+      });
     }
     if (otherProfile?.uid) {
-      next[otherProfile.uid] = otherProfile;
+      next[otherProfile.uid] = normalizeUserRecord(otherProfile.uid, otherProfile);
+    }
+    for (const m of messages) {
+      if (!m?.uid) continue;
+      const existing = next[m.uid] ?? { uid: m.uid };
+      const displayName =
+        pickString(existing.displayName) ??
+        pickString(m.displayName);
+      const name =
+        pickString(existing.name) ??
+        pickString(m.displayName);
+      const photoURL =
+        pickString(existing.photoURL) ??
+        pickString(m.photoURL);
+      next[m.uid] = {
+        ...existing,
+        displayName: displayName ?? existing.displayName ?? 'Member',
+        name: name ?? existing.name ?? displayName ?? 'Member',
+        photoURL: photoURL ?? existing.photoURL ?? null
+      };
     }
     messageUsers = next;
   }
@@ -182,7 +317,7 @@
   $: if (mounted && threadID) {
     unsub?.();
     unsub = streamDMMessages(threadID, async (msgs) => {
-      messages = msgs;
+      messages = msgs.map((row: any) => toChatMessage(row.id, row));
       if (me?.uid) await markThreadRead(threadID, me.uid);
     });
   }
@@ -191,11 +326,97 @@
     const trimmed = text?.trim();
     if (!trimmed || !me?.uid) return;
     await sendDMMessage(threadID, {
-      uid: me.uid,
+      type: 'text',
       text: trimmed,
-      displayName: me.displayName ?? null,
-      photoURL: me.photoURL ?? null
+      uid: me.uid,
+      displayName: deriveMeDisplayName(),
+      photoURL: deriveMePhotoURL()
     });
+  }
+
+  async function handleSendGif(url: string) {
+    const trimmed = pickString(url);
+    if (!trimmed || !me?.uid) return;
+    try {
+      await sendDMMessage(threadID, {
+        type: 'gif',
+        url: trimmed,
+        uid: me.uid,
+        displayName: deriveMeDisplayName(),
+        photoURL: deriveMePhotoURL()
+      });
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to share GIF: ${err}`);
+    }
+  }
+
+  async function handleCreatePoll(poll: { question: string; options: string[] }) {
+    if (!me?.uid) return;
+    try {
+      await sendDMMessage(threadID, {
+        type: 'poll',
+        poll,
+        uid: me.uid,
+        displayName: deriveMeDisplayName(),
+        photoURL: deriveMePhotoURL()
+      });
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to create poll: ${err}`);
+    }
+  }
+
+  async function handleCreateForm(form: { title: string; questions: string[] }) {
+    if (!me?.uid) return;
+    try {
+      await sendDMMessage(threadID, {
+        type: 'form',
+        form,
+        uid: me.uid,
+        displayName: deriveMeDisplayName(),
+        photoURL: deriveMePhotoURL()
+      });
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to share form: ${err}`);
+    }
+  }
+
+  async function handleVote(event: CustomEvent<{ messageId: string; optionIndex: number }>) {
+    if (!me?.uid) return;
+    const { messageId, optionIndex } = event.detail ?? {};
+    if (!messageId || optionIndex === undefined) return;
+    try {
+      await voteOnDMPoll(threadID, messageId, me.uid, optionIndex);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to record vote: ${err}`);
+    }
+  }
+
+  async function handleFormSubmit(event: CustomEvent<{ messageId: string; answers: string[] }>) {
+    if (!me?.uid) return;
+    const { messageId, answers } = event.detail ?? {};
+    if (!messageId || !answers) return;
+    try {
+      await submitDMForm(threadID, messageId, me.uid, answers);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to submit form: ${err}`);
+    }
+  }
+
+  async function handleReaction(event: CustomEvent<{ messageId: string; emoji: string }>) {
+    if (!me?.uid) return;
+    const { messageId, emoji } = event.detail ?? {};
+    if (!messageId || !emoji) return;
+    try {
+      await toggleDMReaction(threadID, messageId, me.uid, emoji);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to toggle reaction: ${err}`);
+    }
   }
 
   function onSend(e: CustomEvent<any>) {
@@ -203,7 +424,11 @@
     handleSend(val ?? '');
   }
 
-  $: displayName = otherProfile?.displayName || otherProfile?.name || otherUid || 'Direct Message';
+  $: displayName =
+    pickString(otherProfile?.displayName) ??
+    pickString(otherProfile?.name) ??
+    pickString(otherProfile?.email) ??
+    (otherProfile ? 'Member' : 'Direct Message');
 </script>
 
 <div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
@@ -254,13 +479,27 @@
     <main class="flex-1 overflow-hidden bg-[#313338]">
       <div class="h-full flex flex-col">
         <div class="flex-1 overflow-hidden p-3 sm:p-4">
-          <MessageList {messages} users={messageUsers} currentUserId={me?.uid ?? null} />
+          <MessageList
+            {messages}
+            users={messageUsers}
+            currentUserId={me?.uid ?? null}
+            on:vote={handleVote}
+            on:submitForm={handleFormSubmit}
+            on:react={handleReaction}
+          />
         </div>
       </div>
     </main>
 
     <div class="border-t border-black/40 bg-[#2b2d31] p-3">
-      <ChatInput placeholder={`Message ${displayName}`} on:send={onSend} on:submit={onSend} />
+      <ChatInput
+        placeholder={`Message ${displayName}`}
+        on:send={onSend}
+        on:submit={onSend}
+        on:sendGif={(e) => handleSendGif(e.detail)}
+        on:createPoll={(e) => handleCreatePoll(e.detail)}
+        on:createForm={(e) => handleCreateForm(e.detail)}
+      />
     </div>
   </div>
 

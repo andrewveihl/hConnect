@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { afterUpdate, createEventDispatcher } from 'svelte';
+  import { afterUpdate, createEventDispatcher, onMount, tick } from 'svelte';
 
   const dispatch = createEventDispatcher();
 
@@ -30,12 +30,23 @@
 
   function nameFor(m: any) {
     const uid = m.uid ?? 'unknown';
-    return m.displayName || users[uid]?.displayName || users[uid]?.name || uid;
+    return (
+      m.displayName ||
+      users[uid]?.displayName ||
+      users[uid]?.name ||
+      users[uid]?.email ||
+      (uid === currentUserId ? 'You' : 'Member')
+    );
   }
 
   function avatarUrlFor(m: any) {
     const uid = m.uid ?? 'unknown';
-    return users[uid]?.photoURL || users[uid]?.avatarUrl || null;
+    return (
+      m.photoURL ||
+      users[uid]?.photoURL ||
+      users[uid]?.avatarUrl ||
+      null
+    );
   }
 
   function isMine(m: any) {
@@ -69,6 +80,9 @@
       lastLen = messages.length;
       scroller?.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
     }
+    if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
+      reactionMenuFor = null;
+    }
   });
 
   function totalVotes(votes?: Record<number, number>) {
@@ -81,6 +95,218 @@
     if (!total) return 0;
     const n = votes?.[idx] ?? 0;
     return Math.round((n / total) * 100);
+  }
+
+  const QUICK_REACTIONS = ['\u{1F44D}', '\u{1F389}', '\u2764\uFE0F', '\u{1F602}', '\u{1F525}', '\u{1F44F}'];
+  const LONG_PRESS_MS = 450;
+  const LONG_PRESS_MOVE_THRESHOLD = 10;
+
+  let hasHoverSupport = true;
+  let hoveredMessageId: string | null = null;
+  let reactionMenuFor: string | null = null;
+  let reactionMenuAnchor: HTMLElement | null = null;
+  let reactionMenuEl: HTMLDivElement | null = null;
+  let reactionMenuPosition = { top: 0, left: 0 };
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let longPressStart: { x: number; y: number } | null = null;
+  let longPressTarget: HTMLElement | null = null;
+
+  onMount(() => {
+    if (typeof window !== 'undefined') {
+      hasHoverSupport = window.matchMedia('(hover: hover)').matches;
+      const handleResize = () => {
+        if (reactionMenuFor) void positionReactionMenu();
+      };
+      window.addEventListener('resize', handleResize);
+      return () => {
+        window.removeEventListener('resize', handleResize);
+      };
+    }
+    return () => {};
+  });
+
+  function sanitizeEmoji(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
+  function extractReactionUsers(entry: any): string[] {
+    if (!entry) return [];
+    if (Array.isArray(entry)) {
+      return entry
+        .map((user) => (typeof user === 'string' ? user.trim() : ''))
+        .filter((user): user is string => Boolean(user));
+    }
+    if (typeof entry === 'object') {
+      return Object.keys(entry)
+        .map((user) => user.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  function reactionsFor(message: any) {
+    const raw = message?.reactions;
+    if (!raw || typeof raw !== 'object') return [];
+
+    const list: Array<{ key: string; emoji: string; users: string[]; count: number; mine: boolean }> = [];
+
+    for (const key in raw) {
+      const entry = raw[key];
+      const emoji =
+        sanitizeEmoji(entry?.emoji) ??
+        sanitizeEmoji(entry?.symbol) ??
+        sanitizeEmoji(entry?.value) ??
+        sanitizeEmoji(key);
+      if (!emoji) continue;
+      const users = extractReactionUsers(entry?.users ?? entry);
+      if (!users.length) continue;
+      const mine = currentUserId ? users.includes(currentUserId) : false;
+      list.push({ key, emoji, users, count: users.length, mine });
+    }
+
+    list.sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
+    return list;
+  }
+
+  function toggleReaction(messageId: string, emoji: string) {
+    if (!currentUserId) return;
+    dispatch('react', { messageId, emoji });
+    closeReactionMenu();
+  }
+
+  function closeReactionMenu() {
+    reactionMenuFor = null;
+    reactionMenuAnchor = null;
+    clearLongPressTimer();
+  }
+
+  async function openReactionMenu(messageId: string, anchor?: HTMLElement | null) {
+    if (!currentUserId) return;
+    if (reactionMenuFor === messageId) {
+      closeReactionMenu();
+      return;
+    }
+    reactionMenuFor = messageId;
+    reactionMenuAnchor = anchor ?? null;
+    hoveredMessageId = messageId;
+    await positionReactionMenu();
+  }
+
+  async function positionReactionMenu() {
+    if (typeof window === 'undefined' || !reactionMenuFor) return;
+    await tick();
+    const anchor = reactionMenuAnchor ?? null;
+    if (!anchor) return;
+
+    const anchorRect = anchor.getBoundingClientRect();
+    await tick();
+    const menuRect = reactionMenuEl?.getBoundingClientRect();
+    const menuWidth = menuRect?.width ?? 0;
+    const menuHeight = menuRect?.height ?? 0;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    let left = anchorRect.left;
+    let top = anchorRect.bottom + 8;
+
+    if (menuWidth) {
+      if (left + menuWidth > viewportWidth - 8) {
+        left = Math.max(8, viewportWidth - menuWidth - 8);
+      }
+      if (left < 8) left = 8;
+    }
+
+    if (menuHeight) {
+      if (top + menuHeight > viewportHeight - 8) {
+        top = Math.max(8, anchorRect.top - menuHeight - 8);
+      }
+      if (top < 8) top = 8;
+    }
+
+    reactionMenuPosition = { top, left };
+  }
+
+  function chooseReaction(messageId: string, emoji: string) {
+    closeReactionMenu();
+    toggleReaction(messageId, emoji);
+  }
+
+  function promptReaction(messageId: string) {
+    if (typeof window === 'undefined') return;
+    const input = window.prompt('React with an emoji (e.g., ??)');
+    const emoji = sanitizeEmoji(input);
+    if (!emoji) return;
+    chooseReaction(messageId, emoji);
+  }
+
+  function onMessagePointerEnter(messageId: string) {
+    if (!hasHoverSupport) return;
+    hoveredMessageId = messageId;
+  }
+
+  function onMessagePointerLeave(messageId: string) {
+    if (!hasHoverSupport) return;
+    if (reactionMenuFor === messageId) return;
+    hoveredMessageId = null;
+  }
+
+  function onMessageFocusIn(messageId: string) {
+    hoveredMessageId = messageId;
+  }
+
+  function onMessageFocusOut(messageId: string, event: FocusEvent) {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next && next.closest?.(`[data-message-id="${messageId}"]`)) return;
+    if (reactionMenuFor === messageId) return;
+    hoveredMessageId = null;
+  }
+
+  function clearLongPressTimer() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    longPressStart = null;
+    longPressTarget = null;
+  }
+
+  function handlePointerDown(event: PointerEvent, messageId: string) {
+    if (event.pointerType !== 'touch') return;
+    clearLongPressTimer();
+    longPressStart = { x: event.clientX, y: event.clientY };
+    longPressTarget = event.currentTarget as HTMLElement;
+    longPressTimer = window.setTimeout(() => {
+      longPressTimer = null;
+      openReactionMenu(messageId, longPressTarget);
+    }, LONG_PRESS_MS);
+  }
+
+  function handlePointerMove(event: PointerEvent) {
+    if (!longPressStart || event.pointerType !== 'touch') return;
+    const dx = Math.abs(event.clientX - longPressStart.x);
+    const dy = Math.abs(event.clientY - longPressStart.y);
+    if (dx > LONG_PRESS_MOVE_THRESHOLD || dy > LONG_PRESS_MOVE_THRESHOLD) {
+      clearLongPressTimer();
+    }
+  }
+
+  function handlePointerUp() {
+    clearLongPressTimer();
+  }
+
+  function onAddReactionClick(event: PointerEvent | MouseEvent, messageId: string) {
+    event.stopPropagation();
+    clearLongPressTimer();
+    const anchor = (event.currentTarget as HTMLElement) ?? null;
+    void openReactionMenu(messageId, anchor);
+  }
+
+  function handleScroll() {
+    if (reactionMenuFor) {
+      closeReactionMenu();
+    }
   }
 
   let formDrafts: Record<string, string[]> = {};
@@ -119,9 +345,154 @@
     background: currentColor;
     opacity: 0.7;
   }
+
+  .reaction-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.6rem;
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.08);
+    font-size: 0.8rem;
+    color: #fff;
+    transition: background 0.15s ease, border 0.15s ease, transform 0.15s ease;
+  }
+
+  .reaction-chip .count {
+    font-size: 0.7rem;
+    opacity: 0.75;
+  }
+
+  .reaction-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding-right: 2.25rem;
+    min-height: 1.75rem;
+    gap: 0.5rem;
+  }
+
+  .reaction-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .reaction-chip:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .reaction-chip:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .reaction-chip.active {
+    border-color: rgba(88, 101, 242, 0.6);
+    background: rgba(88, 101, 242, 0.25);
+  }
+
+  .reaction-add {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    font-size: 1rem;
+    transition: background 0.15s ease, border 0.15s ease;
+  }
+
+  .reaction-add:hover {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .reaction-add:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .reaction-add-inline {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .reaction-menu {
+    position: fixed;
+    z-index: 60;
+    background: rgba(31, 36, 48, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.6rem;
+    padding: 0.4rem;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.25rem;
+    min-width: 9rem;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+    backdrop-filter: blur(8px);
+  }
+
+  .reaction-menu button {
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    line-height: 1;
+    border-radius: 0.4rem;
+    padding: 0.25rem;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.15s ease;
+  }
+
+  .reaction-menu button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    transform: translateY(-1px);
+  }
+
+  .reaction-menu .custom {
+    grid-column: span 5;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .reaction-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    z-index: 50;
+  }
+
+  .chat-gif {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    height: auto;
+    border-radius: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    object-fit: cover;
+  }
+
+  .chat-gif.mine {
+    margin-left: auto;
+  }
+
+  @media (max-width: 640px) {
+    .chat-gif {
+      max-width: min(100%, 280px);
+    }
+  }
 </style>
 
-<div bind:this={scroller} class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3">
+<div bind:this={scroller} class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3" on:scroll={handleScroll}>
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">
       <div class="text-center text-white/60 space-y-1">
@@ -134,7 +505,26 @@
     {#each messages as m, i (m.id)}
       {@const mine = isMine(m)}
       {@const continued = i > 0 && sameBlock(messages[i - 1], m)}
-      <div class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}>
+      {@const reactions = reactionsFor(m)}
+      {@const showAdd = Boolean(
+        currentUserId &&
+        (
+          (hasHoverSupport && hoveredMessageId === m.id) ||
+          reactionMenuFor === m.id
+        )
+      )}
+      <div
+        class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
+        data-message-id={m.id}
+        on:pointerenter={() => onMessagePointerEnter(m.id)}
+        on:pointerleave={() => { onMessagePointerLeave(m.id); handlePointerUp(); }}
+        on:focusin={() => onMessageFocusIn(m.id)}
+        on:focusout={(event) => onMessageFocusOut(m.id, event)}
+        on:pointerdown={(event) => handlePointerDown(event, m.id)}
+        on:pointermove={handlePointerMove}
+        on:pointerup={handlePointerUp}
+        on:pointercancel={handlePointerUp}
+      >
         <div class={`flex w-full max-w-3xl items-end gap-3 ${mine ? 'flex-row-reverse text-right' : ''} ${continued ? 'pt-1' : 'pt-2'}`}>
           {#if continued}
             <div class="w-10"></div>
@@ -162,7 +552,12 @@
                   {(m as any).text ?? (m as any).content ?? ''}
                 </div>
               {:else if m.type === 'gif' && (m as any).url}
-                <img class={`max-w-[min(320px,100%)] rounded-lg border border-white/10 ${mine ? 'ml-auto' : ''}`} src={(m as any).url} alt="GIF" />
+                <img
+                  class={`chat-gif ${mine ? 'mine' : ''}`}
+                  src={(m as any).url}
+                  alt="GIF"
+                  loading="lazy"
+                />
               {:else if m.type === 'file' && (m as any).file}
                 <a
                   class={`inline-flex items-center gap-2 underline hover:no-underline text-sm ${mine ? 'justify-end ml-auto' : ''}`}
@@ -210,6 +605,35 @@
                 </div>
               {/if}
             </div>
+            {#if reactions.length || currentUserId}
+              <div class="mt-1 reaction-row">
+                <div class="reaction-list">
+                  {#each reactions as reaction (reaction.key)}
+                    <button
+                      type="button"
+                      class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
+                      on:click={() => toggleReaction(m.id, reaction.emoji)}
+                      disabled={!currentUserId}
+                      title={reaction.users.join(', ')}
+                    >
+                      <span>{reaction.emoji}</span>
+                      <span class="count">{reaction.count}</span>
+                    </button>
+                  {/each}
+                </div>
+                {#if showAdd}
+                  <button
+                    type="button"
+                    class="reaction-add reaction-add-inline"
+                    on:click={(event) => onAddReactionClick(event, m.id)}
+                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
+                    aria-label="Add reaction"
+                  >
+                    +
+                  </button>
+                {/if}
+              </div>
+            {/if}
           </div>
         </div>
       </div>
@@ -217,3 +641,16 @@
   {/if}
 </div>
 
+{#if reactionMenuFor && currentUserId}
+  <div class="reaction-menu-backdrop" on:click={closeReactionMenu}></div>
+  <div
+    class="reaction-menu"
+    bind:this={reactionMenuEl}
+    style={`top: ${reactionMenuPosition.top}px; left: ${reactionMenuPosition.left}px`}
+  >
+    {#each QUICK_REACTIONS as emoji}
+      <button type="button" on:click={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
+    {/each}
+    <button type="button" class="custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
+  </div>
+{/if}

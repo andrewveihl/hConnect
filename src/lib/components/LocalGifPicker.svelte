@@ -2,7 +2,6 @@
   import { createEventDispatcher } from 'svelte';
   const dispatch = createEventDispatcher();
 
-  // A tiny built-in gallery you can expand anytime
   const SAMPLES = [
     'https://media.tenor.com/4ZJfCwQ4gT4AAAAC/yes.gif',
     'https://media.tenor.com/VW3sIP4PqL4AAAAC/party-celebrate.gif',
@@ -11,41 +10,54 @@
     'https://media.tenor.com/k2r8zCwK8l4AAAAC/dance-happy.gif',
     'https://media.tenor.com/Wv0q7cKJ8_UAAAAC/mind-blown-wow.gif',
     'https://media.tenor.com/Gm7T8m0Bz1oAAAAC/nope-shake-head.gif',
-    'https://media.tenor.com/y1b4c0n4n0EAAAAC/loading-wait.gif',
+    'https://media.tenor.com/y1b4c0n4n0EAAAAC/loading-wait.gif'
   ];
 
   let urlPaste = '';
 </script>
 
-<div class="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="GIF picker">
-  <div class="w-full max-w-3xl rounded-2xl border border-white/10 bg-[#111827]/95 backdrop-blur-xl p-4">
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="text-lg font-semibold">Add a GIF</h3>
-      <button class="rounded-md px-2 py-1 hover:bg-white/10" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+<div class="gif-backdrop" role="dialog" aria-modal="true" aria-label="GIF picker">
+  <div class="gif-panel">
+    <div class="gif-header">
+      <h3 class="gif-title">Add a GIF</h3>
+      <button type="button" class="gif-close" on:click={() => dispatch('close')} aria-label="Close picker">
+        ×
+      </button>
     </div>
 
-    <div class="text-sm text-white/70 mb-2">Pick one or paste any GIF URL.</div>
+    <p class="gif-subtitle">Pick one of our favorites or paste any GIF link.</p>
 
-    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 max-h-[50vh] overflow-auto pr-1 mb-4">
-      {#each SAMPLES as src}
-        <button
-          class="group relative rounded-lg overflow-hidden border border-white/10 hover:ring-2 hover:ring-[#5865f2]"
-          on:click={() => dispatch('pick', src)}
-          title="Use this GIF"
-        >
-          <img src={src} alt="GIF" class="block w-full h-full object-cover" />
-          <div class="absolute inset-0 bg-black/0 group-hover:bg-black/20"></div>
-        </button>
-      {/each}
+    <div class="gif-grid-scroll" role="list">
+      <div class="gif-grid">
+        {#each SAMPLES as src}
+          <button
+            type="button"
+            class="gif-item"
+            on:click={() => dispatch('pick', src)}
+            title="Use this GIF"
+          >
+            <img src={src} alt="GIF preview" loading="lazy" />
+          </button>
+        {/each}
+      </div>
     </div>
 
-    <div class="border-t border-white/10 pt-3">
-      <div class="text-sm text-white/70 mb-2">Paste a URL:</div>
-      <div class="flex gap-2">
-        <input class="input flex-1" type="url" placeholder="https://…/your.gif" bind:value={urlPaste} />
+    <div class="gif-footer">
+      <label class="gif-footer-label" for="gif-url">Paste a URL</label>
+      <div class="gif-url-row">
+        <input
+          id="gif-url"
+          class="gif-url-input"
+          type="url"
+          inputmode="url"
+          placeholder="https://media.tenor.com/your.gif"
+          bind:value={urlPaste}
+        />
         <button
-          class="px-3 py-2 rounded-md bg-[#5865f2] hover:bg-[#4752c4]"
+          type="button"
+          class="gif-add-btn"
           on:click={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
+          disabled={!urlPaste.trim()}
         >
           Add GIF
         </button>
@@ -53,3 +65,199 @@
     </div>
   </div>
 </div>
+
+<style>
+  .gif-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(6px);
+    padding: 1rem;
+    padding-top: calc(env(safe-area-inset-top, 1rem) + 0.5rem);
+    padding-bottom: calc(env(safe-area-inset-bottom, 1rem) + 0.75rem);
+    overflow: hidden;
+  }
+
+  @media (min-width: 640px) {
+    .gif-backdrop {
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+    }
+  }
+
+  .gif-panel {
+    width: 100%;
+    max-width: 640px;
+    background: rgba(17, 24, 39, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: clamp(1rem, 2vw, 1.5rem);
+    padding: clamp(1rem, 4vw, 1.5rem);
+    display: flex;
+    flex-direction: column;
+    min-height: min(600px, 100%);
+    max-height: 100%;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.35);
+  }
+
+  .gif-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .gif-title {
+    font-size: clamp(1.15rem, 4vw, 1.35rem);
+    font-weight: 600;
+    color: #fff;
+    margin: 0;
+  }
+
+  .gif-close {
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 1.4rem;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .gif-close:active,
+  .gif-close:focus-visible,
+  .gif-close:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .gif-subtitle {
+    color: rgba(255, 255, 255, 0.68);
+    font-size: 0.95rem;
+    margin: 0 0 1.1rem 0;
+  }
+
+  .gif-grid-scroll {
+    flex: 1;
+    overflow-y: auto;
+    margin: 0 -0.35rem 1.25rem 0;
+    padding-right: 0.35rem;
+  }
+
+  .gif-grid {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+
+  @media (max-width: 480px) {
+    .gif-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  .gif-item {
+    position: relative;
+    border-radius: 0.9rem;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.02);
+    padding: 0;
+  }
+
+  .gif-item img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.2s ease;
+  }
+
+  .gif-item::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(88, 101, 242, 0) 0%, rgba(88, 101, 242, 0.25) 100%);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .gif-item:active img,
+  .gif-item:focus-visible img,
+  .gif-item:hover img {
+    transform: scale(1.03);
+  }
+
+  .gif-item:active::after,
+  .gif-item:focus-visible::after,
+  .gif-item:hover::after {
+    opacity: 1;
+  }
+
+  .gif-footer {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 1rem;
+    margin-top: auto;
+  }
+
+  .gif-footer-label {
+    display: block;
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.55);
+    margin-bottom: 0.6rem;
+  }
+
+  .gif-url-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .gif-url-input {
+    flex: 1 1 200px;
+    min-width: 0;
+    border-radius: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(17, 20, 30, 0.9);
+    padding: 0.65rem 0.85rem;
+    color: #fff;
+    font-size: 0.95rem;
+  }
+
+  .gif-url-input::placeholder {
+    color: rgba(255, 255, 255, 0.35);
+  }
+
+  .gif-add-btn {
+    flex: 0 0 auto;
+    border-radius: 0.75rem;
+    background: #5865f2;
+    color: #fff;
+    font-weight: 600;
+    padding: 0.65rem 1.15rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 110px;
+  }
+
+  .gif-add-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .gif-add-btn:active,
+  .gif-add-btn:focus-visible,
+  .gif-add-btn:hover {
+    background: #4752c4;
+  }
+</style>
