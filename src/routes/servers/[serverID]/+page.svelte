@@ -10,6 +10,9 @@
   import MessageList from '$lib/components/MessageList.svelte';
   import ChatInput from '$lib/components/ChatInput.svelte';
   import NewServerModal from '$lib/components/NewServerModal.svelte';
+  import VideoChat from '$lib/components/VideoChat.svelte';
+  import { voiceSession } from '$lib/stores/voice';
+  import type { VoiceSession } from '$lib/stores/voice';
 
   import { db } from '$lib/db';
   import { collection, doc, onSnapshot, orderBy, query } from 'firebase/firestore';
@@ -32,6 +35,10 @@
   let messages: any[] = [];
   let profiles: Record<string, any> = {};
   let showCreate = false;
+  let voiceState: VoiceSession | null = null;
+  const unsubscribeVoice = voiceSession.subscribe((value) => {
+    voiceState = value;
+  });
 
   // listeners
   let channelsUnsub: (() => void) | null = null;
@@ -72,9 +79,19 @@
 
   function pickChannel(id: string) {
     if (!serverId) return;
-    activeChannel = selectChannelObject(id);
+    const next = selectChannelObject(id);
+    activeChannel = next;
     messages = [];
-    subscribeMessages(serverId, id);
+
+    if (next.type === 'voice') {
+      clearMessagesUnsub();
+      voiceSession.join(serverId, id, next.name ?? 'Voice channel');
+      voiceSession.setVisible(true);
+    } else {
+      subscribeMessages(serverId, id);
+      voiceSession.setVisible(false);
+    }
+
     // close channels panel on mobile
     showChannels = false;
   }
@@ -227,7 +244,7 @@
     profiles = {};
   }
 
-  onDestroy(() => { clearChannelsUnsub(); clearMessagesUnsub(); });
+  onDestroy(() => { clearChannelsUnsub(); clearMessagesUnsub(); unsubscribeVoice(); voiceSession.leave(); });
 
   async function handleSend(text: string) {
     if (!serverId) { alert('Missing server id.'); return; }
@@ -235,6 +252,10 @@
     if (!$user) { alert('Sign in to send messages.'); return; }
     try { await sendChannelMessage(serverId, activeChannel.id, $user.uid, text); }
     catch (err) { console.error(err); alert(`Failed to send message: ${err}`); }
+  }
+
+  $: if (voiceState && serverId && voiceState.serverId !== serverId) {
+    voiceSession.leave();
   }
 
   // mobile: when switching servers, open channels panel
@@ -273,24 +294,52 @@ Layout:
       />
 
       <div class="flex-1 overflow-hidden bg-[#313338]">
-        {#if serverId && activeChannel}
-          <div class="h-full flex flex-col">
+        <div class="h-full" style:display={voiceState?.visible ? 'block' : 'none'}>
+          <VideoChat />
+        </div>
+
+        <div class="h-full flex flex-col" style:display={voiceState?.visible ? 'none' : 'flex'}>
+          {#if serverId && activeChannel}
             <div class="flex-1 overflow-hidden p-3 sm:p-4">
               <MessageList {messages} users={profiles} currentUserId={$user?.uid ?? null} />
             </div>
+            {#if voiceState && !voiceState.visible}
+              <div class="shrink-0 border-y border-black/40 bg-[#26282f] px-3 py-2 text-sm text-white/80 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                <div class="flex-1 truncate">
+                  <span class="font-semibold text-white">Voice connected</span>
+                  <span class="ml-1 text-white/60">#{voiceState.channelName}</span>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    class="rounded-md bg-white/15 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/25"
+                    type="button"
+                    on:click={() => voiceSession.setVisible(true)}
+                  >
+                    Return to voice
+                  </button>
+                  <button
+                    class="rounded-md bg-red-500/80 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+                    type="button"
+                    on:click={() => voiceSession.leave()}
+                  >
+                    Leave
+                  </button>
+                </div>
+              </div>
+            {/if}
             <div class="shrink-0 border-t border-black/40 bg-[#2b2d31] p-3">
               <ChatInput placeholder={`Message #${activeChannel?.name ?? ''}`} onSend={handleSend} />
             </div>
-          </div>
-        {:else}
-          <div class="h-full grid place-items-center text-white/60">
-            {#if !serverId}
-              <div>Pick a server to start chatting.</div>
-            {:else}
-              <div>Pick a channel to start chatting.</div>
-            {/if}
-          </div>
-        {/if}
+          {:else}
+            <div class="h-full grid place-items-center text-white/60">
+              {#if !serverId}
+                <div>Pick a server to start chatting.</div>
+              {:else}
+                <div>Pick a channel to start chatting.</div>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
 
