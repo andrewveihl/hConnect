@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
-  import { doc, getDoc } from 'firebase/firestore';
+  import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 
   import DMsSidebar from '$lib/components/DMsSidebar.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
@@ -19,6 +19,34 @@
 
   let messages: any[] = [];
   let messageUsers: Record<string, any> = {};
+const profileUnsubs: Record<string, Unsubscribe> = {};
+let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
+let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
+
+  function updateMessageUserCache(uid: string, patch: any) {
+    if (!uid) return;
+    const prev = messageUsers[uid] ?? {};
+    const next = { ...prev, ...patch };
+    messageUsers = { ...messageUsers, [uid]: next };
+  }
+
+  function ensureProfileSubscription(database: ReturnType<typeof getDb>, uid: string) {
+    if (!uid || profileUnsubs[uid]) return;
+    profileUnsubs[uid] = onSnapshot(
+      doc(database, 'profiles', uid),
+      (snap) => {
+        const data: any = snap.data() ?? {};
+        const displayName =
+          pickString(data?.name) ?? pickString(data?.displayName) ?? pickString(data?.email);
+        const photoURL = pickString(data?.photoURL) ?? null;
+        updateMessageUserCache(uid, { uid, displayName, name: displayName, photoURL });
+      },
+      () => {
+        profileUnsubs[uid]?.();
+        delete profileUnsubs[uid];
+      }
+    );
+  }
   let unsub: (() => void) | null = null;
   let mounted = false;
 
@@ -181,6 +209,19 @@
     }
   }
 
+$: {
+  if (otherProfile?.uid) {
+    const meta = {
+      uid: otherProfile.uid,
+      displayName: pickString(otherProfile?.displayName) ?? pickString(otherProfile?.name) ?? null,
+      name: pickString(otherProfile?.name) ?? null,
+      email: pickString(otherProfile?.email) ?? null
+    };
+    sidebarRef?.updatePartnerMeta(meta);
+    sidebarRefMobile?.updatePartnerMeta(meta);
+  }
+}
+
   $: if (threadID) {
     loadThreadMeta();
   }
@@ -311,14 +352,28 @@
       mounted = false;
       unsub?.();
       cleanupGestures();
+      for (const uid in profileUnsubs) profileUnsubs[uid]?.();
     };
   });
+
+  // After computing messageUsers map, ensure we subscribe to each author's profile
+  $: if (Object.keys(messageUsers).length > 0) {
+    try {
+      const database = getDb();
+      for (const uid in messageUsers) ensureProfileSubscription(database, uid);
+    } catch {}
+  }
 
   $: if (mounted && threadID) {
     unsub?.();
     unsub = streamDMMessages(threadID, async (msgs) => {
       messages = msgs.map((row: any) => toChatMessage(row.id, row));
-      if (me?.uid) await markThreadRead(threadID, me.uid);
+      if (me?.uid) {
+        const last = messages[messages.length - 1];
+        const at = last?.createdAt ?? null;
+        const lastId = last?.id ?? null;
+        await markThreadRead(threadID, me.uid, { at, lastMessageId: lastId });
+      }
     });
   }
 
@@ -434,6 +489,7 @@
 <div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
   <div class="hidden md:flex md:w-80 flex-col border-r border-black/40 bg-[#1e1f24]">
     <DMsSidebar
+      bind:this={sidebarRef}
       activeThreadId={threadID}
       on:select={() => (showThreads = false)}
       on:delete={(e) => {
@@ -546,6 +602,7 @@
 <div
   class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
+  style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
   <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">
@@ -556,6 +613,7 @@
   </div>
   <div class="flex-1 overflow-y-auto">
     <DMsSidebar
+      bind:this={sidebarRefMobile}
       activeThreadId={threadID}
       on:select={() => (showThreads = false)}
       on:delete={(e) => {
@@ -570,6 +628,7 @@
 <div
   class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showInfo ? 'translateX(0)' : 'translateX(100%)'}
+  style:pointer-events={showInfo ? 'auto' : 'none'}
   aria-label="Profile"
 >
   <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">

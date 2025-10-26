@@ -6,6 +6,7 @@
   import { startPresenceService } from '$lib/presence';
   import { browser } from '$app/environment';
   import { afterNavigate } from '$app/navigation';
+  import { registerFirebaseMessagingSW } from '$lib/notify/push';
 
   // App name used everywhere (tab title, social tags)
   const APP_TITLE = 'hConnect';
@@ -23,6 +24,8 @@
       (window as any).__DEBUG = true;
       // Set once on first client paint
       document.title = APP_TITLE;
+      // Best-effort register SW for push/notifications (no permission prompt here)
+      registerFirebaseMessagingSW().catch(() => {});
     }
 
     return () => {

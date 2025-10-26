@@ -6,8 +6,10 @@
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
   import ChannelCreateModal from '$lib/components/ChannelCreateModal.svelte';
+  import VoiceMiniPanel from '$lib/components/VoiceMiniPanel.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
+  import { subscribeUnreadForServer, type UnreadMap } from '$lib/unread';
 
   import {
     collection,
@@ -64,12 +66,29 @@
   let unsubChannels: Unsubscribe | null = null;
   let unsubServerMeta: Unsubscribe | null = null;
   let unsubMyMember: Unsubscribe | null = null;
+  let unsubUnread: Unsubscribe | null = null;
 
   let ownerId: string | null = null;
   let myRole: 'owner' | 'admin' | 'member' | null = null;
   let myPerms: Record<string, any> | null = null;
   let myRoleIds: string[] = [];
   let lastServerId: string | null = null;
+
+  // Basic notification prefs (subset of full settings)
+  let notifDesktopEnabled = false;
+  let notifAllMessages = false;
+  function subscribeNotifPrefs() {
+    if (!$user?.uid) return;
+    const db = getDb();
+    const ref = doc(db, 'profiles', $user.uid);
+    return onSnapshot(ref, (snap) => {
+      const s: any = snap.data()?.settings ?? {};
+      const p: any = s.notificationPrefs ?? {};
+      notifDesktopEnabled = !!p.desktopEnabled;
+      notifAllMessages = !!p.allMessages;
+    });
+  }
+  const stopNotif = subscribeNotifPrefs();
 
   function deriveOwnerId(data: any): string | null {
     return data?.ownerId ?? data?.owner ?? data?.createdBy ?? null;
@@ -236,6 +255,15 @@
     watchServerMeta(server);
     watchMyMember(server);
     watchChannels(server);
+    // Unread per channel
+    unsubUnread?.();
+    if ($user?.uid) {
+      unreadReady = false;
+      unsubUnread = subscribeUnreadForServer($user.uid, server, (map: UnreadMap) => {
+        unreadByChannel = map;
+        if (!unreadReady) { prevUnread = { ...map }; unreadReady = true; }
+      });
+    }
   }
 
   $: if (computedServerId && computedServerId !== lastServerId) {
@@ -260,19 +288,46 @@
     unsubChannels?.();
     unsubServerMeta?.();
     unsubMyMember?.();
+    unsubUnread?.();
     resetVoiceWatchers();
     unsubscribeVoiceSession();
+    stopNotif?.();
   });
 
   function pick(id: string) {
     if (!id) return;
     onPickChannel(id);
     dispatch('pick', id);
+    // Optimistically clear unread badge for picked channel
+    if (unreadByChannel[id] && unreadByChannel[id] > 0) {
+      unreadByChannel = { ...unreadByChannel, [id]: 0 };
+    }
   }
 
   function openServerSettings() {
     if (!computedServerId || !isAdminLike) return;
     goto(`/servers/${computedServerId}/settings`);
+  }
+
+  // Unread state map
+  let unreadByChannel: Record<string, number> = {};
+  let prevUnread: Record<string, number> = {};
+  let unreadReady = false;
+  $: if (browser && unreadReady && document.visibilityState === 'hidden' && notifDesktopEnabled && notifAllMessages) {
+    try {
+      for (const id in unreadByChannel) {
+        const curr = unreadByChannel[id] ?? 0;
+        const prev = prevUnread[id] ?? 0;
+        if (curr > prev && id !== activeChannelId) {
+          const chan = channels.find((c) => c.id === id);
+          const title = chan?.name ? `#${chan.name}` : 'New message';
+          new Notification(title, { body: `New messages in ${serverName}`, tag: `ch-${id}` });
+        }
+      }
+    } catch {}
+    prevUnread = { ...unreadByChannel };
+  } else {
+    prevUnread = { ...unreadByChannel };
   }
 
   async function deleteChannel(id: string, name: string) {
@@ -349,6 +404,12 @@
   </div>
 
   <div class="p-3 space-y-4 overflow-y-auto">
+    {#if activeVoice && computedServerId === activeVoice.serverId}
+      <!-- Desktop-only mini voice panel -->
+      <div class="hidden md:block">
+        <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
+      </div>
+    {/if}
     <div>
       <div class="text-[10px] uppercase tracking-wider text-white/50 px-2 mb-1">Text channels</div>
       <div class="space-y-1">
@@ -364,9 +425,16 @@
             >
               <i class="bx bx-hash" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
-              {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
-                <i class="bx bx-lock text-xs ml-auto opacity-70" aria-hidden="true"></i>
-              {/if}
+              <span class="ml-auto flex items-center gap-1">
+                {#if (unreadByChannel[c.id] ?? 0) > 0}
+                  <span class="bg-red-600 text-white text-[10px] font-semibold rounded-full min-w-[16px] h-4 px-1 grid place-items-center">
+                    {unreadByChannel[c.id] > 99 ? '99+' : unreadByChannel[c.id]}
+                  </span>
+                {/if}
+                {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
+                  <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
+                {/if}
+              </span>
             </button>
 
             {#if canManageChannels}

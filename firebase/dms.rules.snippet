@@ -1,0 +1,59 @@
+// Replace the existing docHasParticipant helper with this version.
+function docHasParticipant(docData, uid) {
+  return (docData is map)
+    && (
+      (docData.participants is list && uid in docData.participants) ||
+      (docData.participantUids is list && uid in docData.participantUids) ||
+      (
+        docData.participantsMap is map &&
+        docData.participantsMap[uid] != null &&
+        docData.participantsMap[uid] != false
+      )
+    );
+}
+
+// Add this helper near your other DM helpers.
+function keyContainsUid(key, uid) {
+  return (key is string) && key.matches('(^|_)' + uid + '(_|$)');
+}
+
+function dmHasParticipantOrKey_doc(threadId, uid) {
+  return isSignedIn()
+    && (
+      docHasParticipant(get(/databases/$(database)/documents/dms/$(threadId)).data, uid)
+      || keyContainsUid(
+        get(/databases/$(database)/documents/dms/$(threadId)).data.key,
+        uid
+      )
+    );
+}
+
+// Replace your match /dms/{threadId} block with this updated version.
+match /dms/{threadId} {
+  // Allow read/update when participant (legacy tolerant) OR we are probing an empty deterministic doc id
+  allow read, update: if dmHasParticipantOrKey_resource(request.auth.uid)
+    || (resource.data == null && keyContainsUid(threadId, request.auth.uid));
+
+  // Create: accept participants[], participantUids[], or participantsMap (>=2 and includes creator)
+  allow create: if newDMIsValidCreate(request.resource.data);
+
+  allow delete: if false;
+
+  // Messages subcollection: now tolerant of legacy participant shapes
+  match /messages/{messageId} {
+    allow read: if dmHasParticipantOrKey_doc(threadId, request.auth.uid);
+
+    allow create: if isSignedIn()
+      && request.resource.data.uid == request.auth.uid
+      && dmHasParticipantOrKey_doc(threadId, request.auth.uid);
+
+    allow update, delete: if false;
+  }
+
+  // Per-user read receipts (same participant checks)
+  match /reads/{uid} {
+    allow read, write: if isSignedIn()
+      && uid == request.auth.uid
+      && dmHasParticipantOrKey_doc(threadId, request.auth.uid);
+  }
+}

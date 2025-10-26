@@ -15,8 +15,9 @@
   import type { VoiceSession } from '$lib/stores/voice';
 
   import { db } from '$lib/db';
-  import { collection, doc, onSnapshot, orderBy, query, type Unsubscribe } from 'firebase/firestore';
+  import { collection, doc, onSnapshot, orderBy, query, getDocs, endBefore, limitToLast, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/db/messages';
+  import { markChannelRead } from '$lib/unread';
 
   // Comes from +page.ts
   export let data: { serverId: string | null };
@@ -241,11 +242,38 @@
     return found ?? { id, name: id, type: 'text' };
   }
 
+  const PAGE_SIZE = 50;
+  let earliestLoaded: any = null; // Firestore Timestamp or Date
+
+  async function loadOlderMessages(currServerId: string, channelId: string) {
+    try {
+      const database = db();
+      if (!earliestLoaded) return; // nothing to load yet
+      const q = query(
+        collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
+        orderBy('createdAt', 'asc'),
+        endBefore(earliestLoaded),
+        limitToLast(PAGE_SIZE)
+      );
+      const snap = await getDocs(q);
+      const older: any[] = [];
+      snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
+      messages = [...older, ...messages];
+      if (older.length) {
+        earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
+      }
+    } catch (err) {
+      console.error('Failed to load older messages', err);
+    }
+  }
+
   function subscribeMessages(currServerId: string, channelId: string) {
     const database = db();
     const q = query(
       collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
-      orderBy('createdAt', 'asc')
+      orderBy('createdAt', 'asc'),
+      // Show last page live; older are fetched on-demand
+      limitToLast(PAGE_SIZE)
     );
     clearMessagesUnsub();
     cleanupProfileSubscriptions();
@@ -277,7 +305,20 @@
       }
 
       messages = nextMessages;
+      if (messages.length) {
+        earliestLoaded = messages[0]?.createdAt ?? null;
+      }
       seen.forEach((uid) => ensureProfileSubscription(database, uid));
+
+      // Mark as read when viewing this channel
+      try {
+        if ($user?.uid && activeChannel?.id === channelId) {
+          const last = nextMessages[nextMessages.length - 1];
+          const at = last?.createdAt ?? null;
+          const lastId = last?.id ?? null;
+          void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
+        }
+      } catch {}
     });
   }
 
@@ -296,6 +337,13 @@
     } else {
       subscribeMessages(serverId, id);
       voiceSession.setVisible(false);
+      // Optimistically mark as read on navigation to the channel
+      if ($user?.uid) {
+        const last = messages[messages.length - 1];
+        const at = last?.createdAt ?? null;
+        const lastId = last?.id ?? null;
+        void markChannelRead($user.uid, serverId, id, { at, lastMessageId: lastId });
+      }
     }
 
     // close channels panel on mobile
@@ -457,6 +505,20 @@
     unsubscribeVoice();
     voiceSession.leave();
   });
+
+  // Persist read state when tab is hidden
+  if (typeof window !== 'undefined') {
+    const onVis = () => {
+      if (document.visibilityState === 'hidden' && serverId && activeChannel?.id && $user?.uid) {
+        const last = messages[messages.length - 1];
+        const at = last?.createdAt ?? null;
+        const lastId = last?.id ?? null;
+        void markChannelRead($user.uid, serverId, activeChannel.id, { at, lastMessageId: lastId });
+      }
+    };
+    window.addEventListener('visibilitychange', onVis);
+    onDestroy(() => window.removeEventListener('visibilitychange', onVis));
+  }
 
   async function handleSend(text: string) {
     const trimmed = text?.trim();
@@ -624,6 +686,7 @@ Layout:
                 on:vote={handleVote}
                 on:submitForm={handleFormSubmit}
                 on:react={handleReaction}
+                on:loadMore={() => serverId && activeChannel?.id && loadOlderMessages(serverId, activeChannel.id)}
               />
             </div>
             {#if voiceState && !voiceState.visible}

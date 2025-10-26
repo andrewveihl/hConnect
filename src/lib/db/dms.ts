@@ -59,12 +59,81 @@ const COL_DMS = 'dms';
 const COL_PROFILES = 'profiles';
 const SUB_MESSAGES = 'messages';
 const SUB_READS = 'reads';
+const SUB_DM_RAIL = 'dms'; // profiles/{uid}/dms mapping (like servers rail)
 
 /* ===========================
    Utilities
 =========================== */
 export function participantsKey(uids: string[]) {
   return [...uids].sort().join('_');
+}
+
+function toSortedUnique(uids: any[]): string[] {
+  return Array.from(
+    new Set(
+      uids
+        .filter((uid): uid is string => typeof uid === 'string')
+        .map((uid) => uid.trim())
+        .filter((uid) => uid.length > 0)
+    )
+  ).sort();
+}
+
+function resolveParticipantsFromDoc(data: any, fallback: string[]): string[] {
+  const fromParticipants = Array.isArray(data?.participants) ? toSortedUnique(data.participants) : [];
+  if (fromParticipants.length >= 2) return fromParticipants;
+
+  const fromParticipantUids = Array.isArray(data?.participantUids) ? toSortedUnique(data.participantUids) : [];
+  if (fromParticipantUids.length >= 2) return fromParticipantUids;
+
+  const mapSource =
+    data?.participantsMap && typeof data.participantsMap === 'object'
+      ? toSortedUnique(
+          Object.keys(data.participantsMap).filter((uid) => data.participantsMap[uid] === true)
+        )
+      : [];
+  if (mapSource.length >= 2) return mapSource;
+
+  const fromKey =
+    typeof data?.key === 'string' && data.key.length > 0 ? toSortedUnique(data.key.split('_')) : [];
+  if (fromKey.length >= 2) return fromKey;
+
+  return toSortedUnique(fallback);
+}
+
+function participantsMatch(existing: any, target: string[]): boolean {
+  if (!Array.isArray(existing)) return false;
+  const normalized = toSortedUnique(existing);
+  if (normalized.length !== target.length) return false;
+  for (let i = 0; i < target.length; i += 1) {
+    if (normalized[i] !== target[i]) return false;
+  }
+  return true;
+}
+
+async function findThreadIdViaRail(actorUid: string | undefined, targetUid: string | undefined | null) {
+  const me = (actorUid ?? '').trim();
+  const other = (targetUid ?? '').trim();
+  if (!me || !other) return null;
+  const db = getDb();
+  try {
+    const snap = await getDocs(
+      query(
+        collection(db, COL_PROFILES, me, SUB_DM_RAIL),
+        where('otherUid', '==', other),
+        limit(1)
+      )
+    );
+    if (!snap.empty) {
+      const d = snap.docs[0];
+      const data = d.data() as any;
+      const participants = resolveParticipantsFromDoc(data, [me, other]);
+      return { threadId: d.id, participants };
+    }
+  } catch (err) {
+    console.warn('[dms] findThreadIdViaRail failed', { actorUid: me, targetUid: other }, err);
+  }
+  return null;
 }
 
 export async function getProfile(uid: string): Promise<MinimalUser | null> {
@@ -91,30 +160,37 @@ export function streamProfiles(
   // No orderBy — avoids index/field issues if some docs lack "name"
   const ref = collection(db, 'profiles');
 
-  return onSnapshot(ref, (snap) => {
-    let list: MinimalUser[] = snap.docs.map((d) => {
-      const data: any = d.data();
-      return {
-        uid: d.id,
-        // show Name: field if present, else displayName, else fallback
-        displayName: data.name ?? data.displayName ?? undefined,
-        photoURL: data.photoURL ?? null,
-        email: data.email ?? null
-      };
-    });
+  return onSnapshot(
+    ref,
+    (snap) => {
+      let list: MinimalUser[] = snap.docs.map((d) => {
+        const data: any = d.data();
+        return {
+          uid: d.id,
+          // show Name: field if present, else displayName, else fallback
+          displayName: data.name ?? data.displayName ?? undefined,
+          photoURL: data.photoURL ?? null,
+          email: data.email ?? null
+        };
+      });
 
-    // Client-side sort by name/displayName, then email, then uid
-    list.sort((a, b) => {
-      const A = (a.displayName ?? a.email ?? a.uid).toLowerCase();
-      const B = (b.displayName ?? b.email ?? b.uid).toLowerCase();
-      return A.localeCompare(B);
-    });
+      // Client-side sort by name/displayName, then email, then uid
+      list.sort((a, b) => {
+        const A = (a.displayName ?? a.email ?? a.uid).toLowerCase();
+        const B = (b.displayName ?? b.email ?? b.uid).toLowerCase();
+        return A.localeCompare(B);
+      });
 
-    // Apply limit if requested
-    if (list.length > lim) list = list.slice(0, lim);
+      // Apply limit if requested
+      if (list.length > lim) list = list.slice(0, lim);
 
-    cb(list);
-  });
+      cb(list);
+    },
+    (err) => {
+      console.warn('profiles stream failed', err);
+      cb([]);
+    }
+  );
 }
 
 
@@ -133,31 +209,98 @@ export async function getOrCreateDMWith(aUid: string, bUid: string) {
 }
 
 /** Find a DM thread for exactly these participants, or create it. */
-export async function getOrCreateDMThread(uids: string[]) {
-  if (uids.length < 2) throw new Error('DM needs at least 2 participants');
+export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
+  const normalizedUids = toSortedUnique(uids);
+  if (normalizedUids.length < 2) throw new Error('DM needs at least 2 participants');
   const db = getDb();
-  const key = participantsKey(uids);
+  const key = participantsKey(normalizedUids);
+  const otherUid = normalizedUids.find((uid) => uid !== actorUid) ?? null;
 
-  const dmsCol = collection(db, COL_DMS);
-  const q1 = query(dmsCol, where('key', '==', key), limit(1));
-  const snap = await getDocs(q1);
+  const toThread = async (docSnap: any, fallbackParticipants: string[]) => {
+    const raw = docSnap.data() as DMThread & Record<string, any>;
+    const participants = resolveParticipantsFromDoc(raw, fallbackParticipants);
+    if (!participantsMatch(raw.participants, participants)) {
+      try {
+        await updateDoc(docSnap.ref, { participants });
+      } catch {}
+    }
+    const thread = { id: docSnap.id, ...raw, participants } as any;
+    if (actorUid) {
+      try {
+        await upsertDMRailForUid(thread.id, actorUid, participants, thread.lastMessage ?? null);
+      } catch {}
+    }
+    return thread;
+  };
 
-  if (!snap.empty) {
-    const d = snap.docs[0];
-    return { id: d.id, ...(d.data() as DMThread) };
+  // 1) Try the user's DM rail (fast path, covers legacy docs with custom ids)
+  if (actorUid && otherUid) {
+    const viaRail = await findThreadIdViaRail(actorUid, otherUid);
+    if (viaRail?.threadId) {
+      try {
+        const snap = await getDoc(doc(db, COL_DMS, viaRail.threadId));
+        if (snap.exists()) {
+          return await toThread(snap, viaRail.participants ?? normalizedUids);
+        }
+      } catch (err) {
+        console.warn('[dms] getOrCreateDMThread: rail lookup failed', { key, actorUid, otherUid }, err);
+      }
+    }
   }
 
-  const docRef = await addDoc(dmsCol, {
-    key,
-    participants: [...uids].sort(),
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    lastMessage: null,
-    lastSender: null
-  } as DMThread);
+  // 2) Create deterministically at doc id == key
+  const docRef = doc(db, COL_DMS, key);
+  let existingSnap: any | null = null;
+  try {
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      existingSnap = snap;
+    }
+  } catch (err) {
+    const code = (err as any)?.code;
+    if (code && code !== 'permission-denied') {
+      console.warn('[dms] getOrCreateDMThread: initial getDoc failed', { key, normalizedUids, actorUid }, err);
+    }
+  }
 
-  const created = await getDoc(docRef);
-  return { id: docRef.id, ...(created.data() as DMThread) };
+  if (!existingSnap) {
+    const payload: DMThread = {
+      key,
+      participants: normalizedUids,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      lastMessage: null,
+      lastSender: null
+    };
+    try {
+      await setDoc(docRef, payload, { merge: false });
+    } catch (err) {
+      const code = (err as any)?.code;
+      if (code && code !== 'permission-denied') {
+        console.error('[dms] getOrCreateDMThread: setDoc failed', { key, normalizedUids, actorUid }, err);
+        throw err;
+      }
+    }
+    if (!existingSnap) {
+      try {
+        const snap = await getDoc(docRef);
+        if (snap.exists()) existingSnap = snap;
+      } catch (err) {
+        console.error('[dms] getOrCreateDMThread: fetch after create failed', { key, normalizedUids, actorUid }, err);
+        throw err;
+      }
+    }
+  }
+
+  if (existingSnap?.exists()) {
+    return await toThread(existingSnap, normalizedUids);
+  }
+
+  if (!existingSnap?.exists()) {
+    throw new Error('Failed to create DM thread');
+  }
+
+  return await toThread(existingSnap, normalizedUids);
 }
 
 /** Send a DM message into a thread (updates thread meta). */
@@ -203,6 +346,8 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 
   await addDoc(messagesCol, docData);
 
+  const summary = summarizeMessageForThread(payload);
+
   // bump thread meta
   const tRef = doc(db, COL_DMS, cleanThreadId);
   const tSnap = await getDoc(tRef);
@@ -215,11 +360,16 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 
   await updateDoc(tRef, {
     updatedAt: serverTimestamp(),
-    lastMessage: summarizeMessageForThread(payload),
+    lastMessage: summary,
     lastType: payload.type ?? 'text',
     lastSender: payload.uid,
     ...resets
   });
+
+  // Update rail mapping for all participants so new DMs appear (and refresh metadata)
+  try {
+    await upsertDMRailForParticipants(cleanThreadId, participants, summary);
+  } catch {}
 }
 
 /** Live messages for a thread (ascending). */
@@ -347,15 +497,22 @@ export async function deleteThreadForUser(threadId: string, uid: string) {
   const db = getDb();
   const ref = doc(db, COL_DMS, threadId);
   await updateDoc(ref, { [`deletedFor.${uid}`]: serverTimestamp() });
+  // Remove from user rail list
+  try {
+    await setDoc(doc(db, COL_PROFILES, uid, SUB_DM_RAIL, threadId), { hidden: true, updatedAt: serverTimestamp() }, { merge: true });
+  } catch {}
 }
 
 /* ===========================
    Unread / notifications
 =========================== */
-export async function markThreadRead(threadId: string, uid: string) {
+export async function markThreadRead(threadId: string, uid: string, opts?: { at?: any; lastMessageId?: string | null }) {
   const db = getDb();
   const rRef = doc(db, COL_DMS, threadId, SUB_READS, uid);
-  await setDoc(rRef, { lastReadAt: serverTimestamp() }, { merge: true });
+  await setDoc(rRef, {
+    lastReadAt: opts?.at ?? serverTimestamp(),
+    lastReadMessageId: opts?.lastMessageId ?? null
+  }, { merge: true });
 }
 
 /**
@@ -391,6 +548,103 @@ export function streamUnreadCount(threadId: string, uid: string, cb: (n: number)
     stopRead?.();
     stopMsgs?.();
   };
+}
+
+/* ===========================
+   DM rail mapping (per-user list)
+=========================== */
+
+async function upsertDMRailForParticipants(threadId: string, participants: string[], lastMessage: string | null) {
+  await Promise.all(
+    participants.map((uid) => upsertDMRailForUid(threadId, uid, participants, lastMessage))
+  );
+}
+
+// Safer variant: only write mapping for a single user (avoids cross-user writes blocked by rules)
+async function upsertDMRailForUid(threadId: string, uid: string, participants: string[], lastMessage: string | null) {
+  const db = getDb();
+  const now = serverTimestamp();
+  const others = participants.filter((p) => p !== uid);
+  const otherUid = others.length === 1 ? others[0] : null;
+  const payload: Record<string, any> = {
+    threadId,
+    otherUid,
+    participants,
+    lastMessage: lastMessage ?? null,
+    hidden: false,
+    updatedAt: now
+  };
+  if (otherUid) {
+    try {
+      const profSnap = await getDoc(doc(db, COL_PROFILES, otherUid));
+      if (profSnap.exists()) {
+        const data: any = profSnap.data() ?? {};
+        const name =
+          data.name ?? data.displayName ?? null;
+        const email = data.email ?? null;
+        const photoURL = data.photoURL ?? null;
+        if (name) payload.otherDisplayName = name;
+        if (email) payload.otherEmail = email;
+        if (photoURL !== undefined) payload.otherPhotoURL = photoURL;
+      }
+    } catch {}
+  }
+  await setDoc(
+    doc(db, COL_PROFILES, uid, SUB_DM_RAIL, threadId),
+    payload,
+    { merge: true }
+  );
+}
+
+/**
+ * Subscribe to my DM rail list (profiles/{uid}/dms), ordered by updatedAt desc.
+ */
+export function streamMyDMs(uid: string, cb: (rows: Array<{ id: string; participants: string[]; otherUid: string | null; lastMessage?: string | null; updatedAt?: any; hidden?: boolean }>) => void): Unsubscribe {
+  const db = getDb();
+  const q1 = query(collection(db, COL_PROFILES, uid, SUB_DM_RAIL), orderBy('updatedAt', 'desc'));
+  return onSnapshot(q1, (snap) => {
+    const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    cb(rows.filter((r) => !r.hidden));
+  });
+}
+
+/** Best-effort backfill to ensure existing threads appear in the rail. */
+export async function seedDMRailFromThreads(uid: string, { limitTo = 50 } = {}) {
+  const db = getDb();
+  try {
+    // Avoid composite index by not ordering; sort client-side
+    const q1 = query(
+      collection(db, COL_DMS),
+      where('participants', 'array-contains', uid),
+      limit(limitTo)
+    );
+    const snap = await getDocs(q1);
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      await upsertDMRailForParticipants(d.id, data.participants ?? [], data.lastMessage ?? null);
+    }
+  } catch {
+    // ignore (index may be missing; optional convenience)
+  }
+}
+
+/**
+ * Fallback live stream of my DMs without orderBy to avoid index requirements.
+ * Client-sorts by updatedAt and filters deletedFor.
+ */
+export function streamMyThreadsLoose(uid: string, cb: (threads: any[]) => void): Unsubscribe {
+  const db = getDb();
+  const q1 = query(collection(db, COL_DMS), where('participants', 'array-contains', uid));
+  return onSnapshot(q1, (snap) => {
+    const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    const filtered = rows.filter((row) => !row?.deletedFor?.[uid]);
+    filtered.sort((a, b) => {
+      const A = (a.updatedAt?.toMillis?.() ? a.updatedAt.toMillis() : +new Date(a.updatedAt ?? 0)) || 0;
+      const B = (b.updatedAt?.toMillis?.() ? b.updatedAt.toMillis() : +new Date(b.updatedAt ?? 0)) || 0;
+      return B - A;
+    });
+    cb(filtered);
+  });
 }
 
 /* ===========================
