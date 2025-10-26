@@ -1,0 +1,308 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------------- Core helpers ---------------- */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(serverId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid));
+    }
+
+    // Owner: accept ownerId or (legacy) owner
+    function isServerOwner(serverId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId))
+        && (
+          get(/databases/$(database)/documents/servers/$(serverId)).data.ownerId == request.auth.uid ||
+          get(/databases/$(database)/documents/servers/$(serverId)).data.owner == request.auth.uid
+        );
+    }
+
+    function hasPerm(serverId, perm) {
+      return isMember(serverId)
+        && get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.perms[perm] == true;
+    }
+
+    function isServerAdmin(serverId) {
+      return isServerOwner(serverId) || hasPerm(serverId, "manageServer");
+    }
+
+    function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels"); }
+    function canSendInChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "sendMessages"); }
+    function canConnectVoice(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "connectVoice"); }
+    function canSpeakVoice(serverId)   { return isServerAdmin(serverId) || hasPerm(serverId, "speakVoice"); }
+
+    /* ---------------- DM helpers (legacy tolerant) ---------------- */
+
+    function docHasParticipant(docData, uid) {
+      return (
+        (docData.participants is list && uid in docData.participants) ||
+        (docData.participantUids is list && uid in docData.participantUids) ||
+        (
+          docData.participantsMap is map &&
+          docData.participantsMap[uid] != null &&
+          docData.participantsMap[uid] != false
+        )
+      );
+    }
+
+    function newDMIsValidCreate(d) {
+      return isSignedIn() && (
+        (d.participants is list &&
+         d.participants.size() >= 2 &&
+         (request.auth.uid in d.participants)) ||
+        (d.participantUids is list &&
+         d.participantUids.size() >= 2 &&
+         (request.auth.uid in d.participantUids)) ||
+        (d.participantsMap is map &&
+         d.participantsMap.size() >= 2 &&
+         (d.participantsMap[request.auth.uid] != null &&
+          d.participantsMap[request.auth.uid] != false))
+      );
+    }
+
+    function keyContainsUid(key, uid) {
+      return (key is string) && key.matches('(^|_)' + uid + '(_|$)');
+    }
+
+    function dmHasParticipantOrKey_resource(uid) {
+      return isSignedIn()
+        && resource != null
+        && (
+          docHasParticipant(resource.data, uid) ||
+          keyContainsUid(resource.data.key, uid)
+        );
+    }
+
+    function dmHasParticipantOrKey_byId(threadId, uid) {
+      return isSignedIn()
+        && (
+          (
+            exists(/databases/$(database)/documents/dms/$(threadId)) &&
+            (
+              docHasParticipant(
+                get(/databases/$(database)/documents/dms/$(threadId)).data, uid
+              ) ||
+              keyContainsUid(
+                get(/databases/$(database)/documents/dms/$(threadId)).data.key, uid
+              )
+            )
+          )
+          ||
+          (
+            !exists(/databases/$(database)/documents/dms/$(threadId)) &&
+            keyContainsUid(threadId, uid)
+          )
+        );
+    }
+
+    /* ---------------- Profiles ---------------- */
+    match /profiles/{uid} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if false;
+
+      match /servers/{serverId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /dms/{threadId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /reads/{readId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /presence/{presenceId} {
+        allow read: if isSignedIn() && request.auth.uid == uid;
+        allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /notes/{noteId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    /* ---------------- Servers tree ---------------- */
+    match /servers/{serverId} {
+      allow read: if resource.data.isPublic == true
+                  || isMember(serverId)
+                  || (isSignedIn() && exists(/databases/$(database)/documents/profiles/$(request.auth.uid)/servers/$(serverId)));
+      allow create: if isSignedIn()
+        && (request.resource.data.ownerId == request.auth.uid || request.resource.data.owner == request.auth.uid);
+      allow update, delete: if isServerOwner(serverId);
+
+      match /roles/{roleId} {
+        allow read: if true;
+        allow create, update, delete: if isServerAdmin(serverId);
+      }
+
+      match /members/{uid} {
+        allow read: if isSignedIn() && (uid == request.auth.uid || isMember(serverId));
+        allow create: if isServerAdmin(serverId) || (isSignedIn() && request.auth.uid == uid);
+        allow update: if isServerAdmin(serverId) || (isSignedIn() && request.auth.uid == uid);
+        allow delete: if isServerAdmin(serverId);
+      }
+
+      match /presence/{uid} {
+        allow read: if isSignedIn() && (uid == request.auth.uid || isMember(serverId));
+        allow create, update: if isSignedIn() && request.auth.uid == uid && isMember(serverId);
+        allow delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
+      }
+
+      match /channels/{channelId} {
+        allow read: if canViewChannel(serverId);
+        allow create, update, delete: if isServerAdmin(serverId);
+
+        match /messages/{messageId} {
+          allow read: if canViewChannel(serverId);
+          allow create: if canSendInChannel(serverId);
+          allow update, delete: if isSignedIn() && (
+            request.auth.uid == resource.data.uid || hasPerm(serverId, "manageMessages")
+          );
+        }
+
+        match /members/{uid} {
+          allow read: if canViewChannel(serverId);
+          allow create: if isSignedIn() && request.auth.uid == uid;
+          allow update, delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
+        }
+
+        match /calls/{callId} {
+          allow read: if canViewChannel(serverId);
+          allow create, update: if canConnectVoice(serverId);
+          allow delete: if isServerAdmin(serverId);
+
+          match /offerCandidates/{candidateId} {
+            allow read: if canViewChannel(serverId);
+            allow create, delete: if canConnectVoice(serverId);
+            allow update: if false;
+          }
+
+          match /answerCandidates/{candidateId} {
+            allow read: if canViewChannel(serverId);
+            allow create, delete: if canConnectVoice(serverId);
+            allow update: if false;
+          }
+
+          match /participants/{uid} {
+            allow read: if canViewChannel(serverId);
+            allow create, update: if isSignedIn() && request.auth.uid == uid && canConnectVoice(serverId);
+            allow delete: if (isSignedIn() && request.auth.uid == uid) || canSpeakVoice(serverId);
+          }
+        }
+      }
+    }
+
+    /* ---------------- Direct Messages (deterministic id tolerant) ---------------- */
+    match /dms/{threadId} {
+      allow read, update: if dmHasParticipantOrKey_resource(request.auth.uid)
+        || (
+          !exists(/databases/$(database)/documents/dms/$(threadId)) &&
+          keyContainsUid(threadId, request.auth.uid)
+        );
+
+      allow create: if newDMIsValidCreate(request.resource.data);
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow create: if isSignedIn()
+          && request.resource.data.uid == request.auth.uid
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow update, delete: if false;
+      }
+
+      match /reads/{uid} {
+        allow read, write: if isSignedIn()
+          && uid == request.auth.uid
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+      }
+    }
+
+    /* ---------------- Joins ---------------- */
+    match /joins/{joinId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    /* ---------------- User mailbox invites ---------------- */
+    match /users/{uid} {
+      match /invites/{inviteId} {
+        allow read: if isSignedIn() && request.auth.uid == uid;
+
+        allow create: if isSignedIn()
+          && request.resource.data.type == 'channel'
+          && request.resource.data.serverId is string
+          && request.resource.data.channelId is string
+          && request.resource.data.serverName is string
+          && request.resource.data.channelName is string
+          && request.resource.data.invitedBy == request.auth.uid
+          && request.resource.data.status == 'pending'
+          && (isServerOwner(request.resource.data.serverId) || isServerAdmin(request.resource.data.serverId));
+
+        allow update: if isSignedIn()
+          && request.auth.uid == uid
+          && resource.data.type == 'channel'
+          && request.resource.data.type == resource.data.type
+          && request.resource.data.serverId == resource.data.serverId
+          && request.resource.data.channelId == resource.data.channelId
+          && request.resource.data.serverName == resource.data.serverName
+          && request.resource.data.channelName == resource.data.channelName
+          && request.resource.data.invitedBy == resource.data.invitedBy
+          && request.resource.data.status in ['pending','accepted','declined'];
+
+        allow delete: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    /* ---------------- Optional global invites index ---------------- */
+    match /invites/{inviteId} {
+      allow read: if isSignedIn() && resource.data.toUid == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && request.resource.data.serverId is string
+        && request.resource.data.toUid   is string
+        && request.resource.data.status  == 'pending'
+        && inviteId == (request.resource.data.serverId + '__' + request.resource.data.toUid)
+        && (isServerOwner(request.resource.data.serverId) || isServerAdmin(request.resource.data.serverId))
+        && !exists(/databases/$(database)/documents/invites/$(inviteId));
+
+      allow update: if isSignedIn()
+        && resource.data.toUid == request.auth.uid
+        && request.resource.data.serverId == resource.data.serverId
+        && request.resource.data.toUid == resource.data.toUid
+        && request.resource.data.status in ['accepted','declined'];
+
+      allow update: if isSignedIn()
+        && (isServerOwner(resource.data.serverId) || isServerAdmin(resource.data.serverId))
+        && request.resource.data.serverId == resource.data.serverId
+        && request.resource.data.toUid == resource.data.toUid
+        && resource.data.status in ['accepted','declined']
+        && request.resource.data.status == 'pending';
+
+      allow delete: if isSignedIn()
+        && (resource.data.toUid == request.auth.uid
+            || isServerOwner(resource.data.serverId)
+            || isServerAdmin(resource.data.serverId));
+    }
+
+    /* ---------------- Optional top-level presence ---------------- */
+    match /presence/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
+    }
+
+  } // /documents
+} // service

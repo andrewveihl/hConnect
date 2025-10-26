@@ -8,10 +8,14 @@ import {
   GoogleAuthProvider, OAuthProvider, signInWithPopup, onAuthStateChanged, signOut
 } from 'firebase/auth';
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, type Firestore
+  getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel, type Firestore
 } from 'firebase/firestore';
 
 import { user as userStore } from '$lib/stores/user';
+
+if (import.meta.env.DEV) {
+  setLogLevel('debug');
+}
 
 /* ------------------------------------------------------------------ */
 /* Config resolution (LOCAL/CI -> Hosting script -> Hosting JSON)      */
@@ -95,8 +99,6 @@ export async function ensureFirebaseReady() {
 }
 
 // ---- Firestore getter -------------------------------------------------
-import type { Firestore } from 'firebase/firestore'; // if not already imported at top
-
 /** Return the initialized Firestore instance.
  *  IMPORTANT: Call ensureFirebaseReady() early (e.g., +layout onMount) before using this.
  */

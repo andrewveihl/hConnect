@@ -15,6 +15,7 @@
   export let currentUserId: string | null = null;
 
   let scroller: HTMLDivElement;
+  let isRequestingMore = false;
 
   function formatTime(ts: any) {
     try {
@@ -304,8 +305,12 @@
   }
 
   function handleScroll() {
-    if (reactionMenuFor) {
-      closeReactionMenu();
+    if (reactionMenuFor) closeReactionMenu();
+    if (!scroller) return;
+    if (scroller.scrollTop <= 64 && !isRequestingMore) {
+      isRequestingMore = true;
+      dispatch('loadMore');
+      setTimeout(() => (isRequestingMore = false), 500);
     }
   }
 
@@ -331,7 +336,7 @@
   const formInputId = (mId: string, idx: number) => `form-${mId}-${idx}`;
 </script>
 
-<style>
+<style>\n  .chat-scroll { -ms-overflow-style: none; scrollbar-width: none; }\n  .chat-scroll::-webkit-scrollbar { display: none; }\n
   .bar {
     height: 6px;
     border-radius: 9999px;
@@ -492,7 +497,7 @@
   }
 </style>
 
-<div bind:this={scroller} class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3" on:scroll={handleScroll}>
+<div bind:this={scroller} class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3 chat-scroll" on:scroll={handleScroll}>
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">
       <div class="text-center text-white/60 space-y-1">
@@ -654,3 +659,4 @@
     <button type="button" class="custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
   </div>
 {/if}
+

@@ -3,6 +3,7 @@
   import { user } from '$lib/stores/user';
   import { subscribeUserServers } from '$lib/db/servers';
   import NewServerModal from '$lib/components/NewServerModal.svelte';
+  import VoiceRailItem from '$lib/components/VoiceRailItem.svelte';
 
   export let activeServerId: string | null = null;
   export let onCreateServer: (() => void) | null = null;
@@ -85,6 +86,8 @@
 
   <!-- Bottom cluster -->
   <div class="w-full grid place-items-center gap-2 p-2">
+    <!-- Desktop: voice connected indicator -->
+    <VoiceRailItem />
     <a
       href="/settings"
       class="w-12 h-12 grid place-items-center overflow-hidden rounded-2xl bg-[#313338]

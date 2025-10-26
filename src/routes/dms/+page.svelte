@@ -109,6 +109,7 @@
 <div
   class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
+  style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
   <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">

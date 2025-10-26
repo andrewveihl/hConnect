@@ -6,7 +6,9 @@
   $: pathname = $page?.url?.pathname ?? '/';
   const isActive = (p: string) => pathname === p;
   const tabClasses = (p: string) =>
-    `btn btn-ghost w-full ${isActive(p) ? 'ring-1 ring-white/20 bg-white/10' : ''}`;
+    `flex flex-col items-center justify-center gap-0.5 py-2 text-xs font-medium transition-colors ${
+      isActive(p) ? 'text-[#9aa4ff]' : 'text-white/70 hover:text-white'
+    }`;
 </script>
 
 <!-- Always-on server rail + simple, calm home -->
@@ -41,27 +43,33 @@
     </section>
 
     <!-- Mobile bottom nav: DMs • Friends • Notifications -->
-<nav class="md:hidden fixed bottom-0 inset-x-0 z-20 border-t border-white/10 bg-[#1e1f22]/95 backdrop-blur"
-     aria-label="Primary">
-      <div class="grid grid-cols-3 px-3 py-2"
-           style="padding-bottom: env(safe-area-inset-bottom)">
-        <a href="/dms" class={tabClasses('/dms')} aria-current={isActive('/dms') ? 'page' : undefined}>
-          <i class="bx bx-message-dots text-2xl"></i>
-          <span class="sr-only">Direct Messages</span>
-        </a>
-
-        <a href="/friends" class={tabClasses('/friends')} aria-current={isActive('/friends') ? 'page' : undefined}>
-          <i class="bx bx-user text-2xl"></i>
-          <span class="sr-only">Friends</span>
-        </a>
-
-        <a href="/notifications" class={tabClasses('/notifications')} aria-current={isActive('/notifications') ? 'page' : undefined}>
-          <i class="bx bx-bell text-2xl"></i>
-          <span class="sr-only">Notifications</span>
-          {#if false /* replace with unread > 0 */}
-            <span class="absolute top-2 right-6 h-2 w-2 rounded-full bg-red-500"></span>
-          {/if}
-        </a>
+<nav class="md:hidden fixed inset-x-0 bottom-0 z-30 pointer-events-none" aria-label="Primary">
+      <div class="px-3 pb-3" style="padding-bottom: calc(env(safe-area-inset-bottom) + 8px)">
+        <div class="mx-auto max-w-md rounded-2xl bg-[#1f2430]/95 border border-white/10 shadow-xl backdrop-blur pointer-events-auto">
+          <div class="grid grid-cols-4">
+            <a href="/dms" class={tabClasses('/dms')} aria-current={isActive('/dms') ? 'page' : undefined}>
+              <i class="bx bx-message-dots text-[22px]"></i>
+              <span class="text-[11px] leading-none">DMs</span>
+            </a>
+            <a href="/notes" class={tabClasses('/notes')} aria-current={isActive('/notes') ? 'page' : undefined}>
+              <i class="bx bx-notepad text-[22px]"></i>
+              <span class="text-[11px] leading-none">Notes</span>
+            </a>
+            <a href="/friends" class={tabClasses('/friends')} aria-current={isActive('/friends') ? 'page' : undefined}>
+              <i class="bx bx-user text-[22px]"></i>
+              <span class="text-[11px] leading-none">Friends</span>
+            </a>
+            <a href="/notifications" class={tabClasses('/notifications')} aria-current={isActive('/notifications') ? 'page' : undefined}>
+              <div class="relative">
+                <i class="bx bx-bell text-[22px]"></i>
+                {#if false}
+                  <span class="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-[#1f2430]"></span>
+                {/if}
+              </div>
+              <span class="text-[11px] leading-none">Alerts</span>
+            </a>
+          </div>
+        </div>
       </div>
     </nav>
   </main>
