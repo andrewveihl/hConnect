@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { browser } from '$app/environment';
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
@@ -33,17 +34,52 @@
     photoURL: string | null;
     hasAudio: boolean;
     hasVideo: boolean;
-    status?: 'active' | 'left';
+    status?: 'active' | 'left' | 'removed';
     joinedAt?: any;
     updatedAt?: any;
+    streamId?: string | null;
+    kickedBy?: string | null;
+    removedAt?: any;
+  };
+
+  type ParticipantMedia = {
+    uid: string;
+    isSelf: boolean;
+    streamId: string | null;
+    stream: MediaStream | null;
+    hasAudio: boolean;
+    hasVideo: boolean;
+  };
+
+  type ParticipantControls = {
+    volume: number;
+    muted: boolean;
+  };
+
+  type ParticipantTile = ParticipantMedia & {
+    displayName: string;
+    photoURL: string | null;
+    controls: ParticipantControls;
   };
 
   let localVideoEl: HTMLVideoElement | null = null;
-  let remoteVideoEl: HTMLVideoElement | null = null;
-
   let localStream: MediaStream | null = null;
-  let remoteStream: MediaStream | null = null;
-  let remoteHasVideo = false;
+
+  let remoteStreams = new Map<string, MediaStream>();
+  let audioRefs = new Map<string, HTMLAudioElement>();
+  let videoRefs = new Map<string, HTMLVideoElement>();
+  let participantControls = new Map<string, ParticipantControls>();
+  let menuOpenFor: string | null = null;
+  let longPressTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let isTouchDevice = false;
+
+  let serverMetaUnsub: Unsubscribe | null = null;
+  let memberUnsub: Unsubscribe | null = null;
+  let serverOwnerId: string | null = null;
+  let myPerms: Record<string, any> | null = null;
+  let watchedServerId: string | null = null;
+  let watchedMemberKey: string | null = null;
+  let canKickMembers = false;
 
   let pc: RTCPeerConnection | null = null;
   let audioSender: RTCRtpSender | null = null;
@@ -63,6 +99,8 @@
   let participantDocRef: DocumentReference | null = null;
 
   let participants: ParticipantState[] = [];
+  let participantMedia: ParticipantMedia[] = [];
+  let participantTiles: ParticipantTile[] = [];
   let session: VoiceSession | null = null;
   let activeSessionKey: string | null = null;
   let sessionQueue: Promise<void> = Promise.resolve();
@@ -94,40 +132,103 @@
   $: cameraButtonLabel = hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video';
   $: participantCount = participants.length;
 
+  const DEFAULT_VOLUME = 0.85;
+  const STORAGE_PREFIX = 'hconnect:voice:controls:';
+
   $: currentUserId = $user?.uid ?? null;
   $: selfParticipant = participants.find((p) => p.uid === currentUserId) ?? null;
-  $: remoteParticipants = participants.filter((p) => p.uid !== currentUserId);
   $: localHasAudio = selfParticipant?.hasAudio ?? (hasAudioTrack && !isMicMuted);
   $: localHasVideo = selfParticipant?.hasVideo ?? (hasVideoTrack && !isCameraOff);
-  $: remoteHasAudio =
-    !!(remoteStream && remoteStream.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled));
-  $: remoteHasVideo =
-    !!(remoteStream && remoteStream.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled));
-  $: fallbackRemote =
-    remoteParticipants.length === 0 && (remoteStream || remoteConnected)
-      ? {
-          uid: '__remote__',
-          displayName: 'Participant',
-          photoURL: null,
-          hasAudio: remoteHasAudio,
-          hasVideo: remoteHasVideo,
-          status: 'active' as const
-        }
-      : null;
-  $: primaryRemote = remoteParticipants[0] ?? fallbackRemote;
-  $: extraRemote = remoteParticipants.slice(1);
-  $: primaryRemoteName = primaryRemote?.displayName ?? 'Participant';
-  $: primaryRemoteAudio = primaryRemote?.hasAudio ?? remoteHasAudio;
-  $: primaryRemoteVideo = primaryRemote?.hasVideo ?? remoteHasVideo;
+  $: participantMedia = (() => {
+    const usedStreamIds = new Set<string>();
+    const tiles: ParticipantMedia[] = participants.map((p) => {
+      const streamId = p.streamId ?? null;
+      let stream: MediaStream | null = null;
+      if (p.uid === currentUserId) {
+        stream = localStream;
+      } else if (streamId && remoteStreams.has(streamId)) {
+        stream = remoteStreams.get(streamId) ?? null;
+      }
+      if (stream && streamId) {
+        usedStreamIds.add(streamId);
+      }
+      return {
+        uid: p.uid,
+        isSelf: p.uid === currentUserId,
+        streamId,
+        stream,
+        hasAudio: p.hasAudio,
+        hasVideo: p.hasVideo
+      };
+    });
 
+    if (tiles.some((tile) => !tile.isSelf && tile.hasVideo && !tile.stream) && remoteStreams.size) {
+      const availableStreams = Array.from(remoteStreams.entries()).filter(([_, stream]) =>
+        stream.getVideoTracks().some((track) => track.readyState === 'live')
+      );
+      for (const tile of tiles) {
+        if (tile.isSelf || !tile.hasVideo || tile.stream) continue;
+      const fallbackEntry = availableStreams.find(([id, stream]) => {
+        if (usedStreamIds.has(id)) return false;
+        return stream.getVideoTracks().some((track) => track.readyState === 'live');
+      });
+      if (!fallbackEntry) break;
+      const [fallbackId, fallbackStream] = fallbackEntry;
+      tile.streamId = tile.streamId ?? fallbackId;
+      tile.stream = fallbackStream;
+      usedStreamIds.add(fallbackId);
+      }
+    }
+
+    return tiles;
+  })();
+  $: participantTiles = participantMedia.map((media) => {
+    const base = participants.find((p) => p.uid === media.uid);
+    const controls = media.isSelf
+      ? { volume: 1, muted: false }
+      : participantControls.get(media.uid) ?? { volume: DEFAULT_VOLUME, muted: false };
+    return {
+      ...media,
+      displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
+      photoURL: base?.photoURL ?? null,
+      controls
+    };
+  });
+  $: remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
   $: localVideoEl && localStream && (localVideoEl.srcObject = localStream);
-  $: if (remoteVideoEl) {
-    const target = remoteStream ?? null;
-    if (remoteVideoEl.srcObject !== target) {
-      remoteVideoEl.srcObject = target;
-      remoteVideoEl.play?.().catch(() => {});
+  $: participantMedia.forEach((tile) => {
+    if (!tile.isSelf) {
+      ensureParticipantControls(tile.uid);
+      applyParticipantControls(tile.uid);
+    }
+    attachStreamToRefs(tile.uid, tile.stream);
+  });
+  $: if (serverId && serverId !== watchedServerId) {
+    watchedServerId = serverId;
+    watchServerMeta(serverId);
+  } else if (!serverId && watchedServerId) {
+    watchedServerId = null;
+    serverOwnerId = null;
+    serverMetaUnsub?.();
+    serverMetaUnsub = null;
+  }
+  $: {
+    const key = serverId && currentUserId ? `${serverId}:${currentUserId}` : null;
+    if (key !== watchedMemberKey) {
+      memberUnsub?.();
+      watchedMemberKey = key;
+      if (serverId && currentUserId) {
+        watchMemberDoc(serverId, currentUserId);
+      } else {
+        myPerms = null;
+      }
     }
   }
+  $: canKickMembers =
+    !!currentUserId &&
+    (!!(serverOwnerId && serverOwnerId === currentUserId) ||
+      !!myPerms?.manageServer ||
+      !!myPerms?.kickMembers);
 
   let lastPresenceSignature: string | null = null;
   $: if (participantDocRef && isJoined) {
@@ -142,24 +243,313 @@
     const onUnload = () => {
       hangUp({ cleanupDoc: false }).catch(() => {});
     };
-    if (typeof window !== 'undefined') {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof HTMLElement)) {
+        menuOpenFor = null;
+        return;
+      }
+      if (!event.target.closest('[data-voice-menu]')) {
+        menuOpenFor = null;
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        menuOpenFor = null;
+      }
+    };
+
+    if (browser && typeof window !== 'undefined') {
+      isTouchDevice = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
       window.addEventListener('beforeunload', onUnload);
+      window.addEventListener('pointerdown', onPointerDown);
+      window.addEventListener('keydown', onKeyDown);
     }
     return () => {
-      if (typeof window !== 'undefined') {
+      if (browser && typeof window !== 'undefined') {
         window.removeEventListener('beforeunload', onUnload);
+        window.removeEventListener('pointerdown', onPointerDown);
+        window.removeEventListener('keydown', onKeyDown);
       }
     };
   });
 
   onDestroy(() => {
     voiceUnsubscribe?.();
+    serverMetaUnsub?.();
+    memberUnsub?.();
     hangUp().catch(() => {});
   });
 
   function avatarInitial(name: string | undefined): string {
     if (!name) return '?';
     return name.trim().charAt(0).toUpperCase() || '?';
+  }
+
+  function storageKeyForControls(uid: string): string {
+    const self = currentUserId ?? 'anon';
+    return `${STORAGE_PREFIX}${self}:${uid}`;
+  }
+
+  function readParticipantControls(uid: string): ParticipantControls {
+    if (!browser) return { volume: DEFAULT_VOLUME, muted: false };
+    try {
+      const raw = localStorage.getItem(storageKeyForControls(uid));
+      if (!raw) return { volume: DEFAULT_VOLUME, muted: false };
+      const parsed = JSON.parse(raw) as Partial<ParticipantControls>;
+      const volume =
+        typeof parsed.volume === 'number' && Number.isFinite(parsed.volume)
+          ? Math.min(Math.max(parsed.volume, 0), 1)
+          : DEFAULT_VOLUME;
+      const muted = typeof parsed.muted === 'boolean' ? parsed.muted : false;
+      return { volume, muted };
+    } catch {
+      return { volume: DEFAULT_VOLUME, muted: false };
+    }
+  }
+
+  function persistParticipantControls(uid: string, controls: ParticipantControls) {
+    if (!browser) return;
+    try {
+      localStorage.setItem(storageKeyForControls(uid), JSON.stringify(controls));
+    } catch {
+      /* ignore storage failures */
+    }
+  }
+
+  function ensureParticipantControls(uid: string) {
+    if (participantControls.has(uid)) return;
+    const controls = readParticipantControls(uid);
+    const next = new Map(participantControls);
+    next.set(uid, controls);
+    participantControls = next;
+  }
+
+  function getParticipantControls(uid: string): ParticipantControls {
+    ensureParticipantControls(uid);
+    return participantControls.get(uid) ?? { volume: DEFAULT_VOLUME, muted: false };
+  }
+
+  function applyParticipantControls(uid: string) {
+    const controls = participantControls.get(uid);
+    if (!controls) return;
+    const audio = audioRefs.get(uid);
+    if (audio) {
+      audio.volume = controls.muted ? 0 : controls.volume;
+      audio.muted = controls.muted;
+      if (!controls.muted) {
+        audio.play?.().catch(() => {});
+      }
+    }
+    if (uid !== currentUserId) {
+      const video = videoRefs.get(uid);
+      if (video) {
+        video.muted = true;
+      }
+    }
+  }
+
+  function setParticipantVolume(uid: string, volume: number) {
+    ensureParticipantControls(uid);
+    const current = participantControls.get(uid);
+    if (!current) return;
+    const controls = { ...current, volume };
+    participantControls = new Map(participantControls).set(uid, controls);
+    persistParticipantControls(uid, controls);
+    applyParticipantControls(uid);
+  }
+
+  function toggleParticipantMute(uid: string) {
+    ensureParticipantControls(uid);
+    const current = participantControls.get(uid);
+    if (!current) return;
+    const controls = { ...current, muted: !current.muted };
+    participantControls = new Map(participantControls).set(uid, controls);
+    persistParticipantControls(uid, controls);
+    applyParticipantControls(uid);
+  }
+
+  function attachStreamToRefs(uid: string, stream: MediaStream | null) {
+    const audio = audioRefs.get(uid);
+    if (audio && audio.srcObject !== stream) {
+      audio.srcObject = stream;
+      if (stream) {
+        audio.play?.().catch(() => {});
+      } else {
+        audio.pause?.();
+      }
+    }
+    let video: HTMLVideoElement | null = null;
+    if (uid === currentUserId) {
+      video = localVideoEl;
+    } else {
+      video = videoRefs.get(uid) ?? null;
+    }
+    if (video && video.srcObject !== stream) {
+      video.srcObject = stream;
+      if (stream) {
+        video.play?.().catch(() => {});
+      } else {
+        video.pause?.();
+      }
+      if (uid !== currentUserId) {
+        video.muted = true;
+      }
+    }
+  }
+
+  function registerAudioRef(uid: string, node: HTMLAudioElement | null) {
+    if (node) {
+      audioRefs.set(uid, node);
+      const target = participantMedia.find((tile) => tile.uid === uid);
+      attachStreamToRefs(uid, target?.stream ?? null);
+      applyParticipantControls(uid);
+    } else {
+      const existing = audioRefs.get(uid);
+      if (existing) {
+        existing.pause?.();
+        existing.srcObject = null;
+      }
+      audioRefs.delete(uid);
+    }
+  }
+
+  function audioSink(node: HTMLAudioElement, uid: string) {
+    registerAudioRef(uid, node);
+    return {
+      update(nextUid: string) {
+        if (nextUid === uid) return;
+        registerAudioRef(uid, null);
+        uid = nextUid;
+        registerAudioRef(uid, node);
+      },
+      destroy() {
+        registerAudioRef(uid, null);
+      }
+    };
+  }
+
+  function registerVideoRef(uid: string, node: HTMLVideoElement | null) {
+    if (uid === currentUserId) {
+      if (localVideoEl && localVideoEl !== node) {
+        localVideoEl.pause?.();
+        localVideoEl.srcObject = null;
+      }
+      localVideoEl = node;
+    } else if (node) {
+      videoRefs.set(uid, node);
+    } else {
+      const existing = videoRefs.get(uid);
+      if (existing) {
+        existing.pause?.();
+        existing.srcObject = null;
+      }
+      videoRefs.delete(uid);
+    }
+    const target = participantMedia.find((tile) => tile.uid === uid);
+    attachStreamToRefs(uid, target?.stream ?? null);
+  }
+
+  function streamHasLiveVideo(stream: MediaStream | null): boolean {
+    return !!(
+      stream &&
+      stream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
+    );
+  }
+
+  function videoSink(node: HTMLVideoElement, uid: string) {
+    registerVideoRef(uid, node);
+    return {
+      update(nextUid: string) {
+        if (nextUid === uid) return;
+        registerVideoRef(uid, null);
+        uid = nextUid;
+        registerVideoRef(uid, node);
+      },
+      destroy() {
+        registerVideoRef(uid, null);
+      }
+    };
+  }
+
+  function updateRemoteStreams(mutator: (draft: Map<string, MediaStream>) => void) {
+    const draft = new Map(remoteStreams);
+    mutator(draft);
+    remoteStreams = draft;
+  }
+
+  function openMenu(uid: string) {
+    menuOpenFor = uid;
+  }
+
+  function closeMenu() {
+    menuOpenFor = null;
+  }
+
+  function handleLongPressStart(uid: string) {
+    if (!isTouchDevice) return;
+    const timer = setTimeout(() => {
+      menuOpenFor = uid;
+    }, 450);
+    longPressTimers.set(uid, timer);
+  }
+
+  function handleLongPressEnd(uid: string) {
+    const timer = longPressTimers.get(uid);
+    if (timer) {
+      clearTimeout(timer);
+      longPressTimers.delete(uid);
+    }
+  }
+
+  async function kickParticipant(target: ParticipantState) {
+    if (!participantsCollectionRef || !canKickMembers) return;
+    if (target.uid === currentUserId) return;
+    try {
+      const ref = doc(participantsCollectionRef, target.uid);
+      await setDoc(
+        ref,
+        {
+          status: 'removed',
+          kickedBy: currentUserId ?? null,
+          removedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('Failed to kick participant', err);
+      errorMessage = 'Unable to remove that participant.';
+    }
+  }
+
+  function watchServerMeta(server: string) {
+    serverMetaUnsub?.();
+    const db = getDb();
+    serverMetaUnsub = onSnapshot(
+      doc(db, 'servers', server),
+      (snap) => {
+        const data = snap.data() as any;
+        serverOwnerId = data?.ownerId ?? data?.owner ?? data?.createdBy ?? null;
+      },
+      () => {
+        serverOwnerId = null;
+      }
+    );
+  }
+
+  function watchMemberDoc(server: string, uid: string) {
+    memberUnsub?.();
+    const db = getDb();
+    memberUnsub = onSnapshot(
+      doc(db, 'servers', server, 'members', uid),
+      (snap) => {
+        const data = snap.exists() ? (snap.data() as any) : {};
+        myPerms = data?.perms ?? null;
+      },
+      () => {
+        myPerms = null;
+      }
+    );
   }
 
   async function handleSessionChange(next: VoiceSession | null) {
@@ -171,6 +561,15 @@
       activeSessionKey = null;
       serverId = null;
       channelId = null;
+      menuOpenFor = null;
+      serverMetaUnsub?.();
+      serverMetaUnsub = null;
+      memberUnsub?.();
+      memberUnsub = null;
+      watchedServerId = null;
+      watchedMemberKey = null;
+      serverOwnerId = null;
+      myPerms = null;
       if (hadSession || isJoined || isConnecting) {
         await hangUp();
       }
@@ -296,20 +695,36 @@
 
     pc.ontrack = (event) => {
       const [stream] = event.streams ?? [];
-      const incoming = stream ?? remoteStream ?? new MediaStream();
+      const incoming = stream ?? new MediaStream();
 
       if (!stream) {
         incoming.addTrack(event.track);
       }
 
-      remoteStream = incoming;
-      remoteConnected = true;
-      remoteHasVideo =
-        remoteStream.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled);
-      if (remoteVideoEl) {
-        remoteVideoEl.srcObject = remoteStream;
-        remoteVideoEl.play?.().catch(() => {});
-      }
+      updateRemoteStreams((draft) => {
+        const existing = draft.get(incoming.id);
+        if (existing && stream) {
+          draft.set(incoming.id, stream);
+        } else if (existing) {
+          existing.addTrack(event.track);
+          draft.set(incoming.id, existing);
+        } else {
+          draft.set(incoming.id, incoming);
+        }
+      });
+
+      event.track.onended = () => {
+        updateRemoteStreams((draft) => {
+          const current = draft.get(incoming.id);
+          if (!current) return;
+          current.removeTrack(event.track);
+          if (current.getTracks().length === 0) {
+            draft.delete(incoming.id);
+          } else {
+            draft.set(incoming.id, current);
+          }
+        });
+      };
     };
 
     pc.onconnectionstatechange = () => {
@@ -320,17 +735,12 @@
           break;
         case 'connected':
           statusMessage = 'Connected.';
-          remoteConnected = true;
           break;
         case 'disconnected':
         case 'failed':
-          remoteConnected = false;
-          remoteHasVideo = false;
           statusMessage = 'Connection lost.';
           break;
         case 'closed':
-          remoteConnected = false;
-          remoteHasVideo = false;
           statusMessage = '';
           break;
       }
@@ -348,10 +758,10 @@
     participantsUnsub = onSnapshot(
       participantsCollectionRef,
       (snapshot) => {
-        participants = snapshot.docs
+        const mapped = snapshot.docs
           .map((d) => {
             const data = d.data() as any;
-            const status = (data.status ?? 'active') as 'active' | 'left';
+            const status = (data.status ?? 'active') as 'active' | 'left' | 'removed';
             return {
               uid: data.uid ?? d.id,
               displayName: data.displayName ?? 'Member',
@@ -360,15 +770,33 @@
               hasVideo: data.hasVideo ?? false,
               status,
               joinedAt: data.joinedAt ?? null,
-              updatedAt: data.updatedAt ?? null
+              updatedAt: data.updatedAt ?? null,
+              streamId: data.streamId ?? null,
+              kickedBy: data.kickedBy ?? null,
+              removedAt: data.removedAt ?? data.leftAt ?? null
             } as ParticipantState;
           })
-          .filter((p) => (p.status ?? 'active') !== 'left')
           .sort((a, b) => {
             const aTime = a.joinedAt?.toMillis?.() ?? 0;
             const bTime = b.joinedAt?.toMillis?.() ?? 0;
             return aTime - bTime;
           });
+
+        const current = get(user);
+        const currentUid = current?.uid ?? null;
+        const selfEntry = currentUid ? mapped.find((p) => p.uid === currentUid) : null;
+        if (selfEntry && selfEntry.status && selfEntry.status !== 'active' && isJoined) {
+          if (selfEntry.status === 'removed') {
+            statusMessage = '';
+            errorMessage =
+              'You were removed from this voice channel by a moderator.';
+          } else if (!errorMessage) {
+            statusMessage = 'You have left the call.';
+          }
+          voiceSession.leave();
+        }
+
+        participants = mapped.filter((p) => (p.status ?? 'active') === 'active');
       },
       (err) => {
         console.warn('Failed to subscribe to participants', err);
@@ -388,6 +816,7 @@
       photoURL: current.photoURL ?? null,
       hasAudio: hasAudioTrack && !isMicMuted,
       hasVideo: hasVideoTrack && !isCameraOff,
+      streamId: localStream?.id ?? null,
       status: 'active' as const,
       updatedAt: serverTimestamp(),
       ...extra
@@ -562,7 +991,8 @@
           hasAudio: hasAudioTrack && !isMicMuted,
           hasVideo: hasVideoTrack && !isCameraOff,
           status: 'active',
-          joinedAt: null
+          joinedAt: null,
+          streamId: localStream?.id ?? null
         }
       ];
 
@@ -648,10 +1078,22 @@
     removeLocalTrack('video');
     localStream = null;
 
-    remoteStream = null;
+    updateRemoteStreams((draft) => draft.clear());
     remoteConnected = false;
-    if (remoteVideoEl) remoteVideoEl.srcObject = null;
-    if (localVideoEl) localVideoEl.srcObject = null;
+    audioRefs.forEach((node) => {
+      node.pause?.();
+      node.srcObject = null;
+    });
+    videoRefs.forEach((node) => {
+      node.pause?.();
+      node.srcObject = null;
+    });
+    audioRefs = new Map();
+    videoRefs = new Map();
+    if (localVideoEl) {
+      localVideoEl.pause?.();
+      localVideoEl.srcObject = null;
+    }
 
     const cleanupRef = callRef;
     const participantsRef = participantsCollectionRef;
@@ -805,42 +1247,51 @@
   }
 </script>
 
-<div class="flex h-full flex-col gap-4 p-4" class:hidden={!session || !sessionVisible} aria-hidden={!session || !sessionVisible}>
+<div
+  class="flex h-full flex-col gap-4 p-4 md:p-6"
+  class:hidden={!session || !sessionVisible}
+  aria-hidden={!session || !sessionVisible}
+>
   {#if sessionChannelName}
-    <div class="text-lg font-semibold text-white/90">{sessionChannelName}</div>
+    <header class="flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 md:px-4">
+      <div class="flex items-center gap-2 text-white">
+        <i class="bx bx-headphone text-lg text-white/70" aria-hidden="true"></i>
+        <span class="text-base font-semibold md:text-lg">{sessionChannelName}</span>
+      </div>
+      <div class="ml-auto flex items-center gap-3 text-xs text-white/60 md:text-sm">
+        <span class="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-1 font-medium text-white/70">
+          <i class="bx bx-user-voice text-base"></i>
+          {participantCount}
+        </span>
+        {#if remoteConnected}
+          <span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-1 text-emerald-300">
+            <i class="bx bx-check-shield text-base"></i>
+            Live
+          </span>
+        {/if}
+      </div>
+    </header>
   {/if}
 
-  <div class="flex items-center gap-2 overflow-x-auto rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-    {#if participants.length === 0}
+  <div class="flex items-center gap-2 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 md:px-4">
+    {#if participantTiles.length === 0}
       <div class="text-sm text-white/60">No one is in this voice channel yet.</div>
     {:else}
-      {#each participants as participant (participant.uid)}
-        <div class="flex shrink-0 items-center gap-2 rounded-lg bg-white/5 px-2 py-1">
-          {#if participant.photoURL}
-            <img
-              src={participant.photoURL}
-              alt={participant.displayName}
-              class="h-7 w-7 rounded-full object-cover"
-              loading="lazy"
-            />
-          {:else}
-            <div class="grid h-7 w-7 place-items-center rounded-full bg-[#6c75ff]/40 text-sm font-semibold text-white">
-              {avatarInitial(participant.displayName)}
-            </div>
-          {/if}
-          <div class="leading-tight">
-            <div class="max-w-[140px] truncate text-sm font-medium">
-              {participant.uid === currentUserId ? 'You' : participant.displayName}
-            </div>
-            <div class="flex items-center gap-1 text-[11px] text-white/50">
-              <i
-                class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off'} ${participant.hasAudio ? 'text-white/70' : 'text-red-400'}`}
-              ></i>
-              <i
-                class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off'} ${participant.hasVideo ? 'text-white/70' : 'text-red-400'}`}
-              ></i>
-            </div>
+      {#each participantTiles as tile (tile.uid)}
+        <div class="flex shrink-0 items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1.5 text-xs text-white/80 md:text-sm">
+          <div class="relative h-8 w-8 overflow-hidden rounded-full border border-white/10 bg-white/10">
+            {#if tile.photoURL}
+              <img src={tile.photoURL} alt={tile.displayName} class="h-full w-full object-cover" loading="lazy" />
+            {:else}
+              <div class="grid h-full w-full place-items-center text-sm font-semibold">
+                {avatarInitial(tile.displayName)}
+              </div>
+            {/if}
+            {#if !tile.hasAudio && !tile.isSelf}
+              <i class="bx bx-microphone-off absolute -bottom-1 -right-1 text-xs text-red-400"></i>
+            {/if}
           </div>
+          <span class="max-w-[140px] truncate">{tile.displayName}</span>
         </div>
       {/each}
     {/if}
@@ -848,101 +1299,151 @@
 
   <div class="flex-1 overflow-hidden">
     <div
-      class="grid h-full content-start gap-4"
-      style="grid-template-columns: repeat(auto-fit, minmax(clamp(260px, 28vw, 420px), 1fr));"
+      class="grid h-full content-start gap-3 sm:gap-4"
+      style="grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));"
     >
-      {#if primaryRemote}
-        {#key primaryRemote.uid}
-          <div class="relative aspect-[5/4] md:aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/70">
-            <video
-              bind:this={remoteVideoEl}
-              autoplay
-              playsinline
-              class="h-full w-full object-cover"
-            ></video>
-            {#if !remoteHasVideo}
-              <div class="absolute inset-0 grid place-items-center bg-black/70 px-4 text-center text-sm tracking-wide text-white/70">
-                <div>
-                  <div class="mb-1 text-base font-semibold">{primaryRemoteName}</div>
-                  <div>{remoteConnected ? 'Camera disabled' : 'Connecting...'}</div>
+      {#if participantTiles.length === 0}
+        <div class="col-span-full grid place-items-center rounded-2xl border border-dashed border-white/15 bg-black/40 px-6 py-8 text-center text-sm text-white/60">
+          You're the first one here. Enable your mic or camera to get started.
+        </div>
+      {:else}
+        {#each participantTiles as tile (tile.uid)}
+          <div
+            class={`relative group rounded-2xl border border-white/10 bg-black/50 p-3 sm:p-4 transition ${tile.isSelf ? 'ring-1 ring-white/20' : ''}`}
+            data-voice-menu
+            on:touchstart={() => handleLongPressStart(tile.uid)}
+            on:touchend={() => handleLongPressEnd(tile.uid)}
+            on:touchcancel={() => handleLongPressEnd(tile.uid)}
+          >
+            <div class="relative aspect-video w-full overflow-hidden rounded-xl bg-black/70">
+              <video
+                use:videoSink={tile.uid}
+                autoplay
+                playsinline
+                muted={tile.isSelf}
+                class={`h-full w-full object-cover `}
+              ></video>
+              {#if !streamHasLiveVideo(tile.stream)}
+                <div class="flex h-full flex-col items-center justify-center gap-3 text-white/70">
+                  <div class="h-14 w-14 overflow-hidden rounded-full border border-white/10 bg-[#5865f2]/30">
+                    {#if tile.photoURL}
+                      <img src={tile.photoURL} alt={tile.displayName} class="h-full w-full object-cover" loading="lazy" />
+                    {:else}
+                      <div class="grid h-full w-full place-items-center text-xl font-semibold">
+                        {avatarInitial(tile.displayName)}
+                      </div>
+                    {/if}
+                  </div>
+                  <span class="text-xs uppercase tracking-wide text-white/50">
+                    {tile.hasVideo ? 'Video loading�' : 'Camera disabled'}
+                  </span>
+                </div>
+              {/if}
+              {#if !tile.isSelf}
+                <audio
+                  use:audioSink={tile.uid}
+                  autoplay
+                  playsinline
+                  class="hidden"
+                ></audio>
+              {/if}
+              <div class="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/85 via-black/10 to-transparent px-3 py-2 text-xs text-white">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="truncate font-semibold">{tile.displayName}</span>
+                  {#if tile.isSelf}
+                    <span class="rounded bg-white/20 px-2 text-[10px] uppercase tracking-wide">You</span>
+                  {/if}
+                  {#if !tile.isSelf && tile.controls.muted}
+                    <span class="rounded bg-white/20 px-2 text-[10px] uppercase tracking-wide text-white/80">Muted</span>
+                  {/if}
+                </div>
+                <div class="flex items-center gap-2 text-base">
+                  <i class={`bx ${tile.hasAudio ? 'bx-microphone' : 'bx-microphone-off'} ${tile.hasAudio ? 'text-white' : 'text-red-400'}`}></i>
+                  <i class={`bx ${tile.hasVideo ? 'bx-video' : 'bx-video-off'} ${tile.hasVideo ? 'text-white' : 'text-red-400'}`}></i>
+                </div>
+              </div>
+              {#if !tile.isSelf}
+                <button
+                  type="button"
+                  class="absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white/80 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100"
+                  on:click|stopPropagation={() => openMenu(tile.uid)}
+                  data-voice-menu
+                  aria-label={`Voice options for ${tile.displayName}`}
+                >
+                  <i class="bx bx-dots-vertical-rounded text-lg"></i>
+                </button>
+              {/if}
+            </div>
+
+            {#if menuOpenFor === tile.uid && !tile.isSelf}
+              <div
+                class="absolute inset-x-0 top-full z-20 mt-2 w-full min-w-[220px] rounded-xl border border-white/10 bg-[#14141a] p-3 text-sm text-white shadow-xl"
+                data-voice-menu
+              >
+                <div class="flex items-center justify-between text-xs uppercase tracking-wide text-white/50">
+                  <span class="font-semibold normal-case text-white">{tile.displayName}</span>
+                  <button class="text-white/60 hover:text-white" on:click={closeMenu} type="button">
+                    <i class="bx bx-x text-lg"></i>
+                  </button>
+                </div>
+                <div class="mt-3 space-y-3">
+                  <div>
+                    <div class="flex items-center justify-between text-xs uppercase tracking-wide text-white/40">
+                      <span>Volume</span>
+                      <span>{Math.round(tile.controls.volume * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={Math.round(tile.controls.volume * 100)}
+                      class="mt-2 w-full accent-[#5865f2]"
+                      on:input={(event) => {
+                        const target = event.currentTarget as HTMLInputElement;
+                        setParticipantVolume(tile.uid, Number(target.value) / 100);
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    class="flex w-full items-center justify-between rounded-lg bg-white/[0.06] px-3 py-2 text-left hover:bg-white/[0.12]"
+                    on:click={() => toggleParticipantMute(tile.uid)}
+                  >
+                    <span>{tile.controls.muted ? 'Unmute for me' : 'Mute for me'}</span>
+                    <i class={`bx ${tile.controls.muted ? 'bx-volume-full' : 'bx-volume-mute'} text-lg`}></i>
+                  </button>
+                  {#if canKickMembers}
+                    <button
+                      type="button"
+                      class="flex w-full items-center justify-between rounded-lg bg-red-500/10 px-3 py-2 text-left text-red-200 hover:bg-red-500/20"
+                      on:click={() => {
+                        const target = participants.find((p) => p.uid === tile.uid);
+                        if (target) kickParticipant(target);
+                        closeMenu();
+                      }}
+                    >
+                      <span>Remove from channel</span>
+                      <i class="bx bx-user-x text-lg"></i>
+                    </button>
+                  {/if}
                 </div>
               </div>
             {/if}
-            <div class="absolute inset-x-0 bottom-0 flex items-center justify-between bg-black/60 px-3 py-2 text-sm">
-              <span class="font-medium truncate pr-2">{primaryRemoteName}</span>
-              <span class="flex items-center gap-2 text-base">
-                <i class={`bx ${primaryRemoteAudio ? 'bx-microphone' : 'bx-microphone-off'} ${primaryRemoteAudio ? 'text-white' : 'text-red-400'}`}></i>
-                <i class={`bx ${primaryRemoteVideo ? 'bx-video' : 'bx-video-off'} ${primaryRemoteVideo ? 'text-white' : 'text-red-400'}`}></i>
-              </span>
-            </div>
           </div>
-        {/key}
-      {/if}
-
-      {#each extraRemote as participant (participant.uid)}
-        <div class="relative aspect-[5/4] md:aspect-square overflow-hidden rounded-xl border border-dashed border-white/10 bg-black/60 p-4">
-          <div class="flex h-full flex-col items-center justify-center gap-3 text-center text-white/70">
-            {#if participant.photoURL}
-              <img src={participant.photoURL} alt={participant.displayName} class="h-14 w-14 rounded-full object-cover" loading="lazy" />
-            {:else}
-              <div class="grid h-14 w-14 place-items-center rounded-full bg-[#6c75ff]/30 text-xl font-semibold text-white">
-                {avatarInitial(participant.displayName)}
-              </div>
-            {/if}
-            <div>
-              <div class="text-base font-semibold">{participant.displayName}</div>
-              <div class="mt-1 text-xs text-white/50">
-                {participant.hasVideo ? 'Video enabled' : 'Camera off'}
-              </div>
-              <div class="mt-1 flex justify-center gap-2 text-base">
-                <i class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off'} ${participant.hasAudio ? 'text-white/80' : 'text-red-400'}`}></i>
-                <i class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off'} ${participant.hasVideo ? 'text-white/80' : 'text-red-400'}`}></i>
-              </div>
-            </div>
-          </div>
-        </div>
-      {/each}
-
-      {#if selfParticipant || isJoined}
-        <div class="relative aspect-[5/4] md:aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/60">
-          <video
-            bind:this={localVideoEl}
-            autoplay
-            playsinline
-            muted
-            class="h-full w-full object-cover"
-          ></video>
-          {#if !localHasVideo}
-            <div class="absolute inset-0 grid place-items-center bg-black/70 text-sm tracking-wide text-white/70">
-              Camera off
-            </div>
-          {/if}
-          <div class="absolute inset-x-0 bottom-0 flex items-center justify-between bg-black/60 px-3 py-2 text-sm">
-            <span class="font-medium">You</span>
-            <span class="flex items-center gap-2 text-base">
-              <i class={`bx ${localHasAudio ? 'bx-microphone' : 'bx-microphone-off'} ${localHasAudio ? 'text-white' : 'text-red-400'}`}></i>
-              <i class={`bx ${localHasVideo ? 'bx-video' : 'bx-video-off'} ${localHasVideo ? 'text-white' : 'text-red-400'}`}></i>
-            </span>
-          </div>
-        </div>
-      {/if}
-
-      {#if participants.length === 0}
-        <div class="col-span-full grid place-items-center rounded-xl border border-dashed border-white/10 bg-black/50 p-6 text-center text-white/60">
-          You're the first one here. Enable your mic or camera to get started.
-        </div>
+        {/each}
       {/if}
     </div>
   </div>
 
-  <div class="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-black/40 p-3">
+  <div class="flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/40 p-3 md:p-4">
     {#if !isJoined}
       <button
         class="btn btn-primary"
         on:click={handleJoinClick}
         disabled={isConnecting || !serverId || !channelId}
       >
-        {isConnecting ? 'Joining...' : 'Join voice'}
+        {isConnecting ? 'Joining…' : 'Join Voice'}
       </button>
     {:else}
       <button class="btn btn-secondary" on:click={toggleMic}>
@@ -965,15 +1466,15 @@
         Leave
       </button>
     {/if}
-
     {#if statusMessage}
       <div class="text-sm text-white/60 md:ml-3">{statusMessage}</div>
     {/if}
   </div>
 
   {#if errorMessage}
-    <div class="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+    <div class="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
       {errorMessage}
     </div>
   {/if}
 </div>
+
