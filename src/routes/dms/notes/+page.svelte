@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DMsSidebar from '$lib/components/DMsSidebar.svelte';
+  import NotesBoard from '$lib/components/NotesBoard.svelte';
 
   let showThreads = false;
 
   const LEFT_RAIL = 72;
-  const EDGE_ZONE = 28;
-  const SWIPE_THRESHOLD = 64;
+  const EDGE_ZONE = 40;
+  const SWIPE_THRESHOLD = 48;
 
   let tracking = false;
   let startX = 0;
@@ -79,7 +80,7 @@
 
 <div class="flex flex-1 overflow-hidden panel-muted">
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle">
-    <DMsSidebar activeThreadId={null} />
+    <DMsSidebar activeThreadId="__notes" />
   </div>
 
   <div class="flex flex-1 flex-col panel">
@@ -89,7 +90,7 @@
           <button
             class="channel-header__toggle md:hidden"
             type="button"
-            aria-label="Open conversations"
+            aria-label="Show conversations"
             on:click={() => (showThreads = true)}
           >
             <i class="bx bx-chevron-left text-xl"></i>
@@ -97,24 +98,44 @@
         {/if}
         <div class="channel-header__title">
           <span class="channel-header__badge">
-            <i class="bx bx-message-dots" aria-hidden="true"></i>
+            <i class="bx bx-notepad" aria-hidden="true"></i>
           </span>
-          <span>Direct Messages</span>
+          <span>My Notes</span>
         </div>
       </div>
-      <div class="hidden sm:block text-xs text-soft">
-        Pick a friend to start chatting.
+      <div class="hidden text-xs text-muted uppercase tracking-[0.28em] sm:block">
+        Private to you
       </div>
     </header>
 
-    <main class="flex-1 panel-muted flex items-center justify-center text-soft p-6">
-      <div class="text-center max-w-md space-y-2">
-        <h1 class="text-xl font-semibold text-primary">Select a conversation</h1>
-        <p>Choose someone from your message list to begin chatting. Swipe right or tap the menu to open conversations on mobile.</p>
+    <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
+      <div class="mx-auto flex w-full max-w-5xl flex-col gap-6 sm:gap-8">
+        <div class="surface notes-surface px-5 py-4 text-sm text-muted sm:text-base">
+          Notes stay private to you and sync seamlessly across devices. Capture quick ideas, outline plans, and keep your personal tasks in reach.
+        </div>
+        <div class="surface notes-board-shell p-3 sm:p-5">
+          <div class="panel notes-board-panel border border-subtle p-4 sm:p-6 lg:p-8">
+            <NotesBoard />
+          </div>
+        </div>
       </div>
     </main>
   </div>
 </div>
+
+<style>
+  :global(.notes-surface) {
+    border-radius: calc(var(--radius-lg) * 1.1);
+  }
+
+  :global(.notes-board-shell) {
+    border-radius: calc(var(--radius-lg) * 1.2);
+  }
+
+  :global(.notes-board-panel) {
+    border-radius: calc(var(--radius-lg) * 1.3);
+  }
+</style>
 
 <div
   class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
@@ -123,14 +144,19 @@
   aria-label="Conversations"
 >
   <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showThreads = false)}>
+    <button
+      class="mobile-panel__close -ml-2"
+      aria-label="Close"
+      type="button"
+      on:click={() => (showThreads = false)}
+    >
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
     <div class="mobile-panel__title">Conversations</div>
   </div>
   <div class="flex-1 overflow-y-auto">
     <DMsSidebar
-      activeThreadId={null}
+      activeThreadId="__notes"
       on:select={() => (showThreads = false)}
       on:delete={() => (showThreads = false)}
     />

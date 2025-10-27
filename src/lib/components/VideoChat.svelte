@@ -1253,7 +1253,7 @@
   aria-hidden={!session || !sessionVisible}
 >
   {#if sessionChannelName}
-    <header class="flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 md:px-4">
+    <header class="flex flex-wrap items-center gap-3  border border-white/10 bg-white/[0.05] px-3 py-2.5 md:px-4">
       <div class="flex items-center gap-2 text-white">
         <i class="bx bx-headphone text-lg text-white/70" aria-hidden="true"></i>
         <span class="text-base font-semibold md:text-lg">{sessionChannelName}</span>
@@ -1273,7 +1273,7 @@
     </header>
   {/if}
 
-  <div class="flex items-center gap-2 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 md:px-4">
+  <div class="flex items-center gap-2 overflow-x-auto  border border-white/10 bg-white/[0.02] px-3 py-2 md:px-4">
     {#if participantTiles.length === 0}
       <div class="text-sm text-white/60">No one is in this voice channel yet.</div>
     {:else}
@@ -1303,19 +1303,19 @@
       style="grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));"
     >
       {#if participantTiles.length === 0}
-        <div class="col-span-full grid place-items-center rounded-2xl border border-dashed border-white/15 bg-black/40 px-6 py-8 text-center text-sm text-white/60">
+        <div class="col-span-full grid place-items-center  border border-dashed border-white/15 bg-black/40 px-6 py-8 text-center text-sm text-white/60">
           You're the first one here. Enable your mic or camera to get started.
         </div>
       {:else}
         {#each participantTiles as tile (tile.uid)}
           <div
-            class={`relative group rounded-2xl border border-white/10 bg-black/50 p-3 sm:p-4 transition ${tile.isSelf ? 'ring-1 ring-white/20' : ''}`}
+            class={`relative group  border border-white/10 bg-black/50 p-3 sm:p-4 transition ${tile.isSelf ? 'ring-1 ring-white/20' : ''}`}
             data-voice-menu
             on:touchstart={() => handleLongPressStart(tile.uid)}
             on:touchend={() => handleLongPressEnd(tile.uid)}
             on:touchcancel={() => handleLongPressEnd(tile.uid)}
           >
-            <div class="relative aspect-video w-full overflow-hidden rounded-xl bg-black/70">
+            <div class="relative aspect-video w-full overflow-hidden  bg-black/70">
               <video
                 use:videoSink={tile.uid}
                 autoplay
@@ -1377,12 +1377,12 @@
 
             {#if menuOpenFor === tile.uid && !tile.isSelf}
               <div
-                class="absolute inset-x-0 top-full z-20 mt-2 w-full min-w-[220px] rounded-xl border border-white/10 bg-[#14141a] p-3 text-sm text-white shadow-xl"
+                class="absolute inset-x-0 top-full z-20 mt-2 w-full min-w-[220px]  border border-white/10 bg-[#14141a] p-3 text-sm text-white shadow-xl"
                 data-voice-menu
               >
                 <div class="flex items-center justify-between text-xs uppercase tracking-wide text-white/50">
                   <span class="font-semibold normal-case text-white">{tile.displayName}</span>
-                  <button class="text-white/60 hover:text-white" on:click={closeMenu} type="button">
+                  <button class="text-white/60 hover:text-white" on:click={closeMenu} type="button" aria-label="Close participant menu">
                     <i class="bx bx-x text-lg"></i>
                   </button>
                 </div>
@@ -1407,7 +1407,7 @@
                   </div>
                   <button
                     type="button"
-                    class="flex w-full items-center justify-between rounded-lg bg-white/[0.06] px-3 py-2 text-left hover:bg-white/[0.12]"
+                    class="flex w-full items-center justify-between  bg-white/[0.06] px-3 py-2 text-left hover:bg-white/[0.12]"
                     on:click={() => toggleParticipantMute(tile.uid)}
                   >
                     <span>{tile.controls.muted ? 'Unmute for me' : 'Mute for me'}</span>
@@ -1416,7 +1416,7 @@
                   {#if canKickMembers}
                     <button
                       type="button"
-                      class="flex w-full items-center justify-between rounded-lg bg-red-500/10 px-3 py-2 text-left text-red-200 hover:bg-red-500/20"
+                      class="flex w-full items-center justify-between  bg-red-500/10 px-3 py-2 text-left text-red-200 hover:bg-red-500/20"
                       on:click={() => {
                         const target = participants.find((p) => p.uid === tile.uid);
                         if (target) kickParticipant(target);
@@ -1436,7 +1436,7 @@
     </div>
   </div>
 
-  <div class="flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/40 p-3 md:p-4">
+  <div class="flex flex-wrap items-center gap-2  border border-white/10 bg-black/40 p-3 md:p-4">
     {#if !isJoined}
       <button
         class="btn btn-primary"
@@ -1472,9 +1472,13 @@
   </div>
 
   {#if errorMessage}
-    <div class="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+    <div class="  border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
       {errorMessage}
     </div>
   {/if}
 </div>
+
+
+
+
 

@@ -25,6 +25,7 @@ type PermissionKey =
   | 'manageChannels'
   | 'kickMembers'
   | 'banMembers'
+  | 'reorderChannels'
   | 'viewChannels'
   | 'sendMessages'
   | 'manageMessages'
@@ -59,6 +60,7 @@ const DEFAULT_PERMS: Record<PermissionKey, boolean> = {
   manageChannels: false,
   kickMembers: false,
   banMembers: false,
+  reorderChannels: false,
   viewChannels: true,
   sendMessages: true,
   manageMessages: false,
@@ -67,7 +69,6 @@ const DEFAULT_PERMS: Record<PermissionKey, boolean> = {
 };
 
 function dlog(...args: any[]) {
-  // @ts-expect-error global debug switch
   if (typeof window !== 'undefined' && (window as any).__DEBUG) {
     console.debug('[servers.ts]', ...args);
   }
@@ -185,6 +186,7 @@ export async function createServer(
       manageRoles: true,
       manageChannels: true,
       manageMessages: true,
+      reorderChannels: true,
       kickMembers: true,
       banMembers: true,
     },
@@ -207,6 +209,7 @@ export async function createServer(
       manageRoles: true,
       manageChannels: true,
       manageMessages: true,
+      reorderChannels: true,
     },
   });
 
@@ -306,10 +309,22 @@ export function subscribeUserServers(
       current[id] = { id, name: data.name, icon: data.icon ?? null };
 
       if (!serverUnsubs[id]) {
+        const serverRef = doc(db, 'servers', id);
         serverUnsubs[id] = onSnapshot(
-          doc(db, 'servers', id),
+          serverRef,
           (sv) => {
-            if (!sv.exists()) void verifyAndMaybePurge(id);
+            if (!sv.exists()) {
+              void verifyAndMaybePurge(id);
+              return;
+            }
+            const payload = sv.data() as any;
+            const existing = current[id] ?? { id, name: payload?.name ?? 'Server', icon: null };
+            current[id] = {
+              ...existing,
+              name: payload?.name ?? existing.name,
+              icon: payload?.icon ?? existing.icon ?? null
+            };
+            emit();
           },
           () => {
             void verifyAndMaybePurge(id);
@@ -333,3 +348,5 @@ export function subscribeUserServers(
     for (const k in serverUnsubs) serverUnsubs[k]!();
   };
 }
+
+

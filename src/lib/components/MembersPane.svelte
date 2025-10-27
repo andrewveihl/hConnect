@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { db } from '$lib/db';
-  import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+  import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
 
   export let serverId: string;
   export let showHeader = true;
@@ -24,6 +24,13 @@
     [key: string]: unknown;
   };
 
+  type RoleDoc = {
+    id: string;
+    name: string;
+    color?: string | null;
+    position?: number;
+  };
+
   type PresenceState = 'online' | 'idle' | 'offline';
 
   type MemberRow = {
@@ -32,6 +39,8 @@
     avatar: string | null;
     status: PresenceState;
     tooltip: string;
+    baseRole: 'owner' | 'admin' | 'member' | null;
+    roles: RoleDoc[];
   };
 
   type PresenceDoc = {
@@ -49,9 +58,11 @@
   let members: Record<string, MemberDoc> = {};
   let profiles: Record<string, ProfileDoc> = {};
   let presenceDocs: Record<string, PresenceDoc> = {};
+  let roles: Record<string, RoleDoc> = {};
   let rows: MemberRow[] = [];
 
   let membersUnsub: Unsubscribe | null = null;
+  let rolesUnsub: Unsubscribe | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
   let currentServer: string | null = null;
@@ -199,12 +210,20 @@
       const label = labelFor(member.uid);
       const status = presenceState(member.uid);
       const tooltip = label === 'Member' ? member.uid : label;
+      const baseRole = typeof (member as any)?.role === 'string' ? ((member as any).role as 'owner' | 'admin' | 'member') : null;
+      const roleIds = Array.isArray((member as any)?.roleIds) ? ((member as any).roleIds as string[]) : [];
+      const resolvedRoles = roleIds
+        .map((id) => roles[id])
+        .filter((role): role is RoleDoc => !!role)
+        .sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
       return {
         uid: member.uid,
         label,
         avatar: avatarUrl(member.uid),
         status,
-        tooltip
+        tooltip,
+        baseRole,
+        roles: resolvedRoles
       };
     });
 
@@ -234,6 +253,7 @@
     profiles = {};
     members = {};
     presenceDocs = {};
+    roles = {};
     rows = [];
   }
 
@@ -253,12 +273,40 @@
     );
   }
 
+  function subscribeRoles(server: string) {
+    rolesUnsub?.();
+    const database = db();
+    const rolesRef = query(collection(database, 'servers', server, 'roles'), orderBy('position', 'desc'));
+    rolesUnsub = onSnapshot(
+      rolesRef,
+      (snap) => {
+        const next: Record<string, RoleDoc> = {};
+        snap.forEach((roleSnap) => {
+          const data = roleSnap.data() as any;
+          next[roleSnap.id] = {
+            id: roleSnap.id,
+            name: data?.name ?? 'Role',
+            color: data?.color ?? null,
+            position: data?.position ?? 0
+          };
+        });
+        roles = next;
+        updateRows();
+      },
+      () => {
+        roles = {};
+        updateRows();
+      }
+    );
+  }
+
   function subscribeMembers(server: string) {
     if (currentServer === server) return;
     currentServer = server;
 
     membersUnsub?.();
     cleanupProfiles();
+    subscribeRoles(server);
 
     const database = db();
     membersUnsub = onSnapshot(collection(database, 'servers', server, 'members'), (snap) => {
@@ -302,22 +350,26 @@
   } else {
     membersUnsub?.();
     membersUnsub = null;
+    rolesUnsub?.();
+    rolesUnsub = null;
+    roles = {};
     cleanupProfiles();
     currentServer = null;
   }
 
   onDestroy(() => {
     membersUnsub?.();
+    rolesUnsub?.();
     cleanupProfiles();
   });
 </script>
 
-<div class="flex flex-col h-full w-full bg-[#1e1f24] text-white">
+<div class="flex flex-col h-full w-full panel text-primary">
   {#if showHeader}
-    <div class="flex items-center gap-3 px-3 py-3 border-b border-black/40 text-white/70 sm:px-4">
-      <span class="text-sm font-semibold sm:text-base">Members</span>
+    <div class="flex items-center gap-3 px-3 py-3 border-b border-subtle text-soft sm:px-4">
+      <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
       <div class="ml-auto flex flex-1 justify-end">
-        <span class="inline-flex h-7 min-w-[3.5rem] items-center justify-center rounded-full bg-white/[0.08] px-3 text-xs font-semibold text-white/70 sm:h-8 sm:min-w-[4rem] sm:text-sm">
+        <span class="inline-flex h-7 min-w-[3.5rem] items-center justify-center rounded-full bg-white/[0.08] px-3 text-xs font-semibold text-soft sm:h-8 sm:min-w-[4rem] sm:text-sm">
           {rows.length}
         </span>
       </div>
@@ -328,36 +380,48 @@
       <ul class="flex w-full flex-col gap-2 p-0 m-0 list-none sm:gap-3">
         {#each rows as member (member.uid)}
           <li class="w-full">
-            <div class="flex w-full items-center gap-3 rounded-lg border border-white/5 bg-white/[0.05] px-4 py-2.5 transition-colors hover:bg-white/[0.08] sm:px-5 sm:py-3">
-              <div class="relative shrink-0">
-                <div class="w-10 h-10 sm:w-11 sm:h-11 rounded-full overflow-hidden bg-[#3f4248] grid place-items-center">
-                  {#if member.avatar}
-                    <img
-                      src={member.avatar}
-                      alt={member.label}
-                      class="h-full w-full object-cover"
-                      loading="lazy"
-                    />
-                  {:else}
-                    <i class="bx bx-user text-lg text-white/70"></i>
-                  {/if}
-                </div>
-                <span
-                  class={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border border-[#1e1f24] ${statusClass(member.status)}`}
-                  aria-hidden="true"
-                ></span>
+            <div class="member-card">
+              <div class="member-card__avatar">
+                {#if member.avatar}
+                  <img
+                    src={member.avatar}
+                    alt={member.label}
+                    class="h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                {:else}
+                  <i class="bx bx-user text-lg text-soft"></i>
+                {/if}
+                <span class={`member-card__status ${statusClass(member.status)}`} aria-hidden="true"></span>
               </div>
-              <div class="flex min-w-0 flex-1 flex-col">
-                <span class="text-sm font-medium truncate sm:text-base" title={member.tooltip}>
+              <div class="member-card__meta">
+                <span class="member-card__name" title={member.tooltip}>
                   {member.label}
                 </span>
+                {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
+                  <div class="member-roles">
+                    {#if member.baseRole === 'owner'}
+                      <span class="member-role" data-tone="owner">Owner</span>
+                    {:else if member.baseRole === 'admin'}
+                      <span class="member-role" data-tone="admin">Admin</span>
+                    {/if}
+                    {#each member.roles as role}
+                      <span
+                        class="member-role"
+                        style={role.color ? `--member-role-color: ${role.color}` : undefined}
+                      >
+                        {role.name}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             </div>
           </li>
         {/each}
       </ul>
     {:else}
-      <div class="text-xs text-white/50 px-2">No members yet.</div>
+      <div class="text-xs text-soft px-2">No members yet.</div>
     {/if}
   </div>
 </div>

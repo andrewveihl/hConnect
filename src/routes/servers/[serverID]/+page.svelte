@@ -26,10 +26,10 @@
   $: serverId =
     data?.serverId ??
     $page.params.serverID ??
-    $page.params.serverId ??
+    ($page.params as any).serverId ??
     null;
 
-  type Channel = { id: string; name?: string; type?: 'text' | 'voice'; position?: number };
+  type Channel = { id: string; name: string; type: 'text' | 'voice'; position?: number };
 
   let channels: Channel[] = [];
   let activeChannel: Channel | null = null;
@@ -357,8 +357,8 @@
   let showMembers = false;
 
   const LEFT_RAIL = 72;
-  const EDGE_ZONE = 28;
-  const SWIPE = 64;
+  const EDGE_ZONE = 40;
+  const SWIPE = 48;
 
   let tracking = false;
   let startX = 0;
@@ -458,7 +458,9 @@
     channelsUnsub = onSnapshot(q, (snap) => {
       channels = snap.docs.map((d) => {
         const x: any = d.data();
-        return { id: d.id, ...x, type: x.type ?? 'text' } as Channel;
+        const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'channel';
+        const type = x.type === 'voice' ? 'voice' : 'text';
+        return { id: d.id, ...x, name, type: type as 'text' | 'voice' } as Channel;
       });
 
       const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
@@ -649,10 +651,10 @@ Layout:
 - md (≥768): rail + channels + chat
 - xl (≥1280): rail + channels + chat + members
 -->
-<div class="flex h-dvh bg-[#0b111b] text-white overflow-hidden">
+<div class="flex h-dvh app-bg text-primary overflow-hidden">
   <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
-  <div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
-    <div class="hidden md:flex md:w-64 xl:w-72 flex-col border-r border-black/40 bg-[#1e1f24]">
+  <div class="flex flex-1 overflow-hidden panel-muted">
+    <div class="hidden md:flex md:w-64 xl:w-72 flex-col border-r border-subtle">
       {#if serverId}
         <ServerSidebar
           serverId={serverId}
@@ -664,14 +666,22 @@ Layout:
       {/if}
     </div>
 
-    <div class="flex flex-1 flex-col bg-[#2b2d31] overflow-hidden">
+    <div class="flex flex-1 flex-col panel overflow-hidden">
       <ChannelHeader
         channel={activeChannel}
-        onOpenChannels={() => (showChannels = true)}
-        onOpenMembers={() => (showMembers = true)}
+        channelsVisible={showChannels}
+        membersVisible={showMembers}
+        onToggleChannels={() => {
+          showChannels = true;
+          showMembers = false;
+        }}
+        onToggleMembers={() => {
+          showMembers = true;
+          showChannels = false;
+        }}
       />
 
-      <div class="flex-1 overflow-hidden bg-[#313338]">
+      <div class="flex-1 overflow-hidden panel-muted">
         <div class="h-full" style:display={voiceState?.visible ? 'block' : 'none'}>
           <VideoChat />
         </div>
@@ -690,21 +700,21 @@ Layout:
               />
             </div>
             {#if voiceState && !voiceState.visible}
-              <div class="shrink-0 border-y border-black/40 bg-[#26282f] px-3 py-2 text-sm text-white/80 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div class="shrink-0 border-y border-subtle px-3 py-2 text-sm text-soft flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <div class="flex-1 truncate">
-                  <span class="font-semibold text-white">Voice connected</span>
-                  <span class="ml-1 text-white/60">#{voiceState.channelName}</span>
+                  <span class="font-semibold text-primary">Voice connected</span>
+                  <span class="ml-1 text-soft">#{voiceState.channelName}</span>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                   <button
-                    class="rounded-md bg-white/15 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/25"
+                    class="  bg-white/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-white/25"
                     type="button"
                     on:click={() => voiceSession.setVisible(true)}
                   >
                     Return to voice
                   </button>
                   <button
-                    class="rounded-md bg-red-500/80 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+                    class="btn btn-danger px-3 py-1.5 text-sm font-medium"
                     type="button"
                     on:click={() => voiceSession.leave()}
                   >
@@ -713,7 +723,7 @@ Layout:
                 </div>
               </div>
             {/if}
-            <div class="shrink-0 border-t border-black/40 bg-[#2b2d31] p-3">
+            <div class="shrink-0 border-t border-subtle panel-muted p-3">
               <ChatInput
                 placeholder={`Message #${activeChannel?.name ?? ''}`}
                 onSend={handleSend}
@@ -723,7 +733,7 @@ Layout:
               />
             </div>
           {:else}
-            <div class="h-full grid place-items-center text-white/60">
+            <div class="h-full grid place-items-center text-soft">
               {#if !serverId}
                 <div>Pick a server to start chatting.</div>
               {:else}
@@ -735,11 +745,11 @@ Layout:
       </div>
     </div>
 
-    <div class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">
+    <div class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
       {#if serverId}
         <MembersPane {serverId} />
       {:else}
-        <div class="p-4 text-white/70">No server selected.</div>
+        <div class="p-4 text-muted">No server selected.</div>
       {/if}
     </div>
   </div>
@@ -749,17 +759,21 @@ Layout:
 
 <!-- Channels panel (slides from left) -->
 <div
-  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-50 bg-[#2b2d31] text-white flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-50 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showChannels ? 'translateX(0)' : 'translateX(-100%)'}
   aria-label="Channels"
 >
   <!-- mobile-only top bar (prevents stray arrow on desktop) -->
-  <div class="md:hidden h-12 px-2 flex items-center gap-2 border-b border-black/40">
-    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15"
-            aria-label="Back to chat" on:click={() => (showChannels = false)}>
+  <div class="mobile-panel__header md:hidden">
+    <button
+      class="mobile-panel__close -ml-2"
+      aria-label="Back to chat"
+      type="button"
+      on:click={() => (showChannels = false)}
+    >
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
-    <div class="text-xs uppercase tracking-wide text-white/60">Channels</div>
+    <div class="mobile-panel__title">Channels</div>
   </div>
 
   <div class="flex-1 overflow-y-auto">
@@ -778,16 +792,20 @@ Layout:
 
 <!-- Members panel (slides from right) -->
 <div
-  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-50 bg-[#2b2d31] text-white flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-50 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showMembers ? 'translateX(0)' : 'translateX(100%)'}
   aria-label="Members"
 >
-  <div class="md:hidden h-12 px-2 flex items-center gap-2 border-b border-black/40">
-    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15"
-            aria-label="Back to chat" on:click={() => (showMembers = false)}>
-      <i class="bx bx-chevron-left text-2xl"></i>
+  <div class="mobile-panel__header md:hidden">
+    <button
+      class="mobile-panel__close -ml-2"
+      aria-label="Back to chat"
+      type="button"
+      on:click={() => (showMembers = false)}
+    >
+      <i class="bx bx-chevron-right text-2xl"></i>
     </button>
-    <div class="text-xs uppercase tracking-wide text-white/60">Members</div>
+    <div class="mobile-panel__title">Members</div>
   </div>
 
   <div class="flex-1 overflow-y-auto">
@@ -800,4 +818,7 @@ Layout:
 </div>
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
+
+
+
 

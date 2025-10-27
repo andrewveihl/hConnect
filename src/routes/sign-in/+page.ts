@@ -4,10 +4,10 @@ export const ssr = false;
 import { redirect } from '@sveltejs/kit';
 
 export async function load() {
-  const { getFirebase, completeRedirectIfNeeded, waitForAuthInit } = await import('$lib/firebase');
+  const { completeRedirectIfNeeded, waitForAuthInit, ensureFirebaseReady } = await import('$lib/firebase');
   await completeRedirectIfNeeded?.();
   await waitForAuthInit();
-  const { auth } = getFirebase();
-  if (auth.currentUser) throw redirect(302, '/');
+  const { auth } = await ensureFirebaseReady();
+  if (auth?.currentUser) throw redirect(302, '/');
   return {};
 }

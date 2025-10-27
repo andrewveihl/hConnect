@@ -23,8 +23,8 @@ export async function createChannel(
   const chRef = doc(channelsCol);
   const payload =
     type === 'text'
-      ? { id: chRef.id, type: 'text', name, position, topic: null, isPrivate, createdAt: serverTimestamp() }
-      : { id: chRef.id, type: 'voice', name, position, bitrate: 64000, userLimit: null, isPrivate, createdAt: serverTimestamp() };
+      ? { id: chRef.id, type: 'text', name, position, topic: null, isPrivate, allowedRoleIds: [], createdAt: serverTimestamp() }
+      : { id: chRef.id, type: 'voice', name, position, bitrate: 64000, userLimit: null, isPrivate, allowedRoleIds: [], createdAt: serverTimestamp() };
 
   await setDoc(chRef, payload);
   return chRef.id;

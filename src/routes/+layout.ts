@@ -4,14 +4,14 @@ export const ssr = false;
 import { redirect } from '@sveltejs/kit';
 
 export async function load({ url }) {
-  const { getFirebase, completeRedirectIfNeeded, waitForAuthInit } = await import('$lib/firebase');
+  const { completeRedirectIfNeeded, waitForAuthInit, ensureFirebaseReady } = await import('$lib/firebase');
 
   await completeRedirectIfNeeded?.();
   // Wait for Firebase to finish resolving the current session.
   await waitForAuthInit();
+  const { auth } = await ensureFirebaseReady();
 
-  const { auth } = getFirebase();
-  const isSignedIn = !!auth.currentUser;
+  const isSignedIn = !!auth?.currentUser;
 
   // Only public path is /sign-in (and its children if you ever add any)
   const isSignInRoute = url.pathname === '/sign-in' || url.pathname.startsWith('/sign-in/');

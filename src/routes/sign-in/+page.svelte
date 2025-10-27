@@ -7,25 +7,20 @@
   let status = 'Ready';
   let errorMsg = '';
 
-  // If auth state flips to a user while on this page, leave immediately.
   onMount(() => {
     const unsub = user.subscribe((u) => {
-      if (u) goto('/'); // or '/app'
+      if (u) goto('/');
     });
     return unsub;
   });
 
   async function google() {
-    status = 'Opening Google…';
+    status = 'Opening Google...';
     errorMsg = '';
     try {
-      const res = await signInWithGoogle(); // uses your firebase.ts
-      if (res?.user) {
-        status = 'Signed in ✔';
-        goto('/');
-      } else {
-        status = 'Ready';
-      }
+      await signInWithGoogle();
+      status = 'Signed in';
+      goto('/');
     } catch (e: any) {
       errorMsg = e?.message || String(e);
       status = 'Failed';
@@ -33,16 +28,12 @@
   }
 
   async function apple() {
-    status = 'Opening Apple…';
+    status = 'Opening Apple...';
     errorMsg = '';
     try {
-      const res = await signInWithApple(); // uses your firebase.ts
-      if (res?.user) {
-        status = 'Signed in ✔';
-        goto('/');
-      } else {
-        status = 'Ready';
-      }
+      await signInWithApple();
+      status = 'Signed in';
+      goto('/');
     } catch (e: any) {
       errorMsg = e?.message || String(e);
       status = 'Failed';
@@ -55,12 +46,11 @@
 <div class="min-h-dvh grid place-items-center">
   <div class="w-[92%] max-w-md rounded-3xl bg-white/5 backdrop-blur-xl shadow-2xl ring-1 ring-white/10 p-8 sm:p-10">
     <div class="mb-6 text-center">
-      <div class="mx-auto mb-4 h-12 w-12 rounded-2xl bg-white/10 grid place-items-center">💬</div>
-      <h1 class="text-2xl font-semibold">Welcome</h1>
+      <div class="mx-auto mb-4 h-12 w-12 rounded-2xl bg-white/10 grid place-items-center">HC</div>
+      <h1 class="text-2xl"><span class="font-semibold">Welcome</span></h1>
       <p class="text-white/70">Sign in to continue</p>
     </div>
 
-    <!-- Status + error -->
     <div class="mb-4 text-xs">
       <div class="text-white/80">Status: {status}</div>
       {#if errorMsg}<div class="text-rose-400">{errorMsg}</div>{/if}

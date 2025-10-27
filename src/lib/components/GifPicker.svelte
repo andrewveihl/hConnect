@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { browser } from '$app/environment';
   import { PUBLIC_TENOR_API_KEY } from '$env/static/public';
@@ -55,28 +55,24 @@
 
   if (browser) searchTenor('');
 </script>
-
 <div class="gif-backdrop" role="dialog" aria-modal="true" aria-label="GIF picker">
   <div class="gif-panel">
     <div class="gif-header">
       <h3 class="gif-title">Add a GIF</h3>
       <button type="button" class="gif-close" on:click={() => dispatch('close')} aria-label="Close picker">
-        ×
+        <i class="bx bx-x" aria-hidden="true"></i>
       </button>
     </div>
 
-    <form
-      class="gif-search"
-      on:submit|preventDefault={() => searchTenor(q)}
-    >
+    <form class="gif-search" on:submit|preventDefault={() => searchTenor(q)}>
       <input
-        class="gif-search-input"
+        class="input flex-1 min-w-[200px]"
         placeholder="Search Tenor…"
         bind:value={q}
         inputmode="search"
         autocomplete="off"
       />
-      <button type="submit" class="gif-search-btn" disabled={loading}>
+      <button type="submit" class="btn btn-primary btn-sm" disabled={loading}>
         {#if loading}
           Searching…
         {:else}
@@ -86,12 +82,12 @@
     </form>
 
     {#if errorMsg}
-      <div class="gif-error">{errorMsg}</div>
+      <div class="gif-message gif-message--error">{errorMsg}</div>
     {/if}
 
     <div class="gif-grid-scroll" role="list">
       {#if loading && !gifs.length}
-        <div class="gif-loading">Fetching GIFs…</div>
+        <div class="gif-message">Fetching GIFs…</div>
       {:else if gifs.length}
         <div class="gif-grid">
           {#each gifs as g}
@@ -106,9 +102,9 @@
           {/each}
         </div>
       {:else if PUBLIC_TENOR_API_KEY}
-        <div class="gif-empty-state">No results. Try another search term.</div>
+        <div class="gif-message">No results. Try another search term.</div>
       {:else}
-        <div class="gif-empty-state">Add a Tenor API key to enable search.</div>
+        <div class="gif-message">Add a Tenor API key to enable search.</div>
       {/if}
     </div>
 
@@ -117,7 +113,7 @@
       <div class="gif-url-row">
         <input
           id="gif-url"
-          class="gif-url-input"
+          class="input flex-1 min-w-[200px]"
           type="url"
           inputmode="url"
           placeholder="https://media.tenor.com/your.gif"
@@ -125,7 +121,7 @@
         />
         <button
           type="button"
-          class="gif-add-btn"
+          class="btn btn-primary btn-sm min-w-[110px]"
           on:click={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
           disabled={!urlPaste.trim()}
         >
@@ -143,12 +139,11 @@
     z-index: 50;
     display: flex;
     flex-direction: column;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(6px);
+    background: color-mix(in srgb, var(--color-app-overlay) 65%, transparent);
+    backdrop-filter: blur(8px);
     padding: 1rem;
     padding-top: calc(env(safe-area-inset-top, 1rem) + 0.5rem);
     padding-bottom: calc(env(safe-area-inset-bottom, 1rem) + 0.75rem);
-    overflow: hidden;
   }
 
   @media (min-width: 640px) {
@@ -161,16 +156,17 @@
 
   .gif-panel {
     width: 100%;
-    max-width: 640px;
-    background: rgba(17, 24, 39, 0.95);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    max-width: 680px;
+    background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     border-radius: clamp(1rem, 2vw, 1.5rem);
     padding: clamp(1rem, 4vw, 1.5rem);
     display: flex;
     flex-direction: column;
-    min-height: min(640px, 100%);
+    min-height: min(620px, 100%);
     max-height: 100%;
-    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-elevated);
+    color: var(--color-text-primary);
   }
 
   .gif-header {
@@ -184,80 +180,38 @@
   .gif-title {
     font-size: clamp(1.15rem, 4vw, 1.35rem);
     font-weight: 600;
-    color: #fff;
     margin: 0;
   }
 
   .gif-close {
     width: 2.25rem;
     height: 2.25rem;
-    border-radius: 9999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.08);
-    color: #fff;
-    font-size: 1.4rem;
-    line-height: 1;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    color: var(--color-text-primary);
     display: grid;
     place-items: center;
+    font-size: 1.3rem;
+    transition: background 120ms ease, border 120ms ease;
   }
 
-  .gif-close:active,
-  .gif-close:focus-visible,
   .gif-close:hover {
-    background: rgba(255, 255, 255, 0.18);
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
   }
 
   .gif-search {
     display: flex;
-    gap: 0.65rem;
-    margin-bottom: 0.75rem;
+    align-items: center;
+    gap: 0.6rem;
     flex-wrap: wrap;
-  }
-
-  .gif-search-input {
-    flex: 1 1 220px;
-    min-width: 0;
-    border-radius: 0.75rem;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(17, 20, 30, 0.9);
-    padding: 0.65rem 0.85rem;
-    color: #fff;
-    font-size: 0.95rem;
-  }
-
-  .gif-search-input::placeholder {
-    color: rgba(255, 255, 255, 0.35);
-  }
-
-  .gif-search-btn {
-    border-radius: 0.75rem;
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
-    font-weight: 600;
-    padding: 0.65rem 1.1rem;
-  }
-
-  .gif-search-btn:active,
-  .gif-search-btn:focus-visible,
-  .gif-search-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .gif-search-btn:disabled {
-    opacity: 0.5;
-    cursor: progress;
+    margin-bottom: 1.25rem;
   }
 
   .gif-subtitle {
-    color: rgba(255, 255, 255, 0.68);
+    color: var(--text-60);
     font-size: 0.95rem;
-    margin: 0 0 1.1rem 0;
-  }
-
-  .gif-error {
-    color: #fca5a5;
-    font-size: 0.9rem;
-    margin-bottom: 0.75rem;
   }
 
   .gif-grid-scroll {
@@ -267,12 +221,15 @@
     padding-right: 0.35rem;
   }
 
-  .gif-loading,
-  .gif-empty-state {
-    color: rgba(255, 255, 255, 0.65);
+  .gif-message {
+    color: var(--text-60);
     font-size: 0.95rem;
     text-align: center;
     padding: 1.5rem 0.5rem;
+  }
+
+  .gif-message--error {
+    color: color-mix(in srgb, var(--color-danger) 75%, white);
   }
 
   .gif-grid {
@@ -289,10 +246,10 @@
 
   .gif-item {
     position: relative;
-    border-radius: 0.9rem;
+    border-radius: var(--radius-md);
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
     padding: 0;
   }
 
@@ -308,7 +265,7 @@
     content: '';
     position: absolute;
     inset: 0;
-    background: linear-gradient(135deg, rgba(88, 101, 242, 0) 0%, rgba(88, 101, 242, 0.25) 100%);
+    background: linear-gradient(135deg, transparent 0%, color-mix(in srgb, var(--color-accent) 40%, transparent) 100%);
     opacity: 0;
     transition: opacity 0.2s ease;
   }
@@ -326,17 +283,17 @@
   }
 
   .gif-footer {
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     padding-top: 1rem;
     margin-top: auto;
   }
 
   .gif-footer-label {
     display: block;
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
+    font-size: 0.75rem;
+    letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.55);
+    color: var(--text-60);
     margin-bottom: 0.6rem;
   }
 
@@ -347,42 +304,17 @@
     flex-wrap: wrap;
   }
 
-  .gif-url-input {
-    flex: 1 1 200px;
-    min-width: 0;
-    border-radius: 0.75rem;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(17, 20, 30, 0.9);
-    padding: 0.65rem 0.85rem;
-    color: #fff;
-    font-size: 0.95rem;
+  :global(:root[data-theme='light']) .gif-backdrop {
+    background: color-mix(in srgb, var(--color-app-overlay) 55%, transparent);
   }
 
-  .gif-url-input::placeholder {
-    color: rgba(255, 255, 255, 0.35);
+  :global(:root[data-theme='light']) .gif-panel {
+    background: color-mix(in srgb, var(--color-panel) 99%, transparent);
   }
 
-  .gif-add-btn {
-    flex: 0 0 auto;
-    border-radius: 0.75rem;
-    background: #5865f2;
-    color: #fff;
-    font-weight: 600;
-    padding: 0.65rem 1.15rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 110px;
-  }
-
-  .gif-add-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .gif-add-btn:active,
-  .gif-add-btn:focus-visible,
-  .gif-add-btn:hover {
-    background: #4752c4;
+  :global(:root[data-theme='light']) .gif-item {
+    background: color-mix(in srgb, var(--color-panel) 96%, transparent);
   }
 </style>
+
+

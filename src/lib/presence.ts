@@ -14,13 +14,15 @@ const windowUnsubs: Array<() => void> = [];
 
 const HEARTBEAT_INTERVAL = 60 * 1000;
 
-function addWindowListener<E extends keyof WindowEventMap>(
+type WindowEventKey = keyof WindowEventMap | 'visibilitychange';
+
+function addWindowListener<E extends WindowEventKey>(
   event: E,
-  handler: (event: WindowEventMap[E]) => void
+  handler: (event: E extends keyof WindowEventMap ? WindowEventMap[E] : Event) => void
 ) {
   if (!browser) return () => {};
-  window.addEventListener(event, handler);
-  return () => window.removeEventListener(event, handler);
+  window.addEventListener(event as keyof WindowEventMap, handler as EventListener);
+  return () => window.removeEventListener(event as keyof WindowEventMap, handler as EventListener);
 }
 
 function clearHeartbeat() {

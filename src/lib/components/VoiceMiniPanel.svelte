@@ -70,17 +70,17 @@
 </script>
 
 {#if session && serverId === session.serverId}
-  <div class="rounded-xl border border-white/10 bg-[#1f232b] text-white p-3 shadow-sm">
+  <div class="  border border-white/10 bg-[#1f232b] text-white p-3 shadow-sm">
     <div class="flex items-start gap-2">
       <div class="flex-1 min-w-0">
         <div class="text-emerald-400 text-sm font-semibold">Voice Connected</div>
         <div class="text-xs text-white/70 truncate">{namesLine || session.channelName}</div>
       </div>
       <div class="flex items-center gap-2">
-        <button class="h-8 w-8 grid place-items-center rounded-md hover:bg-white/10" title="Open voice" on:click={openVoice}>
+        <button class="h-8 w-8 grid place-items-center  hover:bg-white/10" title="Open voice" aria-label="Open voice" on:click={openVoice}>
           <i class="bx bx-bar-chart"></i>
         </button>
-        <button class="h-8 w-8 grid place-items-center rounded-md hover:bg-red-500/20 text-red-300" title="Leave" on:click={leaveCall}>
+        <button class="h-8 w-8 grid place-items-center  hover:bg-red-500/20 text-red-300" title="Leave" aria-label="Leave" on:click={leaveCall}>
           <i class="bx bx-phone"></i>
         </button>
       </div>
@@ -112,19 +112,23 @@
 
     <!-- Quick actions (visual only for now) -->
     <div class="mt-3 grid grid-cols-4 gap-2">
-      <button class="h-9 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10" title="Video" on:click={openVoice}>
+      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Video" aria-label="Video" on:click={openVoice}>
         <i class="bx bx-video"></i>
       </button>
-      <button class="h-9 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10" title="Screen share" on:click={openVoice}>
+      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Screen share" aria-label="Screen share" on:click={openVoice}>
         <i class="bx bx-desktop"></i>
       </button>
-      <button class="h-9 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10" title="Invite" on:click={openVoice}>
+      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Invite" aria-label="Invite" on:click={openVoice}>
         <i class="bx bx-user-plus"></i>
       </button>
-      <button class="h-9 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10" title="Noise control" on:click={openVoice}>
+      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Noise control" aria-label="Noise control" on:click={openVoice}>
         <i class="bx bx-volume-low"></i>
       </button>
     </div>
   </div>
 {/if}
+
+
+
+
 
