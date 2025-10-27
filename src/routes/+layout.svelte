@@ -1,6 +1,7 @@
 <!-- src/routes/+layout.svelte -->
 <script lang="ts">
   import '../app.css';
+  import '$lib/stores/theme';
   import { onMount } from 'svelte';
   import { startAuthListener } from '$lib/firebase';
   import { startPresenceService } from '$lib/presence';
@@ -44,6 +45,6 @@
 </svelte:head>
 
 <!-- Full-screen app surface -->
-<div class="min-h-dvh bg-[rgb(3,7,18)] text-white">
+<div class="min-h-dvh app-bg">
   <slot />
 </div>

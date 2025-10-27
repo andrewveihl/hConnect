@@ -47,11 +47,12 @@
 
 {#if session}
   <div class="hidden md:grid place-items-center w-full">
-    <div class="relative my-1 w-12 h-12 grid place-items-center rounded-3xl bg-[#243042] ring-2 ring-emerald-400/40 hover:bg-[#2c3a50] transition-all select-none"
-         role="button" tabindex="0"
-         aria-label="Voice connected. Click to return. Shift+Click to leave."
-         title={`Voice: ${session.channelName}`}
-         on:click={(e) => (e.shiftKey ? leave() : openVoice())}
+    <button
+      type="button"
+      class="relative my-1 w-12 h-12 grid place-items-center bg-[#243042] ring-2 ring-emerald-400/40 hover:bg-[#2c3a50] transition-all select-none"
+      aria-label="Voice connected. Click to return. Shift+Click to leave."
+      title={`Voice: ${session.channelName}`}
+      on:click={(e) => (e.shiftKey ? leave() : openVoice())}
     >
       <i class="bx bx-headphone text-xl text-emerald-300"></i>
       {#if participants > 0}
@@ -59,7 +60,11 @@
           {participants}
         </span>
       {/if}
-    </div>
+    </button>
   </div>
 {/if}
+
+
+
+
 

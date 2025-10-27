@@ -36,7 +36,6 @@
   let unsubSent: (() => void) | null = null;
 
   function dlog(...args: any[]) {
-    // @ts-expect-error global debug flag
     if (typeof window !== 'undefined' && (window as any).__DEBUG) {
       console.debug('[InvitePanel]', ...args);
     }
@@ -97,7 +96,12 @@
   }
 
   async function onAccept(inv: ServerInvite) {
-    const res = await acceptInvite(inv.id!, $user.uid);
+    const me = $user?.uid;
+    if (!me) {
+      alert('You need to be signed in to accept invites.');
+      return;
+    }
+    const res = await acceptInvite(inv.id!, me);
     if (!res.ok) {
       alert(`Accept failed: ${res.error ?? 'Unknown'}`);
       console.debug('[InvitePanel] acceptInvite failed', inv, res);
@@ -107,7 +111,12 @@
   }
 
   async function onDecline(inv: ServerInvite) {
-    const res = await declineInvite(inv.id!, $user.uid);
+    const me = $user?.uid;
+    if (!me) {
+      alert('You need to be signed in to decline invites.');
+      return;
+    }
+    const res = await declineInvite(inv.id!, me);
     if (!res.ok) {
       alert(`Decline failed: ${res.error ?? 'Unknown'}`);
       console.debug('[InvitePanel] declineInvite failed', inv, res);
@@ -118,7 +127,7 @@
 
   onMount(async () => {
     // If the parent page has a param, use it; otherwise try from $page
-    serverId = serverId ?? $page.params.serverId ?? null;
+    serverId = serverId ?? $page.params.serverID ?? null;
 
     if ($user?.uid) {
       unsubInbox?.();
@@ -160,7 +169,7 @@
   <h2 class="text-lg font-semibold">Invites</h2>
 
   <!-- Inbox -->
-  <div class="rounded-lg border border-white/10 bg-white/5">
+  <div class="  border border-white/10 bg-white/5">
     <div class="px-4 py-3 border-b border-white/10 font-medium">Your Pending Invites</div>
     <div class="p-4">
       {#if !$user}
@@ -170,12 +179,12 @@
       {:else}
         <ul class="space-y-3">
           {#each invites as inv (inv.id)}
-            <li class="p-3 rounded-md bg-white/5 border border-white/10 flex items-center justify-between gap-3">
+            <li class="p-3  bg-white/5 border border-white/10 flex items-center justify-between gap-3">
               <div class="flex items-center gap-3">
                 {#if inv.serverIcon}
-                  <img alt="" src={inv.serverIcon} class="w-10 h-10 rounded-md object-cover" />
+                  <img alt="" src={inv.serverIcon} class="w-10 h-10  object-cover" />
                 {:else}
-                  <div class="w-10 h-10 rounded-md bg-white/10 grid place-items-center">🏷</div>
+                  <div class="w-10 h-10  bg-white/10 grid place-items-center">🏷</div>
                 {/if}
                 <div>
                   <div class="font-medium">{inv.serverName ?? inv.serverId}</div>
@@ -198,7 +207,7 @@
 
   <!-- Invite by UID (only if this Settings view is for a specific server + user is owner/admin) -->
   {#if serverId && (isOwner || isAdmin)}
-    <div class="rounded-lg border border-white/10 bg-white/5">
+    <div class="  border border-white/10 bg-white/5">
       <div class="px-4 py-3 border-b border-white/10 font-medium">Invite a User (by UID)</div>
       <div class="p-4 flex items-center gap-2">
         <input
@@ -223,3 +232,6 @@
     </div>
   {/if}
 </div>
+
+
+

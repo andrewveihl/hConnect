@@ -227,7 +227,7 @@
     <div class="relative">
       <i class="bx bx-search absolute left-3 top-2.5 text-white/50"></i>
       <input
-        class="w-full pl-9 pr-3 py-2 rounded-xl bg-white/5 outline-none focus:ring-2 ring-white/20"
+        class="w-full pl-9 pr-3 py-2  bg-white/5 outline-none focus:ring-2 ring-white/20"
         placeholder="Search people by name…"
         bind:value={term}
         on:input={onSearchInput}
@@ -240,12 +240,12 @@
   <!-- Search results -->
   {#if results.length > 0}
     <div class="px-2 mt-2">
-      <div class="text-xs uppercase tracking-wide text-white/40 px-2 mb-1">Search results</div>
+      <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Search results</div>
       <ul class="space-y-1">
         {#each results as u}
           <li>
             <button
-              class="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-white/5"
+              class="w-full flex items-center gap-3 px-2 py-2  hover:bg-white/5"
               on:click={() => openOrStartDM(u.uid)}
             >
               <img class="w-8 h-8 rounded-full object-cover" src={u.photoURL || '/static/demo-cursor.png'} alt="" />
@@ -262,19 +262,20 @@
 
   <div class="mt-4 flex-1 overflow-y-auto px-2 pb-4 space-y-6">
     <section>
-      <div class="text-xs uppercase tracking-wide text-white/40 px-2 mb-1">Personal</div>
+      <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Personal</div>
       <ul class="space-y-1 pr-1">
         <li>
           <a
-            href="/notes"
-            class="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-white/5 focus:outline-none"
+            href="/dms/notes"
+            class={`channel-row ${activeThreadId === '__notes' ? 'channel-row--active' : ''}`}
+            on:click={() => dispatch('select', { id: '__notes' })}
           >
             <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
               <i class="bx bx-notepad text-lg"></i>
             </div>
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium leading-5 truncate">My Notes</div>
-              <div class="text-xs text-white/50 truncate">Keep-like personal notes</div>
+              <div class="text-xs text-soft truncate">Private to you</div>
             </div>
           </a>
         </li>
@@ -282,12 +283,12 @@
     </section>
 
     <section>
-      <div class="text-xs uppercase tracking-wide text-white/40 px-2 mb-1">Messages</div>
+      <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Messages</div>
       <ul class="space-y-0.5 pr-1">
         {#each threads as t}
           {@const isActive = activeThreadId === t.id}
           <li>
-            <div class={`flex items-center gap-2 px-2 py-2 rounded-lg ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+            <div class={`flex items-center gap-2 px-2 py-2  ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
               <button
                 class="flex-1 flex items-center gap-3 text-left focus:outline-none"
                 on:click={() => openExisting(t.id)}
@@ -306,7 +307,7 @@
                 {/if}
               </button>
               <button
-                class="p-2 rounded-md hover:bg-white/10 text-white/70 hover:text-white transition"
+                class="p-2  hover:bg-white/10 text-white/70 hover:text-white transition"
                 aria-label="Delete conversation"
                 on:click|stopPropagation={() => deleteThread(t.id)}
               >
@@ -322,12 +323,12 @@
     </section>
 
     <section>
-      <div class="text-xs uppercase tracking-wide text-white/40 px-2 mb-1">All people</div>
+      <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">All people</div>
       <ul class="space-y-1 pr-1">
         {#each people as p}
           <li>
             <button
-              class="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-white/5"
+              class="w-full flex items-center gap-3 px-2 py-2  hover:bg-white/5"
               on:click={() => openOrStartDM(p.uid)}
             >
               <img class="w-8 h-8 rounded-full object-cover" src={p.photoURL || '/static/demo-cursor.png'} alt="" />
@@ -345,3 +346,7 @@
     </section>
   </div>
 </aside>
+
+
+
+

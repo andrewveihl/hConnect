@@ -13,6 +13,7 @@ import { buildMessageDocument, reactionKeyFromEmoji, type MessageInput } from '.
 export type MinimalUser = {
   uid: string;
   displayName?: string;   // from profiles.name (fallback displayName)
+  name?: string | null;
   photoURL?: string | null;
   email?: string | null;
 };

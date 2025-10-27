@@ -143,7 +143,25 @@
 </div>
 
 <style>
-  .btn { @apply rounded-md px-3 py-1.5 text-sm; }
-  .btn-ghost { @apply bg-white/0 hover:bg-white/10 text-white; }
-  .btn-primary { @apply bg-[#5865f2] hover:bg-[#4752c4] text-white; }
+  .btn {
+    @apply rounded-md px-3 py-1.5 text-sm;
+  }
+
+  .btn-ghost {
+    @apply text-white;
+    background-color: transparent;
+  }
+
+  .btn-ghost:hover {
+    background-color: rgb(255 255 255 / 0.1);
+  }
+
+  .btn-primary {
+    @apply text-white;
+    background-color: #5865f2;
+  }
+
+  .btn-primary:hover {
+    background-color: #4752c4;
+  }
 </style>

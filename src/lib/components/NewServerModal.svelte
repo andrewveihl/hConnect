@@ -65,7 +65,7 @@
     <!-- Centered modal panel -->
     <div class="absolute inset-0 grid place-items-center p-4">
       <div
-        class="relative z-10 bg-[#2b2d31] text-white rounded-2xl shadow-xl w-full max-w-md p-6"
+        class="relative z-10 bg-[#2b2d31] text-white  shadow-xl w-full max-w-md p-6"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-server-title"
@@ -107,3 +107,6 @@
     </div>
   </div>
 {/if}
+
+
+

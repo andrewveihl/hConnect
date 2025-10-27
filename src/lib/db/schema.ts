@@ -1,5 +1,6 @@
 export type PermissionKey =
   | 'manageServer' | 'manageRoles' | 'manageChannels' | 'kickMembers' | 'banMembers'
+  | 'reorderChannels'
   | 'viewChannels' | 'sendMessages' | 'manageMessages' | 'connectVoice' | 'speakVoice';
 
 export type Role = {

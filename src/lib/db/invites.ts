@@ -35,7 +35,6 @@ export type ServerInvite = {
 };
 
 function dlog(...args: any[]) {
-  // @ts-expect-error global debug switch
   if (typeof window !== 'undefined' && (window as any).__DEBUG) {
     console.debug('[invites.ts]', ...args);
   }

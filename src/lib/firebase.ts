@@ -150,6 +150,17 @@ export async function signOutUser() {
 }
 export const signOutNow = signOutUser;
 
+async function afterLoginEnsureDoc() {
+  await ensureFirebaseReady();
+  const current = auth?.currentUser;
+  if (!current) return;
+  await ensureUserDoc(current.uid, {
+    email: current.email,
+    name: current.displayName ?? (current.email ? current.email.split('@')[0] : current.uid),
+    photoURL: current.photoURL
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* App-level auth listener (call once from root)                      */
 /* ------------------------------------------------------------------ */

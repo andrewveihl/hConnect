@@ -3,7 +3,7 @@
 
   const dispatch = createEventDispatcher();
 
-  export type ChatMessage =
+  type ChatMessage =
     | { id: string; uid?: string; createdAt?: any; displayName?: string; text: string; type?: 'text' }
     | { id: string; uid?: string; createdAt?: any; displayName?: string; url: string; type: 'gif' }
     | { id: string; uid?: string; createdAt?: any; displayName?: string; file: { name: string; size?: number; url: string; contentType?: string }; type: 'file' }
@@ -31,13 +31,15 @@
 
   function nameFor(m: any) {
     const uid = m.uid ?? 'unknown';
-    return (
+    const fromMap = users[uid] ?? {};
+    const resolved =
       m.displayName ||
-      users[uid]?.displayName ||
-      users[uid]?.name ||
-      users[uid]?.email ||
-      (uid === currentUserId ? 'You' : 'Member')
-    );
+      fromMap.displayName ||
+      fromMap.name ||
+      fromMap.email;
+    if (resolved) return resolved;
+    if (uid === currentUserId) return 'You';
+    return fromMap.username || fromMap.handle || uid || 'Unknown';
   }
 
   function avatarUrlFor(m: any) {
@@ -108,7 +110,7 @@
   let reactionMenuAnchor: HTMLElement | null = null;
   let reactionMenuEl: HTMLDivElement | null = null;
   let reactionMenuPosition = { top: 0, left: 0 };
-  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let longPressTimer: number | null = null;
   let longPressStart: { x: number; y: number } | null = null;
   let longPressTarget: HTMLElement | null = null;
 
@@ -336,7 +338,15 @@
   const formInputId = (mId: string, idx: number) => `form-${mId}-${idx}`;
 </script>
 
-<style>\n  .chat-scroll { -ms-overflow-style: none; scrollbar-width: none; }\n  .chat-scroll::-webkit-scrollbar { display: none; }\n
+<style>
+  .chat-scroll {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .chat-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
   .bar {
     height: 6px;
     border-radius: 9999px;
@@ -348,152 +358,57 @@
     display: block;
     height: 100%;
     background: currentColor;
-    opacity: 0.7;
   }
 
-  .reaction-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.15rem 0.6rem;
-    border-radius: 9999px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.08);
-    font-size: 0.8rem;
-    color: #fff;
-    transition: background 0.15s ease, border 0.15s ease, transform 0.15s ease;
+  .message-enter {
+    opacity: 0;
+    transform: translateY(12px);
   }
 
-  .reaction-chip .count {
-    font-size: 0.7rem;
-    opacity: 0.75;
-  }
-
-  .reaction-row {
-    position: relative;
-    display: flex;
-    align-items: center;
-    padding-right: 2.25rem;
-    min-height: 1.75rem;
-    gap: 0.5rem;
-  }
-
-  .reaction-list {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .reaction-chip:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.16);
-    border-color: rgba(255, 255, 255, 0.18);
-  }
-
-  .reaction-chip:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-  }
-
-  .reaction-chip.active {
-    border-color: rgba(88, 101, 242, 0.6);
-    background: rgba(88, 101, 242, 0.25);
-  }
-
-  .reaction-add {
-    width: 1.75rem;
-    height: 1.75rem;
-    border-radius: 9999px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #fff;
-    display: grid;
-    place-items: center;
-    font-size: 1rem;
-    transition: background 0.15s ease, border 0.15s ease;
-  }
-
-  .reaction-add:hover {
-    background: rgba(255, 255, 255, 0.16);
-  }
-
-  .reaction-add:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-  }
-
-  .reaction-add-inline {
-    position: absolute;
-    right: 0;
-    top: 50%;
-    transform: translateY(-50%);
+  .message-enter-active {
+    transition: opacity 150ms ease, transform 150ms ease;
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .reaction-menu {
-    position: fixed;
-    z-index: 60;
-    background: rgba(31, 36, 48, 0.95);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 0.6rem;
-    padding: 0.4rem;
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 0.25rem;
-    min-width: 9rem;
-    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
-    backdrop-filter: blur(8px);
-  }
-
-  .reaction-menu button {
-    background: none;
-    border: none;
-    font-size: 1.25rem;
-    line-height: 1;
-    border-radius: 0.4rem;
-    padding: 0.25rem;
-    cursor: pointer;
-    transition: background 0.15s ease, transform 0.15s ease;
-  }
-
-  .reaction-menu button:hover {
-    background: rgba(255, 255, 255, 0.15);
-    transform: translateY(-1px);
-  }
-
-  .reaction-menu .custom {
-    grid-column: span 5;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: rgba(255, 255, 255, 0.7);
+    min-width: 180px;
+    max-width: min(90vw, 320px);
+    background: rgba(18, 22, 28, 0.95);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+    padding: 0.75rem;
+    backdrop-filter: blur(16px);
+    z-index: 500;
   }
 
   .reaction-menu-backdrop {
     position: fixed;
     inset: 0;
     background: transparent;
-    z-index: 50;
+    cursor: pointer;
+    z-index: 400;
   }
 
-  .chat-gif {
-    display: block;
-    width: 100%;
-    max-width: 320px;
-    height: auto;
-    border-radius: 0.75rem;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    object-fit: cover;
+  .reaction-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(40px, 1fr));
+    gap: 0.4rem;
   }
 
-  .chat-gif.mine {
-    margin-left: auto;
+  .reaction-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    font-size: 1.25rem;
+    background: rgba(255, 255, 255, 0.08);
+    color: inherit;
   }
 
-  @media (max-width: 640px) {
-    .chat-gif {
-      max-width: min(100%, 280px);
-    }
+  .reaction-button:hover {
+    background: rgba(255, 255, 255, 0.16);
   }
 </style>
 
@@ -558,7 +473,7 @@
                 </div>
               {:else if m.type === 'gif' && (m as any).url}
                 <img
-                  class={`chat-gif ${mine ? 'mine' : ''}`}
+                  class={`chat-gif rounded-3xl ${mine ? 'mine' : ''}`}
                   src={(m as any).url}
                   alt="GIF"
                   loading="lazy"
@@ -578,17 +493,17 @@
                 </a>
               {:else if m.type === 'poll' && (m as any).poll}
                 {#await Promise.resolve((m as any).poll) then poll}
-                  <div class={`rounded-lg border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                  <div class={`rounded-2xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
                     <div class="font-medium mb-2">Poll: {poll.question}</div>
                     {#each poll.options as opt, idx}
-                      <div class="rounded-md border border-white/10 p-2 bg-white/5 mb-2">
+                      <div class="rounded-2xl border border-white/10 p-2 bg-white/5 mb-2">
                         <div class="flex items-center justify-between gap-2">
                           <div>{opt}</div>
                           <div class="text-sm text-white/60">{pct(poll.votes, idx)}%</div>
                         </div>
                         <div class="bar mt-2" style="color:#5865f2"><i style="width: {pct(poll.votes, idx)}%"></i></div>
                         <div class="mt-2 text-right">
-                          <button class="rounded-md px-2 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
+                          <button class="rounded-full px-3 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
                         </div>
                       </div>
                     {/each}
@@ -596,7 +511,7 @@
                   </div>
                 {/await}
               {:else if m.type === 'form' && (m as any).form}
-                <div class={`rounded-lg border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                <div class={`rounded-2xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
                   <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
                   {#each (m as any).form.questions as q, qi}
                     {#key `${m.id}-${qi}`}
@@ -605,7 +520,7 @@
                     {/key}
                   {/each}
                   <div class="flex justify-end">
-                    <button class="rounded-md px-3 py-2 bg-[#5865f2] hover:bg-[#4752c4]" on:click={() => submitForm(m)}>Submit</button>
+                    <button class="rounded-full px-4 py-2 bg-[#5865f2] hover:bg-[#4752c4]" on:click={() => submitForm(m)}>Submit</button>
                   </div>
                 </div>
               {/if}
@@ -647,7 +562,7 @@
 </div>
 
 {#if reactionMenuFor && currentUserId}
-  <div class="reaction-menu-backdrop" on:click={closeReactionMenu}></div>
+  <button type="button" class="reaction-menu-backdrop" aria-label="Close reactions" on:click={closeReactionMenu}></button>
   <div
     class="reaction-menu"
     bind:this={reactionMenuEl}
@@ -659,4 +574,10 @@
     <button type="button" class="custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
   </div>
 {/if}
+
+
+
+
+
+
 

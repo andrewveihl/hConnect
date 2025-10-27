@@ -8,5 +8,5 @@ module.exports = {
     "[backface-visibility:hidden]",
   ],
   theme: { extend: {} },
-  plugins: [require("@tailwindplus/elements")],
+  plugins: [],
 };

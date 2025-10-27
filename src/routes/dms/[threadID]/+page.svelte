@@ -486,8 +486,8 @@ $: {
     (otherProfile ? 'Member' : 'Direct Message');
 </script>
 
-<div class="flex flex-1 overflow-hidden bg-[#1e1f24]">
-  <div class="hidden md:flex md:w-80 flex-col border-r border-black/40 bg-[#1e1f24]">
+<div class="flex flex-1 overflow-hidden panel-muted">
+  <div class="hidden md:flex md:w-80 flex-col border-r border-subtle panel-muted">
     <DMsSidebar
       bind:this={sidebarRef}
       activeThreadId={threadID}
@@ -501,11 +501,11 @@ $: {
     />
   </div>
 
-  <div class="flex flex-1 flex-col bg-[#2b2d31] overflow-hidden">
-    <header class="h-14 px-3 sm:px-4 flex items-center justify-between border-b border-black/40 bg-[#1e1f24]">
+  <div class="flex flex-1 flex-col panel overflow-hidden">
+    <header class="h-14 px-3 sm:px-4 flex items-center justify-between border-b border-subtle panel-muted">
       <div class="flex items-center gap-3 min-w-0">
         <button
-          class="md:hidden p-2 rounded-md hover:bg-white/10 active:bg-white/15 transition"
+          class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
           aria-label="Open conversations"
           on:click={() => (showThreads = true)}
         >
@@ -524,7 +524,7 @@ $: {
         </div>
       </div>
       <button
-        class="md:hidden p-2 rounded-md hover:bg-white/10 active:bg-white/15 transition"
+        class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
         aria-label="View profile"
         on:click={() => (showInfo = true)}
       >
@@ -532,7 +532,7 @@ $: {
       </button>
     </header>
 
-    <main class="flex-1 overflow-hidden bg-[#313338]">
+    <main class="flex-1 overflow-hidden panel-muted">
       <div class="h-full flex flex-col">
         <div class="flex-1 overflow-hidden p-3 sm:p-4">
           <MessageList
@@ -547,7 +547,7 @@ $: {
       </div>
     </main>
 
-    <div class="border-t border-black/40 bg-[#2b2d31] p-3">
+    <div class="border-t border-subtle panel p-3">
       <ChatInput
         placeholder={`Message ${displayName}`}
         on:send={onSend}
@@ -559,7 +559,7 @@ $: {
     </div>
   </div>
 
-  <aside class="hidden lg:flex lg:w-72 xl:w-80 bg-[#1e1f24] border-l border-black/40 overflow-y-auto">
+  <aside class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
     <div class="p-4 w-full">
       {#if metaLoading}
         <div class="animate-pulse text-white/50">Loading profile...</div>
@@ -600,16 +600,16 @@ $: {
 
 <!-- Mobile overlays -->
 <div
-  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
-  <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">
-    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15" aria-label="Close" on:click={() => (showThreads = false)}>
+  <div class="mobile-panel__header md:hidden">
+    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showThreads = false)}>
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
-    <div class="text-xs uppercase tracking-wide text-white/60">Conversations</div>
+    <div class="mobile-panel__title">Conversations</div>
   </div>
   <div class="flex-1 overflow-y-auto">
     <DMsSidebar
@@ -626,21 +626,21 @@ $: {
 </div>
 
 <div
-  class="md:hidden fixed inset-y-0 right-0 left-[72px] z-40 bg-[#1e1f24] flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showInfo ? 'translateX(0)' : 'translateX(100%)'}
   style:pointer-events={showInfo ? 'auto' : 'none'}
   aria-label="Profile"
 >
-  <div class="h-12 px-2 flex items-center gap-2 border-b border-black/40">
-    <button class="p-2 -ml-2 rounded-md hover:bg-white/10 active:bg-white/15" aria-label="Close" on:click={() => (showInfo = false)}>
+  <div class="mobile-panel__header md:hidden">
+    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showInfo = false)}>
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
-    <div class="text-xs uppercase tracking-wide text-white/60">Profile</div>
+    <div class="mobile-panel__title">Profile</div>
   </div>
 
   <div class="flex-1 overflow-y-auto p-4">
     {#if metaLoading}
-      <div class="animate-pulse text-white/50">Loading profile…</div>
+      <div class="animate-pulse text-soft">Loading profile…</div>
     {:else if otherProfile}
       <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
         <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
@@ -674,3 +674,7 @@ $: {
     {/if}
   </div>
 </div>
+
+
+
+

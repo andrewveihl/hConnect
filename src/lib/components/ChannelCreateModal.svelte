@@ -10,8 +10,8 @@
   // fallback to route param if prop not passed
   $: serverIdFinal =
     serverId ??
-    $page.params.serverId ??
-    ($page.params as any).serversID ??
+    $page.params.serverID ??
+    ($page.params as any).serverId ??
     ($page.params as any).id;
 
   let chName = '';
@@ -58,7 +58,7 @@
 
     <div class="absolute inset-0 grid place-items-center p-4">
       <div
-        class="relative z-10 bg-[#2b2d31] text-white rounded-2xl shadow-xl w-full max-w-md p-6"
+        class="relative z-10 bg-[#2b2d31] text-white  shadow-xl w-full max-w-md p-6"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-channel-title"
@@ -115,3 +115,6 @@
     </div>
   </div>
 {/if}
+
+
+
