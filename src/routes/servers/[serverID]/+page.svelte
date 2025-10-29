@@ -36,6 +36,8 @@
   let messages: any[] = [];
   let profiles: Record<string, any> = {};
   const profileUnsubs: Record<string, Unsubscribe> = {};
+  let serverDisplayName = 'Server';
+  let serverMetaUnsub: Unsubscribe | null = null;
 
   function pickString(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -332,7 +334,7 @@
       clearMessagesUnsub();
       cleanupProfileSubscriptions();
       profiles = {};
-      voiceSession.join(serverId, id, next.name ?? 'Voice channel');
+      voiceSession.join(serverId, id, next.name ?? 'Voice channel', serverDisplayName);
       voiceSession.setVisible(true);
     } else {
       subscribeMessages(serverId, id);
@@ -450,6 +452,35 @@
     return () => cleanup();
   });
 
+  $: {
+    if (serverId) {
+      serverMetaUnsub?.();
+      const database = db();
+      const ref = doc(database, 'servers', serverId);
+      serverMetaUnsub = onSnapshot(
+        ref,
+        (snap) => {
+          const data = snap.data() as any;
+          const nextName =
+            pickString(data?.displayName) ??
+            pickString(data?.name) ??
+            pickString(data?.title) ??
+            'Server';
+          serverDisplayName = nextName;
+          voiceSession.setServerName(serverId, nextName);
+        },
+        () => {
+          serverDisplayName = 'Server';
+          voiceSession.setServerName(serverId, 'Server');
+        }
+      );
+    } else {
+      serverMetaUnsub?.();
+      serverMetaUnsub = null;
+      serverDisplayName = 'Server';
+    }
+  }
+
   // subscribe to channels
   $: if (serverId) {
     const database = db();
@@ -505,7 +536,8 @@
     clearMessagesUnsub();
     cleanupProfileSubscriptions();
     unsubscribeVoice();
-    voiceSession.leave();
+    serverMetaUnsub?.();
+    serverMetaUnsub = null;
   });
 
   // Persist read state when tab is hidden
@@ -634,8 +666,8 @@
     }
   }
 
-  $: if (voiceState && serverId && voiceState.serverId !== serverId) {
-    voiceSession.leave();
+  $: if (voiceState && serverId && voiceState.serverId !== serverId && voiceState.visible) {
+    voiceSession.setVisible(false);
   }
 
   // mobile: when switching servers, open channels panel
@@ -666,7 +698,7 @@ Layout:
       {/if}
     </div>
 
-    <div class="flex flex-1 flex-col panel overflow-hidden">
+    <div class="flex flex-1 flex-col panel">
       <ChannelHeader
         channel={activeChannel}
         channelsVisible={showChannels}
@@ -681,12 +713,44 @@ Layout:
         }}
       />
 
-      <div class="flex-1 overflow-hidden panel-muted">
-        <div class="h-full" style:display={voiceState?.visible ? 'block' : 'none'}>
+      <div class={`flex-1 panel-muted flex flex-col ${voiceState?.visible ? '' : 'overflow-hidden'}`}>
+        {#if voiceState && voiceState.visible}
           <VideoChat />
-        </div>
+        {:else}
+          {#if voiceState && !voiceState.visible}
+            <div class="shrink-0 border-b border-subtle px-3 py-2 text-sm text-soft flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div class="flex-1 truncate">
+                <span class="font-semibold text-primary">Voice connected</span>
+                <span class="ml-1 text-soft flex flex-wrap items-center gap-1">
+                  <span>#{voiceState.channelName}</span>
+                  <span class="text-white/40">&bull;</span>
+                  <span class="text-[11px] uppercase tracking-wide text-white/60 md:text-xs">
+                    {voiceState.serverName ?? voiceState.serverId}
+                  </span>
+                  {#if serverId && voiceState.serverId !== serverId}
+                    <span class="rounded-full bg-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-white/60">other server</span>
+                  {/if}
+                </span>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <button
+                  class="bg-white/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-white/25"
+                  type="button"
+                  on:click={() => voiceSession.setVisible(true)}
+                >
+                  Return to voice
+                </button>
+                <button
+                  class="btn btn-danger px-3 py-1.5 text-sm font-medium"
+                  type="button"
+                  on:click={() => voiceSession.leave()}
+                >
+                  Leave
+                </button>
+              </div>
+            </div>
+          {/if}
 
-        <div class="h-full flex flex-col" style:display={voiceState?.visible ? 'none' : 'flex'}>
           {#if serverId && activeChannel}
             <div class="flex-1 overflow-hidden p-3 sm:p-4">
               <MessageList
@@ -699,31 +763,10 @@ Layout:
                 on:loadMore={() => serverId && activeChannel?.id && loadOlderMessages(serverId, activeChannel.id)}
               />
             </div>
-            {#if voiceState && !voiceState.visible}
-              <div class="shrink-0 border-y border-subtle px-3 py-2 text-sm text-soft flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <div class="flex-1 truncate">
-                  <span class="font-semibold text-primary">Voice connected</span>
-                  <span class="ml-1 text-soft">#{voiceState.channelName}</span>
-                </div>
-                <div class="flex flex-wrap items-center gap-2">
-                  <button
-                    class="  bg-white/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-white/25"
-                    type="button"
-                    on:click={() => voiceSession.setVisible(true)}
-                  >
-                    Return to voice
-                  </button>
-                  <button
-                    class="btn btn-danger px-3 py-1.5 text-sm font-medium"
-                    type="button"
-                    on:click={() => voiceSession.leave()}
-                  >
-                    Leave
-                  </button>
-                </div>
-              </div>
-            {/if}
-            <div class="shrink-0 border-t border-subtle panel-muted p-3">
+            <div
+              class="shrink-0 border-t border-subtle panel-muted p-3"
+              style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
+            >
               <ChatInput
                 placeholder={`Message #${activeChannel?.name ?? ''}`}
                 onSend={handleSend}
@@ -733,7 +776,7 @@ Layout:
               />
             </div>
           {:else}
-            <div class="h-full grid place-items-center text-soft">
+            <div class="flex-1 grid place-items-center text-soft">
               {#if !serverId}
                 <div>Pick a server to start chatting.</div>
               {:else}
@@ -741,7 +784,7 @@ Layout:
               {/if}
             </div>
           {/if}
-        </div>
+        {/if}
       </div>
     </div>
 

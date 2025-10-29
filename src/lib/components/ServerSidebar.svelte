@@ -693,8 +693,8 @@ $: if (reorderMode === 'default') {
     <div class="px-3 pt-2 text-xs text-red-300">{orderError}</div>
   {/if}
 
-  <div class="p-3 space-y-4 overflow-y-auto">
-    {#if activeVoice && computedServerId === activeVoice.serverId}
+<div class="p-3 space-y-4 overflow-y-auto overflow-x-hidden">
+    {#if activeVoice}
       <!-- Desktop-only mini voice panel -->
       <div class="hidden md:block">
         <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
@@ -756,7 +756,7 @@ $: if (reorderMode === 'default') {
             {#if canManageChannels && reorderMode === 'none'}
               <div class="channel-actions shrink-0">
                 <button
-                  class="h-7 w-7 grid place-items-center rounded hover:bg-white/10"
+                  class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10"
                   title="Rename"
                   aria-label="Rename channel"
                   on:click={() => renameChannel(c.id, c.name)}
@@ -764,7 +764,7 @@ $: if (reorderMode === 'default') {
                   <i class="bx bx-edit text-sm"></i>
                 </button>
                 <button
-                  class="h-7 w-7 grid place-items-center rounded hover:bg-white/10 text-red-400"
+                  class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10 text-red-400"
                   title="Delete"
                   aria-label="Delete channel"
                   on:click={() => deleteChannel(c.id, c.name)}
@@ -858,7 +858,7 @@ $: if (reorderMode === 'default') {
 
           {#if (voicePresence[c.id]?.length ?? 0) > 0}
             <div class="channel-voice-presence">
-              <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2">
                 <div class="flex items-center -space-x-2">
                   {#each voicePresence[c.id].slice(0, 4) as member (member.uid)}
                     <div class="channel-voice-avatar">

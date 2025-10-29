@@ -1,16 +1,24 @@
-<!-- src/routes/+layout.svelte -->
+﻿<!-- src/routes/+layout.svelte -->
 <script lang="ts">
   import '../app.css';
   import '$lib/stores/theme';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { startAuthListener } from '$lib/firebase';
   import { startPresenceService } from '$lib/presence';
   import { browser } from '$app/environment';
   import { afterNavigate } from '$app/navigation';
   import { registerFirebaseMessagingSW } from '$lib/notify/push';
+  import VoiceMiniPanel from '$lib/components/VoiceMiniPanel.svelte';
+  import { voiceSession } from '$lib/stores/voice';
+  import type { VoiceSession } from '$lib/stores/voice';
 
   // App name used everywhere (tab title, social tags)
   const APP_TITLE = 'hConnect';
+
+  let activeVoice: VoiceSession | null = null;
+  const stopVoice = voiceSession.subscribe((value) => {
+    activeVoice = value;
+  });
 
   // Re-assert after every route change (overrides page-level titles)
   afterNavigate(() => {
@@ -34,6 +42,10 @@
       stopAuth?.();
     };
   });
+
+  onDestroy(() => {
+    stopVoice?.();
+  });
 </script>
 
 <svelte:head>
@@ -45,6 +57,16 @@
 </svelte:head>
 
 <!-- Full-screen app surface -->
-<div class="min-h-dvh app-bg">
+<div class="min-h-dvh app-bg relative">
   <slot />
+  {#if activeVoice && !activeVoice.visible}
+    <div
+      class="pointer-events-none fixed left-0 right-0 z-30 flex justify-center px-4"
+      style:bottom="calc(1rem + env(safe-area-inset-bottom, 0px))"
+    >
+      <div class="pointer-events-auto w-full max-w-lg">
+        <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} />
+      </div>
+    </div>
+  {/if}
 </div>

@@ -412,7 +412,12 @@
   }
 </style>
 
-<div bind:this={scroller} class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3 chat-scroll" on:scroll={handleScroll}>
+<div
+  bind:this={scroller}
+  class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3 chat-scroll"
+  style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)"
+  on:scroll={handleScroll}
+>
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">
       <div class="text-center text-white/60 space-y-1">
