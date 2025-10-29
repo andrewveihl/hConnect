@@ -25,24 +25,26 @@
   $: {
     unsub?.();
     participants = [];
-    if (!serverId || !session?.channelId || !session?.serverId) {
+    if (!session?.serverId || !session?.channelId) {
       unsub = null;
-    } else if (serverId === session.serverId) {
+    } else {
       const db = getDb();
       const callDoc = doc(db, 'servers', session.serverId, 'channels', session.channelId, 'calls', CALL_DOC_ID);
       const ref = collection(callDoc, 'participants');
       unsub = onSnapshot(ref, (snap) => {
-        const list: VoiceParticipant[] = snap.docs.map((d) => {
-          const data = d.data() as any;
-          return {
-            uid: data.uid ?? d.id,
-            displayName: data.displayName ?? 'Member',
-            photoURL: data.photoURL ?? null,
-            hasAudio: data.hasAudio ?? true,
-            hasVideo: data.hasVideo ?? false,
-            status: (data.status ?? 'active') as 'active' | 'left'
-          };
-        }).filter((p) => p.status !== 'left');
+        const list: VoiceParticipant[] = snap.docs
+          .map((d) => {
+            const data = d.data() as any;
+            return {
+              uid: data.uid ?? d.id,
+              displayName: data.displayName ?? 'Member',
+              photoURL: data.photoURL ?? null,
+              hasAudio: data.hasAudio ?? true,
+              hasVideo: data.hasVideo ?? false,
+              status: (data.status ?? 'active') as 'active' | 'left'
+            };
+          })
+          .filter((p) => p.status !== 'left');
         participants = list;
       });
     }
@@ -67,66 +69,259 @@
   }
 
   $: namesLine = participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', ');
+  $: serverLabel = session?.serverName ?? session?.serverId ?? 'Server';
+  $: connectedElsewhere = !!session && !!serverId && session.serverId !== serverId;
 </script>
 
-{#if session && serverId === session.serverId}
-  <div class="  border border-white/10 bg-[#1f232b] text-white p-3 shadow-sm">
-    <div class="flex items-start gap-2">
-      <div class="flex-1 min-w-0">
-        <div class="text-emerald-400 text-sm font-semibold">Voice Connected</div>
-        <div class="text-xs text-white/70 truncate">{namesLine || session.channelName}</div>
+{#if session}
+  <div class="voice-mini panel-muted border border-subtle rounded-2xl px-3 py-3 sm:px-4 sm:py-3">
+    <div class="voice-mini__header">
+      <div class="voice-mini__avatar">
+        <i class="bx bx-headphone text-lg"></i>
       </div>
-      <div class="flex items-center gap-2">
-        <button class="h-8 w-8 grid place-items-center  hover:bg-white/10" title="Open voice" aria-label="Open voice" on:click={openVoice}>
-          <i class="bx bx-bar-chart"></i>
+      <div class="min-w-0 flex-1">
+        <div class="voice-mini__title">
+          <span class="truncate text-sm font-semibold text-primary sm:text-base">#{session.channelName}</span>
+          <span class="voice-mini__separator">/</span>
+          <span class="text-[11px] uppercase tracking-wide text-soft sm:text-xs">{serverLabel}</span>
+          {#if connectedElsewhere}
+            <span class="voice-mini__tag voice-mini__tag--remote">Other server</span>
+          {/if}
+        </div>
+        {#if namesLine}
+          <div class="voice-mini__subtitle">{namesLine}</div>
+        {/if}
+      </div>
+      <div class="voice-mini__actions">
+        <button class="voice-mini__button" type="button" title="Open call" aria-label="Open call" on:click={openVoice}>
+          <i class="bx bx-window-open text-lg"></i>
         </button>
-        <button class="h-8 w-8 grid place-items-center  hover:bg-red-500/20 text-red-300" title="Leave" aria-label="Leave" on:click={leaveCall}>
-          <i class="bx bx-phone"></i>
+        <button class="voice-mini__button voice-mini__button--danger" type="button" title="Leave call" aria-label="Leave call" on:click={leaveCall}>
+          <i class="bx bx-phone-off text-lg"></i>
         </button>
       </div>
     </div>
 
-    <!-- Participants row -->
     {#if participants.length}
-      <div class="mt-2 flex items-center gap-2 overflow-hidden">
+      <div class="voice-mini__avatars">
         {#each participants.slice(0, 6) as p (p.uid)}
-          <div class="relative h-8 w-8 rounded-full overflow-hidden bg-white/10 border border-white/10 shrink-0">
+          <div class="voice-mini__avatar-chip">
             {#if p.photoURL}
-              <img src={p.photoURL} alt={p.displayName} class="w-full h-full object-cover" loading="lazy" />
+              <img src={p.photoURL} alt={p.displayName} class="h-full w-full object-cover" loading="lazy" />
             {:else}
-              <div class="w-full h-full grid place-items-center text-[11px] text-white/80">{initials(p.displayName)}</div>
+              <div class="grid h-full w-full place-items-center text-[11px] font-semibold text-primary">
+                {initials(p.displayName)}
+              </div>
             {/if}
             {#if p.hasAudio === false}
-              <i class="bx bx-microphone-off absolute -bottom-0.5 -right-0.5 text-[13px] text-red-400 drop-shadow"></i>
+              <i class="bx bx-microphone-off voice-mini__badge voice-mini__badge--audio"></i>
             {/if}
             {#if p.hasVideo === false}
-              <i class="bx bx-video-off absolute -top-0.5 -left-0.5 text-[13px] text-white/80 drop-shadow"></i>
+              <i class="bx bx-video-off voice-mini__badge voice-mini__badge--video"></i>
             {/if}
           </div>
         {/each}
         {#if participants.length > 6}
-          <div class="h-8 px-2 grid place-items-center rounded-full bg-white/10 text-xs text-white/70">+{participants.length - 6}</div>
+          <div class="voice-mini__more">+{participants.length - 6}</div>
         {/if}
       </div>
     {/if}
 
-    <!-- Quick actions (visual only for now) -->
-    <div class="mt-3 grid grid-cols-4 gap-2">
-      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Video" aria-label="Video" on:click={openVoice}>
-        <i class="bx bx-video"></i>
-      </button>
-      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Screen share" aria-label="Screen share" on:click={openVoice}>
-        <i class="bx bx-desktop"></i>
-      </button>
-      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Invite" aria-label="Invite" on:click={openVoice}>
-        <i class="bx bx-user-plus"></i>
-      </button>
-      <button class="h-9  bg-white/5 border border-white/10 hover:bg-white/10" title="Noise control" aria-label="Noise control" on:click={openVoice}>
-        <i class="bx bx-volume-low"></i>
-      </button>
+    <div class="voice-mini__footer">
+      <div class="voice-mini__status">
+        <span class="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-soft">
+          <span class="relative flex h-2 w-2">
+            <span class={`absolute inline-flex h-full w-full rounded-full opacity-75 ${participants.length ? 'bg-emerald-400 animate-ping' : 'bg-white/25'}`}></span>
+            <span class={`relative inline-flex h-2 w-2 rounded-full ${participants.length ? 'bg-emerald-400' : 'bg-white/40'}`}></span>
+          </span>
+          {participants.length} connected
+        </span>
+        <button class="voice-mini__pill" type="button" on:click={openVoice}>
+          Manage
+        </button>
+        <button class="voice-mini__pill" type="button" on:click={openVoice}>
+          Share
+        </button>
+      </div>
     </div>
   </div>
 {/if}
+
+<style>
+  .voice-mini {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .voice-mini__header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .voice-mini__avatar {
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: var(--radius-lg);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text-primary);
+  }
+
+  .voice-mini__title {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .voice-mini__separator {
+    color: var(--text-50);
+  }
+
+  .voice-mini__tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-60);
+  }
+
+  .voice-mini__tag--remote {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-70);
+  }
+
+  .voice-mini__subtitle {
+    font-size: 0.75rem;
+    color: var(--text-55);
+    margin-top: 0.15rem;
+  }
+
+  .voice-mini__actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .voice-mini__button {
+    display: grid;
+    place-items: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-70);
+    transition: background 150ms ease, color 150ms ease;
+  }
+
+  .voice-mini__button:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .voice-mini__button--danger {
+    background: color-mix(in srgb, var(--color-danger) 18%, transparent);
+    color: color-mix(in srgb, var(--color-danger) 80%, white);
+  }
+
+  .voice-mini__button--danger:hover {
+    background: color-mix(in srgb, var(--color-danger) 28%, transparent);
+  }
+
+  .voice-mini__avatars {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .voice-mini__avatar-chip {
+    position: relative;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .voice-mini__badge {
+    position: absolute;
+    font-size: 0.75rem;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  }
+
+  .voice-mini__badge--audio {
+    right: -2px;
+    bottom: -2px;
+    color: color-mix(in srgb, var(--color-danger) 80%, white);
+  }
+
+  .voice-mini__badge--video {
+    left: -2px;
+    top: -2px;
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .voice-mini__more {
+    height: 2.25rem;
+    display: grid;
+    place-items: center;
+    padding: 0 0.75rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-70);
+    font-size: 0.75rem;
+  }
+
+  .voice-mini__footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .voice-mini__status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .voice-mini__pill {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-60);
+    background: transparent;
+    transition: background 150ms ease, color 150ms ease;
+  }
+
+  .voice-mini__pill:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-80);
+  }
+</style>
+
+
+
+
+
+
+
+
 
 
 
