@@ -317,5 +317,14 @@ service cloud.firestore {
       allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
     }
 
+    /* ---------------- Voice debug sandbox ---------------- */
+    match /debugCalls/{sessionId} {
+      allow read, create, update, delete: if isSignedIn();
+
+      match /{document=**} {
+        allow read, create, update, delete: if isSignedIn();
+      }
+    }
+
   } // /documents
 } // service
