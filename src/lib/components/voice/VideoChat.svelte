@@ -6,10 +6,12 @@
   import { user } from '$lib/stores/user';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
+  import { env as publicEnv } from '$env/dynamic/public';
   import {
     addDoc,
     collection,
     deleteDoc,
+    deleteField,
     doc,
     getDoc,
     getDocs,
@@ -23,6 +25,7 @@
   } from 'firebase/firestore';
 
   const CALL_DOC_ID = 'live';
+  const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
   let serverId: string | null = null;
   let channelId: string | null = null;
   let sessionChannelName = '';
@@ -42,6 +45,10 @@
     streamId?: string | null;
     kickedBy?: string | null;
     removedAt?: any;
+    renegotiationRequestId?: string | null;
+    renegotiationRequestReason?: string | null;
+    renegotiationRequestedAt?: any;
+    renegotiationResolvedAt?: any;
   };
 
   type ParticipantMedia = {
@@ -63,6 +70,7 @@
     photoURL: string | null;
     controls: ParticipantControls;
     screenSharing: boolean;
+    isSpeaking: boolean;
   };
 
   let localVideoEl: HTMLVideoElement | null = null;
@@ -87,19 +95,29 @@
   let pc: RTCPeerConnection | null = null;
   let audioSender: RTCRtpSender | null = null;
   let videoSender: RTCRtpSender | null = null;
+  let audioTransceiverRef: RTCRtpTransceiver | null = null;
+  let videoTransceiverRef: RTCRtpTransceiver | null = null;
 
   let callRef: DocumentReference | null = null;
   let offerCandidatesRef: CollectionReference | null = null;
   let answerCandidatesRef: CollectionReference | null = null;
   let localCandidatesRef: CollectionReference | null = null;
   let participantsCollectionRef: CollectionReference | null = null;
+  let callDescriptionsRef: CollectionReference | null = null;
+  let offerDescriptionRef: DocumentReference | null = null;
+  let answerDescriptionRef: DocumentReference | null = null;
 
   let callUnsub: Unsubscribe | null = null;
   let offerCandidatesUnsub: Unsubscribe | null = null;
   let answerCandidatesUnsub: Unsubscribe | null = null;
   let participantsUnsub: Unsubscribe | null = null;
+  let offerDescriptionUnsub: Unsubscribe | null = null;
+  let answerDescriptionUnsub: Unsubscribe | null = null;
 
   let participantDocRef: DocumentReference | null = null;
+  let latestOfferDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
+  let latestAnswerDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
+  let descriptionStorageEnabled = true;
 
   let participants: ParticipantState[] = [];
   let participantMedia: ParticipantMedia[] = [];
@@ -119,6 +137,339 @@
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = false;
 
+  type AudioMonitor = {
+    stream: MediaStream;
+    source: MediaStreamAudioSourceNode;
+    analyser: AnalyserNode;
+    data: Uint8Array;
+    raf: number | null;
+    lastSpoke: number;
+  };
+
+  let audioContext: AudioContext | null = null;
+  let audioMonitors = new Map<string, AudioMonitor>();
+  let speakingParticipants = new Set<string>();
+  let permissionPreflight: Promise<void> | null = null;
+  let permissionWarningShown = false;
+  const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
+  const DEFAULT_STUN_SERVERS = [
+    'stun:stun.l.google.com:19302',
+    'stun:stun1.l.google.com:19302',
+    'stun:stun2.l.google.com:19302',
+    'stun:stun3.l.google.com:19302'
+  ];
+  let debugLoggingEnabled = true;
+  let isOfferer = false;
+  let lastOfferRevision = 0;
+  let lastAnswerRevision = 0;
+  let negotiationInFlight: Promise<void> | null = null;
+  let renegotiationTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRenegotiationReasons: string[] = [];
+  const RENEGOTIATION_DEBOUNCE_MS = 250;
+  let renegotiationAwaitingStable = false;
+  let renegotiationNeedsPromotion = false;
+  let processedRenegotiationSignals = new Map<string, string>();
+  let lastRenegotiationSignalId: string | null = null;
+  let renegotiationSignalClearTimer: ReturnType<typeof setTimeout> | null = null;
+  function flushRenegotiationQueue() {
+    if (!pc || !callRef) {
+      voiceDebug('flushRenegotiationQueue skipped (missing pc or call)');
+      return;
+    }
+    if (negotiationInFlight) {
+      voiceDebug('flushRenegotiationQueue skipped (negotiation in flight)');
+      return;
+    }
+    if (pc.signalingState !== 'stable') {
+      renegotiationAwaitingStable = true;
+      voiceDebug('flushRenegotiationQueue deferred (signaling not stable)', pc.signalingState);
+      return;
+    }
+    if (renegotiationNeedsPromotion && !isOfferer) {
+      const nextReason = pendingRenegotiationReasons[0] ?? 'promotion-needed';
+      voiceDebug('flushRenegotiationQueue cannot promote (not offerer); signalling offerer instead', {
+        reason: nextReason,
+        lastOfferRevision,
+        lastAnswerRevision
+      });
+      void signalOffererRenegotiation(nextReason);
+      renegotiationNeedsPromotion = false;
+      pendingRenegotiationReasons = [];
+      return;
+    }
+    renegotiationNeedsPromotion = false;
+    if (!pendingRenegotiationReasons.length) {
+      voiceDebug('flushRenegotiationQueue no pending reasons, aborting');
+      return;
+    }
+    const reasons = [...pendingRenegotiationReasons];
+    pendingRenegotiationReasons = [];
+    voiceDebug('flushRenegotiationQueue triggering renegotiation', { reasons });
+    performRenegotiation(reasons).catch((err) => {
+      console.warn('Failed to execute pending renegotiation', err);
+      voiceDebug('Failed to execute pending renegotiation', err);
+    });
+  }
+
+  function voiceDebug(...args: unknown[]) {
+    if (!debugLoggingEnabled) return;
+    console.log('[voice]', ...args);
+  }
+
+  function setVoiceDebug(enabled: boolean) {
+    debugLoggingEnabled = enabled;
+    if (!browser || typeof localStorage === 'undefined') return;
+    if (enabled) {
+      localStorage.setItem(DEBUG_STORAGE_KEY, '1');
+    } else {
+      localStorage.removeItem(DEBUG_STORAGE_KEY);
+    }
+  }
+
+  function buildIceServers(): RTCIceServer[] {
+    const servers: RTCIceServer[] = [
+      { urls: DEFAULT_STUN_SERVERS.slice(0, 2) },
+      { urls: DEFAULT_STUN_SERVERS.slice(2) }
+    ];
+    const rawTurnUrls = publicEnv.PUBLIC_TURN_URLS ?? '';
+    const configuredTurn =
+      rawTurnUrls
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean) ?? [];
+    if (!configuredTurn.length) {
+      if (rawTurnUrls.trim().length) {
+        voiceDebug('TURN configuration ignored (no valid URLs parsed)', {
+          raw: rawTurnUrls
+        });
+      } else {
+        voiceDebug('TURN servers not configured; relying on STUN only');
+      }
+      return servers;
+    }
+    const turnServer: RTCIceServer = { urls: configuredTurn };
+    const turnUsername = publicEnv.PUBLIC_TURN_USERNAME ?? '';
+    const turnCredential = publicEnv.PUBLIC_TURN_CREDENTIAL ?? '';
+    if (turnUsername) {
+      turnServer.username = turnUsername;
+    }
+    if (turnCredential) {
+      turnServer.credential = turnCredential;
+    }
+    voiceDebug('TURN servers configured', {
+      urls: configuredTurn,
+      hasAuth: !!(turnServer.username || turnServer.credential)
+    });
+    servers.push(turnServer);
+    return servers;
+  }
+
+  function describeIceCandidate(raw: string | undefined | null) {
+    if (!raw) {
+      return {
+        candidateType: 'none',
+        protocol: '',
+        address: '',
+        port: '',
+        raw: raw ?? ''
+      };
+    }
+    const parts = raw.split(' ');
+    const find = (label: string) => {
+      const idx = parts.indexOf(label);
+      return idx >= 0 ? parts[idx + 1] ?? '' : '';
+    };
+    return {
+      candidateType: find('typ') || 'unknown',
+      protocol: parts[2] ?? '',
+      address: parts[4] ?? '',
+      port: parts[5] ?? '',
+      raw
+    };
+  }
+
+  const SPEAKING_THRESHOLD = 13;
+  const SPEAKING_FALLOFF_MS = 240;
+
+  function getAudioContextCtor(): typeof AudioContext | null {
+    if (!browser || typeof window === 'undefined') return null;
+    const maybeWindow = window as unknown as {
+      AudioContext?: typeof AudioContext;
+      webkitAudioContext?: typeof AudioContext;
+    };
+    return maybeWindow.AudioContext ?? maybeWindow.webkitAudioContext ?? null;
+  }
+
+  function ensureAudioContext(): AudioContext | null {
+    if (audioContext) return audioContext;
+    const Ctor = getAudioContextCtor();
+    if (!Ctor) return null;
+    try {
+      audioContext = new Ctor();
+    } catch (err) {
+      console.warn('Unable to create audio context', err);
+      audioContext = null;
+      return null;
+    }
+    return audioContext;
+  }
+
+  function setParticipantSpeaking(uid: string, speaking: boolean) {
+    const wasSpeaking = speakingParticipants.has(uid);
+    if (wasSpeaking === speaking) return;
+    const next = new Set(speakingParticipants);
+    if (speaking) {
+      next.add(uid);
+    } else {
+      next.delete(uid);
+    }
+    speakingParticipants = next;
+  }
+
+  async function ensureMediaPermissions() {
+    if (!browser || typeof navigator === 'undefined' || !navigator?.mediaDevices?.getUserMedia) {
+      return;
+    }
+    if (permissionPreflight) {
+      try {
+        await permissionPreflight;
+      } catch {
+        /* already logged within the preflight */
+      }
+      return;
+    }
+
+    permissionPreflight = (async () => {
+      let grantedAny = false;
+      const attempts: MediaStreamConstraints[] = [
+        { audio: true, video: false },
+        { audio: false, video: true }
+      ];
+      for (const constraints of attempts) {
+        try {
+          const probe = await navigator.mediaDevices.getUserMedia(constraints);
+          probe.getTracks().forEach((track) => {
+            track.stop();
+            probe.removeTrack(track);
+          });
+          grantedAny = true;
+          voiceDebug('Media permission granted', constraints);
+        } catch (err) {
+          console.warn('Media permission preflight failed', err);
+          voiceDebug('Media permission request failed', constraints, err);
+        }
+      }
+      if (!grantedAny && !permissionWarningShown) {
+        permissionWarningShown = true;
+        statusMessage = 'Allow camera and microphone access to enable video.';
+      }
+    })();
+
+    try {
+      await permissionPreflight;
+    } catch {
+      /* swallow errors after logging above */
+    }
+  }
+
+  function stopAudioMonitor(uid: string) {
+    const existing = audioMonitors.get(uid);
+    if (existing) {
+      if (existing.raf) {
+        cancelAnimationFrame(existing.raf);
+      }
+      try {
+        existing.source.disconnect();
+      } catch {
+        /* ignore disconnect errors */
+      }
+      try {
+        existing.analyser.disconnect();
+      } catch {
+        /* ignore disconnect errors */
+      }
+      audioMonitors.delete(uid);
+    }
+    setParticipantSpeaking(uid, false);
+  }
+
+  function monitorStreamAudio(uid: string, stream: MediaStream | null) {
+    if (!browser) return;
+    const hasLiveAudio =
+      !!stream &&
+      stream.getAudioTracks().some((track) => track.enabled && track.readyState === 'live');
+    if (!hasLiveAudio) {
+      stopAudioMonitor(uid);
+      return;
+    }
+
+    const existing = audioMonitors.get(uid);
+    if (existing?.stream === stream) {
+      return;
+    }
+
+    stopAudioMonitor(uid);
+
+    const ctx = ensureAudioContext();
+    if (!ctx) return;
+
+    try {
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.75;
+      const data = new Uint8Array(analyser.fftSize);
+      source.connect(analyser);
+
+      const monitor: AudioMonitor = {
+        stream,
+        source,
+        analyser,
+        data,
+        raf: null,
+        lastSpoke: 0
+      };
+
+      const sample = () => {
+        analyser.getByteTimeDomainData(data);
+        let sumSquares = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const deviation = data[i] - 128;
+          sumSquares += deviation * deviation;
+        }
+        const rms = Math.sqrt(sumSquares / data.length);
+        const speaking = rms > SPEAKING_THRESHOLD;
+        const now = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
+        if (speaking) {
+          monitor.lastSpoke = now;
+        }
+        const stillSpeaking = speaking || now - monitor.lastSpoke < SPEAKING_FALLOFF_MS;
+        setParticipantSpeaking(uid, stillSpeaking);
+        monitor.raf = requestAnimationFrame(sample);
+      };
+
+      monitor.raf = requestAnimationFrame(sample);
+      audioMonitors.set(uid, monitor);
+
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Failed to monitor audio level', err);
+    }
+  }
+
+  function resetAudioMonitoring() {
+    const keys = Array.from(audioMonitors.keys());
+    keys.forEach((uid) => stopAudioMonitor(uid));
+    speakingParticipants = new Set();
+    if (audioContext && audioMonitors.size === 0) {
+      audioContext.suspend?.().catch(() => {});
+    }
+  }
+
   let statusMessage = '';
   let errorMessage = '';
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -132,10 +483,7 @@
   });
 
   const rtcConfig: RTCConfiguration = {
-    iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      { urls: ['stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302'] }
-    ],
+    iceServers: buildIceServers(),
     iceCandidatePoolSize: 10
   };
 
@@ -176,21 +524,34 @@
       };
     });
 
-    if (tiles.some((tile) => !tile.isSelf && tile.hasVideo && !tile.stream) && remoteStreams.size) {
-      const availableStreams = Array.from(remoteStreams.entries()).filter(([_, stream]) =>
-        stream.getVideoTracks().some((track) => track.readyState === 'live')
-      );
+    if (tiles.some((tile) => !tile.isSelf && (tile.hasVideo || tile.hasAudio) && !tile.stream) && remoteStreams.size) {
+      const availableStreams = Array.from(remoteStreams.entries());
       for (const tile of tiles) {
-        if (tile.isSelf || !tile.hasVideo || tile.stream) continue;
-      const fallbackEntry = availableStreams.find(([id, stream]) => {
-        if (usedStreamIds.has(id)) return false;
-        return stream.getVideoTracks().some((track) => track.readyState === 'live');
-      });
-      if (!fallbackEntry) break;
-      const [fallbackId, fallbackStream] = fallbackEntry;
-      tile.streamId = tile.streamId ?? fallbackId;
-      tile.stream = fallbackStream;
-      usedStreamIds.add(fallbackId);
+        if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
+        const preferVideo = tile.hasVideo;
+        const matchesVideo = (stream: MediaStream) =>
+          stream.getVideoTracks().some((track) => track.readyState === 'live');
+        const matchesAudio = (stream: MediaStream) =>
+          stream.getAudioTracks().some((track) => track.readyState === 'live');
+
+        let fallbackEntry =
+          availableStreams.find(([id, stream]) => {
+            if (usedStreamIds.has(id)) return false;
+            return preferVideo ? matchesVideo(stream) : matchesAudio(stream);
+          }) ?? null;
+
+        if (!fallbackEntry && preferVideo) {
+          fallbackEntry = availableStreams.find(([id, stream]) => {
+            if (usedStreamIds.has(id)) return false;
+            return matchesAudio(stream);
+          }) ?? null;
+        }
+
+        if (!fallbackEntry) continue;
+        const [fallbackId, fallbackStream] = fallbackEntry;
+        tile.streamId = tile.streamId ?? fallbackId;
+        tile.stream = fallbackStream;
+        usedStreamIds.add(fallbackId);
       }
     }
 
@@ -206,18 +567,29 @@
       displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
       photoURL: base?.photoURL ?? null,
       controls,
-      screenSharing: base?.screenSharing ?? false
+      screenSharing: base?.screenSharing ?? false,
+      isSpeaking: speakingParticipants.has(media.uid)
     };
   });
   $: remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
   $: localVideoEl && localStream && (localVideoEl.srcObject = localStream);
-  $: participantMedia.forEach((tile) => {
-    if (!tile.isSelf) {
-      ensureParticipantControls(tile.uid);
-      applyParticipantControls(tile.uid);
+  $: {
+    const seenUids = new Set<string>();
+    participantMedia.forEach((tile) => {
+      seenUids.add(tile.uid);
+      if (!tile.isSelf) {
+        ensureParticipantControls(tile.uid);
+        applyParticipantControls(tile.uid);
+      }
+      attachStreamToRefs(tile.uid, tile.stream);
+      monitorStreamAudio(tile.uid, tile.stream);
+    });
+    for (const uid of Array.from(audioMonitors.keys())) {
+      if (!seenUids.has(uid)) {
+        stopAudioMonitor(uid);
+      }
     }
-    attachStreamToRefs(tile.uid, tile.stream);
-  });
+  }
   $: if (serverId && serverId !== watchedServerId) {
     watchedServerId = serverId;
     watchServerMeta(serverId);
@@ -274,6 +646,22 @@
     };
 
     if (browser && typeof window !== 'undefined') {
+      let storedDebug = false;
+      try {
+        storedDebug = localStorage.getItem(DEBUG_STORAGE_KEY) === '1';
+      } catch {
+        storedDebug = false;
+      }
+      if (storedDebug) {
+        debugLoggingEnabled = true;
+      } else {
+        setVoiceDebug(true);
+      }
+      (window as any).hConnectVoiceDebug = (enable: boolean | undefined) => {
+        setVoiceDebug(enable !== false);
+        console.info('[voice] debug logging', enable === false ? 'disabled' : 'enabled');
+      };
+      voiceDebug('Voice component mounted');
       isTouchDevice = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
       window.addEventListener('beforeunload', onUnload);
       window.addEventListener('pointerdown', onPointerDown);
@@ -284,6 +672,11 @@
         window.removeEventListener('beforeunload', onUnload);
         window.removeEventListener('pointerdown', onPointerDown);
         window.removeEventListener('keydown', onKeyDown);
+        try {
+          delete (window as any).hConnectVoiceDebug;
+        } catch {
+          /* ignore cleanup errors */
+        }
       }
     };
   });
@@ -694,27 +1087,562 @@
   }
 
   function applyTrackStates() {
-    if (!localStream) return;
-    localStream.getAudioTracks().forEach((track) => (track.enabled = !isMicMuted));
-    localStream.getVideoTracks().forEach((track) => (track.enabled = !isCameraOff));
+    const audioTracks = localStream?.getAudioTracks() ?? [];
+    const videoTracks = localStream?.getVideoTracks() ?? [];
+    audioTracks.forEach((track) => (track.enabled = !isMicMuted));
+    videoTracks.forEach((track) => (track.enabled = !isCameraOff));
+
+    if (audioTransceiverRef) {
+      const desiredAudioDir = audioTracks.length ? 'sendrecv' : 'recvonly';
+      if (audioTransceiverRef.direction !== desiredAudioDir) {
+        voiceDebug('audio transceiver direction update', {
+          from: audioTransceiverRef.direction,
+          to: desiredAudioDir
+        });
+        audioTransceiverRef.direction = desiredAudioDir;
+      }
+    }
+    if (videoTransceiverRef) {
+      const shouldSendVideo = videoTracks.length || isScreenSharing;
+      const desiredVideoDir = shouldSendVideo ? 'sendrecv' : 'recvonly';
+      if (videoTransceiverRef.direction !== desiredVideoDir) {
+        voiceDebug('video transceiver direction update', {
+          from: videoTransceiverRef.direction,
+          to: desiredVideoDir,
+          hasVideoTracks: videoTracks.length,
+          isCameraOff,
+          isScreenSharing
+        });
+        videoTransceiverRef.direction = desiredVideoDir;
+      }
+    }
+    voiceDebug('applyTrackStates', {
+      audioTrackCount: audioTracks.length,
+      videoTrackCount: videoTracks.length,
+      micMuted: isMicMuted,
+      cameraOff: isCameraOff,
+      screenSharing: isScreenSharing,
+      audioDirection: audioTransceiverRef?.direction,
+      videoDirection: videoTransceiverRef?.direction
+    });
+  }
+
+  function requestRenegotiation(options: { requireOfferer?: boolean; reason?: string } = {}) {
+    if (!pc || !callRef) {
+      voiceDebug('requestRenegotiation ignored (missing pc or call)', options);
+      return;
+    }
+    voiceDebug('requestRenegotiation invoked', {
+      reason: options.reason ?? null,
+      requireOfferer: !!options.requireOfferer,
+      isOfferer,
+      signalingState: pc.signalingState,
+      negotiationInFlight: !!negotiationInFlight
+    });
+
+    if (options.reason) {
+      pendingRenegotiationReasons.push(options.reason);
+      voiceDebug('requestRenegotiation reason queued', {
+        reason: options.reason,
+        queueLength: pendingRenegotiationReasons.length
+      });
+    }
+
+    if (options.requireOfferer && !isOfferer) {
+      if (pc.signalingState !== 'stable') {
+        renegotiationNeedsPromotion = true;
+      } else {
+        voiceDebug('Promoting to offerer for renegotiation', options);
+        isOfferer = true;
+        lastOfferRevision = Math.max(lastOfferRevision, lastAnswerRevision);
+        attachOffererIceHandlers(pc);
+      }
+    }
+
+    if (pc.signalingState !== 'stable' || negotiationInFlight) {
+      renegotiationAwaitingStable = true;
+      voiceDebug('requestRenegotiation queued until stable/available', {
+        state: pc.signalingState,
+        negotiationInFlight: !!negotiationInFlight,
+        reasons: pendingRenegotiationReasons
+      });
+      return;
+    }
+
+    if (renegotiationTimer) {
+      voiceDebug('requestRenegotiation debounced', { reasons: pendingRenegotiationReasons });
+      return;
+    }
+
+    renegotiationTimer = setTimeout(() => {
+      renegotiationTimer = null;
+      flushRenegotiationQueue();
+    }, RENEGOTIATION_DEBOUNCE_MS);
+  }
+
+  async function performRenegotiation(reasons: string[]) {
+    if (!pc || !callRef) {
+      voiceDebug('performRenegotiation skipped (missing pc or call)', { reasons });
+      return;
+    }
+    if (!isOfferer) {
+      voiceDebug('performRenegotiation skipped (not offerer)', { reasons });
+      return;
+    }
+    if (negotiationInFlight) {
+      voiceDebug('performRenegotiation skipped (already in flight)', { reasons });
+      return;
+    }
+    if (pc.signalingState !== 'stable') {
+      voiceDebug('performRenegotiation delayed (signaling state)', {
+        state: pc.signalingState,
+        reasons
+      });
+      renegotiationAwaitingStable = true;
+      return;
+    }
+
+    voiceDebug('performRenegotiation start', { reasons });
+    negotiationInFlight = renegotiateOffer()
+      .catch((err) => {
+        console.warn('Renegotiation failed', err);
+        voiceDebug('Renegotiation failed', err);
+      })
+      .finally(() => {
+        negotiationInFlight = null;
+      });
+    await negotiationInFlight;
+  }
+
+  function processParticipantRenegotiationRequests(snapshot: ParticipantState[]) {
+    if (!isOfferer) {
+      if (processedRenegotiationSignals.size) {
+        processedRenegotiationSignals.clear();
+      }
+      return;
+    }
+    const activeIds = new Set(snapshot.map((participant) => participant.uid));
+    for (const uid of Array.from(processedRenegotiationSignals.keys())) {
+      if (!activeIds.has(uid)) {
+        processedRenegotiationSignals.delete(uid);
+      }
+    }
+
+    const currentUid = get(user)?.uid ?? null;
+    snapshot.forEach((participant) => {
+      if ((participant.status ?? 'active') !== 'active') return;
+      if (!participant.renegotiationRequestId) return;
+      if (participant.uid === currentUid) return;
+      const lastProcessed = processedRenegotiationSignals.get(participant.uid);
+      if (lastProcessed === participant.renegotiationRequestId) return;
+      processedRenegotiationSignals.set(participant.uid, participant.renegotiationRequestId);
+      const reason = participant.renegotiationRequestReason ?? 'peer-request';
+      voiceDebug('Processing peer renegotiation request', {
+        from: participant.uid,
+        requestId: participant.renegotiationRequestId,
+        reason
+      });
+      requestRenegotiation({ requireOfferer: true, reason: `peer:${reason}` });
+    });
+  }
+
+  async function signalOffererRenegotiation(reason: string) {
+    if (!participantDocRef) {
+      voiceDebug('signalOffererRenegotiation skipped (missing participant doc)', { reason });
+      return;
+    }
+    const current = get(user);
+    if (!current?.uid) {
+      voiceDebug('signalOffererRenegotiation skipped (no authenticated user)', { reason });
+      return;
+    }
+    const requestId = `${current.uid}-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    lastRenegotiationSignalId = requestId;
+    try {
+      voiceDebug('Requesting renegotiation from offerer', { requestId, reason });
+      await setDoc(
+        participantDocRef,
+        {
+          renegotiationRequestId: requestId,
+          renegotiationRequestReason: reason,
+          renegotiationRequestedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('Failed to signal renegotiation to offerer', err);
+      voiceDebug('Failed to signal renegotiation to offerer', err);
+      return;
+    }
+    if (renegotiationSignalClearTimer) {
+      clearTimeout(renegotiationSignalClearTimer);
+    }
+    renegotiationSignalClearTimer = setTimeout(() => {
+      if (!participantDocRef || lastRenegotiationSignalId !== requestId) return;
+      renegotiationSignalClearTimer = null;
+      lastRenegotiationSignalId = null;
+      voiceDebug('Clearing renegotiation request flag', { requestId });
+      setDoc(
+        participantDocRef,
+        {
+          renegotiationRequestId: null,
+          renegotiationRequestReason: null,
+          renegotiationResolvedAt: serverTimestamp()
+        },
+        { merge: true }
+      ).catch((err) => {
+        voiceDebug('Failed to clear renegotiation request flag', err);
+      });
+    }, 2000);
+  }
+
+  function scheduleRenegotiation(reason: string, options: { requireOfferer?: boolean } = {}) {
+    const requireOfferer = options.requireOfferer ?? false;
+    if (requireOfferer && !isOfferer) {
+      voiceDebug('scheduleRenegotiation delegating to current offerer', { reason });
+      void signalOffererRenegotiation(reason);
+      return;
+    }
+    const payload = { ...options, reason };
+    requestRenegotiation(payload);
+  }
+
+  function isPermissionError(err: unknown): boolean {
+    return typeof err === 'object' && err !== null && (err as any).code === 'permission-denied';
+  }
+
+  function resetDescriptionListeners(options: { clearCache?: boolean } = {}) {
+    const { clearCache = true } = options;
+    offerDescriptionUnsub?.();
+    answerDescriptionUnsub?.();
+    offerDescriptionUnsub = null;
+    answerDescriptionUnsub = null;
+    if (clearCache) {
+      latestOfferDescription = null;
+      latestAnswerDescription = null;
+    }
+  }
+
+  function disableDescriptionStorage(reason?: unknown) {
+    if (!descriptionStorageEnabled) return;
+    descriptionStorageEnabled = false;
+    if (reason !== undefined) {
+      voiceDebug('Disabling description subcollection usage; falling back to inline SDP.', reason);
+    } else {
+      voiceDebug('Disabling description subcollection usage; falling back to inline SDP.');
+    }
+    resetDescriptionListeners({ clearCache: false });
+    offerDescriptionRef = null;
+    answerDescriptionRef = null;
+  }
+
+  function detachCandidateSubscriptions() {
+    if (offerCandidatesUnsub || answerCandidatesUnsub) {
+      voiceDebug('Detaching candidate subscriptions');
+    }
+    offerCandidatesUnsub?.();
+    answerCandidatesUnsub?.();
+    offerCandidatesUnsub = null;
+    answerCandidatesUnsub = null;
+  }
+
+  function attachOffererIceHandlers(connection: RTCPeerConnection) {
+    if (!offerCandidatesRef) {
+      voiceDebug('attachOffererIceHandlers skipped (missing offerCandidatesRef)');
+      return;
+    }
+    voiceDebug('attachOffererIceHandlers', {
+      hasAnswerCandidatesRef: !!answerCandidatesRef,
+      hasOfferCandidatesRef: !!offerCandidatesRef
+    });
+    localCandidatesRef = offerCandidatesRef;
+    connection.onicecandidate = (event) => {
+      if (event.candidate && localCandidatesRef) {
+        const info = describeIceCandidate(event.candidate.candidate);
+        voiceDebug('Publishing ICE candidate', { role: 'offerer', ...info });
+        addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
+          console.warn('Failed to save ICE candidate', err)
+        );
+      }
+    };
+
+    detachCandidateSubscriptions();
+
+    if (answerCandidatesRef) {
+      answerCandidatesUnsub = onSnapshot(answerCandidatesRef, (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+            const candidateData = change.doc.data();
+            const info = describeIceCandidate(candidateData.candidate);
+            voiceDebug('Consuming remote ICE candidate', { role: 'offerer', ...info });
+            const candidate = new RTCIceCandidate(candidateData);
+            connection.addIceCandidate(candidate).catch((err) => {
+              console.warn('Failed to add remote ICE candidate', err);
+            });
+          }
+        });
+      });
+    }
+
+    // Fallback listener if the remote peer continues to write to offerCandidates.
+    offerCandidatesUnsub = onSnapshot(offerCandidatesRef, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+          const candidateData = change.doc.data();
+          const info = describeIceCandidate(candidateData.candidate);
+          voiceDebug('Consuming remote ICE candidate (fallback)', { role: 'offerer', ...info });
+          const candidate = new RTCIceCandidate(candidateData);
+          connection.addIceCandidate(candidate).catch((err) => {
+            console.warn('Failed to add remote ICE candidate', err);
+          });
+        }
+      });
+    });
+  }
+
+  function attachAnswererIceHandlers(connection: RTCPeerConnection) {
+    if (!answerCandidatesRef) {
+      voiceDebug('attachAnswererIceHandlers skipped (missing answerCandidatesRef)');
+      return;
+    }
+    voiceDebug('attachAnswererIceHandlers', {
+      hasAnswerCandidatesRef: !!answerCandidatesRef,
+      hasOfferCandidatesRef: !!offerCandidatesRef
+    });
+    localCandidatesRef = answerCandidatesRef;
+    connection.onicecandidate = (event) => {
+      if (event.candidate && localCandidatesRef) {
+        const info = describeIceCandidate(event.candidate.candidate);
+        voiceDebug('Publishing ICE candidate', { role: 'answerer', ...info });
+        addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
+          console.warn('Failed to save ICE candidate', err)
+        );
+      }
+    };
+
+    detachCandidateSubscriptions();
+
+    if (offerCandidatesRef) {
+      offerCandidatesUnsub = onSnapshot(offerCandidatesRef, (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+            const candidateData = change.doc.data();
+            const info = describeIceCandidate(candidateData.candidate);
+            voiceDebug('Consuming remote ICE candidate', { role: 'answerer', ...info });
+            const candidate = new RTCIceCandidate(candidateData);
+            connection.addIceCandidate(candidate).catch((err) => {
+              console.warn('Failed to add remote ICE candidate', err);
+            });
+          }
+        });
+      });
+    }
+  }
+
+  function attachDescriptionListeners() {
+    resetDescriptionListeners();
+    if (!descriptionStorageEnabled) return;
+    if (!offerDescriptionRef || !answerDescriptionRef) return;
+    offerDescriptionUnsub = onSnapshot(
+      offerDescriptionRef,
+      (snap) => {
+        if (!snap.exists()) {
+          latestOfferDescription = null;
+          return;
+        }
+        const data = snap.data() as any;
+        const revision = data.revision ?? 0;
+        const sdp = data.sdp ?? '';
+        const type = (data.type ?? 'offer') as RTCSdpType;
+        latestOfferDescription = { revision, sdp, type };
+        voiceDebug('offer description updated', { revision, type, length: sdp?.length ?? 0 });
+      },
+      (err) => {
+        console.warn('Failed to watch offer description', err);
+        voiceDebug('Failed to watch offer description', err);
+        if (isPermissionError(err)) {
+          disableDescriptionStorage(err);
+        }
+      }
+    );
+
+    answerDescriptionUnsub = onSnapshot(
+      answerDescriptionRef,
+      (snap) => {
+        if (!snap.exists()) {
+          latestAnswerDescription = null;
+          return;
+        }
+        const data = snap.data() as any;
+        const revision = data.revision ?? 0;
+        const sdp = data.sdp ?? '';
+        const type = (data.type ?? 'answer') as RTCSdpType;
+        latestAnswerDescription = { revision, sdp, type };
+        voiceDebug('answer description updated', { revision, type, length: sdp?.length ?? 0 });
+      },
+      (err) => {
+        console.warn('Failed to watch answer description', err);
+        voiceDebug('Failed to watch answer description', err);
+        if (isPermissionError(err)) {
+          disableDescriptionStorage(err);
+        }
+      }
+    );
+  }
+
+  async function ensureOfferDescription(
+    revision: number,
+    fallback: RTCSessionDescriptionInit | null = null
+  ): Promise<RTCSessionDescriptionInit | null> {
+    if (!offerDescriptionRef) {
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'offer';
+        latestOfferDescription = {
+          revision,
+          type,
+          sdp: fallback.sdp
+        };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    if (latestOfferDescription && latestOfferDescription.revision === revision) {
+      return {
+        type: latestOfferDescription.type,
+        sdp: latestOfferDescription.sdp
+      };
+    }
+    let snap;
+    try {
+      snap = await getDoc(offerDescriptionRef);
+    } catch (err) {
+      console.warn('Failed to fetch offer description doc', err);
+      voiceDebug('Failed to fetch offer description doc', err);
+      if (isPermissionError(err)) {
+        disableDescriptionStorage(err);
+      }
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'offer';
+        latestOfferDescription = { revision, type, sdp: fallback.sdp };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    if (!snap.exists()) {
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'offer';
+        latestOfferDescription = { revision, type, sdp: fallback.sdp };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    const data = snap.data() as any;
+    const type = (data.type ?? 'offer') as RTCSdpType;
+    const sdp = data.sdp ?? '';
+    const actualRevision = data.revision ?? revision;
+    latestOfferDescription = { revision: actualRevision, type, sdp };
+    return { type, sdp };
+  }
+
+  async function ensureAnswerDescription(
+    revision: number,
+    fallback: RTCSessionDescriptionInit | null = null
+  ): Promise<RTCSessionDescriptionInit | null> {
+    if (!answerDescriptionRef) {
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'answer';
+        latestAnswerDescription = {
+          revision,
+          type,
+          sdp: fallback.sdp
+        };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    if (latestAnswerDescription && latestAnswerDescription.revision === revision) {
+      return {
+        type: latestAnswerDescription.type,
+        sdp: latestAnswerDescription.sdp
+      };
+    }
+    let snap;
+    try {
+      snap = await getDoc(answerDescriptionRef);
+    } catch (err) {
+      console.warn('Failed to fetch answer description doc', err);
+      voiceDebug('Failed to fetch answer description doc', err);
+      if (isPermissionError(err)) {
+        disableDescriptionStorage(err);
+      }
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'answer';
+        latestAnswerDescription = { revision, type, sdp: fallback.sdp };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    if (!snap.exists()) {
+      if (fallback?.sdp) {
+        const type = fallback.type ?? 'answer';
+        latestAnswerDescription = { revision, type, sdp: fallback.sdp };
+        return { type, sdp: fallback.sdp };
+      }
+      return null;
+    }
+    const data = snap.data() as any;
+    const type = (data.type ?? 'answer') as RTCSdpType;
+    const sdp = data.sdp ?? '';
+    const actualRevision = data.revision ?? revision;
+    latestAnswerDescription = { revision: actualRevision, type, sdp };
+    return { type, sdp };
   }
 
   function syncLocalTracksToPeer() {
-    if (!pc) return;
-    const audioTrack = localStream?.getAudioTracks()[0] ?? null;
-    const videoTrack = localStream?.getVideoTracks()[0] ?? null;
+    const connection = pc;
+    if (!connection) return;
+    const stream = localStream;
+    const audioTrack = stream?.getAudioTracks()[0] ?? null;
+    const videoTrack = stream?.getVideoTracks()[0] ?? null;
 
-    if (audioSender) {
-      audioSender.replaceTrack(audioTrack).catch((err) => console.warn('Failed to sync audio track', err));
-    } else if (audioTrack) {
-      audioSender = pc.addTrack(audioTrack, localStream!);
-    }
+    const updateSender = (
+      sender: RTCRtpSender | null,
+      track: MediaStreamTrack | null,
+      kind: 'audio' | 'video'
+    ): RTCRtpSender | null => {
+      if (sender) {
+        voiceDebug('Replacing track on sender', { kind, hasTrack: !!track });
+        sender
+          .replaceTrack(track)
+          .catch((err) => console.warn(`Failed to sync ${kind} track`, err));
+        try {
+          if (stream) {
+            sender.setStreams?.(stream);
+          } else {
+            sender.setStreams?.();
+          }
+        } catch (err) {
+          console.warn(`Failed to sync ${kind} stream metadata`, err);
+        }
+        return sender;
+      }
+      if (track && stream) {
+        voiceDebug('Adding track to connection', { kind, streamId: stream.id });
+        const next = connection.addTrack(track, stream);
+        try {
+          next.setStreams?.(stream);
+        } catch (err) {
+          console.warn(`Failed to sync ${kind} stream metadata`, err);
+        }
+        return next;
+      }
+      return sender;
+    };
 
-    if (videoSender) {
-      videoSender.replaceTrack(videoTrack).catch((err) => console.warn('Failed to sync video track', err));
-    } else if (videoTrack) {
-      videoSender = pc.addTrack(videoTrack, localStream!);
-    }
+    audioSender = updateSender(audioSender, audioTrack, 'audio');
+    videoSender = updateSender(videoSender, videoTrack, 'video');
   }
 
   async function acquireTrack(kind: 'audio' | 'video'): Promise<boolean> {
@@ -768,32 +1696,74 @@
       track.stop();
       localStream!.removeTrack(track);
     });
-    if (kind === 'audio' && audioSender) {
-      audioSender.replaceTrack(null).catch(() => {});
-    }
-    if (kind === 'video' && videoSender) {
-      videoSender.replaceTrack(null).catch(() => {});
+    const hasRemainingTracks = localStream.getTracks().length > 0;
+    if (!hasRemainingTracks) {
+      if (localVideoEl) {
+        localVideoEl.pause?.();
+        localVideoEl.srcObject = null;
+      }
+      localStream = null;
     }
     syncLocalTracksToPeer();
-    if (!localStream.getTracks().length) {
-      localStream = null;
-      if (localVideoEl) localVideoEl.srcObject = null;
-    }
   }
 
   function createPeerConnection() {
     if (pc) return pc;
     pc = new RTCPeerConnection(rtcConfig);
+    voiceDebug('createPeerConnection', { configuration: rtcConfig });
 
     const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
     const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+    audioTransceiverRef = audioTransceiver;
+    videoTransceiverRef = videoTransceiver;
     audioSender = audioTransceiver.sender;
     videoSender = videoTransceiver.sender;
     syncLocalTracksToPeer();
+    applyTrackStates();
+
+    pc.onsignalingstatechange = () => {
+      const state = pc?.signalingState ?? 'closed';
+      voiceDebug('signalingstatechange', {
+        state,
+        iceConnectionState: pc?.iceConnectionState ?? null,
+        iceGatheringState: pc?.iceGatheringState ?? null
+      });
+      if (state === 'stable' && renegotiationAwaitingStable) {
+        renegotiationAwaitingStable = false;
+        const requireOfferer = renegotiationNeedsPromotion && !isOfferer;
+        renegotiationNeedsPromotion = false;
+        voiceDebug('signaling state stable - flushing pending renegotiation', {
+          reasons: pendingRenegotiationReasons,
+          requireOfferer
+        });
+        scheduleRenegotiation('signaling-stable', { requireOfferer });
+      }
+    };
+
+    pc.onnegotiationneeded = () => {
+      voiceDebug('negotiationneeded event', {
+        isOfferer,
+        hasCallRef: !!callRef,
+        negotiationInFlight: !!negotiationInFlight
+      });
+      if (!callRef) {
+        voiceDebug('negotiationneeded ignored (no active callRef)');
+        return;
+      }
+      scheduleRenegotiation('negotiationneeded', { requireOfferer: true });
+    };
 
     pc.ontrack = (event) => {
       const [stream] = event.streams ?? [];
       const incoming = stream ?? new MediaStream();
+      voiceDebug('Received remote track', {
+        uid: event.transceiver?.mid ?? 'unknown',
+        kind: event.track.kind,
+        id: event.track.id,
+        muted: event.track.muted,
+        readyState: event.track.readyState,
+        streamId: incoming.id
+      });
 
       if (!stream) {
         incoming.addTrack(event.track);
@@ -812,6 +1782,11 @@
       });
 
       event.track.onended = () => {
+        voiceDebug('Remote track ended', {
+          id: event.track.id,
+          kind: event.track.kind,
+          streamId: incoming.id
+        });
         updateRemoteStreams((draft) => {
           const current = draft.get(incoming.id);
           if (!current) return;
@@ -827,6 +1802,12 @@
 
     pc.onconnectionstatechange = () => {
       if (!pc) return;
+      voiceDebug('connectionstatechange', {
+        state: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        iceGatheringState: pc.iceGatheringState,
+        signalingState: pc.signalingState
+      });
       switch (pc.connectionState) {
         case 'connecting':
           statusMessage = 'Connecting...';
@@ -838,6 +1819,7 @@
         case 'disconnected':
           statusMessage = 'Connection interrupted. Reconnecting...';
           try {
+            voiceDebug('Restarting ICE (connection disconnected)');
             pc.restartIce();
           } catch (err) {
             console.warn('ICE restart failed', err);
@@ -856,10 +1838,16 @@
 
     pc.oniceconnectionstatechange = () => {
       if (!pc) return;
+      voiceDebug('iceconnectionstatechange', {
+        state: pc.iceConnectionState,
+        connectionState: pc.connectionState,
+        gatheringState: pc.iceGatheringState
+      });
       if (pc.iceConnectionState === 'connected') {
         clearReconnectTimer();
       } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
         try {
+          voiceDebug('Restarting ICE (ice connection state)', { state: pc.iceConnectionState });
           pc.restartIce();
         } catch (err) {
           console.warn('Failed to restart ICE', err);
@@ -867,7 +1855,96 @@
       }
     };
 
+    pc.onicegatheringstatechange = () => {
+      voiceDebug('icegatheringstatechange', pc?.iceGatheringState ?? 'closed');
+    };
+
+    pc.onicecandidateerror = (event) => {
+      const details: Record<string, unknown> = {
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+        url: event.url
+      };
+      if ('hostCandidate' in event) details.hostCandidate = (event as any).hostCandidate ?? null;
+      if ('address' in event) details.address = (event as any).address ?? null;
+      if ('port' in event) details.port = (event as any).port ?? null;
+      voiceDebug('icecandidateerror', details);
+    };
+
     return pc;
+  }
+
+  async function renegotiateOffer() {
+    if (!pc || !callRef || !isOfferer) {
+      voiceDebug('renegotiateOffer skipped', { hasPc: !!pc, hasCallRef: !!callRef, isOfferer });
+      return;
+    }
+    const connection = pc;
+    if (connection.signalingState !== 'stable') {
+      voiceDebug('renegotiateOffer skipped (signaling not stable)', connection.signalingState);
+      return;
+    }
+    const currentUser = get(user);
+    try {
+      applyTrackStates();
+      const revision = lastOfferRevision + 1;
+      voiceDebug('Creating renegotiation offer', { revision });
+      const offerDescription = await connection.createOffer();
+      await connection.setLocalDescription(offerDescription);
+      let storedInDescriptions = false;
+      if (descriptionStorageEnabled && offerDescriptionRef) {
+        try {
+          await setDoc(
+            offerDescriptionRef,
+            {
+              type: offerDescription.type,
+              revision,
+              sdp: offerDescription.sdp,
+              length: offerDescription.sdp?.length ?? 0,
+              updatedAt: serverTimestamp(),
+              updatedBy: currentUser?.uid ?? null
+            },
+            { merge: true }
+          );
+          storedInDescriptions = true;
+        } catch (err) {
+          console.warn('Failed to persist offer description doc', err);
+          voiceDebug('Failed to persist offer description doc', err);
+          if (isPermissionError(err)) {
+            disableDescriptionStorage(err);
+          }
+        }
+      }
+      latestOfferDescription = {
+        revision,
+        type: offerDescription.type,
+        sdp: offerDescription.sdp ?? ''
+      };
+      const offerPayload: Record<string, unknown> = {
+        type: offerDescription.type,
+        revision,
+        length: offerDescription.sdp?.length ?? 0,
+        updatedAt: serverTimestamp(),
+        updatedBy: currentUser?.uid ?? null
+      };
+      if (offerDescription.sdp) {
+        offerPayload.sdp = offerDescription.sdp;
+      }
+      await updateDoc(callRef, {
+        offer: offerPayload,
+        answer: deleteField()
+      });
+      if (answerDescriptionRef) {
+        await deleteDoc(answerDescriptionRef).catch(() => {});
+        latestAnswerDescription = null;
+      }
+      lastOfferRevision = revision;
+      voiceDebug('Renegotiation offer published', { revision });
+    } catch (err) {
+      console.warn('Failed to renegotiate offer', err);
+      voiceDebug('Renegotiation offer failed', err);
+      statusMessage = 'Trouble updating the call. Try rejoining if issues continue.';
+    }
   }
 
   function subscribeParticipants() {
@@ -896,7 +1973,11 @@
               updatedAt: data.updatedAt ?? null,
               streamId: data.streamId ?? null,
               kickedBy: data.kickedBy ?? null,
-              removedAt: data.removedAt ?? data.leftAt ?? null
+              removedAt: data.removedAt ?? data.leftAt ?? null,
+              renegotiationRequestId: data.renegotiationRequestId ?? null,
+              renegotiationRequestReason: data.renegotiationRequestReason ?? null,
+              renegotiationRequestedAt: data.renegotiationRequestedAt ?? null,
+              renegotiationResolvedAt: data.renegotiationResolvedAt ?? null
             } as ParticipantState;
           })
           .sort((a, b) => {
@@ -904,6 +1985,8 @@
             const bTime = b.joinedAt?.toMillis?.() ?? 0;
             return aTime - bTime;
           });
+
+        processParticipantRenegotiationRequests(mapped);
 
         const current = get(user);
         const currentUid = current?.uid ?? null;
@@ -963,9 +2046,11 @@
 
     const performWrite = async () => {
       try {
+        voiceDebug('updateParticipantPresence write', payload);
         await setDoc(participantDocRef!, payload, { merge: true });
       } catch (err) {
         console.warn('Failed to update presence', err);
+        voiceDebug('updateParticipantPresence failed', err);
         if (!extra.joinedAt) {
           errorMessage =
             err instanceof Error ? err.message : 'Unable to update your voice status.';
@@ -985,11 +2070,14 @@
 
     presenceDebounce = setTimeout(() => {
       presenceDebounce = null;
-      performWrite().catch((err) => console.warn(err));
+      performWrite().catch((err) => {
+        console.warn(err);
+        voiceDebug('updateParticipantPresence debounced write failed', err);
+      });
     }, 250);
   }
 
-  async function purgeExistingCandidates() {
+  async function purgeCallArtifacts() {
     if (!callRef) return;
     const offerSnap = await getDocs(collection(callRef, 'offerCandidates'));
     for (const snap of offerSnap.docs) {
@@ -999,6 +2087,225 @@
     for (const snap of answerSnap.docs) {
       await deleteDoc(snap.ref);
     }
+    try {
+      const descriptionSnap = await getDocs(collection(callRef, 'descriptions'));
+      for (const snap of descriptionSnap.docs) {
+        await deleteDoc(snap.ref);
+      }
+    } catch (err) {
+      if (!isPermissionError(err)) {
+        console.warn('Failed to purge call descriptions', err);
+        voiceDebug('Failed to purge call descriptions', err);
+      }
+    }
+  }
+
+  async function startAsOfferer(
+    connection: RTCPeerConnection,
+    docRef: DocumentReference,
+    currentUser: { uid?: string | null } | null,
+    existingData: any | null
+  ) {
+    const currentUid = currentUser?.uid ?? null;
+    isOfferer = true;
+    processedRenegotiationSignals.clear();
+    lastOfferRevision = existingData?.offer?.revision ?? 0;
+    lastAnswerRevision = existingData?.answer?.revision ?? 0;
+    voiceDebug('Joining voice channel as offerer', { lastOfferRevision, lastAnswerRevision });
+    await purgeCallArtifacts();
+    attachOffererIceHandlers(connection);
+
+    const offerDescription = await connection.createOffer();
+    await connection.setLocalDescription(offerDescription);
+
+    const offerRevision = lastOfferRevision + 1;
+    lastOfferRevision = offerRevision;
+    let storedInDescriptions = false;
+    if (descriptionStorageEnabled && offerDescriptionRef) {
+      try {
+        await setDoc(
+          offerDescriptionRef,
+          {
+            type: offerDescription.type,
+            revision: offerRevision,
+            sdp: offerDescription.sdp,
+            length: offerDescription.sdp?.length ?? 0,
+            updatedAt: serverTimestamp(),
+            updatedBy: currentUid
+          },
+          { merge: true }
+        );
+        storedInDescriptions = true;
+      } catch (err) {
+        console.warn('Failed to persist offer description doc', err);
+        voiceDebug('Failed to persist offer description doc', err);
+        if (isPermissionError(err)) {
+          disableDescriptionStorage(err);
+        }
+      }
+    }
+    latestOfferDescription = {
+      revision: offerRevision,
+      type: offerDescription.type,
+      sdp: offerDescription.sdp ?? ''
+    };
+    const offerData: Record<string, unknown> = {
+      type: offerDescription.type,
+      revision: offerRevision,
+      length: offerDescription.sdp?.length ?? 0,
+      updatedAt: serverTimestamp(),
+      updatedBy: currentUid
+    };
+    if (offerDescription.sdp) {
+      offerData.sdp = offerDescription.sdp;
+    }
+    await setDoc(
+      docRef,
+      {
+        offer: offerData,
+        createdAt: existingData?.createdAt ?? serverTimestamp(),
+        createdBy: existingData?.createdBy ?? currentUid
+      },
+      { merge: true }
+    );
+    if (answerDescriptionRef) {
+      await deleteDoc(answerDescriptionRef).catch(() => {});
+      latestAnswerDescription = null;
+    }
+    voiceDebug('Published initial offer', {
+      offerRevision,
+      length: offerDescription.sdp?.length ?? 0
+    });
+
+    callUnsub = onSnapshot(docRef, (snapshot) => {
+      sessionQueue = sessionQueue
+        .then(async () => {
+          const data = snapshot.data();
+          if (!data) {
+            statusMessage = 'Call ended.';
+            await hangUp({ cleanupDoc: false }).catch(() => {});
+            return;
+          }
+          const currentUserData = get(user);
+          const currentUidValue = currentUserData?.uid ?? null;
+          const offer = data.offer;
+          if (offer) {
+            const revision = offer.revision ?? 1;
+            const updatedBy = offer.updatedBy ?? data.createdBy ?? null;
+            if (revision > lastOfferRevision && (!currentUidValue || updatedBy !== currentUidValue)) {
+              voiceDebug('Remote published updated offer while we were offerer', { revision, updatedBy });
+              const fallbackDescription =
+                typeof offer.sdp === 'string'
+                  ? ({ type: offer.type ?? 'offer', sdp: offer.sdp } as RTCSessionDescriptionInit)
+                  : null;
+              const description = await ensureOfferDescription(revision, fallbackDescription);
+              if (!description?.sdp) {
+                voiceDebug('Missing remote offer description during fallback', { revision });
+                return;
+              }
+              lastOfferRevision = revision;
+              isOfferer = false;
+              processedRenegotiationSignals.clear();
+              localCandidatesRef = answerCandidatesRef;
+              sessionQueue = sessionQueue
+                .then(async () => {
+                  if (!pc) return;
+                  try {
+                    await pc.setRemoteDescription(new RTCSessionDescription(description));
+                    voiceDebug('Remote offer applied (offerer fallback)', { revision });
+                    const answerDescription = await pc.createAnswer();
+                    await pc.setLocalDescription(answerDescription);
+                    const nextRevision = lastAnswerRevision + 1;
+                    lastAnswerRevision = nextRevision;
+                    let storedAnswerDoc = false;
+                    if (descriptionStorageEnabled && answerDescriptionRef) {
+                      try {
+                        await setDoc(
+                          answerDescriptionRef,
+                          {
+                            type: answerDescription.type,
+                            revision: nextRevision,
+                            sdp: answerDescription.sdp,
+                            length: answerDescription.sdp?.length ?? 0,
+                            updatedAt: serverTimestamp(),
+                            updatedBy: currentUidValue
+                          },
+                          { merge: true }
+                        );
+                        storedAnswerDoc = true;
+                      } catch (err) {
+                        console.warn('Failed to persist fallback answer description doc', err);
+                        voiceDebug('Failed to persist fallback answer description doc', err);
+                        if (isPermissionError(err)) {
+                          disableDescriptionStorage(err);
+                        }
+                      }
+                    }
+                    latestAnswerDescription = {
+                      revision: nextRevision,
+                      type: answerDescription.type,
+                      sdp: answerDescription.sdp ?? ''
+                    };
+                    const answerUpdate: Record<string, unknown> = {
+                      type: answerDescription.type,
+                      revision: nextRevision,
+                      length: answerDescription.sdp?.length ?? 0,
+                      updatedAt: serverTimestamp(),
+                      updatedBy: currentUidValue
+                    };
+                    if (answerDescription.sdp) {
+                      answerUpdate.sdp = answerDescription.sdp;
+                    }
+                    await updateDoc(callRef!, {
+                      answer: answerUpdate,
+                      answeredAt: serverTimestamp(),
+                      answeredBy: currentUidValue
+                    });
+                    voiceDebug('Published fallback answer', { revision: nextRevision });
+                  } catch (err) {
+                    console.warn('Failed to process remote offer while offerer', err);
+                    voiceDebug('Failed to process remote offer while offerer', err);
+                  }
+                })
+                .catch((err) => {
+                  console.warn('Failed to queue fallback answer', err);
+                  voiceDebug('Failed to queue fallback answer', err);
+                });
+              return;
+            }
+          }
+          const answer = data.answer;
+          if (answer) {
+            const revision = answer.revision ?? 1;
+            if (revision > lastAnswerRevision) {
+              const fallbackAnswer =
+                typeof answer.sdp === 'string'
+                  ? ({ type: answer.type ?? 'answer', sdp: answer.sdp } as RTCSessionDescriptionInit)
+                  : null;
+              const description = await ensureAnswerDescription(revision, fallbackAnswer);
+              if (!description?.sdp) {
+                voiceDebug('Remote answer description missing', { revision });
+                return;
+              }
+              voiceDebug('Applying remote answer', { revision, length: description.sdp?.length ?? 0 });
+              lastAnswerRevision = revision;
+              connection
+                .setRemoteDescription(new RTCSessionDescription(description))
+                .then(() => voiceDebug('Remote answer applied', { revision }))
+                .catch((err) => {
+                  console.warn('Failed to set remote description', err);
+                  voiceDebug('Failed to set remote description', err);
+                });
+            }
+          }
+        })
+        .catch((err) => {
+          console.warn('Failed to queue offer snapshot handler', err);
+          voiceDebug('Failed to queue offer snapshot handler', err);
+        });
+    });
+
+    statusMessage = 'Waiting for others to join...';
   }
 
   async function joinChannel() {
@@ -1021,6 +2328,7 @@
     const database = getDb();
 
     try {
+      await ensureMediaPermissions();
       const connection = createPeerConnection();
       if (!connection) throw new Error('Failed to create peer connection.');
 
@@ -1032,107 +2340,222 @@
       localCandidatesRef = null;
       participantsCollectionRef = collection(docRef, 'participants');
       subscribeParticipants();
+      callDescriptionsRef = collection(docRef, 'descriptions');
+      offerDescriptionRef = doc(callDescriptionsRef, 'offer');
+      answerDescriptionRef = doc(callDescriptionsRef, 'answer');
+      descriptionStorageEnabled = true;
 
       participantDocRef = doc(participantsCollectionRef, current.uid);
       lastPresenceSignature = null;
 
-      const existing = await getDoc(docRef);
-
-      if (!existing.exists() || !existing.data()?.offer) {
-        await purgeExistingCandidates();
-        localCandidatesRef = offerCandidatesRef;
-        connection.onicecandidate = (event) => {
-          if (event.candidate && localCandidatesRef) {
-            addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
-              console.warn('Failed to save ICE candidate', err)
-            );
-          }
-        };
-
-        const offerDescription = await connection.createOffer();
-        await connection.setLocalDescription(offerDescription);
-
-        await setDoc(docRef, {
-          offer: {
-            type: offerDescription.type,
-            sdp: offerDescription.sdp
-          },
-          createdAt: serverTimestamp(),
-          createdBy: current.uid
-        });
-
-        callUnsub = onSnapshot(docRef, (snapshot) => {
-          const data = snapshot.data();
-          if (!data) {
-            statusMessage = 'Call ended.';
-            hangUp({ cleanupDoc: false }).catch(() => {});
-            return;
-          }
-          if (data.answer && connection && !connection.currentRemoteDescription) {
-            const answerDescription = new RTCSessionDescription(data.answer);
-            connection.setRemoteDescription(answerDescription).catch((err) => {
-              console.warn('Failed to set remote description', err);
-            });
-          }
-        });
-
-        answerCandidatesUnsub = onSnapshot(answerCandidatesRef, (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') {
-              const candidate = new RTCIceCandidate(change.doc.data());
-              connection.addIceCandidate(candidate).catch((err) => {
-                console.warn('Failed to add remote ICE candidate', err);
-              });
-            }
+      let existing = await getDoc(docRef);
+      let existingData = existing.exists() ? (existing.data() as any) : null;
+      if (existingData) {
+        const offerLength = existingData?.offer?.length ?? existingData?.offer?.sdp?.length ?? 0;
+        const answerLength = existingData?.answer?.length ?? existingData?.answer?.sdp?.length ?? 0;
+        if (
+          offerLength > CALL_DOC_SDP_RESET_THRESHOLD ||
+          answerLength > CALL_DOC_SDP_RESET_THRESHOLD
+        ) {
+          voiceDebug('Existing call doc exceeded size threshold, resetting', {
+            offerLength,
+            answerLength
           });
-        });
+          try {
+            await purgeCallArtifacts();
+            await deleteDoc(docRef);
+          } catch (err) {
+            console.warn('Failed to reset oversized call doc', err);
+            voiceDebug('Failed to reset oversized call doc', err);
+          }
+          existing = await getDoc(docRef);
+          existingData = existing.exists() ? (existing.data() as any) : null;
+        }
+      }
 
-        statusMessage = 'Waiting for others to join...';
+      attachDescriptionListeners();
+
+      if (!existing.exists() || !existingData?.offer) {
+        isOfferer = true;
+        await startAsOfferer(connection, docRef, current, existingData);
       } else {
-        localCandidatesRef = answerCandidatesRef;
-        connection.onicecandidate = (event) => {
-          if (event.candidate && localCandidatesRef) {
-            addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
-              console.warn('Failed to save ICE candidate', err)
-            );
+        isOfferer = false;
+        processedRenegotiationSignals.clear();
+        lastOfferRevision = existingData?.offer?.revision ?? 1;
+        lastAnswerRevision = existingData?.answer?.revision ?? 0;
+        voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
+        attachAnswererIceHandlers(connection);
+
+        const initialFallbackOffer =
+          typeof existingData.offer?.sdp === 'string'
+            ? ({
+                type: existingData.offer.type ?? 'offer',
+                sdp: existingData.offer.sdp
+              } as RTCSessionDescriptionInit)
+            : null;
+        const offerDescription = await ensureOfferDescription(lastOfferRevision, initialFallbackOffer);
+        if (!offerDescription?.sdp) {
+          voiceDebug('Offer description missing; promoting to offerer role.');
+          try {
+            await purgeCallArtifacts();
+            await deleteDoc(docRef);
+          } catch (err) {
+            console.warn('Failed to reset call while taking over as offerer', err);
+            voiceDebug('Failed to reset call while taking over as offerer', err);
           }
-        };
+          await startAsOfferer(connection, docRef, current, existingData);
+        } else {
+          await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
+          voiceDebug('Applied existing offer', {
+            revision: lastOfferRevision,
+            length: offerDescription.sdp?.length ?? 0
+          });
 
-        const data = existing.data() as any;
-        const offerDescription = data.offer;
-        await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
+          const answerDescription = await connection.createAnswer();
+          await connection.setLocalDescription(answerDescription);
 
-        const answerDescription = await connection.createAnswer();
-        await connection.setLocalDescription(answerDescription);
-
-        await updateDoc(docRef, {
-          answer: {
+          const answerRevision = lastAnswerRevision + 1;
+          lastAnswerRevision = answerRevision;
+          let answerStoredInDescriptions = false;
+          if (descriptionStorageEnabled && answerDescriptionRef) {
+            try {
+              await setDoc(
+                answerDescriptionRef,
+                {
+                  type: answerDescription.type,
+                  revision: answerRevision,
+                  sdp: answerDescription.sdp,
+                  length: answerDescription.sdp?.length ?? 0,
+                  updatedAt: serverTimestamp(),
+                  updatedBy: current.uid
+                },
+                { merge: true }
+              );
+              answerStoredInDescriptions = true;
+            } catch (err) {
+              console.warn('Failed to persist initial answer description doc', err);
+              voiceDebug('Failed to persist initial answer description doc', err);
+              if (isPermissionError(err)) {
+                disableDescriptionStorage(err);
+              }
+            }
+          }
+          latestAnswerDescription = {
+            revision: answerRevision,
             type: answerDescription.type,
-            sdp: answerDescription.sdp
-          },
-          answeredAt: serverTimestamp(),
-          answeredBy: current.uid
-        });
+            sdp: answerDescription.sdp ?? ''
+          };
+          const answerData: Record<string, unknown> = {
+            type: answerDescription.type,
+            revision: answerRevision,
+            length: answerDescription.sdp?.length ?? 0,
+            updatedAt: serverTimestamp(),
+            updatedBy: current.uid
+          };
+          if (answerDescription.sdp) {
+            answerData.sdp = answerDescription.sdp;
+          }
+          await updateDoc(docRef, {
+            answer: answerData,
+            answeredAt: serverTimestamp(),
+            answeredBy: current.uid
+          });
+          voiceDebug('Published initial answer', { answerRevision });
 
-        offerCandidatesUnsub = onSnapshot(offerCandidatesRef, (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') {
-              const candidate = new RTCIceCandidate(change.doc.data());
-              connection.addIceCandidate(candidate).catch((err) => {
-                console.warn('Failed to add remote ICE candidate', err);
-              });
+          callUnsub = onSnapshot(docRef, (snapshot) => {
+            if (!snapshot.exists()) {
+              statusMessage = 'Call ended.';
+              hangUp({ cleanupDoc: false }).catch(() => {});
+              return;
+            }
+            const data = snapshot.data();
+            const offer = data?.offer;
+            if (offer) {
+              const revision = offer.revision ?? 1;
+              if (revision > lastOfferRevision) {
+                sessionQueue = sessionQueue
+                  .then(async () => {
+                    const fallbackDescription =
+                      typeof offer.sdp === 'string'
+                        ? ({ type: offer.type ?? 'offer', sdp: offer.sdp } as RTCSessionDescriptionInit)
+                        : null;
+                    const description = await ensureOfferDescription(revision, fallbackDescription);
+                    if (!description?.sdp) {
+                      voiceDebug('Updated offer missing description', { revision });
+                      return;
+                    }
+                    voiceDebug('Detected updated offer', { revision, length: description.sdp?.length ?? 0 });
+                    lastOfferRevision = revision;
+                    if (!pc) return;
+                    const connection = pc;
+                    try {
+                      await connection.setRemoteDescription(new RTCSessionDescription(description));
+                      voiceDebug('Remote offer applied', { revision });
+                      const freshAnswer = await connection.createAnswer();
+                      await connection.setLocalDescription(freshAnswer);
+                      const nextRevision = lastAnswerRevision + 1;
+                      lastAnswerRevision = nextRevision;
+                      const responder = get(user);
+                      let storedDoc = false;
+                      if (descriptionStorageEnabled && answerDescriptionRef) {
+                        try {
+                          await setDoc(
+                            answerDescriptionRef,
+                            {
+                              type: freshAnswer.type,
+                              revision: nextRevision,
+                              sdp: freshAnswer.sdp,
+                              length: freshAnswer.sdp?.length ?? 0,
+                              updatedAt: serverTimestamp(),
+                              updatedBy: responder?.uid ?? current.uid
+                            },
+                            { merge: true }
+                          );
+                          storedDoc = true;
+                        } catch (err) {
+                          console.warn('Failed to persist renegotiation answer description doc', err);
+                          voiceDebug('Failed to persist renegotiation answer description doc', err);
+                          if (isPermissionError(err)) {
+                            disableDescriptionStorage(err);
+                          }
+                        }
+                      }
+                      latestAnswerDescription = {
+                        revision: nextRevision,
+                        type: freshAnswer.type,
+                        sdp: freshAnswer.sdp ?? ''
+                      };
+                      const answerPayload: Record<string, unknown> = {
+                        type: freshAnswer.type,
+                        revision: nextRevision,
+                        length: freshAnswer.sdp?.length ?? 0,
+                        updatedAt: serverTimestamp(),
+                        updatedBy: responder?.uid ?? current.uid ?? null
+                      };
+                      if (freshAnswer.sdp) {
+                        answerPayload.sdp = freshAnswer.sdp;
+                      }
+                      await updateDoc(docRef, {
+                        answer: answerPayload,
+                        answeredAt: serverTimestamp(),
+                        answeredBy: responder?.uid ?? current.uid
+                      });
+                      voiceDebug('Published renegotiation answer', { revision: nextRevision });
+                    } catch (err) {
+                      console.warn('Failed to process updated offer', err);
+                      voiceDebug('Failed to process updated offer', err);
+                    }
+                  })
+                  .catch((err) => {
+                    console.warn('Failed to queue renegotiation response', err);
+                    voiceDebug('Failed to queue renegotiation response', err);
+                  });
+              }
             }
           });
-        });
 
-        callUnsub = onSnapshot(docRef, (snapshot) => {
-          if (!snapshot.exists()) {
-            statusMessage = 'Call ended.';
-            hangUp({ cleanupDoc: false }).catch(() => {});
-          }
-        });
-
-        statusMessage = 'Connected.';
+          statusMessage = 'Connected.';
+        }
       }
 
       await updateParticipantPresence({
@@ -1187,14 +2610,32 @@
     lastPresenceSignature = null;
 
     callUnsub?.();
-    offerCandidatesUnsub?.();
-    answerCandidatesUnsub?.();
+    detachCandidateSubscriptions();
     participantsUnsub?.();
+    offerDescriptionUnsub?.();
+    answerDescriptionUnsub?.();
 
     callUnsub = null;
-    offerCandidatesUnsub = null;
-    answerCandidatesUnsub = null;
     participantsUnsub = null;
+    offerDescriptionUnsub = null;
+    answerDescriptionUnsub = null;
+    isOfferer = false;
+    processedRenegotiationSignals.clear();
+    if (renegotiationSignalClearTimer) {
+      clearTimeout(renegotiationSignalClearTimer);
+      renegotiationSignalClearTimer = null;
+    }
+    lastRenegotiationSignalId = null;
+    lastOfferRevision = 0;
+    lastAnswerRevision = 0;
+    negotiationInFlight = null;
+    renegotiationAwaitingStable = false;
+    renegotiationNeedsPromotion = false;
+    pendingRenegotiationReasons = [];
+    if (renegotiationTimer) {
+      clearTimeout(renegotiationTimer);
+      renegotiationTimer = null;
+    }
 
     if (screenStream) {
       screenStream.getTracks().forEach((track) => {
@@ -1254,6 +2695,8 @@
 
     audioSender = null;
     videoSender = null;
+    audioTransceiverRef = null;
+    videoTransceiverRef = null;
 
     removeLocalTrack('audio');
     removeLocalTrack('video');
@@ -1276,6 +2719,7 @@
       localVideoEl.srcObject = null;
     }
     audioNeedsUnlock = false;
+    resetAudioMonitoring();
 
     const cleanupRef = callRef;
     const participantsRef = participantsCollectionRef;
@@ -1284,6 +2728,11 @@
     answerCandidatesRef = null;
     localCandidatesRef = null;
     participantsCollectionRef = null;
+    callDescriptionsRef = null;
+    offerDescriptionRef = null;
+    answerDescriptionRef = null;
+    latestOfferDescription = null;
+    latestAnswerDescription = null;
 
     if (participantsRef && currentUid) {
       participants = participants.filter((p) => p.uid !== currentUid);
@@ -1301,6 +2750,10 @@
           }
           const answers = await getDocs(collection(cleanupRef, 'answerCandidates'));
           for (const snap of answers.docs) {
+            await deleteDoc(snap.ref);
+          }
+          const descriptions = await getDocs(collection(cleanupRef, 'descriptions'));
+          for (const snap of descriptions.docs) {
             await deleteDoc(snap.ref);
           }
           await deleteDoc(cleanupRef);
@@ -1323,6 +2776,7 @@
   }
 
   async function toggleMic() {
+    voiceDebug('toggleMic invoked', { isMicMuted, hasAudioTrack });
     const enabling = isMicMuted;
     if (enabling) {
       const previous = isMicMuted;
@@ -1348,6 +2802,7 @@
       statusMessage = 'Microphone muted.';
     }
     await updateParticipantPresence();
+    scheduleRenegotiation(enabling ? 'mic-unmuted' : 'mic-muted', { requireOfferer: true });
     const currentUid = $user?.uid ?? null;
     if (currentUid) {
       const nextAudio = hasAudioTrack && !isMicMuted;
@@ -1359,6 +2814,7 @@
 
   async function toggleCamera() {
     if (isScreenSharePending) return;
+    voiceDebug('toggleCamera invoked', { isCameraOff, isScreenSharing });
 
     if (isScreenSharing) {
       await stopScreenShare();
@@ -1393,6 +2849,7 @@
     }
 
     await updateParticipantPresence();
+    scheduleRenegotiation(enabling ? 'camera-on' : 'camera-off', { requireOfferer: true });
     const currentUid = $user?.uid ?? null;
     if (currentUid) {
       const nextVideo = hasVideoTrack && (!isCameraOff || isScreenSharing);
@@ -1468,6 +2925,7 @@
       }
 
       await updateParticipantPresence();
+      scheduleRenegotiation('screen-share-started', { requireOfferer: true });
     } catch (err) {
       console.warn('Failed to start screen share', err);
       errorMessage =
@@ -1524,10 +2982,15 @@
     }
 
     await updateParticipantPresence();
+    scheduleRenegotiation(
+      restoreCamera ? 'screen-share-stopped-restore-camera' : 'screen-share-stopped',
+      { requireOfferer: true }
+    );
     statusMessage = restoreCamera ? 'Returned to camera.' : 'Screen share stopped.';
   }
 
   async function toggleScreenShare() {
+    voiceDebug('toggleScreenShare invoked', { isScreenSharing });
     if (isScreenSharing) {
       await stopScreenShare();
     } else {
@@ -1536,6 +2999,7 @@
   }
 
   async function refreshDevices() {
+    voiceDebug('refreshDevices invoked', { hasAudioTrack, hasVideoTrack, isMicMuted, isCameraOff });
     const tasks: Promise<boolean>[] = [];
     if (hasAudioTrack && !isMicMuted) tasks.push(acquireTrack('audio'));
     if (hasVideoTrack && !isCameraOff) tasks.push(acquireTrack('video'));
@@ -1552,6 +3016,7 @@
       statusMessage = 'Devices refreshed.';
     }
     await updateParticipantPresence();
+    scheduleRenegotiation('refresh-devices', { requireOfferer: true });
     const currentUid = $user?.uid ?? null;
     if (currentUid) {
       const nextAudio = hasAudioTrack && !isMicMuted;
@@ -1579,13 +3044,23 @@
 
   function clearReconnectTimer() {
     if (reconnectTimer) {
+      voiceDebug('clearReconnectTimer');
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
   }
 
   async function performFullReconnect() {
-    if (isConnecting) return;
+    if (isConnecting) {
+      voiceDebug('performFullReconnect skipped (already connecting)');
+      return;
+    }
+    voiceDebug('performFullReconnect start', {
+      isJoined,
+      hasPc: !!pc,
+      connectionState: pc?.connectionState ?? null,
+      iceState: pc?.iceConnectionState ?? null
+    });
     const shouldEnableMic = !isMicMuted;
     const shouldEnableCamera = !isCameraOff && !isScreenSharing;
     const shouldShareScreen = isScreenSharing;
@@ -1596,6 +3071,11 @@
     if (!isJoined) return;
     clearReconnectTimer();
     statusMessage = 'Connected.';
+    voiceDebug('performFullReconnect completed', {
+      isJoined,
+      connectionState: pc?.connectionState ?? null,
+      iceState: pc?.iceConnectionState ?? null
+    });
 
     if (shouldEnableMic && isMicMuted) {
       await toggleMic();
@@ -1610,6 +3090,14 @@
 
   function scheduleReconnect(message: string, force = false) {
     statusMessage = message;
+    voiceDebug('scheduleReconnect', {
+      message,
+      force,
+      existingTimer: !!reconnectTimer,
+      connectionState: pc?.connectionState ?? null,
+      iceState: pc?.iceConnectionState ?? null,
+      signalingState: pc?.signalingState ?? null
+    });
     if (reconnectTimer && !force) return;
     clearReconnectTimer();
     reconnectTimer = setTimeout(() => {
@@ -1632,6 +3120,15 @@
 
 <div class="voice-root">
   <div class="call-shell">
+    {#if debugLoggingEnabled}
+      <div class="call-debug-banner">
+        <i class="bx bx-bug"></i>
+        Debug logging active – open the browser console to view `[voice]` events.
+        <button type="button" on:click={() => setVoiceDebug(false)}>
+          Disable
+        </button>
+      </div>
+    {/if}
     <header class="call-header">
       <div class="call-header__info">
         <div class="call-header__icon">
@@ -1674,7 +3171,7 @@
         <div class="call-grid">
           {#each participantTiles as tile (tile.uid)}
             <article
-              class={`call-tile ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''}`}
+              class={`call-tile ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking' : ''}`}
               data-voice-menu
               on:touchstart={() => handleLongPressStart(tile.uid)}
               on:touchend={() => handleLongPressEnd(tile.uid)}
@@ -2100,6 +3597,40 @@
     width: 100%;
     align-content: start;
   }
+  .call-debug-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    padding: 0.65rem 0.85rem;
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, var(--color-warning, #facc15) 12%, transparent);
+    color: var(--text-90);
+    font-size: 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--color-warning, #facc15) 30%, transparent);
+  }
+
+  .call-debug-banner i {
+    font-size: 1rem;
+  }
+
+  .call-debug-banner button {
+    margin-left: auto;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border: none;
+    background: transparent;
+    color: inherit;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+
+  .call-debug-banner button:hover,
+  .call-debug-banner button:focus-visible {
+    background: color-mix(in srgb, var(--color-warning, #facc15) 25%, transparent);
+  }
 
   @media (min-width: 1200px) {
     .call-grid {
@@ -2109,12 +3640,13 @@
 
   .call-tile {
     position: relative;
-    border-radius: 1.25rem;
+    border-radius: 0.85rem;
     overflow: hidden;
     background: color-mix(in srgb, var(--color-panel) 75%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
     min-height: 220px;
     display: flex;
+    transition: box-shadow 0.18s ease, border-color 0.18s ease;
   }
 
   .call-tile--self {
@@ -2124,6 +3656,11 @@
   .call-tile--sharing {
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-strong) 55%, transparent);
     border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  }
+
+  .call-tile--speaking {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success, #16a34a) 70%, transparent);
+    border-color: color-mix(in srgb, var(--color-success, #16a34a) 60%, transparent);
   }
 
   .call-tile__media {
@@ -2158,7 +3695,7 @@
   .call-avatar__image {
     width: 4.5rem;
     height: 4.5rem;
-    border-radius: 999px;
+    border-radius: 0.75rem;
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.12);
     display: grid;
@@ -2607,6 +4144,7 @@
     }
   }
 </style>
+
 
 
 
