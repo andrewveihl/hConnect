@@ -171,6 +171,11 @@
   let processedRenegotiationSignals = new Map<string, string>();
   let lastRenegotiationSignalId: string | null = null;
   let renegotiationSignalClearTimer: ReturnType<typeof setTimeout> | null = null;
+  let consumedOfferCandidateIds = new Set<string>();
+  let consumedAnswerCandidateIds = new Set<string>();
+  const MAX_REMOTE_ICE_LOGS = 25;
+  let remoteIceLogCountOfferer = 0;
+  let remoteIceLogCountAnswerer = 0;
   function flushRenegotiationQueue() {
     if (!pc || !callRef) {
       voiceDebug('flushRenegotiationQueue skipped (missing pc or call)');
@@ -214,6 +219,26 @@
   function voiceDebug(...args: unknown[]) {
     if (!debugLoggingEnabled) return;
     console.log('[voice]', ...args);
+  }
+
+  function logRemoteCandidate(
+    role: 'offerer' | 'answerer',
+    info: ReturnType<typeof describeIceCandidate>,
+    options: { fallback?: boolean } = {}
+  ) {
+    const { fallback = false } = options;
+    const count = role === 'offerer' ? remoteIceLogCountOfferer : remoteIceLogCountAnswerer;
+    const label = fallback ? 'Consuming remote ICE candidate (fallback)' : 'Consuming remote ICE candidate';
+    if (count < MAX_REMOTE_ICE_LOGS) {
+      voiceDebug(label, { role, ...info });
+    } else if (count === MAX_REMOTE_ICE_LOGS) {
+      voiceDebug(`${label} (muted additional logs)`, { role });
+    }
+    if (role === 'offerer') {
+      remoteIceLogCountOfferer += 1;
+    } else {
+      remoteIceLogCountAnswerer += 1;
+    }
   }
 
   function setVoiceDebug(enabled: boolean) {
@@ -1374,9 +1399,14 @@
       answerCandidatesUnsub = onSnapshot(answerCandidatesRef, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+            const docId = change.doc.id;
+            if (consumedAnswerCandidateIds.has(docId)) {
+              return;
+            }
+            consumedAnswerCandidateIds.add(docId);
             const candidateData = change.doc.data();
             const info = describeIceCandidate(candidateData.candidate);
-            voiceDebug('Consuming remote ICE candidate', { role: 'offerer', ...info });
+            logRemoteCandidate('offerer', info);
             const candidate = new RTCIceCandidate(candidateData);
             connection.addIceCandidate(candidate).catch((err) => {
               console.warn('Failed to add remote ICE candidate', err);
@@ -1390,9 +1420,14 @@
     offerCandidatesUnsub = onSnapshot(offerCandidatesRef, (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+          const docId = change.doc.id;
+          if (consumedAnswerCandidateIds.has(docId)) {
+            return;
+          }
+          consumedAnswerCandidateIds.add(docId);
           const candidateData = change.doc.data();
           const info = describeIceCandidate(candidateData.candidate);
-          voiceDebug('Consuming remote ICE candidate (fallback)', { role: 'offerer', ...info });
+          logRemoteCandidate('offerer', info, { fallback: true });
           const candidate = new RTCIceCandidate(candidateData);
           connection.addIceCandidate(candidate).catch((err) => {
             console.warn('Failed to add remote ICE candidate', err);
@@ -1428,9 +1463,14 @@
       offerCandidatesUnsub = onSnapshot(offerCandidatesRef, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added' && !change.doc.metadata.hasPendingWrites) {
+            const docId = change.doc.id;
+            if (consumedOfferCandidateIds.has(docId)) {
+              return;
+            }
+            consumedOfferCandidateIds.add(docId);
             const candidateData = change.doc.data();
             const info = describeIceCandidate(candidateData.candidate);
-            voiceDebug('Consuming remote ICE candidate', { role: 'answerer', ...info });
+            logRemoteCandidate('answerer', info);
             const candidate = new RTCIceCandidate(candidateData);
             connection.addIceCandidate(candidate).catch((err) => {
               console.warn('Failed to add remote ICE candidate', err);
@@ -2344,6 +2384,10 @@
       offerDescriptionRef = doc(callDescriptionsRef, 'offer');
       answerDescriptionRef = doc(callDescriptionsRef, 'answer');
       descriptionStorageEnabled = true;
+      consumedOfferCandidateIds.clear();
+      consumedAnswerCandidateIds.clear();
+      remoteIceLogCountOfferer = 0;
+      remoteIceLogCountAnswerer = 0;
 
       participantDocRef = doc(participantsCollectionRef, current.uid);
       lastPresenceSignature = null;
@@ -2626,6 +2670,10 @@
       renegotiationSignalClearTimer = null;
     }
     lastRenegotiationSignalId = null;
+    consumedOfferCandidateIds.clear();
+    consumedAnswerCandidateIds.clear();
+    remoteIceLogCountOfferer = 0;
+    remoteIceLogCountAnswerer = 0;
     lastOfferRevision = 0;
     lastAnswerRevision = 0;
     negotiationInFlight = null;
