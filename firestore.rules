@@ -33,8 +33,16 @@ service cloud.firestore {
 
     function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels"); }
     function canSendInChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "sendMessages"); }
-    function canConnectVoice(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "connectVoice"); }
-    function canSpeakVoice(serverId)   { return isServerAdmin(serverId) || hasPerm(serverId, "speakVoice"); }
+    function canConnectVoice(serverId) {
+      return isServerAdmin(serverId)
+        || hasPerm(serverId, "connectVoice")
+        || canViewChannel(serverId);
+    }
+    function canSpeakVoice(serverId) {
+      return isServerAdmin(serverId)
+        || hasPerm(serverId, "speakVoice")
+        || canConnectVoice(serverId);
+    }
 
     /* ---------------- DM helpers (legacy tolerant) ---------------- */
 
@@ -192,6 +200,11 @@ service cloud.firestore {
             allow read: if canViewChannel(serverId);
             allow create, delete: if canConnectVoice(serverId);
             allow update: if false;
+          }
+
+          match /descriptions/{descriptionId} {
+            allow read: if canViewChannel(serverId);
+            allow create, update, delete: if canConnectVoice(serverId);
           }
 
           match /participants/{uid} {
