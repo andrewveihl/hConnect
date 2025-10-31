@@ -36,3 +36,7 @@ npm run build
 You can preview the production build with `npm run preview`.
 
 > To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+
+## GIF search configuration
+
+To enable in-app GIF search, create a [Tenor API key](https://developers.google.com/tenor/guides/quickstart) and add it to your `.env` file as `PUBLIC_TENOR_API_KEY`. The picker falls back to manual URL pasting if the key is missing.

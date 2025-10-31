@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import LocalGifPicker from './LocalGifPicker.svelte';
+  import GifPicker from './GifPicker.svelte';
   import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
 
@@ -174,7 +174,7 @@
 
 <!-- Modals -->
 {#if showGif}
-  <LocalGifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
+  <GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
 {/if}
 {#if showPoll}
   <PollBuilder on:close={() => (showPoll = false)} on:create={(e) => onPollCreate(e.detail)} />
