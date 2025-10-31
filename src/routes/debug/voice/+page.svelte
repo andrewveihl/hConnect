@@ -760,7 +760,7 @@
     </div>
     <div class="video-panel">
       <h2>Remote Preview</h2>
-      <video playsinline autoplay bind:this={remoteVideoEl}></video>
+      <video playsinline autoplay aria-hidden="true" tabindex="-1" bind:this={remoteVideoEl}></video>
       <pre>{JSON.stringify(remoteTrackInfo(), null, 2)}</pre>
     </div>
   </section>

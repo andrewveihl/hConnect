@@ -209,11 +209,6 @@
     margin-bottom: 1.25rem;
   }
 
-  .gif-subtitle {
-    color: var(--text-60);
-    font-size: 0.95rem;
-  }
-
   .gif-grid-scroll {
     flex: 1;
     overflow-y: auto;
