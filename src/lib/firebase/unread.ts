@@ -9,12 +9,12 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  Timestamp,
   where,
   limit,
   getDoc,
   type Unsubscribe
 } from 'firebase/firestore';
+import type { Timestamp } from 'firebase/firestore';
 
 export type UnreadMap = Record<string, number>;
 
