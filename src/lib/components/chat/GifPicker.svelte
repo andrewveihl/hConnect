@@ -1,9 +1,10 @@
 ﻿<script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { browser } from '$app/environment';
-  import { PUBLIC_TENOR_API_KEY } from '$env/static/public';
+  import { env as publicEnv } from '$env/dynamic/public';
 
   const dispatch = createEventDispatcher();
+  const tenorApiKey = publicEnv.PUBLIC_TENOR_API_KEY;
 
   let q = '';
   let gifs: Array<{ url: string; preview: string }> = [];
@@ -13,7 +14,7 @@
 
   async function searchTenor(query: string) {
     if (!browser) return;
-    if (!PUBLIC_TENOR_API_KEY) {
+    if (!tenorApiKey) {
       errorMsg = 'No Tenor API key set. Paste a URL below instead.';
       gifs = [];
       return;
@@ -22,7 +23,7 @@
     errorMsg = '';
     try {
       const params = new URLSearchParams({
-        key: PUBLIC_TENOR_API_KEY,
+        key: tenorApiKey,
         q: query || 'trending',
         limit: '24',
         media_filter: 'minimal',
@@ -101,7 +102,7 @@
             </button>
           {/each}
         </div>
-      {:else if PUBLIC_TENOR_API_KEY}
+      {:else if tenorApiKey}
         <div class="gif-message">No results. Try another search term.</div>
       {:else}
         <div class="gif-message">Add a Tenor API key to enable search.</div>
