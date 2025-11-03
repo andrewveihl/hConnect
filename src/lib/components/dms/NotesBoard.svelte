@@ -81,15 +81,15 @@
           rows="3"
           placeholder="Take a note..."
           bind:value={content}
-        />
+        ></textarea>
         <div class="mt-3 flex items-center gap-2">
           <div class="flex items-center gap-1">
-            <button class="h-6 w-6 rounded-full bg-yellow-300/70" title="Yellow" on:click={() => color = 'yellow'}></button>
-            <button class="h-6 w-6 rounded-full bg-emerald-300/70" title="Green" on:click={() => color = 'green'}></button>
-            <button class="h-6 w-6 rounded-full bg-sky-300/70" title="Blue" on:click={() => color = 'blue'}></button>
-            <button class="h-6 w-6 rounded-full bg-pink-300/70" title="Pink" on:click={() => color = 'pink'}></button>
-            <button class="h-6 w-6 rounded-full bg-purple-300/70" title="Purple" on:click={() => color = 'purple'}></button>
-            <button class="h-6 w-6 rounded-full bg-white/10 border border-white/20" title="Default" on:click={() => color = null}></button>
+            <button class="h-6 w-6 rounded-full bg-yellow-300/70" type="button" title="Yellow" aria-label="Set note color to yellow" on:click={() => color = 'yellow'}></button>
+            <button class="h-6 w-6 rounded-full bg-emerald-300/70" type="button" title="Green" aria-label="Set note color to green" on:click={() => color = 'green'}></button>
+            <button class="h-6 w-6 rounded-full bg-sky-300/70" type="button" title="Blue" aria-label="Set note color to blue" on:click={() => color = 'blue'}></button>
+            <button class="h-6 w-6 rounded-full bg-pink-300/70" type="button" title="Pink" aria-label="Set note color to pink" on:click={() => color = 'pink'}></button>
+            <button class="h-6 w-6 rounded-full bg-purple-300/70" type="button" title="Purple" aria-label="Set note color to purple" on:click={() => color = 'purple'}></button>
+            <button class="h-6 w-6 rounded-full bg-white/10 border border-white/20" type="button" title="Default" aria-label="Reset note color" on:click={() => color = null}></button>
           </div>
           <div class="ml-auto flex items-center gap-2">
             <button class="btn btn-ghost" on:click={resetComposer}>Cancel</button>
@@ -120,20 +120,20 @@
               <div class="mt-1 text-white/90 whitespace-pre-wrap break-words">{n.content}</div>
             {/if}
           </div>
-          <button class="p-1 rounded hover:bg-white/10" title={n.pinned ? 'Unpin' : 'Pin'} on:click={() => togglePin(n)}>
+          <button class="p-1 rounded hover:bg-white/10" type="button" title={n.pinned ? 'Unpin' : 'Pin'} aria-label={n.pinned ? 'Unpin note' : 'Pin note'} on:click={() => togglePin(n)}>
             <i class={`bx ${n.pinned ? 'bx-pin' : 'bx-pin'}`}></i>
           </button>
         </div>
         <div class="mt-3 flex items-center gap-2">
           <div class="flex items-center gap-1">
-            <button class="h-5 w-5 rounded-full bg-yellow-300/70" on:click={() => changeColor(n, 'yellow')}></button>
-            <button class="h-5 w-5 rounded-full bg-emerald-300/70" on:click={() => changeColor(n, 'green')}></button>
-            <button class="h-5 w-5 rounded-full bg-sky-300/70" on:click={() => changeColor(n, 'blue')}></button>
-            <button class="h-5 w-5 rounded-full bg-pink-300/70" on:click={() => changeColor(n, 'pink')}></button>
-            <button class="h-5 w-5 rounded-full bg-purple-300/70" on:click={() => changeColor(n, 'purple')}></button>
-            <button class="h-5 w-5 rounded-full bg-white/10 border border-white/20" on:click={() => changeColor(n, null)}></button>
+            <button class="h-5 w-5 rounded-full bg-yellow-300/70" type="button" aria-label="Change note color to yellow" on:click={() => changeColor(n, 'yellow')}></button>
+            <button class="h-5 w-5 rounded-full bg-emerald-300/70" type="button" aria-label="Change note color to green" on:click={() => changeColor(n, 'green')}></button>
+            <button class="h-5 w-5 rounded-full bg-sky-300/70" type="button" aria-label="Change note color to blue" on:click={() => changeColor(n, 'blue')}></button>
+            <button class="h-5 w-5 rounded-full bg-pink-300/70" type="button" aria-label="Change note color to pink" on:click={() => changeColor(n, 'pink')}></button>
+            <button class="h-5 w-5 rounded-full bg-purple-300/70" type="button" aria-label="Change note color to purple" on:click={() => changeColor(n, 'purple')}></button>
+            <button class="h-5 w-5 rounded-full bg-white/10 border border-white/20" type="button" aria-label="Reset note color" on:click={() => changeColor(n, null)}></button>
           </div>
-          <button class="ml-auto p-1 rounded hover:bg-white/10 text-red-300" title="Delete" on:click={() => remove(n)}>
+          <button class="ml-auto p-1 rounded hover:bg-white/10 text-red-300" type="button" title="Delete" aria-label="Delete note" on:click={() => remove(n)}>
             <i class="bx bx-trash"></i>
           </button>
         </div>

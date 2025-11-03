@@ -1057,7 +1057,7 @@ body {
   background: var(--button-primary-hover) !important;
 }
 
-.bg-[rgb(3,7,18)] {
+.bg-\[rgb\(3_7_18\)\] {
   background: var(--color-app-bg) !important;
 }
 
