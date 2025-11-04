@@ -4,8 +4,16 @@ import { env as dynamicPublic } from '$env/dynamic/public';
 
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import {
-  getAuth, type Auth, setPersistence, browserLocalPersistence,
-  GoogleAuthProvider, OAuthProvider, signInWithPopup, onAuthStateChanged, signOut
+  getAuth,
+  type Auth,
+  setPersistence,
+  browserLocalPersistence,
+  indexedDBLocalPersistence,
+  GoogleAuthProvider,
+  OAuthProvider,
+  signInWithPopup,
+  onAuthStateChanged,
+  signOut
 } from 'firebase/auth';
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel, type Firestore
@@ -89,8 +97,20 @@ export async function ensureFirebaseReady() {
   const _app = await ensureApp();
   if (!auth) {
     auth = getAuth(_app);
-    // best-effort; ignore failures (private mode, etc.)
-    setPersistence(auth, browserLocalPersistence).catch(() => {});
+    const persistenceCandidates = [indexedDBLocalPersistence, browserLocalPersistence];
+    let appliedPersistence = false;
+    for (const candidate of persistenceCandidates) {
+      try {
+        await setPersistence(auth, candidate);
+        appliedPersistence = true;
+        break;
+      } catch {
+        // ignore and try the next option (e.g., private mode may block IndexedDB)
+      }
+    }
+    if (!appliedPersistence) {
+      console.warn('[firebase] Falling back to in-memory auth persistence (storage unavailable).');
+    }
   }
   if (!db) {
     db = getFirestore(_app);
