@@ -73,6 +73,51 @@
     isSpeaking: boolean;
   };
 
+  type TrackDiagnostics = {
+    id: string;
+    kind: string;
+    readyState: MediaStreamTrackState;
+    enabled: boolean;
+    muted: boolean;
+    label: string;
+    width?: number | null;
+    height?: number | null;
+    frameRate?: number | null;
+  };
+
+  type TransceiverDiagnostics = {
+    mid: string | null;
+    currentDirection: RTCRtpTransceiverDirection | null;
+    preferredDirection: RTCRtpTransceiverDirection | null;
+    isStopped: boolean;
+    senderTrack: TrackDiagnostics | null;
+    receiverTrack: TrackDiagnostics | null;
+  };
+
+  type SenderDiagnostics = {
+    track: TrackDiagnostics | null;
+    streams: string[];
+    transportState: string | null;
+  };
+
+  type ReceiverDiagnostics = {
+    track: TrackDiagnostics | null;
+    streams: string[];
+  };
+
+  type RemoteStreamDiagnostics = {
+    id: string;
+    audioTracks: TrackDiagnostics[];
+    videoTracks: TrackDiagnostics[];
+  };
+
+  type PeerDiagnostics = {
+    transceivers: TransceiverDiagnostics[];
+    senders: SenderDiagnostics[];
+    receivers: ReceiverDiagnostics[];
+    remoteStreams: RemoteStreamDiagnostics[];
+  };
+
   let localVideoEl: HTMLVideoElement | null = null;
   let localStream: MediaStream | null = null;
 
@@ -126,16 +171,24 @@
   let activeSessionKey: string | null = null;
   let sessionQueue: Promise<void> = Promise.resolve();
   let voiceUnsubscribe: (() => void) | null = null;
+  let peerDiagnostics: PeerDiagnostics = {
+    transceivers: [],
+    senders: [],
+    receivers: [],
+    remoteStreams: []
+  };
   let isJoined = false;
   let isConnecting = false;
   let isMicMuted = true;
   let isCameraOff = true;
   let remoteConnected = false;
-  let isScreenSharing = false;
   let screenStream: MediaStream | null = null;
+  let isScreenSharing = false;
   let isScreenSharePending = false;
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = false;
+  let isRestartingCall = false;
+  let reconnectAttemptCount = 0;
   let signalingState = 'closed';
   let connectionState = 'new';
   let iceConnectionState = 'new';
@@ -202,16 +255,14 @@
       return;
     }
     if (renegotiationNeedsPromotion && !isOfferer) {
-      const nextReason = pendingRenegotiationReasons[0] ?? 'promotion-needed';
-      voiceDebug('flushRenegotiationQueue cannot promote (not offerer); signalling offerer instead', {
-        reason: nextReason,
+      voiceDebug('flushRenegotiationQueue promoting to offerer', {
         lastOfferRevision,
-        lastAnswerRevision
+        lastAnswerRevision,
+        pendingReasons: [...pendingRenegotiationReasons]
       });
-      void signalOffererRenegotiation(nextReason);
-      renegotiationNeedsPromotion = false;
-      pendingRenegotiationReasons = [];
-      return;
+      isOfferer = true;
+      lastOfferRevision = Math.max(lastOfferRevision, lastAnswerRevision);
+      attachOffererIceHandlers(pc);
     }
     renegotiationNeedsPromotion = false;
     if (!pendingRenegotiationReasons.length) {
@@ -386,6 +437,12 @@
     publishedCandidateCount = 0;
     appliedCandidateCount = 0;
     remoteCandidateKeys.clear();
+    peerDiagnostics = {
+      transceivers: [],
+      senders: [],
+      receivers: [],
+      remoteStreams: []
+    };
   }
 
   function remoteCandidateKey(candidate: RTCIceCandidateInit & { candidate?: string | null }) {
@@ -395,12 +452,14 @@
   function updatePeerConnectionStateSnapshot(connection: RTCPeerConnection | null = pc) {
     if (!connection) {
       resetPeerDiagnostics();
+      capturePeerDiagnostics(null, 'state-snapshot');
       return;
     }
     signalingState = connection.signalingState ?? 'closed';
     connectionState = connection.connectionState ?? 'new';
     iceConnectionState = connection.iceConnectionState ?? 'new';
     iceGatheringState = connection.iceGatheringState ?? 'new';
+    capturePeerDiagnostics(connection, 'state-snapshot');
   }
 
   const SPEAKING_THRESHOLD = 13;
@@ -439,6 +498,166 @@
       next.delete(uid);
     }
     speakingParticipants = next;
+  }
+
+  function setTransceiverDirection(
+    transceiver: RTCRtpTransceiver | null,
+    desired: RTCRtpTransceiverDirection,
+    context: 'audio' | 'video',
+    details: Record<string, unknown> = {}
+  ) {
+    if (!transceiver) return;
+    const current = transceiver.direction;
+    if (current === desired) return;
+    voiceDebug(`${context} transceiver direction update`, { from: current, to: desired, ...details });
+    try {
+      if (typeof transceiver.setDirection === 'function') {
+        transceiver.setDirection(desired);
+      } else {
+        (transceiver as any).direction = desired;
+      }
+    } catch (err) {
+      console.warn(`Failed to set ${context} transceiver direction`, err);
+      voiceDebug(`Failed to set ${context} transceiver direction`, err);
+      try {
+        (transceiver as any).direction = desired;
+      } catch (assignErr) {
+        console.warn(`Failed to assign ${context} transceiver direction`, assignErr);
+        voiceDebug(`Failed to assign ${context} transceiver direction`, assignErr);
+      }
+    }
+  }
+
+  function describeTrack(track: MediaStreamTrack | null): TrackDiagnostics | null {
+    if (!track) return null;
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+    return {
+      id: track.id,
+      kind: track.kind,
+      readyState: track.readyState,
+      enabled: track.enabled,
+      muted: (track as any)?.muted ?? false,
+      label: track.label ?? '',
+      width: typeof settings.width === 'number' ? settings.width : null,
+      height: typeof settings.height === 'number' ? settings.height : null,
+      frameRate: typeof settings.frameRate === 'number' ? settings.frameRate : null
+    };
+  }
+
+  let lastPeerDiagnosticsSignature = '';
+
+  function capturePeerDiagnostics(connection: RTCPeerConnection | null = pc, reason = 'snapshot') {
+    if (!connection) {
+      peerDiagnostics = {
+        transceivers: [],
+        senders: [],
+        receivers: [],
+        remoteStreams: []
+      };
+      const emptySignature = 'null';
+      if (lastPeerDiagnosticsSignature !== emptySignature) {
+        lastPeerDiagnosticsSignature = emptySignature;
+        voiceDebug('Peer diagnostics cleared', { reason });
+      }
+      return;
+    }
+
+    const transceivers =
+      typeof connection.getTransceivers === 'function'
+        ? connection.getTransceivers().map((transceiver) => ({
+            mid: transceiver.mid ?? null,
+            currentDirection: transceiver.currentDirection ?? transceiver.direction ?? null,
+            preferredDirection: transceiver.direction ?? null,
+            isStopped: transceiver.stopped ?? false,
+            senderTrack: describeTrack(transceiver.sender?.track ?? null),
+            receiverTrack: describeTrack(transceiver.receiver?.track ?? null)
+          }))
+        : [];
+
+    const senders =
+      typeof connection.getSenders === 'function'
+        ? connection.getSenders().map((sender) => {
+            const rawTransport = (sender as any)?.transport ?? null;
+            const transportState =
+              rawTransport && typeof rawTransport.state === 'string' ? (rawTransport.state as string) : null;
+            return {
+              track: describeTrack(sender.track ?? null),
+              streams: typeof sender.getStreams === 'function' ? sender.getStreams().map((stream) => stream.id) : [],
+              transportState
+            };
+          })
+        : [];
+
+    const receivers =
+      typeof connection.getReceivers === 'function'
+        ? connection.getReceivers().map((receiver) => ({
+            track: describeTrack(receiver.track ?? null),
+            streams:
+              typeof receiver.getStreams === 'function' ? receiver.getStreams().map((stream) => stream.id) : []
+          }))
+        : [];
+
+    const remoteStreamsDiagnostics: RemoteStreamDiagnostics[] = Array.from(remoteStreams.values()).map((stream) => ({
+      id: stream.id,
+      audioTracks: stream.getAudioTracks().map((track) => describeTrack(track)).filter(Boolean) as TrackDiagnostics[],
+      videoTracks: stream.getVideoTracks().map((track) => describeTrack(track)).filter(Boolean) as TrackDiagnostics[]
+    }));
+
+    const nextDiagnostics: PeerDiagnostics = {
+      transceivers,
+      senders,
+      receivers,
+      remoteStreams: remoteStreamsDiagnostics
+    };
+
+    const signature = JSON.stringify(
+      nextDiagnostics.transceivers.map((trx) => ({
+        mid: trx.mid,
+        currentDirection: trx.currentDirection,
+        preferredDirection: trx.preferredDirection,
+        sender: trx.senderTrack?.readyState ?? null,
+        receiver: trx.receiverTrack?.readyState ?? null
+      }))
+    );
+    peerDiagnostics = nextDiagnostics;
+    if (signature !== lastPeerDiagnosticsSignature) {
+      lastPeerDiagnosticsSignature = signature;
+      voiceDebug('Peer diagnostics updated', {
+        reason,
+        transceivers: nextDiagnostics.transceivers.map((trx) => ({
+          mid: trx.mid,
+          current: trx.currentDirection,
+          preferred: trx.preferredDirection,
+          stopped: trx.isStopped,
+          sender: trx.senderTrack ? `${trx.senderTrack.kind}:${trx.senderTrack.readyState}` : null,
+          receiver: trx.receiverTrack ? `${trx.receiverTrack.kind}:${trx.receiverTrack.readyState}` : null
+        })),
+        senders: nextDiagnostics.senders.map((sender) => ({
+          track: sender.track ? `${sender.track.kind}:${sender.track.readyState}` : null,
+          transport: sender.transportState ?? null
+        })),
+        remoteStreams: nextDiagnostics.remoteStreams.map((stream) => ({
+          id: stream.id,
+          audio: stream.audioTracks.map((track) => `${track.readyState}${track.enabled ? '' : '(disabled)'}`),
+          video: stream.videoTracks.map((track) => `${track.readyState}${track.enabled ? '' : '(disabled)'}`)
+        }))
+      });
+    }
+  }
+
+  function formatTrackDiagnostics(track: TrackDiagnostics | null): string {
+    if (!track) return 'none';
+    const bits = [`${track.kind}`, track.readyState];
+    bits.push(track.enabled ? 'enabled' : 'disabled');
+    if (track.muted) bits.push('muted');
+    if (track.label) bits.push(`label:${track.label}`);
+    if (track.width && track.height) {
+      bits.push(`${track.width}x${track.height}`);
+    }
+    if (track.frameRate) {
+      bits.push(`${track.frameRate}fps`);
+    }
+    return bits.join(' | ');
   }
 
   async function ensureMediaPermissions() {
@@ -644,10 +863,9 @@
       for (const tile of tiles) {
         if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
         const preferVideo = tile.hasVideo;
-        const matchesVideo = (stream: MediaStream) =>
-          stream.getVideoTracks().some((track) => track.readyState === 'live');
+        const matchesVideo = (stream: MediaStream) => streamHasLiveVideo(stream);
         const matchesAudio = (stream: MediaStream) =>
-          stream.getAudioTracks().some((track) => track.readyState === 'live');
+          stream.getAudioTracks().some((track) => track.readyState !== 'ended');
 
         let fallbackEntry =
           availableStreams.find(([id, stream]) => {
@@ -677,8 +895,18 @@
     const controls = media.isSelf
       ? { volume: 1, muted: false }
       : participantControls.get(media.uid) ?? { volume: DEFAULT_VOLUME, muted: false };
+    const streamAudioActive = media.stream
+      ? media.stream.getAudioTracks().some((track) => track.readyState !== 'ended')
+      : false;
+    const streamVideoActive = streamHasLiveVideo(media.stream);
+    const resolvedHasAudio = media.isSelf
+      ? localHasAudio || streamAudioActive
+      : media.hasAudio || streamAudioActive;
+    const resolvedHasVideo = media.isSelf ? localHasVideo || streamVideoActive : media.hasVideo || streamVideoActive;
     return {
       ...media,
+      hasAudio: resolvedHasAudio,
+      hasVideo: resolvedHasVideo,
       displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
       photoURL: base?.photoURL ?? null,
       controls,
@@ -931,7 +1159,14 @@
     if (video && video.srcObject !== stream) {
       video.srcObject = stream;
       if (stream) {
-        video.play?.().catch(() => {});
+        const playResult = video.play?.();
+        if (playResult && typeof playResult.then === 'function') {
+          playResult.catch((err: unknown) => {
+            if ((err as any)?.name === 'NotAllowedError') {
+              voiceDebug('Video playback blocked until user gesture', { uid, streamId: stream.id });
+            }
+          });
+        }
       } else {
         video.pause?.();
       }
@@ -1018,10 +1253,15 @@
   }
 
   function streamHasLiveVideo(stream: MediaStream | null): boolean {
-    return !!(
-      stream &&
-      stream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
-    );
+    if (!stream) return false;
+    const videoTracks = stream.getVideoTracks();
+    if (!videoTracks.length) return false;
+    return videoTracks.some((track) => {
+      if (track.readyState === 'ended') return false;
+      if (track.readyState === 'live') return true;
+      if (track.readyState === 'new') return true;
+      return track.enabled;
+    });
   }
 
   function videoSink(node: HTMLVideoElement, uid: string) {
@@ -1039,10 +1279,41 @@
     };
   }
 
-  function updateRemoteStreams(mutator: (draft: Map<string, MediaStream>) => void) {
+  function describeRemoteStreamForLog(stream: MediaStream) {
+    return {
+      id: stream.id,
+      audio: stream.getAudioTracks().map((track) => ({
+        id: track.id,
+        state: track.readyState,
+        enabled: track.enabled
+      })),
+      video: stream.getVideoTracks().map((track) => ({
+        id: track.id,
+        state: track.readyState,
+        enabled: track.enabled
+      }))
+    };
+  }
+
+  function updateRemoteStreams(
+    mutator: (draft: Map<string, MediaStream>) => void,
+    reason = 'remote-streams'
+  ) {
+    const previous = Array.from(remoteStreams.keys());
     const draft = new Map(remoteStreams);
     mutator(draft);
     remoteStreams = draft;
+    const next = Array.from(remoteStreams.keys());
+    voiceDebug('Remote streams updated', {
+      reason,
+      previous,
+      next,
+      details: next.map((id) => {
+        const stream = remoteStreams.get(id);
+        return stream ? describeRemoteStreamForLog(stream) : { id, missing: true };
+      })
+    });
+    capturePeerDiagnostics(pc, 'remote-streams');
   }
 
   function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
@@ -1152,10 +1423,10 @@
 
   async function handleSessionChange(next: VoiceSession | null) {
     if (!next) {
-    session = null;
-    sessionVisible = false;
-    sessionChannelName = '';
-    sessionServerName = '';
+      session = null;
+      sessionVisible = false;
+      sessionChannelName = '';
+      sessionServerName = '';
       const hadSession = activeSessionKey !== null;
       activeSessionKey = null;
       serverId = null;
@@ -1207,30 +1478,16 @@
     audioTracks.forEach((track) => (track.enabled = !isMicMuted));
     videoTracks.forEach((track) => (track.enabled = !isCameraOff));
 
-    if (audioTransceiverRef) {
-      const desiredAudioDir = audioTracks.length ? 'sendrecv' : 'recvonly';
-      if (audioTransceiverRef.direction !== desiredAudioDir) {
-        voiceDebug('audio transceiver direction update', {
-          from: audioTransceiverRef.direction,
-          to: desiredAudioDir
-        });
-        audioTransceiverRef.direction = desiredAudioDir;
-      }
-    }
-    if (videoTransceiverRef) {
-      const shouldSendVideo = videoTracks.length || isScreenSharing;
-      const desiredVideoDir = shouldSendVideo ? 'sendrecv' : 'recvonly';
-      if (videoTransceiverRef.direction !== desiredVideoDir) {
-        voiceDebug('video transceiver direction update', {
-          from: videoTransceiverRef.direction,
-          to: desiredVideoDir,
-          hasVideoTracks: videoTracks.length,
-          isCameraOff,
-          isScreenSharing
-        });
-        videoTransceiverRef.direction = desiredVideoDir;
-      }
-    }
+    const desiredAudioDir: RTCRtpTransceiverDirection = audioTracks.length ? 'sendrecv' : 'recvonly';
+    setTransceiverDirection(audioTransceiverRef, desiredAudioDir, 'audio');
+
+    const shouldSendVideo = videoTracks.length || isScreenSharing;
+    const desiredVideoDir: RTCRtpTransceiverDirection = shouldSendVideo ? 'sendrecv' : 'recvonly';
+    setTransceiverDirection(videoTransceiverRef, desiredVideoDir, 'video', {
+      hasVideoTracks: videoTracks.length,
+      isCameraOff,
+      isScreenSharing
+    });
     voiceDebug('applyTrackStates', {
       audioTrackCount: audioTracks.length,
       videoTrackCount: videoTracks.length,
@@ -1240,6 +1497,7 @@
       audioDirection: audioTransceiverRef?.direction,
       videoDirection: videoTransceiverRef?.direction
     });
+    capturePeerDiagnostics(pc, 'apply-track-states');
   }
 
   function requestRenegotiation(options: { requireOfferer?: boolean; reason?: string } = {}) {
@@ -1415,13 +1673,13 @@
 
   function scheduleRenegotiation(reason: string, options: { requireOfferer?: boolean } = {}) {
     const requireOfferer = options.requireOfferer ?? false;
-    if (requireOfferer && !isOfferer) {
-      voiceDebug('scheduleRenegotiation delegating to current offerer', { reason });
-      void signalOffererRenegotiation(reason);
-      return;
-    }
+    const shouldSignalCurrentOfferer = requireOfferer && !isOfferer;
     const payload = { ...options, reason };
     requestRenegotiation(payload);
+    if (shouldSignalCurrentOfferer && !isOfferer) {
+      voiceDebug('scheduleRenegotiation signaling current offerer', { reason });
+      void signalOffererRenegotiation(reason);
+    }
   }
 
   function isPermissionError(err: unknown): boolean {
@@ -1808,6 +2066,7 @@
 
     audioSender = updateSender(audioSender, audioTrack, 'audio');
     videoSender = updateSender(videoSender, videoTrack, 'video');
+    capturePeerDiagnostics(connection, 'sync-local-tracks');
   }
 
   async function acquireTrack(kind: 'audio' | 'video'): Promise<boolean> {
@@ -1841,10 +2100,24 @@
 
       applyTrackStates();
       syncLocalTracksToPeer();
+      voiceDebug('acquireTrack success', {
+        kind,
+        streamId: localStream?.id ?? null,
+        tracks: localStream
+          ? localStream.getTracks().map((track) => ({
+              id: track.id,
+              kind: track.kind,
+              state: track.readyState,
+              enabled: track.enabled,
+              label: track.label
+            }))
+          : []
+      });
       errorMessage = '';
       return true;
     } catch (err) {
       console.warn(`Failed to acquire ${kind} track`, err);
+      voiceDebug('acquireTrack failed', { kind, error: err instanceof Error ? err.message : err });
       const msg =
         err instanceof Error
           ? err.message
@@ -1922,50 +2195,90 @@
       scheduleRenegotiation('negotiationneeded', { requireOfferer: true });
     };
 
+    connection.onicecandidateerror = (event) => {
+      const iceError = event as RTCPeerConnectionIceErrorEvent;
+      voiceDebug('icecandidateerror', {
+        errorCode: iceError.errorCode,
+        errorText: iceError.errorText,
+        hostCandidate: iceError.hostCandidate,
+        url: iceError.url
+      });
+    };
+
     connection.ontrack = (event) => {
+      const track = event.track;
       const [stream] = event.streams ?? [];
       const incoming = stream ?? new MediaStream();
+
       voiceDebug('Received remote track', {
         uid: event.transceiver?.mid ?? 'unknown',
-        kind: event.track.kind,
-        id: event.track.id,
-        muted: event.track.muted,
-        readyState: event.track.readyState,
+        kind: track.kind,
+        id: track.id,
+        muted: track.muted,
+        readyState: track.readyState,
         streamId: incoming.id
       });
 
       if (!stream) {
-        incoming.addTrack(event.track);
+        incoming.addTrack(track);
       }
 
-      updateRemoteStreams((draft) => {
-        const existing = draft.get(incoming.id);
-        if (existing && stream) {
-          draft.set(incoming.id, stream);
-        } else if (existing) {
-          existing.addTrack(event.track);
-          draft.set(incoming.id, existing);
-        } else {
-          draft.set(incoming.id, incoming);
-        }
-      });
+      const syncRemoteStream = (reason: string) => {
+        updateRemoteStreams((draft) => {
+          const current = draft.get(incoming.id);
+          if (current && current !== incoming) {
+            if (!current.getTracks().some((existing) => existing.id === track.id)) {
+              current.addTrack(track);
+            }
+            draft.set(incoming.id, current);
+          } else {
+            draft.set(incoming.id, incoming);
+          }
+        }, `track-${reason}`);
+        voiceDebug('Remote stream synced', {
+          streamId: incoming.id,
+          reason,
+          trackId: track.id,
+          trackState: track.readyState,
+          muted: track.muted
+        });
+      };
 
-      event.track.onended = () => {
+      syncRemoteStream('ontrack');
+
+      track.onunmute = () => {
+        voiceDebug('Remote track unmuted', {
+          id: track.id,
+          kind: track.kind,
+          streamId: incoming.id
+        });
+        syncRemoteStream('track-unmuted');
+      };
+
+      track.onmute = () => {
+        voiceDebug('Remote track muted', {
+          id: track.id,
+          kind: track.kind,
+          streamId: incoming.id
+        });
+      };
+
+      track.onended = () => {
         voiceDebug('Remote track ended', {
-          id: event.track.id,
-          kind: event.track.kind,
+          id: track.id,
+          kind: track.kind,
           streamId: incoming.id
         });
         updateRemoteStreams((draft) => {
           const current = draft.get(incoming.id);
           if (!current) return;
-          current.removeTrack(event.track);
+          current.removeTrack(track);
           if (current.getTracks().length === 0) {
             draft.delete(incoming.id);
           } else {
             draft.set(incoming.id, current);
           }
-        });
+        }, 'track-ended');
       };
     };
 
@@ -2249,18 +2562,18 @@
     }, 250);
   }
 
-  async function purgeCallArtifacts() {
-    if (!callRef) return;
-    const offerSnap = await getDocs(collection(callRef, 'offerCandidates'));
+  async function purgeCallArtifacts(targetRef: DocumentReference | null = callRef) {
+    if (!targetRef) return;
+    const offerSnap = await getDocs(collection(targetRef, 'offerCandidates'));
     for (const snap of offerSnap.docs) {
       await deleteDoc(snap.ref);
     }
-    const answerSnap = await getDocs(collection(callRef, 'answerCandidates'));
+    const answerSnap = await getDocs(collection(targetRef, 'answerCandidates'));
     for (const snap of answerSnap.docs) {
       await deleteDoc(snap.ref);
     }
     try {
-      const descriptionSnap = await getDocs(collection(callRef, 'descriptions'));
+      const descriptionSnap = await getDocs(collection(targetRef, 'descriptions'));
       for (const snap of descriptionSnap.docs) {
         await deleteDoc(snap.ref);
       }
@@ -2482,6 +2795,7 @@
   }
 
   async function joinChannel() {
+    voiceDebug('joinChannel start', { serverId, channelId, isJoined, isConnecting });
     if (!serverId || !channelId) {
       errorMessage = 'Select a voice channel to start a call.';
       return;
@@ -2562,6 +2876,27 @@
         lastAnswerRevision = existingData?.answer?.revision ?? 0;
         voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
         attachAnswererIceHandlers(connection);
+        const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
+        const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
+        if (
+          offerUpdatedBy &&
+          offerUpdatedBy === current.uid &&
+          (!existingData?.answer || answerUpdatedBy === current.uid)
+        ) {
+          voiceDebug('Existing offer authored by self; resetting call before joining as answerer', {
+            offerUpdatedBy,
+            answerUpdatedBy
+          });
+          try {
+            await purgeCallArtifacts();
+            await deleteDoc(docRef);
+          } catch (err) {
+            console.warn('Failed to reset self-authored offer', err);
+            voiceDebug('Failed to reset self-authored offer', err);
+          }
+          await startAsOfferer(connection, docRef, current, existingData);
+          return;
+        }
 
         const initialFallbackOffer =
           typeof existingData.offer?.sdp === 'string'
@@ -2759,11 +3094,22 @@
       if (!statusMessage || statusMessage.startsWith('Rejoining')) {
         statusMessage = 'Connected.';
       }
+      voiceDebug('joinChannel success', {
+        callPath: callRef?.path ?? null,
+        role: isOfferer ? 'offerer' : 'answerer',
+        hasAudioTrack,
+        hasVideoTrack,
+        localStreamId: localStream?.id ?? null
+      });
       if (!hasAudioTrack && !hasVideoTrack) {
         statusMessage = 'Listening only. Enable mic or camera to share.';
       }
     } catch (err) {
       console.error(err);
+      voiceDebug('joinChannel error', {
+        error: err instanceof Error ? err.message : err,
+        callPath: callRef?.path ?? null
+      });
       errorMessage =
         err instanceof Error ? err.message : 'Unable to join the call. Please check your devices.';
       await hangUp({ cleanupDoc: false, resetError: false });
@@ -2773,6 +3119,8 @@
   }
 
   async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean } = {}) {
+    voiceDebug('hangUp start', options);
+    reconnectAttemptCount = 0;
     const { cleanupDoc = true, resetError = true } = options;
 
     clearReconnectTimer();
@@ -2885,7 +3233,7 @@
     removeLocalTrack('video');
     localStream = null;
 
-    updateRemoteStreams((draft) => draft.clear());
+    updateRemoteStreams((draft) => draft.clear(), 'hangup-clear');
     remoteConnected = false;
     audioRefs.forEach((node) => {
       node.pause?.();
@@ -3234,31 +3582,55 @@
     }
   }
 
-  async function performFullReconnect() {
+  async function performFullReconnect(options: { purgeDoc?: boolean } = {}) {
+    const { purgeDoc = false } = options;
     if (isConnecting) {
-      voiceDebug('performFullReconnect skipped (already connecting)');
+      voiceDebug('performFullReconnect skipped (already connecting)', { purgeDoc });
       return;
     }
     voiceDebug('performFullReconnect start', {
       isJoined,
       hasPc: !!pc,
       connectionState: pc?.connectionState ?? null,
-      iceState: pc?.iceConnectionState ?? null
+      iceState: pc?.iceConnectionState ?? null,
+      purgeDoc
     });
     const shouldEnableMic = !isMicMuted;
     const shouldEnableCamera = !isCameraOff && !isScreenSharing;
     const shouldShareScreen = isScreenSharing;
+    const targetRef = purgeDoc ? callRef : null;
 
-    await hangUp({ cleanupDoc: false, resetError: false });
-    statusMessage = 'Rejoining call...';
+    statusMessage = purgeDoc ? 'Restarting call...' : 'Rejoining call...';
+    await hangUp({ cleanupDoc: !purgeDoc, resetError: false });
+
+    if (purgeDoc && targetRef) {
+      try {
+        await purgeCallArtifacts(targetRef);
+        await deleteDoc(targetRef);
+        voiceDebug('performFullReconnect purged call document', { path: targetRef.path });
+      } catch (err) {
+        console.warn('Failed to purge call document during reconnect', err);
+        voiceDebug('Failed to purge call document during reconnect', err);
+      }
+    }
+
     await joinChannel();
-    if (!isJoined) return;
+    if (!isJoined) {
+      voiceDebug('performFullReconnect join failed', {
+        purgeDoc,
+        connectionState: pc?.connectionState ?? null,
+        signalingState: pc?.signalingState ?? null
+      });
+      return;
+    }
     clearReconnectTimer();
+    reconnectAttemptCount = 0;
     statusMessage = 'Connected.';
     voiceDebug('performFullReconnect completed', {
       isJoined,
       connectionState: pc?.connectionState ?? null,
-      iceState: pc?.iceConnectionState ?? null
+      iceState: pc?.iceConnectionState ?? null,
+      purgeDoc
     });
 
     if (shouldEnableMic && isMicMuted) {
@@ -3270,6 +3642,28 @@
     } else if (shouldEnableCamera && isCameraOff && !isScreenSharing) {
       await toggleCamera();
     }
+  }
+
+  function handleForceRestart() {
+    if (isRestartingCall || isConnecting) return;
+    if (!serverId || !channelId) return;
+    isRestartingCall = true;
+    statusMessage = 'Restarting call...';
+    voiceDebug('Manual call restart requested', {
+      callPath: callRef?.path ?? null,
+      purgeDoc: true
+    });
+    sessionQueue = sessionQueue
+      .then(() => performFullReconnect({ purgeDoc: true }))
+      .catch((err) => {
+        console.warn('Failed to restart call manually', err);
+        voiceDebug('Failed to restart call manually', err);
+        errorMessage =
+          err instanceof Error ? err.message : 'Unable to restart the call. Please try again.';
+      })
+      .finally(() => {
+        isRestartingCall = false;
+      });
   }
 
   function scheduleReconnect(message: string, force = false) {
@@ -3286,8 +3680,15 @@
     clearReconnectTimer();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      reconnectAttemptCount += 1;
+      const shouldPurge = force || reconnectAttemptCount >= 3;
+      voiceDebug('performFullReconnect queued', {
+        attempt: reconnectAttemptCount,
+        force,
+        purgeDoc: shouldPurge
+      });
       sessionQueue = sessionQueue
-        .then(() => performFullReconnect())
+        .then(() => performFullReconnect({ purgeDoc: shouldPurge }))
         .catch((err) => console.warn('Failed to reconnect to voice call', err));
     }, force ? 1500 : RECONNECT_DELAY_MS);
   }
@@ -3307,7 +3708,7 @@
     {#if debugLoggingEnabled}
       <div class="call-debug-banner">
         <i class="bx bx-bug"></i>
-        Debug logging active – open the browser console to view `[voice]` events.
+        Debug logging active - open the browser console to view `[voice]` events.
         <button type="button" on:click={() => setVoiceDebug(false)}>
           Disable
         </button>
@@ -3411,6 +3812,98 @@
           <div class="call-debug-panel__section call-debug-panel__section--doc">
             <h2 class="call-debug-panel__title">Call Document</h2>
             <pre>{callSnapshotDebug || 'Awaiting call document...'}</pre>
+          </div>
+          <div class="call-debug-panel__section call-debug-panel__section--peer">
+            <h2 class="call-debug-panel__title">Peer Diagnostics</h2>
+            <div class="peer-diag">
+              <div class="peer-diag__column">
+                <h3>Transceivers</h3>
+                {#if peerDiagnostics.transceivers.length}
+                  <ul class="peer-diag__list">
+                    {#each peerDiagnostics.transceivers as trx, index (trx.mid ?? `trx-${index}`)}
+                      <li>
+                        <span class="peer-diag__headline">
+                          MID {trx.mid ?? '(pending)'} - {trx.currentDirection ?? 'unknown'}
+                          {#if trx.preferredDirection && trx.preferredDirection !== trx.currentDirection}
+                            <span class="peer-diag__badge">to {trx.preferredDirection}</span>
+                          {/if}
+                          {#if trx.isStopped}
+                            <span class="peer-diag__badge peer-diag__badge--warn">stopped</span>
+                          {/if}
+                        </span>
+                        <span class="peer-diag__label">Sender</span>
+                        <span class="peer-diag__value">{formatTrackDiagnostics(trx.senderTrack)}</span>
+                        <span class="peer-diag__label">Receiver</span>
+                        <span class="peer-diag__value">{formatTrackDiagnostics(trx.receiverTrack)}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="call-debug-empty">No transceivers.</p>
+                {/if}
+              </div>
+              <div class="peer-diag__column">
+                <h3>Senders</h3>
+                {#if peerDiagnostics.senders.length}
+                  <ul class="peer-diag__list">
+                    {#each peerDiagnostics.senders as sender, index (`sender-${index}`)}
+                      <li>
+                        <span class="peer-diag__label">Track</span>
+                        <span class="peer-diag__value">{formatTrackDiagnostics(sender.track)}</span>
+                        <span class="peer-diag__label">Streams</span>
+                        <span class="peer-diag__value">
+                          {sender.streams.length ? sender.streams.join(', ') : 'none'}
+                        </span>
+                        <span class="peer-diag__label">Transport</span>
+                        <span class="peer-diag__value">{sender.transportState ?? 'unknown'}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="call-debug-empty">No RTP senders.</p>
+                {/if}
+              </div>
+              <div class="peer-diag__column">
+                <h3>Remote Streams</h3>
+                {#if peerDiagnostics.remoteStreams.length}
+                  <ul class="peer-diag__list">
+                    {#each peerDiagnostics.remoteStreams as stream (stream.id)}
+                      <li>
+                        <span class="peer-diag__headline">#{stream.id}</span>
+                        <span class="peer-diag__label">Audio</span>
+                        <span class="peer-diag__value">
+                          {stream.audioTracks.length
+                            ? stream.audioTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
+                            : 'none'}
+                        </span>
+                        <span class="peer-diag__label">Video</span>
+                        <span class="peer-diag__value">
+                          {stream.videoTracks.length
+                            ? stream.videoTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
+                            : 'none'}
+                        </span>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="call-debug-empty">No remote streams attached.</p>
+                {/if}
+              </div>
+            </div>
+          </div>
+          <div class="call-debug-panel__section call-debug-panel__section--tools">
+            <h2 class="call-debug-panel__title">Debug Tools</h2>
+            <div class="call-debug-actions">
+              <button
+                type="button"
+                class="call-debug-action"
+                on:click={handleForceRestart}
+                disabled={isRestartingCall || isConnecting}
+              >
+                <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>
+                <span>{isRestartingCall ? 'Restarting call...' : 'Restart call'}</span>
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -3632,6 +4125,17 @@
                 <i class="bx bx-sync"></i>
               </button>
               <span>Refresh</span>
+            </div>
+            <div class="call-controls__item">
+              <button
+                class={controlClasses({ disabled: isRestartingCall || isConnecting })}
+                on:click={handleForceRestart}
+                aria-label="Restart call"
+                disabled={isRestartingCall || isConnecting}
+              >
+                <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>
+              </button>
+              <span>{isRestartingCall ? 'Restarting' : 'Restart'}</span>
             </div>
           </div>
           <div class="call-controls__group call-controls__group--exit">
@@ -4002,6 +4506,127 @@
     line-height: 1.35;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .call-debug-panel__section--peer {
+    gap: 0.75rem;
+  }
+
+  .peer-diag {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
+  .peer-diag__column {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .peer-diag__column h3 {
+    margin: 0;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.65);
+  }
+
+  .peer-diag__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .peer-diag__list li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.6rem 0.7rem;
+    border-radius: 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.3);
+  }
+
+  .peer-diag__headline {
+    font-weight: 600;
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .peer-diag__label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.45);
+  }
+
+  .peer-diag__value {
+    font-size: 0.76rem;
+    color: rgba(255, 255, 255, 0.85);
+    word-break: break-word;
+  }
+
+  .peer-diag__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.65rem;
+    letter-spacing: 0.05em;
+  }
+
+  .peer-diag__badge--warn {
+    background: color-mix(in srgb, var(--color-warning, #facc15) 35%, transparent);
+    color: rgba(35, 23, 0, 0.9);
+  }
+
+  .call-debug-panel__section--tools {
+    gap: 0.75rem;
+  }
+
+  .call-debug-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .call-debug-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.8rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 35%, transparent);
+    color: var(--text-80);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+
+  .call-debug-action i {
+    font-size: 1rem;
+  }
+
+  .call-debug-action:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .call-debug-action:not(:disabled):hover,
+  .call-debug-action:not(:disabled):focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-strong, rgba(255, 255, 255, 0.35)) 65%, transparent);
+    color: var(--text-100);
   }
 
   @media (min-width: 1200px) {
