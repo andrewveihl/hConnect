@@ -136,6 +136,12 @@
   let isScreenSharePending = false;
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = false;
+  let signalingState = 'closed';
+  let connectionState = 'new';
+  let iceConnectionState = 'new';
+  let iceGatheringState = 'new';
+  let publishedCandidateCount = 0;
+  let appliedCandidateCount = 0;
 
   type AudioMonitor = {
     stream: MediaStream;
@@ -151,6 +157,11 @@
   let speakingParticipants = new Set<string>();
   let permissionPreflight: Promise<void> | null = null;
   let permissionWarningShown = false;
+  let callSnapshotDebug = '';
+  type VoiceLogEntry = { id: string; timestamp: string; message: string; details?: string };
+  let voiceLogs: VoiceLogEntry[] = [];
+  let voiceLogSequence = 0;
+  const remoteCandidateKeys = new Set<string>();
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
   const DEFAULT_STUN_SERVERS = [
     'stun:stun.l.google.com:19302',
@@ -216,7 +227,61 @@
     });
   }
 
+  function toDisplayString(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) {
+      const message = value.message ?? value.name ?? 'Error';
+      return value.stack ? `${message}\n${value.stack}` : message;
+    }
+    if (value === null || value === undefined) {
+      return String(value);
+    }
+    if (Array.isArray(value)) {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch {
+        return value.map((entry) => String(entry)).join(', ');
+      }
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value, (_key, val) => {
+          if (val && typeof val === 'object') {
+            if (typeof (val as any).toDate === 'function' && typeof (val as any).seconds === 'number') {
+              const ts = val as { seconds: number; nanoseconds: number; toDate: () => Date };
+              return {
+                seconds: ts.seconds,
+                nanoseconds: ts.nanoseconds,
+                iso: ts.toDate().toISOString()
+              };
+            }
+          }
+          return val;
+        }, 2);
+      } catch {
+        return Object.prototype.toString.call(value);
+      }
+    }
+    return String(value);
+  }
+
+  function recordVoiceLog(message: unknown, details?: unknown) {
+    const timestamp = new Date().toLocaleTimeString();
+    const entryMessage = toDisplayString(message);
+    let entryDetails: string | undefined;
+    if (details !== undefined) {
+      entryDetails = toDisplayString(details);
+    }
+    const id = `${Date.now()}-${voiceLogSequence++}`;
+    voiceLogs = [{ id, timestamp, message: entryMessage, details: entryDetails }, ...voiceLogs].slice(0, 250);
+  }
+
   function voiceDebug(...args: unknown[]) {
+    if (args.length > 0) {
+      const [message, ...rest] = args;
+      const details = rest.length === 0 ? undefined : rest.length === 1 ? rest[0] : rest;
+      recordVoiceLog(message, details);
+    }
     if (!debugLoggingEnabled) return;
     console.log('[voice]', ...args);
   }
@@ -311,6 +376,31 @@
       port: parts[5] ?? '',
       raw
     };
+  }
+
+  function resetPeerDiagnostics() {
+    signalingState = 'closed';
+    connectionState = 'new';
+    iceConnectionState = 'new';
+    iceGatheringState = 'new';
+    publishedCandidateCount = 0;
+    appliedCandidateCount = 0;
+    remoteCandidateKeys.clear();
+  }
+
+  function remoteCandidateKey(candidate: RTCIceCandidateInit & { candidate?: string | null }) {
+    return `${candidate.sdpMid ?? ''}|${candidate.sdpMLineIndex ?? ''}|${candidate.candidate ?? ''}`;
+  }
+
+  function updatePeerConnectionStateSnapshot(connection: RTCPeerConnection | null = pc) {
+    if (!connection) {
+      resetPeerDiagnostics();
+      return;
+    }
+    signalingState = connection.signalingState ?? 'closed';
+    connectionState = connection.connectionState ?? 'new';
+    iceConnectionState = connection.iceConnectionState ?? 'new';
+    iceGatheringState = connection.iceGatheringState ?? 'new';
   }
 
   const SPEAKING_THRESHOLD = 13;
@@ -1387,6 +1477,7 @@
       if (event.candidate && localCandidatesRef) {
         const info = describeIceCandidate(event.candidate.candidate);
         voiceDebug('Publishing ICE candidate', { role: 'offerer', ...info });
+        publishedCandidateCount += 1;
         addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
           console.warn('Failed to save ICE candidate', err)
         );
@@ -1405,12 +1496,23 @@
             }
             consumedAnswerCandidateIds.add(docId);
             const candidateData = change.doc.data();
+            const key = remoteCandidateKey(candidateData);
+            if (remoteCandidateKeys.has(key)) {
+              voiceDebug('Skipping duplicate remote ICE candidate', { role: 'offerer', key });
+              return;
+            }
+            remoteCandidateKeys.add(key);
             const info = describeIceCandidate(candidateData.candidate);
             logRemoteCandidate('offerer', info);
             const candidate = new RTCIceCandidate(candidateData);
-            connection.addIceCandidate(candidate).catch((err) => {
-              console.warn('Failed to add remote ICE candidate', err);
-            });
+            connection
+              .addIceCandidate(candidate)
+              .then(() => {
+                appliedCandidateCount += 1;
+              })
+              .catch((err) => {
+                console.warn('Failed to add remote ICE candidate', err);
+              });
           }
         });
       });
@@ -1426,12 +1528,23 @@
           }
           consumedAnswerCandidateIds.add(docId);
           const candidateData = change.doc.data();
+          const key = remoteCandidateKey(candidateData);
+          if (remoteCandidateKeys.has(key)) {
+            voiceDebug('Skipping duplicate remote ICE candidate', { role: 'offerer', key, fallback: true });
+            return;
+          }
+          remoteCandidateKeys.add(key);
           const info = describeIceCandidate(candidateData.candidate);
           logRemoteCandidate('offerer', info, { fallback: true });
           const candidate = new RTCIceCandidate(candidateData);
-          connection.addIceCandidate(candidate).catch((err) => {
-            console.warn('Failed to add remote ICE candidate', err);
-          });
+          connection
+            .addIceCandidate(candidate)
+            .then(() => {
+              appliedCandidateCount += 1;
+            })
+            .catch((err) => {
+              console.warn('Failed to add remote ICE candidate', err);
+            });
         }
       });
     });
@@ -1451,6 +1564,7 @@
       if (event.candidate && localCandidatesRef) {
         const info = describeIceCandidate(event.candidate.candidate);
         voiceDebug('Publishing ICE candidate', { role: 'answerer', ...info });
+        publishedCandidateCount += 1;
         addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
           console.warn('Failed to save ICE candidate', err)
         );
@@ -1469,12 +1583,23 @@
             }
             consumedOfferCandidateIds.add(docId);
             const candidateData = change.doc.data();
+            const key = remoteCandidateKey(candidateData);
+            if (remoteCandidateKeys.has(key)) {
+              voiceDebug('Skipping duplicate remote ICE candidate', { role: 'answerer', key });
+              return;
+            }
+            remoteCandidateKeys.add(key);
             const info = describeIceCandidate(candidateData.candidate);
             logRemoteCandidate('answerer', info);
             const candidate = new RTCIceCandidate(candidateData);
-            connection.addIceCandidate(candidate).catch((err) => {
-              console.warn('Failed to add remote ICE candidate', err);
-            });
+            connection
+              .addIceCandidate(candidate)
+              .then(() => {
+                appliedCandidateCount += 1;
+              })
+              .catch((err) => {
+                console.warn('Failed to add remote ICE candidate', err);
+              });
           }
         });
       });
@@ -1749,11 +1874,14 @@
 
   function createPeerConnection() {
     if (pc) return pc;
-    pc = new RTCPeerConnection(rtcConfig);
+    const connection = new RTCPeerConnection(rtcConfig);
+    pc = connection;
+    resetPeerDiagnostics();
+    updatePeerConnectionStateSnapshot(connection);
     voiceDebug('createPeerConnection', { configuration: rtcConfig });
 
-    const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
-    const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+    const audioTransceiver = connection.addTransceiver('audio', { direction: 'sendrecv' });
+    const videoTransceiver = connection.addTransceiver('video', { direction: 'sendrecv' });
     audioTransceiverRef = audioTransceiver;
     videoTransceiverRef = videoTransceiver;
     audioSender = audioTransceiver.sender;
@@ -1761,7 +1889,8 @@
     syncLocalTracksToPeer();
     applyTrackStates();
 
-    pc.onsignalingstatechange = () => {
+    connection.onsignalingstatechange = () => {
+      updatePeerConnectionStateSnapshot(pc);
       const state = pc?.signalingState ?? 'closed';
       voiceDebug('signalingstatechange', {
         state,
@@ -1780,7 +1909,7 @@
       }
     };
 
-    pc.onnegotiationneeded = () => {
+    connection.onnegotiationneeded = () => {
       voiceDebug('negotiationneeded event', {
         isOfferer,
         hasCallRef: !!callRef,
@@ -1793,7 +1922,7 @@
       scheduleRenegotiation('negotiationneeded', { requireOfferer: true });
     };
 
-    pc.ontrack = (event) => {
+    connection.ontrack = (event) => {
       const [stream] = event.streams ?? [];
       const incoming = stream ?? new MediaStream();
       voiceDebug('Received remote track', {
@@ -1840,8 +1969,9 @@
       };
     };
 
-    pc.onconnectionstatechange = () => {
+    connection.onconnectionstatechange = () => {
       if (!pc) return;
+      updatePeerConnectionStateSnapshot(pc);
       voiceDebug('connectionstatechange', {
         state: pc.connectionState,
         iceConnectionState: pc.iceConnectionState,
@@ -1876,8 +2006,9 @@
       }
     };
 
-    pc.oniceconnectionstatechange = () => {
+    connection.oniceconnectionstatechange = () => {
       if (!pc) return;
+      updatePeerConnectionStateSnapshot(pc);
       voiceDebug('iceconnectionstatechange', {
         state: pc.iceConnectionState,
         connectionState: pc.connectionState,
@@ -1895,11 +2026,12 @@
       }
     };
 
-    pc.onicegatheringstatechange = () => {
+    connection.onicegatheringstatechange = () => {
+      updatePeerConnectionStateSnapshot(pc);
       voiceDebug('icegatheringstatechange', pc?.iceGatheringState ?? 'closed');
     };
 
-    pc.onicecandidateerror = (event) => {
+    connection.onicecandidateerror = (event) => {
       const details: Record<string, unknown> = {
         errorCode: event.errorCode,
         errorText: event.errorText,
@@ -1911,7 +2043,7 @@
       voiceDebug('icecandidateerror', details);
     };
 
-    return pc;
+    return connection;
   }
 
   async function renegotiateOffer() {
@@ -2221,6 +2353,7 @@
       sessionQueue = sessionQueue
         .then(async () => {
           const data = snapshot.data();
+          callSnapshotDebug = data ? toDisplayString(data) : '';
           if (!data) {
             statusMessage = 'Call ended.';
             await hangUp({ cleanupDoc: false }).catch(() => {});
@@ -2506,15 +2639,16 @@
           });
           voiceDebug('Published initial answer', { answerRevision });
 
-          callUnsub = onSnapshot(docRef, (snapshot) => {
-            if (!snapshot.exists()) {
-              statusMessage = 'Call ended.';
-              hangUp({ cleanupDoc: false }).catch(() => {});
-              return;
-            }
-            const data = snapshot.data();
-            const offer = data?.offer;
-            if (offer) {
+      callUnsub = onSnapshot(docRef, (snapshot) => {
+        if (!snapshot.exists()) {
+          statusMessage = 'Call ended.';
+          hangUp({ cleanupDoc: false }).catch(() => {});
+          return;
+        }
+        const data = snapshot.data();
+        callSnapshotDebug = data ? toDisplayString(data) : '';
+        const offer = data?.offer;
+        if (offer) {
               const revision = offer.revision ?? 1;
               if (revision > lastOfferRevision) {
                 sessionQueue = sessionQueue
@@ -2740,6 +2874,7 @@
       pc.close();
       pc = null;
     }
+    resetPeerDiagnostics();
 
     audioSender = null;
     videoSender = null;
@@ -2821,6 +2956,7 @@
     isConnecting = false;
     isMicMuted = true;
     isCameraOff = true;
+    callSnapshotDebug = '';
   }
 
   async function toggleMic() {
@@ -3213,6 +3349,72 @@
         </button>
       </div>
     </header>
+
+    {#if debugLoggingEnabled}
+      <section class="call-debug-panel">
+        <div class="call-debug-panel__grid">
+          <div class="call-debug-panel__section call-debug-panel__section--stats">
+            <h2 class="call-debug-panel__title">Quick Stats</h2>
+            <div class="quick-stats">
+              <div>
+                <span class="label">Signaling</span>
+                <span class="value">{signalingState}</span>
+              </div>
+              <div>
+                <span class="label">Connection</span>
+                <span class="value">{connectionState}</span>
+              </div>
+              <div>
+                <span class="label">ICE Connection</span>
+                <span class="value">{iceConnectionState}</span>
+              </div>
+              <div>
+                <span class="label">ICE Gathering</span>
+                <span class="value">{iceGatheringState}</span>
+              </div>
+              <div>
+                <span class="label">Local ICE</span>
+                <span class="value">{publishedCandidateCount}</span>
+              </div>
+              <div>
+                <span class="label">Remote ICE</span>
+                <span class="value">{appliedCandidateCount}</span>
+              </div>
+              <div>
+                <span class="label">Role</span>
+                <span class="value">{isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'}</span>
+              </div>
+              <div>
+                <span class="label">Call Doc</span>
+                <span class="value">{callRef ? callRef.path : 'none'}</span>
+              </div>
+            </div>
+          </div>
+          <div class="call-debug-panel__section call-debug-panel__section--logs">
+            <h2 class="call-debug-panel__title">Recent Logs</h2>
+            {#if voiceLogs.length}
+              <ul class="call-debug-logs">
+                {#each voiceLogs.slice(0, 8) as entry (entry.id)}
+                  <li>
+                    <span class="time">{entry.timestamp}</span>
+                    <span class="msg">{entry.message}</span>
+                    {#if entry.details}
+                      <pre>{entry.details}</pre>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="call-debug-empty">No events yet.</p>
+            {/if}
+          </div>
+          <div class="call-debug-panel__section call-debug-panel__section--doc">
+            <h2 class="call-debug-panel__title">Call Document</h2>
+            <pre>{callSnapshotDebug || 'Awaiting call document...'}</pre>
+          </div>
+        </div>
+      </section>
+    {/if}
 
     <section class="call-stage">
       {#if isJoined && participantTiles.length}
@@ -3678,6 +3880,128 @@
   .call-debug-banner button:hover,
   .call-debug-banner button:focus-visible {
     background: color-mix(in srgb, var(--color-warning, #facc15) 25%, transparent);
+  }
+
+  .call-debug-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .call-debug-panel__grid {
+    display: grid;
+    gap: 0.85rem;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .call-debug-panel__section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-height: 0;
+  }
+
+  .call-debug-panel__title {
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.7);
+    margin: 0;
+  }
+
+  .quick-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  .quick-stats .label {
+    display: block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.55);
+  }
+
+  .quick-stats .value {
+    font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+      'Courier New', monospace;
+    font-size: 0.8rem;
+    word-break: break-word;
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .call-debug-logs {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  .call-debug-logs li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 0.65rem;
+    padding: 0.75rem;
+  }
+
+  .call-debug-logs .time {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .call-debug-logs .msg {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .call-debug-logs pre {
+    margin: 0;
+    max-height: 120px;
+    overflow: auto;
+    font-size: 0.75rem;
+    line-height: 1.35;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .call-debug-empty {
+    margin: 0;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .call-debug-panel__section--doc pre {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 0.75rem;
+    max-height: 180px;
+    overflow: auto;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   @media (min-width: 1200px) {
