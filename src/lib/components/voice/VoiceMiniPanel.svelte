@@ -5,12 +5,6 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
-  import {
-    appendVoiceDebugEvent,
-    copyVoiceDebugAggregate,
-    removeVoiceDebugSection,
-    setVoiceDebugSection
-  } from '$lib/utils/voiceDebugContext';
 
   export let serverId: string | null = null;
   export let session: VoiceSession | null = null;
@@ -47,7 +41,7 @@
             return {
               uid: data.uid ?? d.id,
               displayName: data.displayName ?? 'Member',
-              photoURL: data.photoURL ?? null,
+              photoURL: resolveProfilePhotoURL(data),
               hasAudio: data.hasAudio ?? true,
               hasVideo: data.hasVideo ?? false,
               status: (data.status ?? 'active') as 'active' | 'left'

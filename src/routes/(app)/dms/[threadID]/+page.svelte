@@ -10,6 +10,7 @@
   import ChatInput from '$lib/components/chat/ChatInput.svelte';
 
   import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   export let data: { threadID: string };
   $: threadID = data.threadID;
@@ -38,8 +39,15 @@ let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
         const data: any = snap.data() ?? {};
         const displayName =
           pickString(data?.name) ?? pickString(data?.displayName) ?? pickString(data?.email);
-        const photoURL = pickString(data?.photoURL) ?? null;
-        updateMessageUserCache(uid, { uid, displayName, name: displayName, photoURL });
+        const photoURL = resolveProfilePhotoURL(data);
+        updateMessageUserCache(uid, {
+          uid,
+          displayName,
+          name: displayName,
+          photoURL,
+          authPhotoURL: data?.authPhotoURL ?? null,
+          settings: data?.settings ?? undefined
+        });
       },
       () => {
         profileUnsubs[uid]?.();
@@ -159,7 +167,15 @@ let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
   }
 
   function deriveMePhotoURL() {
-    return pickString(me?.photoURL) ?? null;
+    if (!me?.uid) {
+      return pickString(me?.photoURL) ?? null;
+    }
+    const cached = messageUsers[me.uid];
+    const fallback = pickString(me?.photoURL) ?? null;
+    if (cached) {
+      return resolveProfilePhotoURL(cached, fallback);
+    }
+    return fallback;
   }
 
   function normalizeUserRecord(uid: string, data: any = {}) {
@@ -171,7 +187,7 @@ let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
     const name =
       pickString(data?.name) ??
       displayName;
-    const photoURL = pickString(data?.photoURL) ?? null;
+    const photoURL = resolveProfilePhotoURL(data);
     return {
       ...data,
       uid,

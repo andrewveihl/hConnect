@@ -219,22 +219,52 @@ export async function ensureUserDoc(
   data?: { email?: string | null; name?: string | null; photoURL?: string | null }
 ) {
   await ensureFirebaseReady();
+  const ref = profileRef(uid);
+  const snap = await getDoc(ref);
+  const existing: Record<string, any> | null = snap.exists() ? (snap.data() as any) : null;
+
   const name = data?.name ?? null;
-  await setDoc(
-    profileRef(uid),
-    {
-      uid,
-      email: data?.email ?? null,
-      name,
-      nameLower: typeof name === 'string' ? name.toLowerCase() : null,
-      displayName: data?.name ?? null, // keep legacy
-      photoURL: data?.photoURL ?? null,
-      settings: { theme: 'dark', notifications: true },
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    },
-    { merge: true }
-  );
+  const email = data?.email ?? null;
+  const trim = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+  const incomingAuth = trim(data?.photoURL ?? null);
+  const existingAuth = trim(existing?.authPhotoURL ?? null);
+  const authPhotoURL = incomingAuth || existingAuth || '';
+
+  let customPhoto = trim(existing?.customPhotoURL ?? null);
+  const storedPhoto = trim(existing?.photoURL ?? null);
+
+  if (!customPhoto && storedPhoto) {
+    if (!authPhotoURL) {
+      customPhoto = storedPhoto;
+    } else if (storedPhoto !== authPhotoURL) {
+      customPhoto = storedPhoto;
+    }
+  }
+
+  const finalPhoto = customPhoto || authPhotoURL || '';
+
+  const payload: Record<string, any> = {
+    uid,
+    email,
+    name,
+    nameLower: typeof name === 'string' ? name.toLowerCase() : null,
+    displayName: name ?? null, // keep legacy
+    authPhotoURL: authPhotoURL || null,
+    customPhotoURL: customPhoto || null,
+    photoURL: finalPhoto || null,
+    updatedAt: serverTimestamp()
+  };
+
+  if (!snap.exists()) {
+    payload.createdAt = serverTimestamp();
+    payload.settings = {
+      theme: 'dark',
+      notifications: true
+    };
+  }
+
+  await setDoc(ref, payload, { merge: true });
 }
 
 export async function getUserSettings(uid: string) {

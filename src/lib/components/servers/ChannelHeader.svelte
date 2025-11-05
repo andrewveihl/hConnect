@@ -48,12 +48,5 @@
         <i class="bx bx-chevron-right text-xl"></i>
       </button>
     {/if}
-    <div class="hidden sm:flex items-center">
-      <input
-        class="input input--compact channel-header__search"
-        placeholder="Search"
-        type="search"
-      />
-    </div>
   </div>
 </header>

@@ -18,6 +18,7 @@
   import { collection, doc, onSnapshot, orderBy, query, getDocs, endBefore, limitToLast, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import { markChannelRead } from '$lib/firebase/unread';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   // Comes from +page.ts
   export let data: { serverId: string | null };
@@ -46,28 +47,25 @@
   }
 
   function normalizeProfile(uid: string, data: any, previous: any = profiles[uid] ?? {}) {
+    const merged = { ...previous, ...data };
     const displayName =
-      pickString(data?.name) ??
-      pickString(data?.displayName) ??
+      pickString(merged?.name) ??
+      pickString(merged?.displayName) ??
       pickString(previous.displayName) ??
       pickString(previous.name) ??
-      pickString(data?.email) ??
+      pickString(merged?.email) ??
       'Member';
 
     const name =
-      pickString(data?.name) ??
+      pickString(merged?.name) ??
       pickString(previous.name) ??
-      pickString(data?.displayName) ??
+      pickString(merged?.displayName) ??
       displayName;
 
-    const photoURL =
-      pickString(data?.photoURL) ??
-      pickString(previous.photoURL) ??
-      null;
+    const photoURL = resolveProfilePhotoURL(merged);
 
     return {
-      ...previous,
-      ...data,
+      ...merged,
       uid,
       displayName,
       name,
@@ -213,10 +211,11 @@
   function deriveCurrentPhotoURL() {
     const uid = $user?.uid ?? '';
     const profile = uid ? profiles[uid] : null;
-    const candidate =
-      pickString(profile?.photoURL) ??
-      pickString($user?.photoURL);
-    return candidate ?? null;
+    const authPhoto = pickString($user?.photoURL) ?? null;
+    if (profile) {
+      return resolveProfilePhotoURL(profile, authPhoto);
+    }
+    return authPhoto ?? null;
   }
   let showCreate = false;
   let voiceState: VoiceSession | null = null;
@@ -225,9 +224,11 @@
   });
 
   $: if ($user?.uid) {
+    const fallbackPhoto = pickString($user.photoURL) ?? null;
     updateProfileCache($user.uid, {
       displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
-      photoURL: pickString($user.photoURL) ?? null,
+      photoURL: fallbackPhoto,
+      authPhotoURL: fallbackPhoto,
       email: pickString($user.email) ?? undefined
     });
   }
@@ -283,7 +284,7 @@
     if ($user?.uid) {
       updateProfileCache($user.uid, {
         displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
-        photoURL: pickString($user.photoURL) ?? null
+        email: pickString($user.email) ?? undefined
       });
     }
     messagesUnsub = onSnapshot(q, (snap) => {
@@ -297,10 +298,9 @@
 
         if (msg?.uid && msg.uid !== 'unknown') {
           seen.add(msg.uid);
-          if (msg.displayName || msg.photoURL) {
+          if (pickString(msg.displayName)) {
             updateProfileCache(msg.uid, {
-              displayName: msg.displayName,
-              photoURL: msg.photoURL
+              displayName: msg.displayName
             });
           }
         }

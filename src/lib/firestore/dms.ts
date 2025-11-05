@@ -1,5 +1,6 @@
 // src/lib/firestore/dms.ts
 import { getDb } from '$lib/firebase';
+import { resolveProfilePhotoURL } from '$lib/utils/profile';
 import {
   addDoc, collection, doc, getDoc, getDocs, onSnapshot,
   orderBy, query, serverTimestamp, setDoc, updateDoc,
@@ -15,6 +16,7 @@ export type MinimalUser = {
   displayName?: string;   // from profiles.name (fallback displayName)
   name?: string | null;
   photoURL?: string | null;
+  authPhotoURL?: string | null;
   email?: string | null;
 };
 
@@ -145,7 +147,8 @@ export async function getProfile(uid: string): Promise<MinimalUser | null> {
   return {
     uid: snap.id,
     displayName: data.name ?? data.displayName ?? undefined,
-    photoURL: data.photoURL ?? null,
+    photoURL: resolveProfilePhotoURL(data),
+    authPhotoURL: data.authPhotoURL ?? null,
     email: data.email ?? null
   };
 }
@@ -170,7 +173,8 @@ export function streamProfiles(
           uid: d.id,
           // show Name: field if present, else displayName, else fallback
           displayName: data.name ?? data.displayName ?? undefined,
-          photoURL: data.photoURL ?? null,
+          photoURL: resolveProfilePhotoURL(data),
+          authPhotoURL: data.authPhotoURL ?? null,
           email: data.email ?? null
         };
       });
@@ -583,7 +587,7 @@ async function upsertDMRailForUid(threadId: string, uid: string, participants: s
         const name =
           data.name ?? data.displayName ?? null;
         const email = data.email ?? null;
-        const photoURL = data.photoURL ?? null;
+        const photoURL = resolveProfilePhotoURL(data);
         if (name) payload.otherDisplayName = name;
         if (email) payload.otherEmail = email;
         if (photoURL !== undefined) payload.otherPhotoURL = photoURL;
@@ -668,7 +672,8 @@ export async function searchUsersByName(term: string, { limitTo = 25 } = {}) {
     results.push({
       uid: id,
       displayName: data.name ?? data.displayName ?? undefined,
-      photoURL: data.photoURL ?? null,
+      photoURL: resolveProfilePhotoURL(data),
+      authPhotoURL: data.authPhotoURL ?? null,
       email: data.email ?? null
     });
   };

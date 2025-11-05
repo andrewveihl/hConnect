@@ -23,12 +23,6 @@
     type DocumentReference,
     type Unsubscribe
   } from 'firebase/firestore';
-  import {
-    appendVoiceDebugEvent,
-    formatVoiceDebugContext,
-    removeVoiceDebugSection,
-    setVoiceDebugSection
-  } from '$lib/utils/voiceDebugContext';
 
   const CALL_DOC_ID = 'live';
   const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
@@ -42,6 +36,7 @@
     uid: string;
     displayName: string;
     photoURL: string | null;
+    authPhotoURL?: string | null;
     hasAudio: boolean;
     hasVideo: boolean;
     screenSharing?: boolean;
@@ -124,6 +119,12 @@
     remoteStreams: RemoteStreamDiagnostics[];
   };
 
+  function pickString(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : undefined;
+  }
+
   let localVideoEl: HTMLVideoElement | null = null;
   let localStream: MediaStream | null = null;
 
@@ -166,6 +167,8 @@
   let answerDescriptionUnsub: Unsubscribe | null = null;
 
   let participantDocRef: DocumentReference | null = null;
+  let myProfile: Record<string, any> | null = null;
+  let myProfileUnsub: Unsubscribe | null = null;
   let latestOfferDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
   let latestAnswerDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
   let descriptionStorageEnabled = true;
@@ -1722,10 +1725,18 @@
 
   let lastPresenceSignature: string | null = null;
   $: if (participantDocRef && isJoined) {
-    const signature = `${hasAudioTrack && !isMicMuted}:${hasVideoTrack && !isCameraOff}`;
+    const identity = computeSelfIdentity();
+    const signature = [
+      hasAudioTrack && !isMicMuted,
+      hasVideoTrack && (!isCameraOff || isScreenSharing),
+      identity.displayName ?? '',
+      identity.photoURL ?? '',
+      identity.authPhotoURL ?? '',
+      isScreenSharing ? '1' : '0'
+    ].join('|');
     if (signature !== lastPresenceSignature) {
       lastPresenceSignature = signature;
-      updateParticipantPresence().catch((err) => console.warn('Failed to sync presence', err));
+      updateParticipantPresence({}, identity).catch((err) => console.warn('Failed to sync presence', err));
     }
   }
 
@@ -3333,7 +3344,8 @@
             return {
               uid: data.uid ?? d.id,
               displayName: data.displayName ?? 'Member',
-              photoURL: data.photoURL ?? null,
+              photoURL: resolveProfilePhotoURL(data),
+              authPhotoURL: pickString(data.authPhotoURL) ?? null,
               hasAudio: data.hasAudio ?? false,
               hasVideo: data.hasVideo ?? false,
               screenSharing: data.screenSharing ?? data.isScreenSharing ?? false,
@@ -3420,15 +3432,55 @@
     );
   }
 
-  async function updateParticipantPresence(extra: Partial<ParticipantState> = {}) {
+  function cleanupMyProfileSubscription() {
+    myProfileUnsub?.();
+    myProfileUnsub = null;
+    myProfile = null;
+  }
+
+  function subscribeToMyProfile(database: ReturnType<typeof getDb>, uid: string) {
+    cleanupMyProfileSubscription();
+    myProfileUnsub = onSnapshot(doc(database, 'profiles', uid), (snap) => {
+      myProfile = snap.exists() ? ((snap.data() as any) ?? {}) : null;
+    });
+  }
+
+  function computeSelfIdentity() {
+    const current = get(user);
+    const profile = myProfile ?? {};
+    const displayName =
+      pickString(profile?.displayName) ??
+      pickString(profile?.name) ??
+      pickString(current?.displayName) ??
+      pickString(current?.email) ??
+      'Member';
+    const authFallback =
+      pickString(profile?.authPhotoURL) ??
+      pickString(current?.photoURL) ??
+      null;
+    const resolvedPhoto = resolveProfilePhotoURL(profile, authFallback);
+    return {
+      displayName,
+      photoURL: resolvedPhoto,
+      authPhotoURL: authFallback
+    };
+  }
+
+  async function updateParticipantPresence(
+    extra: Partial<ParticipantState> = {},
+    identity?: ReturnType<typeof computeSelfIdentity>
+  ) {
     if (!participantDocRef) return;
     const current = get(user);
     if (!current?.uid) return;
 
+    const info = identity ?? computeSelfIdentity();
+
     const payload = {
       uid: current.uid,
-      displayName: current.displayName ?? current.email ?? 'Member',
-      photoURL: current.photoURL ?? null,
+      displayName: info.displayName,
+      photoURL: info.photoURL ?? null,
+      authPhotoURL: info.authPhotoURL ?? null,
       hasAudio: hasAudioTrack && !isMicMuted,
       hasVideo: hasVideoTrack && (!isCameraOff || isScreenSharing),
       screenSharing: isScreenSharing,
@@ -4065,6 +4117,7 @@
     const participantRef = participantDocRef;
     participantDocRef = null;
     lastPresenceSignature = null;
+    cleanupMyProfileSubscription();
 
     callUnsub?.();
     detachCandidateSubscriptions();
