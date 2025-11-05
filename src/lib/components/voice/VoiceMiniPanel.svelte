@@ -5,6 +5,8 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+  import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   export let serverId: string | null = null;
   export let session: VoiceSession | null = null;

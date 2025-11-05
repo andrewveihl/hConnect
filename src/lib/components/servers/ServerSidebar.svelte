@@ -3,10 +3,13 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { createEventDispatcher, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
   import ChannelCreateModal from '$lib/components/servers/ChannelCreateModal.svelte';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
+  import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { subscribeUnreadForServer, type UnreadMap } from '$lib/firebase/unread';
@@ -585,12 +588,52 @@ $: if (reorderMode === 'default') {
     if (reorderMode !== 'none') return;
     if (!id) return;
     const chan = channelById(id);
-    if (chan?.type === 'voice' && browser) {
-      appendVoiceDebugEvent('sidebar', 'pick voice channel', {
-        serverId: computedServerId ?? null,
-        channelId: id,
-        channelName: chan.name ?? null
-      });
+    if (chan?.type === 'voice') {
+      if (browser) {
+        appendVoiceDebugEvent('sidebar', 'pick voice channel', {
+          serverId: computedServerId ?? null,
+          channelId: id,
+          channelName: chan.name ?? null
+        });
+      }
+
+      const me = get(user);
+      if (me?.uid) {
+        const nameCandidates = [
+          (me as any)?.nickname,
+          (me as any)?.displayName,
+          (me as any)?.name,
+          (me as any)?.profile?.displayName,
+          (me as any)?.profile?.name,
+          (me as any)?.email
+        ];
+        let displayName = 'You';
+        for (const candidate of nameCandidates) {
+          if (typeof candidate === 'string') {
+            const trimmed = candidate.trim();
+            if (trimmed.length) {
+              displayName = trimmed;
+              break;
+            }
+          }
+        }
+
+        const photoURL =
+          resolveProfilePhotoURL(me, (me as any)?.photoURL ?? (me as any)?.authPhotoURL ?? null) ?? null;
+        const existing = voicePresence[id] ?? [];
+        const base: VoiceParticipant = {
+          uid: me.uid,
+          displayName,
+          photoURL,
+          hasAudio: true,
+          hasVideo: false,
+          status: 'active'
+        };
+        const index = existing.findIndex((p) => p.uid === me.uid);
+        const nextPresence =
+          index === -1 ? [...existing, base] : existing.map((p, idx) => (idx === index ? { ...p, ...base } : p));
+        voicePresence = { ...voicePresence, [id]: nextPresence };
+      }
     }
     onPickChannel(id);
     dispatch('pick', id);
@@ -719,7 +762,7 @@ $: if (reorderMode === 'default') {
 </script>
 
 <aside
-  class="h-dvh w-64 panel flex flex-col border-r border-subtle text-primary"
+  class="h-dvh w-80 shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
   aria-label="Channels"
 >
   <div class="h-12 px-3 flex items-center justify-between border-b border-subtle">
