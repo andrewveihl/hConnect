@@ -276,7 +276,7 @@
   }
 </script>
 
-<aside class="w-80 shrink-0 bg-[#0f172a] border-r border-white/10 h-[100dvh] flex flex-col">
+<aside class="w-80 shrink-0 sidebar-surface border-r border-subtle h-[100dvh] flex flex-col text-primary">
   <!-- Header -->
   <div class="px-4 py-3 flex items-center justify-between">
     <div class="text-base font-semibold">Direct Messages</div>

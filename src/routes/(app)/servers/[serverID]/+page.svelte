@@ -686,7 +686,7 @@ Layout:
 <div class="flex h-dvh app-bg text-primary overflow-hidden">
   <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
   <div class="flex flex-1 overflow-hidden panel-muted">
-    <div class="hidden md:flex md:w-64 xl:w-72 flex-col border-r border-subtle">
+    <div class="hidden md:flex md:w-80 xl:w-80 shrink-0 flex-col border-r border-subtle">
       {#if serverId}
         <ServerSidebar
           serverId={serverId}
@@ -698,7 +698,7 @@ Layout:
       {/if}
     </div>
 
-    <div class="flex flex-1 flex-col panel">
+    <div class="flex flex-1 min-w-0 flex-col panel" style="border-radius: var(--radius-sm);">
       <ChannelHeader
         channel={activeChannel}
         channelsVisible={showChannels}

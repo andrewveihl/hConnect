@@ -4,6 +4,8 @@
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
+  import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { env as publicEnv } from '$env/dynamic/public';

@@ -372,6 +372,158 @@
     transform: translateY(0);
   }
 
+  .message-author {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .message-author--mine {
+    color: color-mix(in srgb, var(--chat-bubble-self-bg) 65%, var(--chat-bubble-self-text));
+  }
+
+  .message-timestamp {
+    font-size: 0.75rem;
+    color: var(--text-55);
+  }
+
+  .message-body {
+    margin-top: 0.45rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    max-width: 100%;
+  }
+
+  .message-body--continued {
+    margin-top: 0.12rem;
+    gap: 0.18rem;
+  }
+
+  .message-bubble {
+    display: inline-block;
+    max-width: min(640px, 100%);
+    padding: 0.55rem 0.95rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+    box-shadow: 0 6px 14px rgba(9, 12, 16, 0.18);
+    transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .message-bubble--mine {
+    background: var(--chat-bubble-self-bg);
+    color: var(--chat-bubble-self-text);
+    border-color: var(--chat-bubble-self-border);
+  }
+
+  .message-bubble--other {
+    background: var(--chat-bubble-other-bg);
+    color: var(--chat-bubble-other-text);
+    border-color: var(--chat-bubble-other-border);
+  }
+
+  .chat-gif {
+    display: block;
+    max-width: min(440px, 100%);
+    border-radius: calc(var(--radius-sm) + 0.2rem);
+    border: 1px solid var(--chat-bubble-other-border);
+    overflow: hidden;
+  }
+
+  .chat-gif.mine {
+    border-color: var(--chat-bubble-self-border);
+  }
+
+  .reaction-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 1.75rem;
+  }
+
+  .reaction-list {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.2rem;
+  }
+
+  .reaction-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.6rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--chat-bubble-other-border);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 55%, transparent);
+    color: var(--chat-bubble-other-text);
+    font-size: 0.85rem;
+    line-height: 1.1;
+    transition: transform 120ms ease, background 120ms ease, border 120ms ease;
+  }
+
+  .reaction-chip:hover {
+    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 70%, transparent);
+  }
+
+  .reaction-chip.active {
+    border-color: color-mix(in srgb, var(--chat-bubble-self-bg) 55%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, transparent);
+    color: var(--chat-bubble-self-text);
+  }
+
+  .reaction-chip .count {
+    font-size: 0.75rem;
+    opacity: 0.8;
+  }
+
+  .reaction-add {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--radius-pill);
+    border: 1px dashed var(--chat-bubble-other-border);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    color: var(--chat-bubble-other-text);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition: opacity 120ms ease, transform 120ms ease, border-color 120ms ease, color 120ms ease;
+    background: transparent;
+  }
+
+  .reaction-add.is-visible {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .reaction-add:hover {
+    border-color: color-mix(in srgb, var(--chat-bubble-self-bg) 55%, transparent);
+    color: var(--chat-bubble-self-text);
+  }
+
+  .reaction-add:disabled {
+    cursor: default;
+  }
+
+  .accent-button {
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    font-weight: 600;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+
+  .accent-button:hover {
+    background: var(--color-accent-strong);
+  }
+
   .reaction-menu {
     min-width: 180px;
     max-width: min(90vw, 320px);
@@ -415,13 +567,13 @@
 
 <div
   bind:this={scroller}
-  class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-3 chat-scroll"
+  class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-2 chat-scroll"
   style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)"
   on:scroll={handleScroll}
 >
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">
-      <div class="text-center text-white/60 space-y-1">
+      <div class="text-center text-soft space-y-1">
         <div class="text-2xl font-semibold">Nothing yet</div>
         <div class="text-lg font-medium">No messages yet</div>
         <div class="text-sm">Be the first to say something below.</div>
@@ -451,7 +603,10 @@
         on:pointerup={handlePointerUp}
         on:pointercancel={handlePointerUp}
       >
-        <div class={`flex w-full max-w-3xl items-end gap-3 ${mine ? 'flex-row-reverse text-right' : ''} ${continued ? 'pt-1' : 'pt-2'}`}>
+        <div
+          class={`flex w-full max-w-3xl items-start ${mine ? 'flex-row-reverse text-right' : ''}`}
+          style={`padding-top: ${(continued ? 0.2 : 0.75)}rem; gap: ${(continued ? 0.35 : 0.75)}rem;`}
+        >
           {#if continued}
             <div class="w-10"></div>
           {:else}
@@ -459,7 +614,7 @@
               {#if avatarUrlFor(m)}
                 <img src={avatarUrlFor(m)} alt={nameFor(m)} class="w-full h-full object-cover" loading="lazy" />
               {:else}
-                <span class="text-sm text-white/80">{initialsFor(nameFor(m))}</span>
+                <span class="text-sm text-soft">{initialsFor(nameFor(m))}</span>
               {/if}
             </div>
           {/if}
@@ -467,19 +622,19 @@
           <div class={`min-w-0 flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
             {#if !continued}
               <div class={`flex flex-wrap items-baseline gap-x-2 ${mine ? 'justify-end text-right' : ''}`}>
-                <span class={`font-semibold ${mine ? 'text-[#d9ddff]' : 'text-white'}`}>{mine ? 'You' : nameFor(m)}</span>
-                <span class="text-xs text-white/50">{formatTime((m as any).createdAt)}</span>
+                <span class={`message-author ${mine ? 'message-author--mine' : ''}`}>{mine ? 'You' : nameFor(m)}</span>
+                <span class="message-timestamp">{formatTime((m as any).createdAt)}</span>
               </div>
             {/if}
 
-            <div class="mt-1 space-y-1 max-w-full">
+            <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
               {#if !m.type || m.type === 'text'}
-                <div class={`inline-block rounded-2xl px-3 py-2 whitespace-pre-wrap leading-relaxed break-words shadow-sm ${mine ? 'bg-[#5865f2] text-white' : 'bg-white/5 text-white/90'}`}>
+                <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'}`}>
                   {(m as any).text ?? (m as any).content ?? ''}
                 </div>
               {:else if m.type === 'gif' && (m as any).url}
                 <img
-                  class={`chat-gif rounded-3xl ${mine ? 'mine' : ''}`}
+                  class={`chat-gif ${mine ? 'mine' : ''}`}
                   src={(m as any).url}
                   alt="GIF"
                   loading="lazy"
@@ -494,30 +649,30 @@
                   <span>[file]</span>
                   <span>{(m as any).file.name}</span>
                   {#if (m as any).file.size}
-                    <span class="text-white/60">({Math.round(((m as any).file.size || 0) / 1024)} KB)</span>
+                    <span class="text-soft">({Math.round(((m as any).file.size || 0) / 1024)} KB)</span>
                   {/if}
                 </a>
               {:else if m.type === 'poll' && (m as any).poll}
                 {#await Promise.resolve((m as any).poll) then poll}
-                  <div class={`rounded-2xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                  <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
                     <div class="font-medium mb-2">Poll: {poll.question}</div>
                     {#each poll.options as opt, idx}
-                      <div class="rounded-2xl border border-white/10 p-2 bg-white/5 mb-2">
+                      <div class="rounded-lg border border-white/10 p-2 bg-white/5 mb-2">
                         <div class="flex items-center justify-between gap-2">
                           <div>{opt}</div>
-                          <div class="text-sm text-white/60">{pct(poll.votes, idx)}%</div>
+                          <div class="text-sm text-soft">{pct(poll.votes, idx)}%</div>
                         </div>
-                        <div class="bar mt-2" style="color:#5865f2"><i style="width: {pct(poll.votes, idx)}%"></i></div>
+                        <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
                         <div class="mt-2 text-right">
                           <button class="rounded-full px-3 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
                         </div>
                       </div>
                     {/each}
-                    <div class="text-xs text-white/60 mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
+                    <div class="text-xs text-soft mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
                   </div>
                 {/await}
               {:else if m.type === 'form' && (m as any).form}
-                <div class={`rounded-2xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
                   <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
                   {#each (m as any).form.questions as q, qi}
                     {#key `${m.id}-${qi}`}
@@ -526,13 +681,18 @@
                     {/key}
                   {/each}
                   <div class="flex justify-end">
-                    <button class="rounded-full px-4 py-2 bg-[#5865f2] hover:bg-[#4752c4]" on:click={() => submitForm(m)}>Submit</button>
+                    <button
+                      class="rounded-full px-4 py-2 accent-button"
+                      on:click={() => submitForm(m)}
+                    >
+                      Submit
+                    </button>
                   </div>
                 </div>
               {/if}
             </div>
             {#if reactions.length || currentUserId}
-              <div class="mt-1 reaction-row">
+              <div class={`reaction-row ${continued ? 'mt-0.5' : 'mt-1'}`}>
                 <div class="reaction-list">
                   {#each reactions as reaction (reaction.key)}
                     <button
@@ -547,17 +707,17 @@
                     </button>
                   {/each}
                 </div>
-                {#if showAdd}
-                  <button
-                    type="button"
-                    class="reaction-add reaction-add-inline"
-                    on:click={(event) => onAddReactionClick(event, m.id)}
-                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
-                    aria-label="Add reaction"
-                  >
-                    +
-                  </button>
-                {/if}
+                <button
+                  type="button"
+                  class={`reaction-add reaction-add-inline ${showAdd ? 'is-visible' : ''}`}
+                  disabled={!showAdd}
+                  aria-hidden={!showAdd}
+                  on:click={(event) => onAddReactionClick(event, m.id)}
+                  on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
+                  aria-label="Add reaction"
+                >
+                  +
+                </button>
               </div>
             {/if}
           </div>

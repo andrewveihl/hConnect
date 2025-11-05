@@ -49,11 +49,18 @@
   --ring-color: var(--color-accent);
   --shadow-elevated: 0 18px 42px rgba(7, 11, 15, 0.45);
 
-  --radius-xs: 0.5rem;
-  --radius-sm: 0.75rem;
-  --radius-md: 1rem;
-  --radius-lg: 1.5rem;
+  --radius-xs: 0.3rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
   --radius-pill: 9999px;
+
+  --chat-bubble-self-bg: var(--color-accent);
+  --chat-bubble-self-text: var(--color-text-inverse);
+  --chat-bubble-self-border: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  --chat-bubble-other-bg: #2f3136;
+  --chat-bubble-other-text: rgba(242, 245, 246, 0.88);
+  --chat-bubble-other-border: rgba(9, 12, 16, 0.4);
 
   --text-100: var(--color-text-primary);
   --text-90: color-mix(in srgb, var(--color-text-primary) 90%, transparent);
@@ -124,6 +131,13 @@
 
   --ring-color: rgba(51, 200, 191, 0.35);
   --shadow-elevated: 0 18px 36px rgba(25, 34, 42, 0.12);
+
+  --chat-bubble-self-bg: var(--color-accent);
+  --chat-bubble-self-text: var(--color-text-inverse);
+  --chat-bubble-self-border: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  --chat-bubble-other-bg: #e7ebf3;
+  --chat-bubble-other-text: #1f262c;
+  --chat-bubble-other-border: rgba(31, 38, 44, 0.16);
 
   --text-100: var(--color-text-primary);
   --text-90: color-mix(in srgb, var(--color-text-primary) 90%, transparent);
@@ -200,12 +214,12 @@ body {
 .panel {
   background: var(--color-panel);
   color: var(--color-text-primary);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
 }
 
 .panel-muted {
   background: var(--color-panel-muted);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
 }
 
 .surface {
@@ -383,7 +397,7 @@ body {
   background: color-mix(in srgb, var(--color-panel) 88%, transparent);
   border-bottom: 1px solid var(--color-border-subtle);
   color: var(--color-text-primary);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-sm);
 }
 
 .channel-header__left {
@@ -405,7 +419,7 @@ body {
   place-items: center;
   width: 2.5rem;
   height: 2.5rem;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: color-mix(in srgb, var(--color-panel) 70%, transparent);
   color: var(--color-text-primary);
@@ -501,7 +515,7 @@ body {
 }
 
 .channel-row:hover {
-  background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+  background: color-mix(in srgb, var(--color-sidebar) 78%, transparent);
 }
 
 .channel-row--active {
@@ -523,7 +537,7 @@ body {
 }
 
 .channel-row__button:hover {
-  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+  background: color-mix(in srgb, var(--color-sidebar) 70%, transparent);
 }
 
 .channel-row__button:disabled {
@@ -649,7 +663,7 @@ body {
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem 1rem;
-  border-radius: 1rem;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--color-panel) 78%, transparent);
   border: 1px solid var(--color-border-subtle);
   transition: background 150ms ease, border 150ms ease;
