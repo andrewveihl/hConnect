@@ -638,7 +638,7 @@
 <div
   bind:this={scroller}
   class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-2 chat-scroll"
-  style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)"
+  style:padding-bottom="var(--chat-scroll-padding, calc(env(safe-area-inset-bottom, 0px) + 1rem))"
   on:scroll={handleScroll}
 >
   {#if messages.length === 0}
