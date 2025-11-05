@@ -8,6 +8,7 @@
   import { afterNavigate } from '$app/navigation';
   import { registerFirebaseMessagingSW } from '$lib/notify/push';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
+  import MobileDock from '$lib/components/app/MobileDock.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
 
@@ -56,12 +57,17 @@
 </svelte:head>
 
 <!-- Full-screen app surface -->
-<div class="min-h-dvh app-bg relative">
-  <slot />
+<div class="app-shell has-mobile-dock app-bg">
+  <div class="app-shell__body">
+    <slot />
+  </div>
+
+  <MobileDock />
+
   {#if activeVoice && !activeVoice.visible}
     <div
-      class="pointer-events-none fixed left-0 right-0 z-30 flex justify-center px-4"
-      style:bottom="calc(1rem + env(safe-area-inset-bottom, 0px))"
+      class="voice-mini-fab pointer-events-none fixed left-0 right-0 z-40 flex justify-center px-4"
+      style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem + env(safe-area-inset-bottom, 0px))"
     >
       <div class="pointer-events-auto w-full max-w-lg">
         <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} />

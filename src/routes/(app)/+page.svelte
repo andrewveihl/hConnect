@@ -1,13 +1,5 @@
 ﻿<script lang="ts">
-  import { page } from '$app/stores';
   import LeftPane from '$lib/components/app/LeftPane.svelte';
-
-  $: pathname = $page?.url?.pathname ?? '/';
-  const isActive = (p: string) => pathname === p;
-  const tabClasses = (p: string) =>
-    `flex flex-col items-center justify-center gap-0.5 py-2 text-xs font-medium transition-colors ${
-      isActive(p) ? 'text-primary' : 'text-muted hover:text-primary'
-    }`;
 </script>
 
 <div class="flex h-dvh app-bg text-primary overflow-hidden">
@@ -100,35 +92,6 @@
       </div>
     </main>
 
-    <nav class="pointer-events-none fixed inset-x-0 bottom-0 z-30 md:hidden" aria-label="Primary">
-      <div class="px-3 pb-3" style="padding-bottom: calc(env(safe-area-inset-bottom) + 10px)">
-        <div class="pointer-events-auto mx-auto max-w-md surface rounded-full border border-subtle px-2 py-1.5">
-          <div class="grid grid-cols-4">
-            <a href="/dms" class={tabClasses('/dms')} aria-current={isActive('/dms') ? 'page' : undefined}>
-              <i class="bx bx-message-dots text-[22px]"></i>
-              <span class="text-[11px] leading-none">DMs</span>
-            </a>
-            <a href="/dms/notes" class={tabClasses('/dms/notes')} aria-current={isActive('/dms/notes') ? 'page' : undefined}>
-              <i class="bx bx-notepad text-[22px]"></i>
-              <span class="text-[11px] leading-none">Notes</span>
-            </a>
-            <a href="/friends" class={tabClasses('/friends')} aria-current={isActive('/friends') ? 'page' : undefined}>
-              <i class="bx bx-user text-[22px]"></i>
-              <span class="text-[11px] leading-none">Friends</span>
-            </a>
-            <a href="/notifications" class={tabClasses('/notifications')} aria-current={isActive('/notifications') ? 'page' : undefined}>
-              <div class="relative">
-                <i class="bx bx-bell text-[22px]"></i>
-                {#if false}
-                  <span class="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full" style="background: var(--color-danger)"></span>
-                {/if}
-              </div>
-              <span class="text-[11px] leading-none">Alerts</span>
-            </a>
-          </div>
-        </div>
-      </div>
-    </nav>
   </div>
 </div>
 

@@ -30,7 +30,7 @@
 
 <aside
   class="app-rail h-dvh w-[72px] sticky top-0 left-0 z-30 flex flex-col items-center select-none"
-  style="padding-bottom: calc(env(safe-area-inset-bottom) + 12px);"
+  style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 12px);"
   aria-label="Server list"
 >
   <div class="h-4 shrink-0"></div>

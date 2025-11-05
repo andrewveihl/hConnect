@@ -138,7 +138,7 @@
 </style>
 
 <div
-  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"

@@ -287,7 +287,7 @@ let avatarError: string | null = null;
 
     <main class="settings-content">
       {#if loading}
-        <div class="settings-placeholder">Loading profileÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦</div>
+        <div class="settings-placeholder">Loading profile...</div>
       {:else if !$user}
         <div class="settings-placeholder">Sign in to manage your settings.</div>
       {:else}
@@ -393,7 +393,7 @@ let avatarError: string | null = null;
             </div>
 
             <p class="settings-hint">
-              Want per-server controls? Tell us what would help and weÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ll line it up next.
+              Want per-server controls? Tell us what would help and we'll line it up next.
             </p>
 
             <footer class="settings-actions settings-actions--inline">
@@ -435,7 +435,8 @@ let avatarError: string | null = null;
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
-    padding: 1.75rem 2rem;
+    padding: calc(env(safe-area-inset-top, 0px) + 1.75rem) 2rem 1.75rem;
+    min-height: 100dvh;
   }
 
   .settings-bar {
@@ -458,9 +459,12 @@ let avatarError: string | null = null;
   }
 
   .settings-content {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-bottom: 2rem;
+    padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
+    scroll-padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
     -webkit-overflow-scrolling: touch;
   }
 
@@ -758,7 +762,7 @@ let avatarError: string | null = null;
 
   @media (max-width: 1024px) {
     .settings-shell {
-      padding: 1.5rem;
+      padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) 1.5rem 1.5rem;
     }
 
     .settings-grid {
@@ -772,7 +776,7 @@ let avatarError: string | null = null;
 
   @media (max-width: 768px) {
     .settings-shell {
-      padding: 1.25rem 1.1rem;
+      padding: calc(env(safe-area-inset-top, 0px) + 1.1rem) 1.1rem 1.25rem;
       gap: 1.25rem;
     }
 
