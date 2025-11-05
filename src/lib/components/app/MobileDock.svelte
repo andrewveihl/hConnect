@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
 
   type Link = {
     href: string;
@@ -30,20 +31,36 @@
   ];
 
   $: currentPath = $page?.url?.pathname ?? '/';
+
+  const formatBadge = (value: number): string => {
+    if (!Number.isFinite(value)) return '';
+    if (value > 99) return '99+';
+    return value.toString();
+  };
 </script>
 
 <nav class="mobile-dock md:hidden" aria-label="Primary">
   <div class="mobile-dock__inner">
     {#each links as link}
       {@const active = link.isActive(currentPath)}
+      {@const badge =
+        link.href === '/dms'
+          ? $dmUnreadCount
+          : link.href === '/notifications'
+            ? $notificationCount
+            : 0}
       <a
         href={link.href}
         class={`mobile-dock__item ${active ? 'is-active' : ''}`}
+        class:mobile-dock__item--alert={!active && badge > 0}
         aria-label={link.label}
         aria-current={active ? 'page' : undefined}
       >
         <i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
         <span class="mobile-dock__label">{link.label}</span>
+        {#if badge > 0}
+          <span class="mobile-dock__badge">{formatBadge(badge)}</span>
+        {/if}
       </a>
     {/each}
   </div>
@@ -73,6 +90,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    position: relative;
     gap: 0.3rem;
     padding: 0.35rem 0.5rem;
     border-radius: var(--radius-md);
@@ -103,5 +121,27 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+  }
+
+  .mobile-dock__badge {
+    position: absolute;
+    top: -0.2rem;
+    right: -0.05rem;
+    min-width: 1.2rem;
+    height: 1.2rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--color-alert, #f87171);
+    color: white;
+    font-size: 0.65rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 10px rgba(249, 127, 127, 0.45);
+  }
+
+  .mobile-dock__item--alert {
+    color: var(--color-accent);
   }
 </style>

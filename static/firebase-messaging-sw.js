@@ -76,6 +76,7 @@ async function setupBackgroundHandler() {
     const body = payload?.notification?.body || payload?.data?.body || '';
     const tag = payload?.data?.tag || undefined;
     const icon = payload?.notification?.icon || '/Logo_transparent.png';
+    const badgeCount = Number(payload?.data?.badge ?? payload?.notification?.badge ?? 0);
 
     self.registration.showNotification(title, {
       body,
@@ -83,7 +84,36 @@ async function setupBackgroundHandler() {
       tag,
       data: payload?.data || {}
     });
+
+    if (typeof self.registration.setAppBadge === 'function') {
+      Promise.resolve()
+        .then(() => self.registration.setAppBadge(badgeCount > 0 ? badgeCount : 1))
+        .catch(() => {});
+    }
   });
 }
 
 setupBackgroundHandler();
+
+self.addEventListener('notificationclick', (event) => {
+  const target = event.notification?.data?.link || event.notification?.data?.url || '/';
+  event.notification.close();
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          if ('focus' in client) {
+            client.navigate(target).catch(() => {});
+            return client.focus();
+          }
+        }
+        return self.clients.openWindow(target);
+      })
+      .finally(() => {
+        if (typeof self.registration.clearAppBadge === 'function') {
+          self.registration.clearAppBadge().catch(() => {});
+        }
+      })
+  );
+});

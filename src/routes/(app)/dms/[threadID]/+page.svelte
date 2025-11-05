@@ -18,11 +18,12 @@
   let me: any = null;
   $: me = $user;
 
-  let messages: any[] = [];
-  let messageUsers: Record<string, any> = {};
+let messages: any[] = [];
+let messageUsers: Record<string, any> = {};
 const profileUnsubs: Record<string, Unsubscribe> = {};
 let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
 let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
+type MentionSendRecord = { uid: string; handle: string | null; label: string | null };
 
   function updateMessageUserCache(uid: string, patch: any) {
     if (!uid) return;
@@ -153,6 +154,26 @@ let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
 
     if (inferredType === 'form') {
       message.form = normalizeForm(raw?.form ?? {});
+    }
+
+    const mentionArray: MentionSendRecord[] = Array.isArray(raw?.mentions)
+      ? raw.mentions
+      : raw?.mentionsMap && typeof raw.mentionsMap === 'object'
+        ? Object.entries(raw.mentionsMap).map(([key, value]) => ({
+            uid: pickString(key) ?? '',
+            handle: pickString((value as any)?.handle) ?? null,
+            label: pickString((value as any)?.label) ?? null
+          }))
+        : [];
+    const mentions = mentionArray
+      .map((entry) => ({
+        uid: pickString(entry?.uid) ?? '',
+        handle: pickString((entry as any)?.handle) ?? null,
+        label: pickString((entry as any)?.label) ?? null
+      }))
+      .filter((entry) => entry.uid);
+    if (mentions.length) {
+      message.mentions = mentions;
     }
 
     return message;
@@ -393,15 +414,23 @@ $: {
     });
   }
 
-  async function handleSend(text: string) {
-    const trimmed = text?.trim();
+  async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[] }) {
+    const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
+    const trimmed = raw?.trim?.() ?? '';
     if (!trimmed || !me?.uid) return;
     await sendDMMessage(threadID, {
       type: 'text',
       text: trimmed,
       uid: me.uid,
       displayName: deriveMeDisplayName(),
-      photoURL: deriveMePhotoURL()
+      photoURL: deriveMePhotoURL(),
+      mentions:
+        typeof payload === 'object' && payload && Array.isArray(payload.mentions)
+          ? payload.mentions.filter(
+              (item): item is MentionSendRecord =>
+                !!item?.uid && (!!item?.handle || !!item?.label)
+            )
+          : undefined
     });
   }
 
@@ -491,8 +520,7 @@ $: {
   }
 
   function onSend(e: CustomEvent<any>) {
-    const val = typeof e.detail === 'string' ? e.detail : e.detail?.text;
-    handleSend(val ?? '');
+    handleSend(e.detail ?? '');
   }
 
   $: displayName =

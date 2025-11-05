@@ -1,14 +1,46 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, tick } from 'svelte';
   import GifPicker from './GifPicker.svelte';
   import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
 
+  type MentionCandidate = {
+    uid: string;
+    label: string;
+    handle: string;
+    avatar: string | null;
+    search: string;
+    aliases: string[];
+  };
+
+  type MentionRecord = {
+    uid: string;
+    handle: string;
+    label: string;
+  };
+
+  const canonical = (value: string) =>
+    (value ?? '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+  const initialsFor = (value: string) => {
+    const words = (value ?? '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2);
+    if (!words.length) return '?';
+    return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
+  };
+
   export let placeholder: string = 'Message #channel';
   export let disabled = false;
+  export let mentionOptions: MentionCandidate[] = [];
 
-  // Callbacks (optional; we also dispatch events)
-  export let onSend: (text: string) => void = () => {};
+  export let onSend: (payload: { text: string; mentions?: MentionRecord[] }) => void = () => {};
   export let onUpload: (files: File[]) => void = () => {};
   export let onSendGif: (url: string) => void = () => {};
   export let onCreatePoll: (poll: { question: string; options: string[] }) => void = () => {};
@@ -22,24 +54,79 @@
   let showPoll = false;
   let showForm = false;
   let fileEl: HTMLInputElement | null = null;
+  let inputEl: HTMLTextAreaElement | null = null;
+
+  let mentionActive = false;
+  let mentionFiltered: MentionCandidate[] = [];
+  let mentionIndex = 0;
+  let mentionQuery = '';
+  let mentionStart = -1;
+  let mentionLookup = new Map<string, MentionCandidate>();
+  let mentionAliasLookup = new Map<string, MentionCandidate>();
+  const mentionDraft = new Map<string, MentionRecord>();
+
+  $: mentionLookup = new Map(
+    mentionOptions.map((option) => [option.handle.toLowerCase(), option])
+  );
+  $: mentionAliasLookup = new Map(
+    mentionOptions.flatMap((option) =>
+      option.aliases.map((alias) => [alias, option] as [string, MentionCandidate])
+    )
+  );
+  $: if (!mentionOptions.length) {
+    mentionDraft.clear();
+    closeMentionMenu();
+  }
 
   function submit(e?: Event) {
     e?.preventDefault();
-    const t = text.trim();
-    if (!t || disabled) return;
-    onSend(t);
-    dispatch('send', t);
+    const trimmed = text.trim();
+    if (!trimmed || disabled) return;
+    const mentions = collectMentions(text);
+    const payload = { text: trimmed, mentions };
+    onSend(payload);
+    dispatch('send', payload);
     text = '';
+    mentionDraft.clear();
+    closeMentionMenu();
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (mentionActive) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex + 1) % mentionFiltered.length;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex - 1 + mentionFiltered.length) % mentionFiltered.length;
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const choice = mentionFiltered[mentionIndex] ?? mentionFiltered[0];
+        if (choice) void insertMention(choice);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMentionMenu();
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
     }
   }
 
-  function pickFiles() { fileEl?.click(); popOpen = false; }
+  function pickFiles() {
+    fileEl?.click();
+    popOpen = false;
+  }
+
   function onFilesChange(e: Event) {
     const input = e.target as HTMLInputElement;
     const files = Array.from(input.files ?? []);
@@ -49,9 +136,138 @@
     input.value = '';
   }
 
-  const openGif  = () => { showGif  = true; popOpen = false; };
-  const openPoll = () => { showPoll = true; popOpen = false; };
-  const openForm = () => { showForm = true; popOpen = false; };
+  function handleInput() {
+    refreshMentionDraft();
+    if (!mentionOptions.length) return;
+    updateMentionState();
+  }
+
+  function handleSelectionChange() {
+    if (!mentionOptions.length) return;
+    requestAnimationFrame(() => updateMentionState());
+  }
+
+  function collectMentions(value: string): MentionRecord[] {
+    const collected = new Map<string, MentionRecord>();
+    mentionDraft.forEach((record) => {
+      if (value.includes(record.handle)) collected.set(record.uid, record);
+    });
+
+    const regex = /@([a-z0-9._-]{2,64})/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(value))) {
+      const raw = match[1] ?? '';
+      const byHandle = mentionLookup.get(raw.toLowerCase());
+      const byAlias = mentionAliasLookup.get(canonical(raw));
+      const candidate = byHandle ?? byAlias;
+      if (candidate) {
+        const record: MentionRecord = {
+          uid: candidate.uid,
+          handle: `@${candidate.handle}`,
+          label: candidate.label
+        };
+        collected.set(candidate.uid, record);
+      }
+    }
+
+    return Array.from(collected.values());
+  }
+
+  function refreshMentionDraft() {
+    if (!mentionDraft.size) return;
+    for (const [uid, record] of mentionDraft) {
+      if (!text.includes(record.handle)) {
+        mentionDraft.delete(uid);
+      }
+    }
+  }
+
+  function updateMentionState() {
+    if (!inputEl || !mentionOptions.length || disabled) {
+      closeMentionMenu();
+      return;
+    }
+
+    const caret = inputEl.selectionStart ?? text.length;
+    const prefix = text.slice(0, caret);
+    const atIndex = prefix.lastIndexOf('@');
+
+    if (atIndex === -1) {
+      closeMentionMenu();
+      return;
+    }
+
+    const prevChar = atIndex > 0 ? prefix.charAt(atIndex - 1) : ' ';
+    if (/\S/.test(prevChar) && !/[\(\[\{]/.test(prevChar)) {
+      closeMentionMenu();
+      return;
+    }
+
+    const fragment = prefix.slice(atIndex + 1);
+    if (fragment.includes(' ') || fragment.includes('\n') || fragment.includes('\t')) {
+      closeMentionMenu();
+      return;
+    }
+
+    mentionStart = atIndex;
+    mentionQuery = fragment.toLowerCase();
+    const canonicalQuery = canonical(fragment);
+
+    const filtered = mentionOptions.filter((option) => {
+      if (!mentionQuery) return true;
+      const handleMatch = option.handle.toLowerCase().startsWith(mentionQuery);
+      const labelMatch = option.label.toLowerCase().includes(mentionQuery);
+      const aliasMatch = canonicalQuery
+        ? option.aliases.some((alias) => alias.startsWith(canonicalQuery))
+        : false;
+      return handleMatch || labelMatch || aliasMatch;
+    });
+
+    mentionFiltered = filtered.slice(0, 8);
+    if (!mentionFiltered.length) {
+      closeMentionMenu();
+      return;
+    }
+
+    mentionActive = true;
+    mentionIndex = Math.min(mentionIndex, mentionFiltered.length - 1);
+  }
+
+  async function insertMention(option: MentionCandidate) {
+    if (mentionStart < 0) return;
+    const caret = inputEl?.selectionStart ?? text.length;
+    const before = text.slice(0, mentionStart);
+    const after = text.slice(caret);
+    const handleText = `@${option.handle}`;
+    text = `${before}${handleText} `;
+    mentionDraft.set(option.uid, { uid: option.uid, handle: handleText, label: option.label });
+    await tick();
+    const nextCaret = before.length + handleText.length + 1;
+    inputEl?.setSelectionRange(nextCaret, nextCaret);
+    closeMentionMenu();
+    refreshMentionDraft();
+  }
+
+  function closeMentionMenu() {
+    mentionActive = false;
+    mentionFiltered = [];
+    mentionIndex = 0;
+    mentionQuery = '';
+    mentionStart = -1;
+  }
+
+  const openGif = () => {
+    showGif = true;
+    popOpen = false;
+  };
+  const openPoll = () => {
+    showPoll = true;
+    popOpen = false;
+  };
+  const openForm = () => {
+    showForm = true;
+    popOpen = false;
+  };
 
   function onGifPicked(url: string) {
     onSendGif(url);
@@ -71,6 +287,10 @@
 
   function onEsc(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
+    if (mentionActive) {
+      closeMentionMenu();
+      return;
+    }
     if (showGif || showPoll || showForm) {
       showGif = showPoll = showForm = false;
     } else {
@@ -81,9 +301,7 @@
 
 <svelte:window on:keydown={onEsc} />
 
-<!-- Keep relative so the popover anchors above the + -->
 <form on:submit|preventDefault={submit} class="relative flex items-center gap-2">
-  <!-- Plus -->
   <div class="relative">
     <button
       type="button"
@@ -99,10 +317,7 @@
     </button>
 
     {#if popOpen}
-      <div
-        class="chat-input-popover"
-        role="menu"
-      >
+      <div class="chat-input-popover" role="menu">
         <div class="chat-input-popover__header">Add to message</div>
         <div class="chat-input-menu">
           <button class="chat-input-menu__item" role="menuitem" on:click={openGif}>
@@ -145,22 +360,55 @@
       </div>
     {/if}
 
-    <!-- hidden file input -->
     <input class="hidden" type="file" multiple bind:this={fileEl} on:change={onFilesChange} />
   </div>
 
-  <!-- Text -->
-  <input
-    class="input flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[#5865f2]"
-    type="text"
-    bind:value={text}
-    placeholder={placeholder}
-    on:keydown={onKeydown}
-    {disabled}
-    aria-label="Message input"
-  />
+  <div class="flex-1 relative">
+    <textarea
+      class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[#5865f2]"
+      rows="1"
+      bind:this={inputEl}
+      bind:value={text}
+      placeholder={placeholder}
+      on:keydown={onKeydown}
+      on:input={handleInput}
+      on:keyup={handleSelectionChange}
+      on:click={handleSelectionChange}
+      {disabled}
+      aria-label="Message input"
+    />
 
-  <!-- Send -->
+    {#if mentionActive}
+      <div class="mention-menu" role="listbox">
+        <div class="mention-menu__header">Tag someone</div>
+        <div class="mention-menu__list">
+          {#each mentionFiltered as option, idx}
+            <button
+              type="button"
+              class={`mention-menu__item ${idx === mentionIndex ? 'is-active' : ''}`}
+              role="option"
+              aria-selected={idx === mentionIndex}
+              on:mousedown|preventDefault={() => insertMention(option)}
+              on:mouseenter={() => (mentionIndex = idx)}
+            >
+              <span class="mention-menu__avatar">
+                {#if option.avatar}
+                  <img src={option.avatar} alt={option.label} loading="lazy" />
+                {:else}
+                  <span>{initialsFor(option.label)}</span>
+                {/if}
+              </span>
+              <span class="mention-menu__meta">
+                <span class="mention-menu__label">{option.label}</span>
+                <span class="mention-menu__handle">@{option.handle}</span>
+              </span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+  </div>
+
   <button
     class="rounded-full bg-[#5865f2] hover:bg-[#4752c4] px-5 py-2 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
     type="submit"
@@ -172,7 +420,6 @@
   </button>
 </form>
 
-<!-- Modals -->
 {#if showGif}
   <GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
 {/if}
@@ -278,5 +525,101 @@
 
   :global(:root[data-theme='light']) .chat-input-menu__icon {
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  }
+
+  .textarea {
+    width: 100%;
+    min-height: 2.6rem;
+    max-height: 9.5rem;
+    resize: none;
+    line-height: 1.4;
+    font-family: inherit;
+  }
+
+  .mention-menu {
+    position: absolute;
+    z-index: 70;
+    left: 0;
+    top: calc(100% + 0.5rem);
+    width: min(22rem, 100%);
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+    box-shadow: var(--shadow-elevated);
+    overflow: hidden;
+    backdrop-filter: blur(18px);
+  }
+
+  .mention-menu__header {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-55);
+    padding: 0.45rem 0.85rem 0.35rem;
+  }
+
+  .mention-menu__list {
+    display: grid;
+    max-height: 16rem;
+    overflow-y: auto;
+  }
+
+  .mention-menu__item {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.55rem 0.85rem;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    transition: background 140ms ease, color 140ms ease;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .mention-menu__item.is-active,
+  .mention-menu__item:hover {
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .mention-menu__avatar {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .mention-menu__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .mention-menu__meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .mention-menu__label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mention-menu__handle {
+    font-size: 0.7rem;
+    color: var(--text-60);
   }
 </style>

@@ -858,6 +858,12 @@ body {
   background: color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
 
+.rail-button--alert {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 28%, transparent), 0 12px 28px rgba(32, 167, 156, 0.32);
+  color: var(--color-accent);
+}
+
 .rail-button--create {
   border: 1px dashed var(--color-border-subtle);
   background: color-mix(in srgb, var(--color-panel) 62%, transparent);
@@ -901,6 +907,24 @@ body {
   font-weight: 600;
   font-size: 0.75rem;
   letter-spacing: 0.02em;
+}
+
+.rail-badge {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  display: grid;
+  place-items: center;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--color-alert, #f87171);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 8px 22px rgba(248, 114, 117, 0.4);
 }
 
 .appearance-option {

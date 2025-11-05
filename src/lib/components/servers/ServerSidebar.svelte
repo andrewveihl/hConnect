@@ -13,6 +13,8 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { subscribeUnreadForServer, type UnreadMap } from '$lib/firebase/unread';
+  import { notifications, dmUnreadCount } from '$lib/stores/notifications';
+  import type { NotificationItem } from '$lib/stores/notifications';
 
   import {
     collection,
@@ -122,6 +124,8 @@
   let myPerms: Record<string, any> | null = null;
   let myRoleIds: string[] = [];
   let lastServerId: string | null = null;
+  let dmAlerts: NotificationItem[] = [];
+  let mentionHighlights: Set<string> = new Set();
 
   // Basic notification prefs (subset of full settings)
   let notifDesktopEnabled = false;
@@ -399,6 +403,19 @@
     result.splice(Math.max(0, Math.min(result.length, insertIndex)), 0, moved);
     workingOrder = result;
   }
+
+  $: dmAlerts = ($notifications ?? []).filter((item) => item.kind === 'dm').slice(0, 3);
+  $: mentionHighlights = new Set(
+    ($notifications ?? [])
+      .filter(
+        (item) =>
+          item.kind === 'channel' &&
+          item.isMention &&
+          item.serverId === computedServerId &&
+          typeof item.channelId === 'string'
+      )
+      .map((item) => item.channelId as string)
+  );
 
   function canMoveChannel(id: string, type: Chan['type'], delta: number) {
     return !!findSibling(id, type, delta);
@@ -844,6 +861,41 @@ $: if (reorderMode === 'default') {
   {/if}
 
 <div class="p-3 space-y-4 overflow-y-auto overflow-x-hidden">
+    {#if dmAlerts.length}
+      <div class="sidebar-alert-card" aria-live="polite" aria-label="Direct messages">
+        <div class="sidebar-alert-card__header">
+          <i class="bx bx-message-dots text-lg" aria-hidden="true"></i>
+          <span>Direct messages</span>
+          <span class="sidebar-alert-card__badge">
+            {$dmUnreadCount > 99 ? '99+' : $dmUnreadCount}
+          </span>
+        </div>
+        <ul class="sidebar-alert-card__list">
+          {#each dmAlerts as alert (alert.id)}
+            <li>
+              <button
+                type="button"
+                class="sidebar-alert-card__item"
+                on:click={() => goto(alert.href)}
+                aria-label={`Open direct message with ${alert.title}`}
+              >
+                <div class="sidebar-alert-card__item-main">
+                  <span class="sidebar-alert-card__title">{alert.title}</span>
+                  {#if alert.preview}
+                    <span class="sidebar-alert-card__preview" title={alert.preview}>
+                      {alert.preview}
+                    </span>
+                  {/if}
+                </div>
+                <span class="sidebar-alert-card__count">
+                  {alert.unread > 99 ? '99+' : alert.unread}
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
     {#if activeVoice}
       <!-- Desktop-only mini voice panel -->
       <div class="hidden md:block">
@@ -855,7 +907,7 @@ $: if (reorderMode === 'default') {
       <div class="space-y-1">
         {#each visibleChannels.filter((c) => c.type === 'text') as c (c.id)}
           <div
-            class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''}`}
+            class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''}`}
           >
             {#if reorderMode !== 'none'}
               <div class="channel-reorder-controls">
@@ -892,6 +944,9 @@ $: if (reorderMode === 'default') {
               <i class="bx bx-hash" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
               <span class="ml-auto flex items-center gap-1">
+                {#if mentionHighlights.has(c.id)}
+                  <span class="channel-mention-pill" title="You were mentioned">@</span>
+                {/if}
                 {#if (unreadByChannel[c.id] ?? 0) > 0}
                   <span class="channel-unread">
                     {unreadByChannel[c.id] > 99 ? '99+' : unreadByChannel[c.id]}
@@ -1060,5 +1115,126 @@ $: if (reorderMode === 'default') {
   </div>
 </aside>
 
+<style>
+  .sidebar-alert-card {
+    border-radius: var(--radius-md);
+    padding: 0.75rem;
+    background: color-mix(in srgb, var(--color-panel) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    box-shadow: 0 6px 22px rgba(6, 12, 24, 0.24);
+    display: grid;
+    gap: 0.675rem;
+  }
 
+  .sidebar-alert-card__header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-70);
+  }
 
+  .sidebar-alert-card__badge {
+    margin-left: auto;
+    min-width: 1.6rem;
+    height: 1.3rem;
+    border-radius: 999px;
+    background: var(--color-accent);
+    color: var(--button-primary-text);
+    font-size: 0.7rem;
+    display: grid;
+    place-items: center;
+    padding: 0 0.45rem;
+    font-weight: 700;
+  }
+
+  .sidebar-alert-card__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .sidebar-alert-card__item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.65rem;
+    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    color: inherit;
+    text-align: left;
+    transition: border 160ms ease, transform 160ms ease, background 160ms ease;
+  }
+
+  .sidebar-alert-card__item:hover {
+    border-color: var(--color-accent);
+    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .sidebar-alert-card__item-main {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .sidebar-alert-card__title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-90);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar-alert-card__preview {
+    font-size: 0.72rem;
+    color: var(--text-60);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar-alert-card__count {
+    min-width: 1.6rem;
+    height: 1.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+    color: var(--color-accent);
+    font-size: 0.75rem;
+    font-weight: 600;
+    display: grid;
+    place-items: center;
+    padding: 0 0.45rem;
+  }
+
+  .channel-row--mention .channel-row__button {
+    border-left: 3px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
+    padding-left: 0.9rem;
+  }
+
+  .channel-row--mention .channel-row__button:hover {
+    border-left-color: var(--color-accent);
+  }
+
+  .channel-mention-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+    color: var(--color-accent);
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+</style>

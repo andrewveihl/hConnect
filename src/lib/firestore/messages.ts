@@ -7,6 +7,7 @@ export type BaseMessageInput = {
   uid: string;
   displayName?: Nullable<string>;
   photoURL?: Nullable<string>;
+  mentions?: MentionInput[];
 };
 
 export type TextMessageInput = BaseMessageInput & {
@@ -40,6 +41,12 @@ export type MessageInput =
   | GifMessageInput
   | PollMessageInput
   | FormMessageInput;
+
+export type MentionInput = {
+  uid: string;
+  handle?: Nullable<string>;
+  label?: Nullable<string>;
+};
 
 function trimString(value: Nullable<string>): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -86,6 +93,23 @@ function compactRecord(record: Record<string, any>) {
   return output;
 }
 
+function normalizeMentionList(mentions: MentionInput[] | undefined): Array<{
+  uid: string;
+  handle: string | null;
+  label: string | null;
+}> {
+  if (!Array.isArray(mentions)) return [];
+  const map = new Map<string, { uid: string; handle: string | null; label: string | null }>();
+  for (const entry of mentions) {
+    const uid = trimString(entry?.uid);
+    if (!uid) continue;
+    const handle = trimString(entry?.handle) ?? null;
+    const label = trimString(entry?.label) ?? null;
+    map.set(uid, { uid, handle, label });
+  }
+  return Array.from(map.values());
+}
+
 export function buildMessageDocument(payload: MessageInput) {
   if (!payload?.uid) {
     throw new Error('Cannot write message without uid.');
@@ -94,6 +118,7 @@ export function buildMessageDocument(payload: MessageInput) {
   const type = payload.type ?? 'text';
   const base = baseAuthorFields(payload);
   let extras: Record<string, any> = {};
+  const mentions = normalizeMentionList((payload as any)?.mentions);
 
   switch (type) {
     case 'text': {
@@ -156,6 +181,23 @@ export function buildMessageDocument(payload: MessageInput) {
     default: {
       throw new Error(`Unsupported message type: ${String(type)}`);
     }
+  }
+
+  if (mentions.length) {
+    extras = {
+      ...extras,
+      mentions,
+      mentionsMap: mentions.reduce<Record<string, { handle: string | null; label: string | null }>>(
+        (acc, entry) => {
+          acc[entry.uid] = {
+            handle: entry.handle ?? null,
+            label: entry.label ?? null
+          };
+          return acc;
+        },
+        {}
+      )
+    };
   }
 
   return {
