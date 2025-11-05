@@ -4,7 +4,7 @@
   import { subscribeUserServers } from '$lib/firestore/servers';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
-  import logoMarkUrl from '$lib/assets/logo-mark.svg?url';
+  import logoMarkUrl from '$lib/assets/Logo_transparent.png';
 
   export let activeServerId: string | null = null;
   export let onCreateServer: (() => void) | null = null;

@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { db } from '$lib/firestore';
   import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   export let serverId: string;
   export let showHeader = true;
@@ -92,7 +93,8 @@
   const avatarUrl = (uid: string) => {
     const member = members[uid] ?? {};
     const profile = profiles[uid] ?? {};
-    return pickString(profile.photoURL) ?? pickString(member.photoURL) ?? null;
+    const fallback = pickString(member.photoURL) ?? null;
+    return resolveProfilePhotoURL(profile, fallback);
   };
 
   const isRecent = (value: unknown, ms = 5 * 60 * 1000) => {

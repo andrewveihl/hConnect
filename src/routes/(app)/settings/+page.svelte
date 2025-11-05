@@ -17,8 +17,17 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const FIRESTORE_IMAGE_LIMIT = 900 * 1024; // Keep data URLs safely under 1 MB Firestore limit
 const AVATAR_MAX_DIMENSION = 512;
 
+function pickString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : undefined;
+}
+
 let displayName = '';
 let photoURL = '';
+let authPhotoURL = '';
+let previewPhotoURL = '';
+let providerPhotoAvailable = false;
 let loading = true;
 let loadedUid: string | null = null;
 let avatarFileInput: HTMLInputElement | null = null;
@@ -39,6 +48,15 @@ let avatarError: string | null = null;
     mentions: true,
     allMessages: false
   };
+
+  $: previewPhotoURL =
+    pickString(photoURL) ??
+    pickString(authPhotoURL) ??
+    pickString($user?.photoURL) ??
+    '';
+
+  $: providerPhotoAvailable =
+    Boolean(pickString(authPhotoURL) ?? pickString($user?.photoURL));
 
   const themeChoices: Array<{ id: ThemeMode; label: string; description: string }> = [
     { id: 'dark', label: 'Dark', description: 'Charcoal surfaces with teal highlights.' },
@@ -66,7 +84,25 @@ let avatarError: string | null = null;
 
     const data = (await getDoc(ref)).data() ?? {};
     displayName = (data.displayName as string) ?? '';
-    photoURL = (data.photoURL as string) ?? '';
+
+    const storedAuth =
+      pickString(data.authPhotoURL) ??
+      pickString($user?.photoURL);
+    const storedPhoto = pickString(data.photoURL);
+    const storedCustom = pickString(data.customPhotoURL);
+
+    authPhotoURL = storedAuth ?? '';
+
+    if (storedCustom) {
+      photoURL = storedCustom;
+    } else if (storedPhoto && storedAuth && storedPhoto !== storedAuth) {
+      photoURL = storedPhoto;
+    } else if (storedPhoto && !storedAuth) {
+      photoURL = storedPhoto;
+    } else {
+      photoURL = '';
+    }
+
     loadedUid = uid;
 
     const settings = (data.settings ?? {}) as any;
@@ -105,9 +141,16 @@ let avatarError: string | null = null;
   async function save() {
     if (!$user?.uid) return;
     const database = db();
+    const customPhoto = pickString(photoURL) ?? null;
+    const normalizedAuthPhoto =
+      pickString(authPhotoURL) ??
+      pickString($user?.photoURL) ??
+      null;
     await updateDoc(doc(database, 'profiles', $user.uid), {
       displayName,
-      photoURL,
+      photoURL: customPhoto ?? normalizedAuthPhoto,
+      customPhotoURL: customPhoto,
+      authPhotoURL: normalizedAuthPhoto,
       lastActiveAt: serverTimestamp(),
       'settings.notificationPrefs': notif,
       'settings.theme': themeMode
@@ -116,8 +159,12 @@ let avatarError: string | null = null;
   }
 
   function useGooglePhoto() {
-    if ($user?.photoURL) {
-      photoURL = $user.photoURL;
+    const provider =
+      pickString($user?.photoURL) ??
+      pickString(authPhotoURL);
+    if (provider) {
+      authPhotoURL = provider;
+      photoURL = '';
       avatarError = null;
     }
   }
@@ -253,16 +300,16 @@ let avatarError: string | null = null;
 
             <div class="settings-profile">
               <div class="settings-avatar">
-                {#if photoURL}
-                  <img src={photoURL} alt="Avatar preview" loading="lazy" />
+                {#if previewPhotoURL}
+                  <img src={previewPhotoURL} alt="Avatar preview" loading="lazy" />
                 {:else}
                   <div class="settings-avatar__empty">No image</div>
                 {/if}
               </div>
               <div class="settings-avatar__actions">
                 <div class="settings-chip-row">
-                  <button class="settings-chip" on:click={useGooglePhoto} disabled={!$user?.photoURL}>
-                    Use Google photo
+                  <button class="settings-chip" on:click={useGooglePhoto} disabled={!providerPhotoAvailable}>
+                    Use Google/Apple photo
                   </button>
                   <button type="button" class="settings-chip settings-chip--primary" on:click={triggerAvatarUpload}>
                     Upload photo
@@ -277,6 +324,12 @@ let avatarError: string | null = null;
                 />
                 {#if avatarError}
                   <p class="settings-hint settings-hint--error">{avatarError}</p>
+                {/if}
+                {#if !pickString(photoURL) && previewPhotoURL}
+                  <p class="settings-hint">Currently using your Google or Apple profile photo.</p>
+                {/if}
+                {#if !providerPhotoAvailable}
+                  <p class="settings-hint">Link Google or Apple to enable the fallback option.</p>
                 {/if}
                 <p class="settings-hint">JPG, PNG, GIF up to 8&nbsp;MB. Larger images are compressed automatically.</p>
               </div>
@@ -315,10 +368,6 @@ let avatarError: string | null = null;
                   <p>Show native alerts when new messages arrive.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <label class="settings-toggle">
-                    <input type="checkbox" bind:checked={notif.desktopEnabled} />
-                    <span>Enabled</span>
-                  </label>
                   <button class="settings-chip" on:click={enableDesktopNotifications}>Grant permission</button>
                 </div>
               </div>
@@ -329,10 +378,6 @@ let avatarError: string | null = null;
                   <p>Receive updates even when the app is closed.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <label class="settings-toggle">
-                    <input type="checkbox" bind:checked={notif.pushEnabled} />
-                    <span>Enabled</span>
-                  </label>
                   <button class="settings-chip" on:click={enablePush}>Enable on this device</button>
                 </div>
               </div>
@@ -343,18 +388,6 @@ let avatarError: string | null = null;
                   <p>Choose which updates we surface.</p>
                 </div>
                 <div class="settings-notif-list">
-                  <label class="settings-toggle">
-                    <span>Direct messages</span>
-                    <input type="checkbox" bind:checked={notif.dms} />
-                  </label>
-                  <label class="settings-toggle">
-                    <span>@ Mentions</span>
-                    <input type="checkbox" bind:checked={notif.mentions} />
-                  </label>
-                  <label class="settings-toggle">
-                    <span>All messages (noisy)</span>
-                    <input type="checkbox" bind:checked={notif.allMessages} />
-                  </label>
                 </div>
               </div>
             </div>
@@ -679,18 +712,6 @@ let avatarError: string | null = null;
   .settings-notif-list {
     display: grid;
     gap: 0.45rem;
-  }
-
-  .settings-notif-list .settings-toggle {
-    justify-content: space-between;
-  }
-
-  .settings-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.9rem;
-    color: var(--text-60);
   }
 
   .appearance-option {

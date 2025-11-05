@@ -73,10 +73,50 @@
 
   // Resolve names for "other" participant so the list shows names, not UIDs.
   let nameCache: Record<string, string> = {};
+
+  function pickDisplayCandidate(source: any): string | null {
+    if (!source) return null;
+    const candidates = Array.isArray(source)
+      ? source
+      : [
+          source.otherDisplayName,
+          source.otherName,
+          source.otherEmail,
+          source.displayName,
+          source.name,
+          source.profile?.name,
+          source.profile?.displayName,
+          source.profile?.email
+        ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+    }
+    return null;
+  }
+
+  $: if (threads?.length) {
+    let updated = false;
+    const nextCache = { ...nameCache };
+    for (const t of threads) {
+      const other = resolveOtherUid(t);
+      if (!other) continue;
+      const seeded = pickDisplayCandidate(t);
+      if (seeded && nextCache[other] !== seeded) {
+        nextCache[other] = seeded;
+        updated = true;
+      }
+    }
+    if (updated) {
+      nameCache = nextCache;
+    }
+  }
+
   $: (async () => {
     if (!threads?.length) return;
     for (const t of threads) {
-      const other = (t.participants || []).find((p: string) => p !== me?.uid);
+      const other = resolveOtherUid(t);
       if (other && !nameCache[other]) {
         try {
           const prof = await getProfile(other);
@@ -93,8 +133,12 @@
     }
   })();
 
+  function resolveOtherUid(t: any) {
+    return t.otherUid || (t.participants || []).find((p: string) => p !== me?.uid) || null;
+  }
+
   function otherOf(t: any) {
-    const o = t.otherUid || (t.participants || []).find((p: string) => p !== me?.uid);
+    const o = resolveOtherUid(t);
     if (!o) return 'Unknown';
     if (nameCache[o]) return nameCache[o];
     const fromPeople = peopleMap[o];
@@ -116,6 +160,23 @@
       return fallback;
     }
     return o;
+  }
+
+  function otherPhotoOf(t: any) {
+    const other = resolveOtherUid(t);
+    if (!other) return null;
+    const fromPeople = peopleMap[other];
+    if (fromPeople) {
+      if (fromPeople.photoURL) return fromPeople.photoURL;
+      if (fromPeople.authPhotoURL) return fromPeople.authPhotoURL;
+    }
+    return (
+      t.otherPhotoURL ??
+      t.photoURL ??
+      t.profile?.photoURL ??
+      t.profile?.authPhotoURL ??
+      null
+    );
   }
 
   /* ---------------- Unread badges ---------------- */
@@ -228,7 +289,7 @@
       <i class="bx bx-search absolute left-3 top-2.5 text-white/50"></i>
       <input
         class="w-full pl-9 pr-3 py-2  bg-white/5 outline-none focus:ring-2 ring-white/20"
-        placeholder="Search people by nameâ€¦"
+        placeholder="Search people by name"
         bind:value={term}
         on:input={onSearchInput}
       />
@@ -248,7 +309,7 @@
               class="w-full flex items-center gap-3 px-2 py-2  hover:bg-white/5"
               on:click={() => openOrStartDM(u.uid)}
             >
-              <img class="w-8 h-8 rounded-full object-cover" src={u.photoURL || '/static/demo-cursor.png'} alt="" />
+              <img class="w-8 h-8 rounded-full object-cover" src={u.photoURL || u.authPhotoURL || '/static/demo-cursor.png'} alt="" />
               <div class="text-sm text-left">
                 <div class="font-medium leading-5">{u.displayName || u.email || u.uid}</div>
                 {#if u.email}<div class="text-xs text-white/50">{u.email}</div>{/if}
@@ -287,14 +348,19 @@
       <ul class="space-y-0.5 pr-1">
         {#each threads as t}
           {@const isActive = activeThreadId === t.id}
+          {@const otherPhoto = otherPhotoOf(t)}
           <li>
             <div class={`flex items-center gap-2 px-2 py-2  ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
               <button
                 class="flex-1 flex items-center gap-3 text-left focus:outline-none"
                 on:click={() => openExisting(t.id)}
               >
-                <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
-                  <i class="bx bx-user text-lg"></i>
+                <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
+                  {#if otherPhoto}
+                    <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
+                  {:else}
+                    <i class="bx bx-user text-lg"></i>
+                  {/if}
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
@@ -331,7 +397,7 @@
               class="w-full flex items-center gap-3 px-2 py-2  hover:bg-white/5"
               on:click={() => openOrStartDM(p.uid)}
             >
-              <img class="w-8 h-8 rounded-full object-cover" src={p.photoURL || '/static/demo-cursor.png'} alt="" />
+              <img class="w-8 h-8 rounded-full object-cover" src={p.photoURL || p.authPhotoURL || '/static/demo-cursor.png'} alt="" />
               <div class="text-sm text-left">
                 <div class="font-medium leading-5">{p.displayName || p.email || 'User'}</div>
                 {#if p.email}<div class="text-xs text-white/50">{p.email}</div>{/if}

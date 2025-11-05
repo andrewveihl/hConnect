@@ -10,6 +10,7 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { subscribeUnreadForServer, type UnreadMap } from '$lib/firebase/unread';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   import {
     collection,
@@ -153,7 +154,7 @@
               return {
                 uid: data.uid ?? d.id,
                 displayName: data.displayName ?? 'Member',
-                photoURL: data.photoURL ?? null,
+                photoURL: resolveProfilePhotoURL(data),
                 hasAudio: data.hasAudio ?? false,
                 hasVideo: data.hasVideo ?? false,
                 status

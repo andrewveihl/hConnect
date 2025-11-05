@@ -47,6 +47,7 @@
     return (
       m.photoURL ||
       users[uid]?.photoURL ||
+      users[uid]?.authPhotoURL ||
       users[uid]?.avatarUrl ||
       null
     );
