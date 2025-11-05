@@ -563,7 +563,10 @@ $: {
       </div>
     </main>
 
-    <div class="border-t border-subtle panel p-3">
+    <div
+      class="border-t border-subtle panel p-3"
+      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.5rem)"
+    >
       <ChatInput
         placeholder={`Message ${displayName}`}
         on:send={onSend}
@@ -616,7 +619,7 @@ $: {
 
 <!-- Mobile overlays -->
 <div
-  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
@@ -642,7 +645,7 @@ $: {
 </div>
 
 <div
-  class="mobile-panel md:hidden fixed inset-y-0 right-0 left-[72px] z-40 flex flex-col transition-transform duration-300 will-change-transform"
+  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showInfo ? 'translateX(0)' : 'translateX(100%)'}
   style:pointer-events={showInfo ? 'auto' : 'none'}
   aria-label="Profile"
@@ -656,7 +659,7 @@ $: {
 
   <div class="flex-1 overflow-y-auto p-4">
     {#if metaLoading}
-      <div class="animate-pulse text-soft">Loading profileÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦</div>
+      <div class="animate-pulse text-soft">Loading profile...</div>
     {:else if otherProfile}
       <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
         <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
@@ -676,7 +679,7 @@ $: {
         {#if otherProfile.bio}
           <p>{otherProfile.bio}</p>
         {:else}
-          <p>This user hasnÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢t added a bio yet.</p>
+          <p>This user hasn't added a bio yet.</p>
         {/if}
         {#if otherProfile.email}
           <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>

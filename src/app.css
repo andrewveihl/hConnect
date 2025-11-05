@@ -207,6 +207,38 @@ body {
   color: var(--color-text-primary);
 }
 
+.app-shell {
+  min-height: 100dvh;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.has-mobile-dock {
+  --mobile-dock-height: 0px;
+}
+
+@media (max-width: 767px) {
+  .has-mobile-dock {
+    --mobile-dock-height: 4.75rem;
+  }
+
+  .has-mobile-dock .app-shell__body {
+    padding-bottom: calc(var(--mobile-dock-height) + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (min-width: 768px) {
+  .has-mobile-dock .app-shell__body {
+    padding-bottom: 0;
+  }
+}
+
 .sidebar-surface {
   background: var(--color-sidebar);
 }
@@ -459,10 +491,11 @@ body {
 }
 
 .mobile-panel {
-  background: var(--color-panel);
+  background: color-mix(in srgb, var(--color-panel) 95%, transparent);
   color: var(--color-text-primary);
-  box-shadow: var(--shadow-elevated);
-  border-radius: var(--radius-lg);
+  box-shadow: none;
+  border-radius: 0;
+  padding-bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
 }
 
 .mobile-panel__header {
