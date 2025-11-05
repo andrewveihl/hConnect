@@ -1,9 +1,16 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { browser } from '$app/environment';
   import { getDb } from '$lib/firebase';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+  import {
+    appendVoiceDebugEvent,
+    copyVoiceDebugAggregate,
+    removeVoiceDebugSection,
+    setVoiceDebugSection
+  } from '$lib/utils/voiceDebugContext';
 
   export let serverId: string | null = null;
   export let session: VoiceSession | null = null;
@@ -21,6 +28,8 @@
 
   let participants: VoiceParticipant[] = [];
   let unsub: Unsubscribe | null = null;
+  let copyStatus = '';
+  let copyTimeout: ReturnType<typeof setTimeout> | null = null;
 
   $: {
     unsub?.();
@@ -46,6 +55,18 @@
           })
           .filter((p) => p.status !== 'left');
         participants = list;
+        if (browser) {
+          appendVoiceDebugEvent('mini-panel', 'participants snapshot', {
+            serverId: session?.serverId ?? null,
+            channelId: session?.channelId ?? null,
+            count: list.length,
+            participants: list.slice(0, 6).map((p) => ({
+              uid: p.uid,
+              hasAudio: p.hasAudio ?? true,
+              hasVideo: p.hasVideo ?? false
+            }))
+          });
+        }
       });
     }
   }
@@ -53,6 +74,11 @@
   onDestroy(() => {
     unsub?.();
     unsub = null;
+    if (copyTimeout) {
+      clearTimeout(copyTimeout);
+      copyTimeout = null;
+    }
+    removeVoiceDebugSection('miniPanel.snapshot');
   });
 
   function leaveCall() {
@@ -63,6 +89,22 @@
     voiceSession.setVisible(true);
   }
 
+  async function copyDebug() {
+    appendVoiceDebugEvent('mini-panel', 'copy debug requested', {
+      serverId: session?.serverId ?? null,
+      channelId: session?.channelId ?? null,
+      participantCount: participants.length
+    });
+    const success = await copyVoiceDebugAggregate({ includeLogs: 50, includeEvents: 80 });
+    copyStatus = success ? 'Debug info copied.' : 'Debug info logged to console.';
+    if (copyTimeout) {
+      clearTimeout(copyTimeout);
+    }
+    copyTimeout = setTimeout(() => {
+      copyStatus = '';
+    }, 4000);
+  }
+
   function initials(name?: string) {
     if (!name) return '?';
     return name.trim().charAt(0).toUpperCase() || '?';
@@ -71,6 +113,20 @@
   $: namesLine = participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', ');
   $: serverLabel = session?.serverName ?? session?.serverId ?? 'Server';
   $: connectedElsewhere = !!session && !!serverId && session.serverId !== serverId;
+  $: if (browser) {
+    setVoiceDebugSection('miniPanel.snapshot', {
+      serverId: session?.serverId ?? null,
+      channelId: session?.channelId ?? null,
+      channelName: session?.channelName ?? null,
+      participantCount: participants.length,
+      connectedElsewhere,
+      participants: participants.slice(0, 8).map((p) => ({
+        uid: p.uid,
+        hasAudio: p.hasAudio ?? true,
+        hasVideo: p.hasVideo ?? false
+      }))
+    });
+  }
 </script>
 
 {#if session}
@@ -139,9 +195,12 @@
         <button class="voice-mini__pill" type="button" on:click={openVoice}>
           Manage
         </button>
-        <button class="voice-mini__pill" type="button" on:click={openVoice}>
-          Share
+        <button class="voice-mini__pill" type="button" on:click={copyDebug} aria-label="Copy voice debug info">
+          Copy debug
         </button>
+        {#if copyStatus}
+          <span class="voice-mini__feedback">{copyStatus}</span>
+        {/if}
       </div>
     </div>
   </div>
@@ -312,6 +371,14 @@
   .voice-mini__pill:hover {
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-80);
+  }
+
+  .voice-mini__feedback {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-60);
+    margin-left: 0.35rem;
   }
 </style>
 
