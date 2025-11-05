@@ -211,17 +211,53 @@
   let permissionPreflight: Promise<void> | null = null;
   let permissionWarningShown = false;
   let callSnapshotDebug = '';
-  type VoiceLogEntry = { id: string; timestamp: string; message: string; details?: string };
+  type VoiceLogEntry = {
+    id: string;
+    timestamp: string;
+    message: string;
+    details?: string;
+    severity: 'info' | 'warn' | 'error';
+  };
   let voiceLogs: VoiceLogEntry[] = [];
   let voiceLogSequence = 0;
+  let voiceErrorCount = 0;
+  let voiceWarnCount = 0;
   const remoteCandidateKeys = new Set<string>();
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
+  const DEBUG_PANEL_STORAGE_KEY = 'hconnect:voice:debug-panel-open';
+  let debugPanelVisible = false;
+  let hasDebugAlerts = false;
+  let mostRecentAlertId: string | null = null;
   const DEFAULT_STUN_SERVERS = [
     'stun:stun.l.google.com:19302',
     'stun:stun1.l.google.com:19302',
     'stun:stun2.l.google.com:19302',
     'stun:stun3.l.google.com:19302'
   ];
+  const FALLBACK_TURN_SERVER = {
+    urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:3478'],
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  } as const;
+
+  function parseBooleanFlag(value: string | undefined, defaultValue: boolean): boolean {
+    if (value === undefined) return defaultValue;
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return defaultValue;
+    if (['0', 'false', 'off', 'no', 'disabled'].includes(normalized)) return false;
+    if (['1', 'true', 'on', 'yes', 'enabled'].includes(normalized)) return true;
+    return defaultValue;
+  }
+
+  const allowTurnFallback = parseBooleanFlag(publicEnv.PUBLIC_ENABLE_TURN_FALLBACK, true);
+  let fallbackTurnActivated = false;
+  let fallbackTurnActivationReason: string | null = null;
+  let hasTurnServers = false;
+  let usingFallbackTurnServers = false;
+  let forceRelayIceTransport = false;
+  let consecutiveIceErrors = 0;
+  let lastIceErrorTimestamp = 0;
+  let lastTurnConfigSignature: string | null = null;
   let debugLoggingEnabled = true;
   let isOfferer = false;
   let lastOfferRevision = 0;
@@ -316,6 +352,33 @@
     return String(value);
   }
 
+  function classifyVoiceLogSeverity(message: string, details?: string): 'info' | 'warn' | 'error' {
+    const combined = `${message} ${details ?? ''}`.toLowerCase();
+    if (
+      /\b(error|fail|failed|denied|timeout|unreachable|disconnected|critical)\b/.test(combined)
+    ) {
+      return 'error';
+    }
+    if (/\b(warn|warning|retry|reconnect|unstable|degraded)\b/.test(combined)) {
+      return 'warn';
+    }
+    return 'info';
+  }
+
+  function updateVoiceLogCounters(entries: VoiceLogEntry[]) {
+    let errors = 0;
+    let warnings = 0;
+    for (const entry of entries) {
+      if (entry.severity === 'error') {
+        errors += 1;
+      } else if (entry.severity === 'warn') {
+        warnings += 1;
+      }
+    }
+    voiceErrorCount = errors;
+    voiceWarnCount = warnings;
+  }
+
   function recordVoiceLog(message: unknown, details?: unknown) {
     const timestamp = new Date().toLocaleTimeString();
     const entryMessage = toDisplayString(message);
@@ -324,7 +387,20 @@
       entryDetails = toDisplayString(details);
     }
     const id = `${Date.now()}-${voiceLogSequence++}`;
-    voiceLogs = [{ id, timestamp, message: entryMessage, details: entryDetails }, ...voiceLogs].slice(0, 250);
+    const severity = classifyVoiceLogSeverity(entryMessage, entryDetails);
+    const nextLogs = [
+      { id, timestamp, message: entryMessage, details: entryDetails, severity },
+      ...voiceLogs
+    ].slice(0, 250);
+    voiceLogs = nextLogs;
+    updateVoiceLogCounters(nextLogs);
+    if (!debugPanelVisible && severity !== 'info' && mostRecentAlertId !== id) {
+      mostRecentAlertId = id;
+      hasDebugAlerts = true;
+    } else if (debugPanelVisible) {
+      mostRecentAlertId = id;
+      hasDebugAlerts = false;
+    }
   }
 
   function voiceDebug(...args: unknown[]) {
@@ -335,6 +411,33 @@
     }
     if (!debugLoggingEnabled) return;
     console.log('[voice]', ...args);
+  }
+
+  function acknowledgeDebugAlerts() {
+    hasDebugAlerts = false;
+  }
+
+  function setDebugPanelVisibility(open: boolean) {
+    debugPanelVisible = open;
+    if (open) {
+      acknowledgeDebugAlerts();
+    }
+    voiceDebug('Debug panel visibility', { open });
+    if (!browser || typeof localStorage === 'undefined') return;
+    try {
+      if (open) {
+        localStorage.setItem(DEBUG_PANEL_STORAGE_KEY, '1');
+      } else {
+        localStorage.removeItem(DEBUG_PANEL_STORAGE_KEY);
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+  }
+
+  function toggleDebugPanel(force?: boolean) {
+    const desired = typeof force === 'boolean' ? force : !debugPanelVisible;
+    setDebugPanelVisibility(desired);
   }
 
   function logRemoteCandidate(
@@ -359,6 +462,10 @@
 
   function setVoiceDebug(enabled: boolean) {
     debugLoggingEnabled = enabled;
+    if (!enabled) {
+      setDebugPanelVisibility(false);
+      hasDebugAlerts = false;
+    }
     if (!browser || typeof localStorage === 'undefined') return;
     if (enabled) {
       localStorage.setItem(DEBUG_STORAGE_KEY, '1');
@@ -378,30 +485,69 @@
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean) ?? [];
+    let turnServer: RTCIceServer | null = null;
+    let turnState: 'configured' | 'fallback' | 'none' = 'none';
     if (!configuredTurn.length) {
       if (rawTurnUrls.trim().length) {
         voiceDebug('TURN configuration ignored (no valid URLs parsed)', {
           raw: rawTurnUrls
         });
-      } else {
+      }
+    } else {
+      turnServer = { urls: configuredTurn };
+      const turnUsername = publicEnv.PUBLIC_TURN_USERNAME ?? '';
+      const turnCredential = publicEnv.PUBLIC_TURN_CREDENTIAL ?? '';
+      if (turnUsername) {
+        turnServer.username = turnUsername;
+      }
+      if (turnCredential) {
+        turnServer.credential = turnCredential;
+      }
+      turnState = 'configured';
+    }
+    if (!turnServer && allowTurnFallback && fallbackTurnActivated) {
+      turnServer = {
+        urls: [...FALLBACK_TURN_SERVER.urls],
+        username: FALLBACK_TURN_SERVER.username,
+        credential: FALLBACK_TURN_SERVER.credential
+      };
+      turnState = 'fallback';
+    }
+    hasTurnServers = !!turnServer;
+    usingFallbackTurnServers = turnState === 'fallback';
+    if (!hasTurnServers) {
+      usingFallbackTurnServers = false;
+      forceRelayIceTransport = false;
+    }
+    if (turnServer) {
+      servers.push(turnServer);
+    }
+    const signature = JSON.stringify({
+      turnState,
+      urls: servers.map((entry) => entry.urls)
+    });
+    if (lastTurnConfigSignature !== signature) {
+      if (turnState === 'configured' && turnServer) {
+        const urls = Array.isArray(turnServer.urls)
+          ? turnServer.urls
+          : turnServer.urls
+            ? [turnServer.urls]
+            : [];
+        voiceDebug('TURN servers configured', {
+          urls,
+          hasAuth: !!(turnServer.username || turnServer.credential)
+        });
+      } else if (turnState === 'fallback') {
+        voiceDebug('Fallback TURN relay enabled', {
+          provider: 'openrelay.metered.ca',
+          allowTurnFallback,
+          reason: fallbackTurnActivationReason ?? 'stun-host-error'
+        });
+      } else if (!configuredTurn.length) {
         voiceDebug('TURN servers not configured; relying on STUN only');
       }
-      return servers;
+      lastTurnConfigSignature = signature;
     }
-    const turnServer: RTCIceServer = { urls: configuredTurn };
-    const turnUsername = publicEnv.PUBLIC_TURN_USERNAME ?? '';
-    const turnCredential = publicEnv.PUBLIC_TURN_CREDENTIAL ?? '';
-    if (turnUsername) {
-      turnServer.username = turnUsername;
-    }
-    if (turnCredential) {
-      turnServer.credential = turnCredential;
-    }
-    voiceDebug('TURN servers configured', {
-      urls: configuredTurn,
-      hasAuth: !!(turnServer.username || turnServer.credential)
-    });
-    servers.push(turnServer);
     return servers;
   }
 
@@ -427,6 +573,103 @@
       port: parts[5] ?? '',
       raw
     };
+  }
+
+  function extractMediaSections(sdp: string): string[] {
+    return sdp
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('m='))
+      .map((line) => line.trim());
+  }
+
+  function summarizeParticipantsForDebug(source: ParticipantState[]): Array<Record<string, unknown>> {
+    return source.map((participant) => ({
+      uid: participant.uid,
+      status: participant.status ?? 'active',
+      hasAudio: participant.hasAudio ?? false,
+      hasVideo: participant.hasVideo ?? false,
+      screenSharing: participant.screenSharing ?? false,
+      streamId: participant.streamId ?? null
+    }));
+  }
+
+  function describeTransceiverOrder(connection: RTCPeerConnection | null) {
+    if (!connection || typeof connection.getTransceivers !== 'function') return [];
+    return connection
+      .getTransceivers()
+      .map((trx, index) => ({
+        index,
+        mid: trx.mid ?? null,
+        direction: trx.direction ?? null,
+        currentDirection: (trx as any)?.currentDirection ?? null,
+        senderKind: trx.sender?.track?.kind ?? null,
+        receiverKind: trx.receiver?.track?.kind ?? null,
+        stopped: trx.stopped ?? false
+      }))
+      .filter(Boolean);
+  }
+
+  function collectVoiceDebugBundle(options: { includeLogs?: number } = {}): string {
+    const now = new Date();
+    const currentUser = get(user);
+    const maxLogs = options.includeLogs ?? 20;
+    const logs = voiceLogs.slice(0, maxLogs);
+    const transceiverSnapshot = describeTransceiverOrder(pc);
+    const senderSnapshot =
+      pc?.getSenders?.().map((sender) => ({
+        trackKind: sender.track?.kind ?? null,
+        streams: sender.streams?.map((stream) => stream.id) ?? [],
+        transportState: (sender as any)?.transport?.state ?? null
+      })) ?? [];
+
+    const lines: string[] = [
+      '=== hConnect Voice Debug ===',
+      `captured_at: ${now.toISOString()}`,
+      `user: ${currentUser?.uid ?? 'unknown'} (${currentUser?.email ?? 'n/a'})`,
+      `session: server=${serverId ?? 'n/a'} channel=${channelId ?? 'n/a'}`,
+      `call_ref: ${callRef?.path ?? 'none'}`,
+      `role: ${isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'}`,
+      `connection: signaling=${signalingState} connection=${connectionState} ice_connection=${iceConnectionState} ice_gathering=${iceGatheringState}`,
+      `ice_strategy: has_turn=${hasTurnServers} fallback_turn=${fallbackTurnActivated} using_fallback=${usingFallbackTurnServers} force_relay=${forceRelayIceTransport}`,
+      `renegotiation: pending=${JSON.stringify(pendingRenegotiationReasons)} awaiting_stable=${renegotiationAwaitingStable} needs_promotion=${renegotiationNeedsPromotion}`,
+      `revisions: offer=${lastOfferRevision} answer=${lastAnswerRevision}`,
+      `participants: ${JSON.stringify(summarizeParticipantsForDebug(participants), null, 2)}`,
+      `transceivers: ${JSON.stringify(transceiverSnapshot, null, 2)}`,
+      `senders: ${JSON.stringify(senderSnapshot, null, 2)}`,
+      `remote_stream_ids: ${JSON.stringify(Array.from(remoteStreams.keys()), null, 2)}`,
+      `status_message: ${statusMessage || 'n/a'}`,
+      `error_message: ${errorMessage || 'n/a'}`,
+      '',
+      'recent_logs:'
+    ];
+
+    if (!logs.length) {
+      lines.push('  (none)');
+    } else {
+      for (const entry of logs) {
+        const payload = entry.details ? ` | ${entry.details}` : '';
+        lines.push(`  - [${entry.timestamp}] ${entry.severity.toUpperCase()} ${entry.message}${payload}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  async function copyVoiceDebugBundle(options: { includeLogs?: number } = {}) {
+    const bundle = collectVoiceDebugBundle(options);
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(bundle);
+        statusMessage = 'Debug info copied to clipboard.';
+      } else {
+        console.info('[voice] debug bundle\n', bundle);
+        statusMessage = 'Clipboard unavailable; bundle logged to console.';
+      }
+    } catch (err) {
+      console.warn('Failed to copy debug bundle', err);
+      statusMessage = 'Unable to copy debug info; check console output.';
+      console.info('[voice] debug bundle\n', bundle);
+    }
   }
 
   function resetPeerDiagnostics() {
@@ -811,15 +1054,30 @@
   let lastPresencePayload: Record<string, unknown> | null = null;
   let presenceDebounce: ReturnType<typeof setTimeout> | null = null;
   let lastParticipantsSnapshot: ParticipantState[] | null = null;
+  let debugParticipants: ParticipantState[] = [];
 
   voiceUnsubscribe = voiceSession.subscribe((next) => {
     sessionQueue = sessionQueue.then(() => handleSessionChange(next));
   });
 
-  const rtcConfig: RTCConfiguration = {
-    iceServers: buildIceServers(),
-    iceCandidatePoolSize: 10
-  };
+  function buildRtcConfiguration(): RTCConfiguration {
+    const iceServers = buildIceServers();
+    const config: RTCConfiguration = {
+      iceServers,
+      iceCandidatePoolSize: 10
+    };
+    if (forceRelayIceTransport && hasTurnServers) {
+      config.iceTransportPolicy = 'relay';
+    }
+    return config;
+  }
+
+  function isPeerConnectionUsable(connection: RTCPeerConnection | null): connection is RTCPeerConnection {
+    if (!connection) return false;
+    if (connection.signalingState === 'closed') return false;
+    if (connection.connectionState === 'closed') return false;
+    return true;
+  }
 
   $: hasAudioTrack = !!(localStream && localStream.getAudioTracks().length);
   $: hasVideoTrack = !!(localStream && localStream.getVideoTracks().length);
@@ -960,6 +1218,8 @@
       !!myPerms?.manageServer ||
       !!myPerms?.kickMembers);
 
+  $: debugParticipants = lastParticipantsSnapshot ?? participants;
+
   let lastPresenceSignature: string | null = null;
   $: if (participantDocRef && isJoined) {
     const signature = `${hasAudioTrack && !isMicMuted}:${hasVideoTrack && !isCameraOff}`;
@@ -985,25 +1245,43 @@
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         menuOpenFor = null;
+        if (debugPanelVisible) {
+          toggleDebugPanel(false);
+          event.preventDefault();
+        }
       }
     };
 
     if (browser && typeof window !== 'undefined') {
       let storedDebug = false;
+      let storedPanelOpen = false;
       try {
         storedDebug = localStorage.getItem(DEBUG_STORAGE_KEY) === '1';
+        storedPanelOpen = localStorage.getItem(DEBUG_PANEL_STORAGE_KEY) === '1';
       } catch {
         storedDebug = false;
+        storedPanelOpen = false;
       }
       if (storedDebug) {
         debugLoggingEnabled = true;
       } else {
         setVoiceDebug(true);
       }
+      if (storedPanelOpen) {
+        setDebugPanelVisibility(true);
+      }
       (window as any).hConnectVoiceDebug = (enable: boolean | undefined) => {
         setVoiceDebug(enable !== false);
         console.info('[voice] debug logging', enable === false ? 'disabled' : 'enabled');
       };
+      (window as any).hConnectVoiceTogglePanel = (open?: boolean) => {
+        toggleDebugPanel(open);
+        return debugPanelVisible;
+      };
+      (window as any).hConnectVoiceDump = (options?: { includeLogs?: number }) =>
+        collectVoiceDebugBundle(options ?? {});
+      (window as any).hConnectVoiceCopyDebug = (options?: { includeLogs?: number }) =>
+        copyVoiceDebugBundle(options ?? {});
       voiceDebug('Voice component mounted');
       isTouchDevice = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
       window.addEventListener('beforeunload', onUnload);
@@ -1017,6 +1295,21 @@
         window.removeEventListener('keydown', onKeyDown);
         try {
           delete (window as any).hConnectVoiceDebug;
+        } catch {
+          /* ignore cleanup errors */
+        }
+        try {
+          delete (window as any).hConnectVoiceTogglePanel;
+        } catch {
+          /* ignore cleanup errors */
+        }
+        try {
+          delete (window as any).hConnectVoiceDump;
+        } catch {
+          /* ignore cleanup errors */
+        }
+        try {
+          delete (window as any).hConnectVoiceCopyDebug;
         } catch {
           /* ignore cleanup errors */
         }
@@ -1732,7 +2025,12 @@
     });
     localCandidatesRef = offerCandidatesRef;
     connection.onicecandidate = (event) => {
-      if (event.candidate && localCandidatesRef) {
+      if (!event.candidate) {
+        voiceDebug('ICE candidate gathering complete', { role: 'offerer' });
+        capturePeerDiagnostics(connection, 'ice-gatherer-offerer');
+        return;
+      }
+      if (localCandidatesRef) {
         const info = describeIceCandidate(event.candidate.candidate);
         voiceDebug('Publishing ICE candidate', { role: 'offerer', ...info });
         publishedCandidateCount += 1;
@@ -1819,7 +2117,12 @@
     });
     localCandidatesRef = answerCandidatesRef;
     connection.onicecandidate = (event) => {
-      if (event.candidate && localCandidatesRef) {
+      if (!event.candidate) {
+        voiceDebug('ICE candidate gathering complete', { role: 'answerer' });
+        capturePeerDiagnostics(connection, 'ice-gatherer-answerer');
+        return;
+      }
+      if (localCandidatesRef) {
         const info = describeIceCandidate(event.candidate.candidate);
         voiceDebug('Publishing ICE candidate', { role: 'answerer', ...info });
         publishedCandidateCount += 1;
@@ -2147,11 +2450,22 @@
 
   function createPeerConnection() {
     if (pc) return pc;
-    const connection = new RTCPeerConnection(rtcConfig);
+    const config = buildRtcConfiguration();
+    const connection = new RTCPeerConnection(config);
     pc = connection;
     resetPeerDiagnostics();
     updatePeerConnectionStateSnapshot(connection);
-    voiceDebug('createPeerConnection', { configuration: rtcConfig });
+    const maskedServers = (config.iceServers ?? []).map((server) => ({
+      urls: server.urls,
+      username: server.username ? '***' : undefined,
+      credential: server.credential ? '***' : undefined
+    }));
+    voiceDebug('createPeerConnection', {
+      iceServers: maskedServers,
+      forceRelayIceTransport: forceRelayIceTransport && hasTurnServers,
+      hasTurnServers,
+      usingFallbackTurnServers
+    });
 
     const audioTransceiver = connection.addTransceiver('audio', { direction: 'sendrecv' });
     const videoTransceiver = connection.addTransceiver('video', { direction: 'sendrecv' });
@@ -2193,16 +2507,6 @@
         return;
       }
       scheduleRenegotiation('negotiationneeded', { requireOfferer: true });
-    };
-
-    connection.onicecandidateerror = (event) => {
-      const iceError = event as RTCPeerConnectionIceErrorEvent;
-      voiceDebug('icecandidateerror', {
-        errorCode: iceError.errorCode,
-        errorText: iceError.errorText,
-        hostCandidate: iceError.hostCandidate,
-        url: iceError.url
-      });
     };
 
     connection.ontrack = (event) => {
@@ -2298,6 +2602,8 @@
         case 'connected':
           statusMessage = 'Connected.';
           clearReconnectTimer();
+          consecutiveIceErrors = 0;
+          lastIceErrorTimestamp = 0;
           break;
         case 'disconnected':
           statusMessage = 'Connection interrupted. Reconnecting...';
@@ -2327,8 +2633,10 @@
         connectionState: pc.connectionState,
         gatheringState: pc.iceGatheringState
       });
-      if (pc.iceConnectionState === 'connected') {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         clearReconnectTimer();
+        consecutiveIceErrors = 0;
+        lastIceErrorTimestamp = 0;
       } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
         try {
           voiceDebug('Restarting ICE (ice connection state)', { state: pc.iceConnectionState });
@@ -2344,17 +2652,67 @@
       voiceDebug('icegatheringstatechange', pc?.iceGatheringState ?? 'closed');
     };
 
-    connection.onicecandidateerror = (event) => {
+    const handleIceCandidateError = (event: RTCPeerConnectionIceErrorEvent) => {
       const details: Record<string, unknown> = {
         errorCode: event.errorCode,
         errorText: event.errorText,
-        url: event.url
+        url: event.url ?? null,
+        forceRelayIceTransport,
+        hasTurnServers,
+        usingFallbackTurnServers
       };
-      if ('hostCandidate' in event) details.hostCandidate = (event as any).hostCandidate ?? null;
-      if ('address' in event) details.address = (event as any).address ?? null;
-      if ('port' in event) details.port = (event as any).port ?? null;
+      if ('hostCandidate' in event) {
+        details.hostCandidate = (event as any).hostCandidate ?? null;
+      }
+      if ('address' in event) {
+        details.address = (event as any).address ?? null;
+      }
+      if ('port' in event) {
+        details.port = (event as any).port ?? null;
+      }
       voiceDebug('icecandidateerror', details);
+
+      const now = Date.now();
+      if (now - lastIceErrorTimestamp > 7000) {
+        consecutiveIceErrors = 0;
+      }
+      consecutiveIceErrors += 1;
+      lastIceErrorTimestamp = now;
+
+      const reconnectWithMessage = (message: string) => {
+        capturePeerDiagnostics(connection, 'icecandidateerror');
+        scheduleReconnect(message, true);
+        consecutiveIceErrors = 0;
+        lastIceErrorTimestamp = 0;
+      };
+
+      if (event.errorCode === 701) {
+        if (!hasTurnServers && allowTurnFallback && !fallbackTurnActivated && consecutiveIceErrors >= 2) {
+          fallbackTurnActivated = true;
+          fallbackTurnActivationReason = 'stun-host-error';
+          lastTurnConfigSignature = null;
+          voiceDebug('Activating fallback TURN relay', {
+            provider: 'openrelay.metered.ca',
+            consecutiveIceErrors,
+            allowTurnFallback
+          });
+          reconnectWithMessage('Reconnecting with fallback relay...');
+          return;
+        }
+        if (hasTurnServers && !forceRelayIceTransport && consecutiveIceErrors >= 3) {
+          forceRelayIceTransport = true;
+          voiceDebug('Switching ICE transport policy to relay-only', {
+            consecutiveIceErrors,
+            usingFallbackTurnServers
+          });
+          reconnectWithMessage('Rejoining voice via relay...');
+          return;
+        }
+      }
+
+      capturePeerDiagnostics(connection, 'icecandidateerror');
     };
+    connection.addEventListener('icecandidateerror', handleIceCandidateError);
 
     return connection;
   }
@@ -2476,7 +2834,20 @@
         const current = get(user);
         const currentUid = current?.uid ?? null;
         const selfEntry = currentUid ? mapped.find((p) => p.uid === currentUid) : null;
+        const snapshotSummary = mapped.map((p) => ({
+          uid: p.uid,
+          status: p.status ?? 'active',
+          hasAudio: p.hasAudio,
+          hasVideo: p.hasVideo,
+          streamId: p.streamId ?? null,
+          screenSharing: p.screenSharing ?? false
+        }));
         if (selfEntry && selfEntry.status && selfEntry.status !== 'active' && isJoined) {
+          voiceDebug('Self participant status changed', {
+            status: selfEntry.status,
+            joined: isJoined,
+            reason: 'subscribeParticipants'
+          });
           if (selfEntry.status === 'removed') {
             statusMessage = '';
             errorMessage =
@@ -2488,13 +2859,35 @@
         }
 
         if (lastParticipantsSnapshot && participantsEqual(mapped, lastParticipantsSnapshot)) {
+          voiceDebug('Participant snapshot unchanged', {
+            total: snapshotSummary.length,
+            active: snapshotSummary.filter((p) => (p.status ?? 'active') === 'active').length,
+            summary: snapshotSummary
+          });
           return;
         }
+        voiceDebug('Participant snapshot updated', {
+          total: snapshotSummary.length,
+          active: snapshotSummary.filter((p) => (p.status ?? 'active') === 'active').length,
+          summary: snapshotSummary
+        });
         lastParticipantsSnapshot = mapped;
         participants = mapped.filter((p) => (p.status ?? 'active') === 'active');
+        voiceDebug('Active participant list refreshed', {
+          activeCount: participants.length,
+          uids: participants.map((p) => p.uid),
+          media: participants.map((p) => ({
+            uid: p.uid,
+            hasAudio: p.hasAudio,
+            hasVideo: p.hasVideo,
+            streamId: p.streamId ?? null,
+            screenSharing: p.screenSharing ?? false
+          }))
+        });
       },
       (err) => {
         console.warn('Failed to subscribe to participants', err);
+        voiceDebug('Participant subscription error', err instanceof Error ? err.message : err);
         participants = [];
         lastParticipantsSnapshot = null;
       }
@@ -2662,461 +3055,644 @@
       length: offerDescription.sdp?.length ?? 0
     });
 
-    callUnsub = onSnapshot(docRef, (snapshot) => {
-      sessionQueue = sessionQueue
-        .then(async () => {
-          const data = snapshot.data();
-          callSnapshotDebug = data ? toDisplayString(data) : '';
-          if (!data) {
-            statusMessage = 'Call ended.';
-            await hangUp({ cleanupDoc: false }).catch(() => {});
-            return;
-          }
-          const currentUserData = get(user);
-          const currentUidValue = currentUserData?.uid ?? null;
-          const offer = data.offer;
-          if (offer) {
-            const revision = offer.revision ?? 1;
-            const updatedBy = offer.updatedBy ?? data.createdBy ?? null;
-            if (revision > lastOfferRevision && (!currentUidValue || updatedBy !== currentUidValue)) {
-              voiceDebug('Remote published updated offer while we were offerer', { revision, updatedBy });
-              const fallbackDescription =
-                typeof offer.sdp === 'string'
-                  ? ({ type: offer.type ?? 'offer', sdp: offer.sdp } as RTCSessionDescriptionInit)
-                  : null;
-              const description = await ensureOfferDescription(revision, fallbackDescription);
-              if (!description?.sdp) {
-                voiceDebug('Missing remote offer description during fallback', { revision });
-                return;
-              }
-              lastOfferRevision = revision;
-              isOfferer = false;
-              processedRenegotiationSignals.clear();
-              localCandidatesRef = answerCandidatesRef;
-              sessionQueue = sessionQueue
-                .then(async () => {
-                  if (!pc) return;
-                  try {
-                    await pc.setRemoteDescription(new RTCSessionDescription(description));
-                    voiceDebug('Remote offer applied (offerer fallback)', { revision });
-                    const answerDescription = await pc.createAnswer();
-                    await pc.setLocalDescription(answerDescription);
-                    const nextRevision = lastAnswerRevision + 1;
-                    lastAnswerRevision = nextRevision;
-                    let storedAnswerDoc = false;
-                    if (descriptionStorageEnabled && answerDescriptionRef) {
-                      try {
-                        await setDoc(
-                          answerDescriptionRef,
-                          {
-                            type: answerDescription.type,
-                            revision: nextRevision,
-                            sdp: answerDescription.sdp,
-                            length: answerDescription.sdp?.length ?? 0,
-                            updatedAt: serverTimestamp(),
-                            updatedBy: currentUidValue
-                          },
-                          { merge: true }
-                        );
-                        storedAnswerDoc = true;
-                      } catch (err) {
-                        console.warn('Failed to persist fallback answer description doc', err);
-                        voiceDebug('Failed to persist fallback answer description doc', err);
-                        if (isPermissionError(err)) {
-                          disableDescriptionStorage(err);
-                        }
-                      }
-                    }
-                    latestAnswerDescription = {
-                      revision: nextRevision,
-                      type: answerDescription.type,
-                      sdp: answerDescription.sdp ?? ''
-                    };
-                    const answerUpdate: Record<string, unknown> = {
-                      type: answerDescription.type,
-                      revision: nextRevision,
-                      length: answerDescription.sdp?.length ?? 0,
-                      updatedAt: serverTimestamp(),
-                      updatedBy: currentUidValue
-                    };
-                    if (answerDescription.sdp) {
-                      answerUpdate.sdp = answerDescription.sdp;
-                    }
-                    await updateDoc(callRef!, {
-                      answer: answerUpdate,
-                      answeredAt: serverTimestamp(),
-                      answeredBy: currentUidValue
-                    });
-                    voiceDebug('Published fallback answer', { revision: nextRevision });
-                  } catch (err) {
-                    console.warn('Failed to process remote offer while offerer', err);
-                    voiceDebug('Failed to process remote offer while offerer', err);
-                  }
-                })
-                .catch((err) => {
-                  console.warn('Failed to queue fallback answer', err);
-                  voiceDebug('Failed to queue fallback answer', err);
-                });
-              return;
-            }
-          }
-          const answer = data.answer;
-          if (answer) {
-            const revision = answer.revision ?? 1;
-            if (revision > lastAnswerRevision) {
-              const fallbackAnswer =
-                typeof answer.sdp === 'string'
-                  ? ({ type: answer.type ?? 'answer', sdp: answer.sdp } as RTCSessionDescriptionInit)
-                  : null;
-              const description = await ensureAnswerDescription(revision, fallbackAnswer);
-              if (!description?.sdp) {
-                voiceDebug('Remote answer description missing', { revision });
-                return;
-              }
-              voiceDebug('Applying remote answer', { revision, length: description.sdp?.length ?? 0 });
-              lastAnswerRevision = revision;
-              connection
-                .setRemoteDescription(new RTCSessionDescription(description))
-                .then(() => voiceDebug('Remote answer applied', { revision }))
-                .catch((err) => {
-                  console.warn('Failed to set remote description', err);
-                  voiceDebug('Failed to set remote description', err);
-                });
-            }
-          }
-        })
-        .catch((err) => {
-          console.warn('Failed to queue offer snapshot handler', err);
-          voiceDebug('Failed to queue offer snapshot handler', err);
-        });
-    });
-
-    statusMessage = 'Waiting for others to join...';
   }
 
   async function joinChannel() {
+
     voiceDebug('joinChannel start', { serverId, channelId, isJoined, isConnecting });
+
     if (!serverId || !channelId) {
+
       errorMessage = 'Select a voice channel to start a call.';
+
       return;
+
     }
+
     if (isJoined || isConnecting) return;
 
+
+
     const current = get(user);
+
     if (!current?.uid) {
+
       errorMessage = 'Sign in to join voice.';
+
       return;
+
     }
 
+
+
     isConnecting = true;
+
     errorMessage = '';
+
     statusMessage = 'Setting up call...';
+
+
 
     const database = getDb();
 
+
+
     try {
+
       await ensureMediaPermissions();
+
       const connection = createPeerConnection();
+
       if (!connection) throw new Error('Failed to create peer connection.');
 
+
+
       const docRef = doc(database, 'servers', serverId, 'channels', channelId, 'calls', CALL_DOC_ID);
+
       callRef = docRef;
 
+
+
       offerCandidatesRef = collection(docRef, 'offerCandidates');
+
       answerCandidatesRef = collection(docRef, 'answerCandidates');
+
       localCandidatesRef = null;
+
       participantsCollectionRef = collection(docRef, 'participants');
+
       subscribeParticipants();
+
       callDescriptionsRef = collection(docRef, 'descriptions');
+
       offerDescriptionRef = doc(callDescriptionsRef, 'offer');
+
       answerDescriptionRef = doc(callDescriptionsRef, 'answer');
+
       descriptionStorageEnabled = true;
+
       consumedOfferCandidateIds.clear();
+
       consumedAnswerCandidateIds.clear();
+
       remoteIceLogCountOfferer = 0;
+
       remoteIceLogCountAnswerer = 0;
 
+
+
       participantDocRef = doc(participantsCollectionRef, current.uid);
+
       lastPresenceSignature = null;
 
+
+
       let existing = await getDoc(docRef);
+
       let existingData = existing.exists() ? (existing.data() as any) : null;
+
       if (existingData) {
+
         const offerLength = existingData?.offer?.length ?? existingData?.offer?.sdp?.length ?? 0;
+
         const answerLength = existingData?.answer?.length ?? existingData?.answer?.sdp?.length ?? 0;
+
         if (
+
           offerLength > CALL_DOC_SDP_RESET_THRESHOLD ||
+
           answerLength > CALL_DOC_SDP_RESET_THRESHOLD
+
         ) {
+
           voiceDebug('Existing call doc exceeded size threshold, resetting', {
+
             offerLength,
+
             answerLength
+
           });
+
           try {
+
             await purgeCallArtifacts();
+
             await deleteDoc(docRef);
+
           } catch (err) {
+
             console.warn('Failed to reset oversized call doc', err);
+
             voiceDebug('Failed to reset oversized call doc', err);
+
           }
+
           existing = await getDoc(docRef);
+
           existingData = existing.exists() ? (existing.data() as any) : null;
+
         }
+
       }
+
+
 
       attachDescriptionListeners();
 
+
+
       if (!existing.exists() || !existingData?.offer) {
+
         isOfferer = true;
+
         await startAsOfferer(connection, docRef, current, existingData);
+
       } else {
+
         isOfferer = false;
+
         processedRenegotiationSignals.clear();
+
         lastOfferRevision = existingData?.offer?.revision ?? 1;
+
         lastAnswerRevision = existingData?.answer?.revision ?? 0;
+
         voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
+
         attachAnswererIceHandlers(connection);
+
         const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
+
         const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
+
         if (
+
           offerUpdatedBy &&
+
           offerUpdatedBy === current.uid &&
+
           (!existingData?.answer || answerUpdatedBy === current.uid)
+
         ) {
+
           voiceDebug('Existing offer authored by self; resetting call before joining as answerer', {
+
             offerUpdatedBy,
+
             answerUpdatedBy
+
           });
+
           try {
+
             await purgeCallArtifacts();
+
             await deleteDoc(docRef);
+
           } catch (err) {
+
             console.warn('Failed to reset self-authored offer', err);
+
             voiceDebug('Failed to reset self-authored offer', err);
+
           }
+
           await startAsOfferer(connection, docRef, current, existingData);
+
           return;
+
         }
+
+
 
         const initialFallbackOffer =
+
           typeof existingData.offer?.sdp === 'string'
+
             ? ({
+
                 type: existingData.offer.type ?? 'offer',
+
                 sdp: existingData.offer.sdp
+
               } as RTCSessionDescriptionInit)
+
             : null;
+
         const offerDescription = await ensureOfferDescription(lastOfferRevision, initialFallbackOffer);
+
         if (!offerDescription?.sdp) {
+
           voiceDebug('Offer description missing; promoting to offerer role.');
+
           try {
+
             await purgeCallArtifacts();
+
             await deleteDoc(docRef);
+
           } catch (err) {
+
             console.warn('Failed to reset call while taking over as offerer', err);
+
             voiceDebug('Failed to reset call while taking over as offerer', err);
+
           }
+
           await startAsOfferer(connection, docRef, current, existingData);
+
         } else {
+
           await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
+
           voiceDebug('Applied existing offer', {
+
             revision: lastOfferRevision,
+
             length: offerDescription.sdp?.length ?? 0
+
           });
+
+
 
           const answerDescription = await connection.createAnswer();
+
           await connection.setLocalDescription(answerDescription);
 
+
+
           const answerRevision = lastAnswerRevision + 1;
+
           lastAnswerRevision = answerRevision;
+
           let answerStoredInDescriptions = false;
+
           if (descriptionStorageEnabled && answerDescriptionRef) {
+
             try {
+
               await setDoc(
+
                 answerDescriptionRef,
+
                 {
+
                   type: answerDescription.type,
+
                   revision: answerRevision,
+
                   sdp: answerDescription.sdp,
+
                   length: answerDescription.sdp?.length ?? 0,
+
                   updatedAt: serverTimestamp(),
+
                   updatedBy: current.uid
+
                 },
+
                 { merge: true }
+
               );
+
               answerStoredInDescriptions = true;
+
             } catch (err) {
+
               console.warn('Failed to persist initial answer description doc', err);
+
               voiceDebug('Failed to persist initial answer description doc', err);
+
               if (isPermissionError(err)) {
+
                 disableDescriptionStorage(err);
+
               }
+
             }
+
           }
+
           latestAnswerDescription = {
+
             revision: answerRevision,
+
             type: answerDescription.type,
+
             sdp: answerDescription.sdp ?? ''
+
           };
+
           const answerData: Record<string, unknown> = {
+
             type: answerDescription.type,
+
             revision: answerRevision,
+
             length: answerDescription.sdp?.length ?? 0,
+
             updatedAt: serverTimestamp(),
+
             updatedBy: current.uid
+
           };
+
           if (answerDescription.sdp) {
+
             answerData.sdp = answerDescription.sdp;
+
           }
+
           await updateDoc(docRef, {
+
             answer: answerData,
+
             answeredAt: serverTimestamp(),
+
             answeredBy: current.uid
+
           });
+
           voiceDebug('Published initial answer', { answerRevision });
 
-      callUnsub = onSnapshot(docRef, (snapshot) => {
-        if (!snapshot.exists()) {
-          statusMessage = 'Call ended.';
-          hangUp({ cleanupDoc: false }).catch(() => {});
-          return;
-        }
-        const data = snapshot.data();
-        callSnapshotDebug = data ? toDisplayString(data) : '';
-        const offer = data?.offer;
-        if (offer) {
-              const revision = offer.revision ?? 1;
-              if (revision > lastOfferRevision) {
-                sessionQueue = sessionQueue
-                  .then(async () => {
-                    const fallbackDescription =
-                      typeof offer.sdp === 'string'
-                        ? ({ type: offer.type ?? 'offer', sdp: offer.sdp } as RTCSessionDescriptionInit)
-                        : null;
-                    const description = await ensureOfferDescription(revision, fallbackDescription);
-                    if (!description?.sdp) {
-                      voiceDebug('Updated offer missing description', { revision });
-                      return;
-                    }
-                    voiceDebug('Detected updated offer', { revision, length: description.sdp?.length ?? 0 });
-                    lastOfferRevision = revision;
-                    if (!pc) return;
-                    const connection = pc;
-                    try {
-                      await connection.setRemoteDescription(new RTCSessionDescription(description));
-                      voiceDebug('Remote offer applied', { revision });
-                      const freshAnswer = await connection.createAnswer();
-                      await connection.setLocalDescription(freshAnswer);
-                      const nextRevision = lastAnswerRevision + 1;
-                      lastAnswerRevision = nextRevision;
-                      const responder = get(user);
-                      let storedDoc = false;
-                      if (descriptionStorageEnabled && answerDescriptionRef) {
-                        try {
-                          await setDoc(
-                            answerDescriptionRef,
-                            {
-                              type: freshAnswer.type,
-                              revision: nextRevision,
-                              sdp: freshAnswer.sdp,
-                              length: freshAnswer.sdp?.length ?? 0,
-                              updatedAt: serverTimestamp(),
-                              updatedBy: responder?.uid ?? current.uid
-                            },
-                            { merge: true }
-                          );
-                          storedDoc = true;
-                        } catch (err) {
-                          console.warn('Failed to persist renegotiation answer description doc', err);
-                          voiceDebug('Failed to persist renegotiation answer description doc', err);
-                          if (isPermissionError(err)) {
-                            disableDescriptionStorage(err);
-                          }
-                        }
-                      }
-                      latestAnswerDescription = {
-                        revision: nextRevision,
-                        type: freshAnswer.type,
-                        sdp: freshAnswer.sdp ?? ''
-                      };
-                      const answerPayload: Record<string, unknown> = {
-                        type: freshAnswer.type,
-                        revision: nextRevision,
-                        length: freshAnswer.sdp?.length ?? 0,
-                        updatedAt: serverTimestamp(),
-                        updatedBy: responder?.uid ?? current.uid ?? null
-                      };
-                      if (freshAnswer.sdp) {
-                        answerPayload.sdp = freshAnswer.sdp;
-                      }
-                      await updateDoc(docRef, {
-                        answer: answerPayload,
-                        answeredAt: serverTimestamp(),
-                        answeredBy: responder?.uid ?? current.uid
-                      });
-                      voiceDebug('Published renegotiation answer', { revision: nextRevision });
-                    } catch (err) {
-                      console.warn('Failed to process updated offer', err);
-                      voiceDebug('Failed to process updated offer', err);
-                    }
-                  })
-                  .catch((err) => {
-                    console.warn('Failed to queue renegotiation response', err);
-                    voiceDebug('Failed to queue renegotiation response', err);
-                  });
-              }
-            }
-          });
 
-          statusMessage = 'Connected.';
-        }
-      }
 
-      await updateParticipantPresence({
-        joinedAt: serverTimestamp()
-      });
-      participants = [
-        ...participants.filter((p) => p.uid !== current.uid),
-        {
-          uid: current.uid,
-          displayName: current.displayName ?? current.email ?? 'Member',
-          photoURL: current.photoURL ?? null,
-          hasAudio: hasAudioTrack && !isMicMuted,
-          hasVideo: hasVideoTrack && (!isCameraOff || isScreenSharing),
-          screenSharing: isScreenSharing,
-          status: 'active',
-          joinedAt: null,
-          streamId: localStream?.id ?? null
-        }
-      ];
-
-      isJoined = true;
-      clearReconnectTimer();
-      if (!statusMessage || statusMessage.startsWith('Rejoining')) {
-        statusMessage = 'Connected.';
       }
-      voiceDebug('joinChannel success', {
-        callPath: callRef?.path ?? null,
-        role: isOfferer ? 'offerer' : 'answerer',
-        hasAudioTrack,
-        hasVideoTrack,
-        localStreamId: localStream?.id ?? null
-      });
-      if (!hasAudioTrack && !hasVideoTrack) {
-        statusMessage = 'Listening only. Enable mic or camera to share.';
-      }
-    } catch (err) {
-      console.error(err);
-      voiceDebug('joinChannel error', {
-        error: err instanceof Error ? err.message : err,
-        callPath: callRef?.path ?? null
-      });
-      errorMessage =
-        err instanceof Error ? err.message : 'Unable to join the call. Please check your devices.';
-      await hangUp({ cleanupDoc: false, resetError: false });
-    } finally {
-      isConnecting = false;
     }
+
+    callUnsub = onSnapshot(docRef, (snapshot) => {
+
+      sessionQueue = sessionQueue
+
+        .then(async () => {
+
+          const data = snapshot.data();
+
+          callSnapshotDebug = data ? toDisplayString(data) : '';
+
+          if (!data) {
+
+            statusMessage = 'Call ended.';
+
+            await hangUp({ cleanupDoc: false }).catch(() => {});
+
+            return;
+
+          }
+
+          const currentUserData = get(user);
+
+          const currentUidValue = currentUserData?.uid ?? null;
+
+          const offer = data.offer;
+
+          if (offer) {
+
+            const revision = offer.revision ?? 1;
+
+            const updatedBy = offer.updatedBy ?? data.createdBy ?? null;
+
+            if (revision > lastOfferRevision && (!currentUidValue || updatedBy !== currentUidValue)) {
+
+              voiceDebug('Remote published updated offer while we were offerer', { revision, updatedBy });
+
+              const fallbackDescription =
+
+                typeof offer.sdp === 'string'
+
+                  ? ({ type: offer.type ?? 'offer', sdp: offer.sdp } as RTCSessionDescriptionInit)
+
+                  : null;
+
+              const description = await ensureOfferDescription(revision, fallbackDescription);
+
+              if (!description?.sdp) {
+
+                voiceDebug('Missing remote offer description during fallback', { revision });
+
+                return;
+
+              }
+
+              lastOfferRevision = revision;
+
+              isOfferer = false;
+
+              processedRenegotiationSignals.clear();
+
+              localCandidatesRef = answerCandidatesRef;
+
+              sessionQueue = sessionQueue
+
+                .then(async () => {
+
+                  if (!pc) return;
+
+                  try {
+
+                    await pc.setRemoteDescription(new RTCSessionDescription(description));
+
+                    voiceDebug('Remote offer applied (offerer fallback)', { revision });
+
+                    const answerDescription = await pc.createAnswer();
+
+                    await pc.setLocalDescription(answerDescription);
+
+                    const nextRevision = lastAnswerRevision + 1;
+
+                    lastAnswerRevision = nextRevision;
+
+                    let storedAnswerDoc = false;
+
+                    if (descriptionStorageEnabled && answerDescriptionRef) {
+
+                      try {
+
+                        await setDoc(
+
+                          answerDescriptionRef,
+
+                          {
+
+                            type: answerDescription.type,
+
+                            revision: nextRevision,
+
+                            sdp: answerDescription.sdp,
+
+                            length: answerDescription.sdp?.length ?? 0,
+
+                            updatedAt: serverTimestamp(),
+
+                            updatedBy: currentUidValue
+
+                          },
+
+                          { merge: true }
+
+                        );
+
+                        storedAnswerDoc = true;
+
+                      } catch (err) {
+
+                        console.warn('Failed to persist fallback answer description doc', err);
+
+                        voiceDebug('Failed to persist fallback answer description doc', err);
+
+                        if (isPermissionError(err)) {
+
+                          disableDescriptionStorage(err);
+
+                        }
+
+                      }
+
+                    }
+
+                    latestAnswerDescription = {
+
+                      revision: nextRevision,
+
+                      type: answerDescription.type,
+
+                      sdp: answerDescription.sdp ?? ''
+
+                    };
+
+                    const answerUpdate: Record<string, unknown> = {
+
+                      type: answerDescription.type,
+
+                      revision: nextRevision,
+
+                      length: answerDescription.sdp?.length ?? 0,
+
+                      updatedAt: serverTimestamp(),
+
+                      updatedBy: currentUidValue
+
+                    };
+
+                    if (answerDescription.sdp) {
+
+                      answerUpdate.sdp = answerDescription.sdp;
+
+                    }
+
+                    await updateDoc(callRef!, {
+
+                      answer: answerUpdate,
+
+                      answeredAt: serverTimestamp(),
+
+                      answeredBy: currentUidValue
+
+                    });
+
+                    voiceDebug('Published fallback answer', { revision: nextRevision });
+
+                  } catch (err) {
+
+                    console.warn('Failed to process remote offer while offerer', err);
+
+                    voiceDebug('Failed to process remote offer while offerer', err);
+
+                  }
+
+                })
+
+                .catch((err) => {
+
+                  console.warn('Failed to queue fallback answer', err);
+
+                  voiceDebug('Failed to queue fallback answer', err);
+
+                });
+
+              return;
+
+            }
+
+          }
+
+          const answer = data.answer;
+
+          if (answer) {
+
+            const revision = answer.revision ?? 1;
+
+            if (revision > lastAnswerRevision) {
+
+              const fallbackAnswer =
+
+                typeof answer.sdp === 'string'
+
+                  ? ({ type: answer.type ?? 'answer', sdp: answer.sdp } as RTCSessionDescriptionInit)
+
+                  : null;
+
+              const description = await ensureAnswerDescription(revision, fallbackAnswer);
+
+              if (!description?.sdp) {
+
+                voiceDebug('Remote answer description missing', { revision });
+
+                return;
+
+              }
+
+              voiceDebug('Applying remote answer', { revision, length: description.sdp?.length ?? 0 });
+
+              lastAnswerRevision = revision;
+
+              connection
+
+                .setRemoteDescription(new RTCSessionDescription(description))
+
+                .then(() => voiceDebug('Remote answer applied', { revision }))
+
+                .catch((err) => {
+
+                  console.warn('Failed to set remote description', err);
+
+                  voiceDebug('Failed to set remote description', err);
+
+                });
+
+            }
+
+          }
+
+        })
+
+        .catch((err) => {
+
+          console.warn('Failed to queue offer snapshot handler', err);
+
+          voiceDebug('Failed to queue offer snapshot handler', err);
+
+        });
+
+    });
+
+
+
+    statusMessage = 'Waiting for others to join...';
+  } catch (err) {
+    console.error('Failed to join voice call', err);
+    voiceDebug('Failed to join voice call', err);
+    errorMessage =
+      err instanceof Error
+        ? err.message
+        : 'Unable to join the call. Please check your devices and try again.';
+    await hangUp({ cleanupDoc: false, resetError: false });
+  } finally {
+    isConnecting = false;
   }
+  }
+
+
 
   async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean } = {}) {
     voiceDebug('hangUp start', options);
@@ -3264,6 +3840,13 @@
     answerDescriptionRef = null;
     latestOfferDescription = null;
     latestAnswerDescription = null;
+    fallbackTurnActivated = false;
+    fallbackTurnActivationReason = null;
+    hasTurnServers = false;
+    usingFallbackTurnServers = false;
+    forceRelayIceTransport = false;
+    lastTurnConfigSignature = null;
+    buildIceServers();
 
     if (participantsRef && currentUid) {
       participants = participants.filter((p) => p.uid !== currentUid);
@@ -3593,7 +4176,10 @@
       hasPc: !!pc,
       connectionState: pc?.connectionState ?? null,
       iceState: pc?.iceConnectionState ?? null,
-      purgeDoc
+      purgeDoc,
+      forceRelayIceTransport,
+      fallbackTurnActivated,
+      usingFallbackTurnServers
     });
     const shouldEnableMic = !isMicMuted;
     const shouldEnableCamera = !isCameraOff && !isScreenSharing;
@@ -3630,7 +4216,10 @@
       isJoined,
       connectionState: pc?.connectionState ?? null,
       iceState: pc?.iceConnectionState ?? null,
-      purgeDoc
+      purgeDoc,
+      forceRelayIceTransport,
+      fallbackTurnActivated,
+      usingFallbackTurnServers
     });
 
     if (shouldEnableMic && isMicMuted) {
@@ -3641,6 +4230,27 @@
       await toggleScreenShare();
     } else if (shouldEnableCamera && isCameraOff && !isScreenSharing) {
       await toggleCamera();
+    }
+  }
+
+  function handleDebugPanelRefresh() {
+    updatePeerConnectionStateSnapshot(pc);
+    capturePeerDiagnostics(pc, 'manual-refresh');
+    voiceDebug('Manual diagnostics snapshot requested');
+  }
+
+  function handleResetIceStrategy() {
+    const wasForced = forceRelayIceTransport || fallbackTurnActivated || usingFallbackTurnServers;
+    forceRelayIceTransport = false;
+    fallbackTurnActivated = false;
+    usingFallbackTurnServers = false;
+    fallbackTurnActivationReason = null;
+    consecutiveIceErrors = 0;
+    lastIceErrorTimestamp = 0;
+    lastTurnConfigSignature = null;
+    voiceDebug('ICE strategy manually reset', { wasForced, allowTurnFallback });
+    if (isJoined) {
+      scheduleReconnect('Rejoining with default ICE...', true);
     }
   }
 
@@ -3739,6 +4349,28 @@
           </span>
           <span class="call-status__label">{remoteConnected ? 'Voice connected' : 'Connecting'}</span>
         </div>
+        {#if debugLoggingEnabled}
+          <button
+            type="button"
+            class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
+            on:click={() => toggleDebugPanel()}
+            aria-pressed={debugPanelVisible}
+            aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
+          >
+            <i class="bx bx-bug"></i>
+            <span class="call-header__debug-label">Debug</span>
+            {#if voiceErrorCount > 0}
+              <span class="call-header__debug-count" aria-label={`Detected ${voiceErrorCount} error${voiceErrorCount === 1 ? '' : 's'}`}>
+                {voiceErrorCount}
+              </span>
+            {:else if voiceWarnCount > 0}
+              <span class="call-header__debug-count call-header__debug-count--warn">{voiceWarnCount}</span>
+            {/if}
+            {#if hasDebugAlerts}
+              <span class="call-header__debug-pulse" aria-hidden="true"></span>
+            {/if}
+          </button>
+        {/if}
         <button
           type="button"
           class="call-header__minimize"
@@ -3750,165 +4382,6 @@
         </button>
       </div>
     </header>
-
-    {#if debugLoggingEnabled}
-      <section class="call-debug-panel">
-        <div class="call-debug-panel__grid">
-          <div class="call-debug-panel__section call-debug-panel__section--stats">
-            <h2 class="call-debug-panel__title">Quick Stats</h2>
-            <div class="quick-stats">
-              <div>
-                <span class="label">Signaling</span>
-                <span class="value">{signalingState}</span>
-              </div>
-              <div>
-                <span class="label">Connection</span>
-                <span class="value">{connectionState}</span>
-              </div>
-              <div>
-                <span class="label">ICE Connection</span>
-                <span class="value">{iceConnectionState}</span>
-              </div>
-              <div>
-                <span class="label">ICE Gathering</span>
-                <span class="value">{iceGatheringState}</span>
-              </div>
-              <div>
-                <span class="label">Local ICE</span>
-                <span class="value">{publishedCandidateCount}</span>
-              </div>
-              <div>
-                <span class="label">Remote ICE</span>
-                <span class="value">{appliedCandidateCount}</span>
-              </div>
-              <div>
-                <span class="label">Role</span>
-                <span class="value">{isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'}</span>
-              </div>
-              <div>
-                <span class="label">Call Doc</span>
-                <span class="value">{callRef ? callRef.path : 'none'}</span>
-              </div>
-            </div>
-          </div>
-          <div class="call-debug-panel__section call-debug-panel__section--logs">
-            <h2 class="call-debug-panel__title">Recent Logs</h2>
-            {#if voiceLogs.length}
-              <ul class="call-debug-logs">
-                {#each voiceLogs.slice(0, 8) as entry (entry.id)}
-                  <li>
-                    <span class="time">{entry.timestamp}</span>
-                    <span class="msg">{entry.message}</span>
-                    {#if entry.details}
-                      <pre>{entry.details}</pre>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {:else}
-              <p class="call-debug-empty">No events yet.</p>
-            {/if}
-          </div>
-          <div class="call-debug-panel__section call-debug-panel__section--doc">
-            <h2 class="call-debug-panel__title">Call Document</h2>
-            <pre>{callSnapshotDebug || 'Awaiting call document...'}</pre>
-          </div>
-          <div class="call-debug-panel__section call-debug-panel__section--peer">
-            <h2 class="call-debug-panel__title">Peer Diagnostics</h2>
-            <div class="peer-diag">
-              <div class="peer-diag__column">
-                <h3>Transceivers</h3>
-                {#if peerDiagnostics.transceivers.length}
-                  <ul class="peer-diag__list">
-                    {#each peerDiagnostics.transceivers as trx, index (trx.mid ?? `trx-${index}`)}
-                      <li>
-                        <span class="peer-diag__headline">
-                          MID {trx.mid ?? '(pending)'} - {trx.currentDirection ?? 'unknown'}
-                          {#if trx.preferredDirection && trx.preferredDirection !== trx.currentDirection}
-                            <span class="peer-diag__badge">to {trx.preferredDirection}</span>
-                          {/if}
-                          {#if trx.isStopped}
-                            <span class="peer-diag__badge peer-diag__badge--warn">stopped</span>
-                          {/if}
-                        </span>
-                        <span class="peer-diag__label">Sender</span>
-                        <span class="peer-diag__value">{formatTrackDiagnostics(trx.senderTrack)}</span>
-                        <span class="peer-diag__label">Receiver</span>
-                        <span class="peer-diag__value">{formatTrackDiagnostics(trx.receiverTrack)}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                {:else}
-                  <p class="call-debug-empty">No transceivers.</p>
-                {/if}
-              </div>
-              <div class="peer-diag__column">
-                <h3>Senders</h3>
-                {#if peerDiagnostics.senders.length}
-                  <ul class="peer-diag__list">
-                    {#each peerDiagnostics.senders as sender, index (`sender-${index}`)}
-                      <li>
-                        <span class="peer-diag__label">Track</span>
-                        <span class="peer-diag__value">{formatTrackDiagnostics(sender.track)}</span>
-                        <span class="peer-diag__label">Streams</span>
-                        <span class="peer-diag__value">
-                          {sender.streams.length ? sender.streams.join(', ') : 'none'}
-                        </span>
-                        <span class="peer-diag__label">Transport</span>
-                        <span class="peer-diag__value">{sender.transportState ?? 'unknown'}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                {:else}
-                  <p class="call-debug-empty">No RTP senders.</p>
-                {/if}
-              </div>
-              <div class="peer-diag__column">
-                <h3>Remote Streams</h3>
-                {#if peerDiagnostics.remoteStreams.length}
-                  <ul class="peer-diag__list">
-                    {#each peerDiagnostics.remoteStreams as stream (stream.id)}
-                      <li>
-                        <span class="peer-diag__headline">#{stream.id}</span>
-                        <span class="peer-diag__label">Audio</span>
-                        <span class="peer-diag__value">
-                          {stream.audioTracks.length
-                            ? stream.audioTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
-                            : 'none'}
-                        </span>
-                        <span class="peer-diag__label">Video</span>
-                        <span class="peer-diag__value">
-                          {stream.videoTracks.length
-                            ? stream.videoTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
-                            : 'none'}
-                        </span>
-                      </li>
-                    {/each}
-                  </ul>
-                {:else}
-                  <p class="call-debug-empty">No remote streams attached.</p>
-                {/if}
-              </div>
-            </div>
-          </div>
-          <div class="call-debug-panel__section call-debug-panel__section--tools">
-            <h2 class="call-debug-panel__title">Debug Tools</h2>
-            <div class="call-debug-actions">
-              <button
-                type="button"
-                class="call-debug-action"
-                on:click={handleForceRestart}
-                disabled={isRestartingCall || isConnecting}
-              >
-                <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>
-                <span>{isRestartingCall ? 'Restarting call...' : 'Restart call'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-    {/if}
-
     <section class="call-stage">
       {#if isJoined && participantTiles.length}
         <div class="call-grid">
@@ -4155,6 +4628,298 @@
     </footer>
   </div>
 
+  {#if debugLoggingEnabled}
+    <div
+      class={`call-debug-drawer ${debugPanelVisible ? 'call-debug-drawer--open' : ''}`}
+      role="dialog"
+      aria-modal="false"
+      aria-label="Call diagnostics"
+    >
+      <section class="call-debug-panel">
+        <header class="call-debug-panel__header">
+          <div class="call-debug-panel__heading">
+            <i class="bx bx-bug"></i>
+            <span>Call diagnostics</span>
+          </div>
+          <div class="call-debug-panel__header-actions">
+            <button type="button" class="call-debug-panel__refresh" on:click={handleDebugPanelRefresh}>
+              <i class="bx bx-refresh"></i>
+              <span>Refresh</span>
+            </button>
+            <button
+              type="button"
+              class="call-debug-panel__close"
+              on:click={() => toggleDebugPanel(false)}
+              aria-label="Close debug panel"
+            >
+              <i class="bx bx-x"></i>
+            </button>
+          </div>
+        </header>
+        <div class="call-debug-panel__scroll">
+          <div class="call-debug-panel__grid">
+            <div class="call-debug-panel__section call-debug-panel__section--stats">
+              <h2 class="call-debug-panel__title">Quick Stats</h2>
+              <div class="quick-stats">
+                <div>
+                  <span class="label">Signaling</span>
+                  <span class="value">{signalingState}</span>
+                </div>
+                <div>
+                  <span class="label">Connection</span>
+                  <span class="value">{connectionState}</span>
+                </div>
+                <div>
+                  <span class="label">ICE Connection</span>
+                  <span class="value">{iceConnectionState}</span>
+                </div>
+                <div>
+                  <span class="label">ICE Gathering</span>
+                  <span class="value">{iceGatheringState}</span>
+                </div>
+                <div>
+                  <span class="label">Local ICE</span>
+                  <span class="value">{publishedCandidateCount}</span>
+                </div>
+                <div>
+                  <span class="label">Remote ICE</span>
+                  <span class="value">{appliedCandidateCount}</span>
+                </div>
+                <div>
+                  <span class="label">ICE Policy</span>
+                  <span class="value">
+                    {hasTurnServers ? (forceRelayIceTransport ? 'relay-only' : 'all') : 'stun-only'}
+                  </span>
+                </div>
+                <div>
+                  <span class="label">TURN</span>
+                  <span class="value">
+                    {hasTurnServers
+                      ? usingFallbackTurnServers
+                        ? 'fallback (openrelay)'
+                        : 'configured'
+                      : allowTurnFallback
+                        ? 'none'
+                        : 'none (disabled)'}
+                  </span>
+                </div>
+                <div>
+                  <span class="label">Role</span>
+                  <span class="value">{isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'}</span>
+                </div>
+                <div>
+                  <span class="label">Call Doc</span>
+                  <span class="value">{callRef ? callRef.path : 'none'}</span>
+                </div>
+                <div>
+                  <span class="label">Errors</span>
+                  <span class="value">{voiceErrorCount}</span>
+                </div>
+                <div>
+                  <span class="label">Warnings</span>
+                  <span class="value">{voiceWarnCount}</span>
+                </div>
+              </div>
+            </div>
+            <div class="call-debug-panel__section call-debug-panel__section--participants">
+              <h2 class="call-debug-panel__title">Participants</h2>
+              {#if debugParticipants.length}
+                <ul class="call-debug-participants">
+                  {#each debugParticipants as participant (participant.uid)}
+                    <li>
+                      <div class="call-debug-participant__header">
+                        <span class="call-debug-participant__name">{participant.displayName}</span>
+                        <span
+                          class={`call-debug-participant__status call-debug-participant__status--${participant.status ?? 'active'}`}
+                        >
+                          {participant.status ?? 'active'}
+                        </span>
+                      </div>
+                      <div class="call-debug-participant__meta">
+                        <code>{participant.uid}</code>
+                        {#if participant.uid === currentUserId}
+                          <span class="call-debug-participant__badge">you</span>
+                        {/if}
+                      </div>
+                      <div class="call-debug-participant__tags">
+                        <span class={`tag ${participant.hasAudio ? '' : 'tag--off'}`}>
+                          <i class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off'}`}></i>
+                          Audio
+                        </span>
+                        <span class={`tag ${participant.hasVideo ? '' : 'tag--off'}`}>
+                          <i class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off'}`}></i>
+                          Video
+                        </span>
+                        <span class={`tag ${participant.screenSharing ? 'tag--active' : ''}`}>
+                          <i class="bx bx-desktop"></i>
+                          Share
+                        </span>
+                      </div>
+                      <div class="call-debug-participant__meta">
+                        <span>Stream</span>
+                        <code>{participant.streamId ?? 'none'}</code>
+                      </div>
+                      {#if participant.renegotiationRequestId}
+                        <div class="call-debug-participant__meta">
+                          <span>Renegotiation</span>
+                          <code>{participant.renegotiationRequestId}</code>
+                        </div>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="call-debug-empty">No participants detected.</p>
+              {/if}
+            </div>
+            <div class="call-debug-panel__section call-debug-panel__section--logs">
+              <h2 class="call-debug-panel__title">Recent Logs</h2>
+              {#if voiceLogs.length}
+                <ul class="call-debug-logs">
+                  {#each voiceLogs.slice(0, 10) as entry (entry.id)}
+                    <li class={`call-debug-log call-debug-log--${entry.severity}`}>
+                      <div class="call-debug-log__row">
+                        <span class="time">{entry.timestamp}</span>
+                        <span class="call-debug-log__pill">{entry.severity}</span>
+                      </div>
+                      <span class="msg">{entry.message}</span>
+                      {#if entry.details}
+                        <pre>{entry.details}</pre>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="call-debug-empty">No events yet.</p>
+              {/if}
+            </div>
+            <div class="call-debug-panel__section call-debug-panel__section--doc">
+              <h2 class="call-debug-panel__title">Call Document</h2>
+              <pre>{callSnapshotDebug || 'Awaiting call document...'}</pre>
+            </div>
+            <div class="call-debug-panel__section call-debug-panel__section--peer">
+              <h2 class="call-debug-panel__title">Peer Diagnostics</h2>
+              <div class="peer-diag">
+                <div class="peer-diag__column">
+                  <h3>Transceivers</h3>
+                  {#if peerDiagnostics.transceivers.length}
+                    <ul class="peer-diag__list">
+                      {#each peerDiagnostics.transceivers as trx, index (trx.mid ?? `trx-${index}`)}
+                        <li>
+                          <span class="peer-diag__headline">
+                            MID {trx.mid ?? '(pending)'} - {trx.currentDirection ?? 'unknown'}
+                            {#if trx.preferredDirection && trx.preferredDirection !== trx.currentDirection}
+                              <span class="peer-diag__badge">to {trx.preferredDirection}</span>
+                            {/if}
+                            {#if trx.isStopped}
+                              <span class="peer-diag__badge peer-diag__badge--warn">stopped</span>
+                            {/if}
+                          </span>
+                          <span class="peer-diag__label">Sender</span>
+                          <span class="peer-diag__value">{formatTrackDiagnostics(trx.senderTrack)}</span>
+                          <span class="peer-diag__label">Receiver</span>
+                          <span class="peer-diag__value">{formatTrackDiagnostics(trx.receiverTrack)}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="call-debug-empty">No transceivers.</p>
+                  {/if}
+                </div>
+                <div class="peer-diag__column">
+                  <h3>Senders</h3>
+                  {#if peerDiagnostics.senders.length}
+                    <ul class="peer-diag__list">
+                      {#each peerDiagnostics.senders as sender, index (`sender-${index}`)}
+                        <li>
+                          <span class="peer-diag__label">Track</span>
+                          <span class="peer-diag__value">{formatTrackDiagnostics(sender.track)}</span>
+                          <span class="peer-diag__label">Streams</span>
+                          <span class="peer-diag__value">
+                            {sender.streams.length ? sender.streams.join(', ') : 'none'}
+                          </span>
+                          <span class="peer-diag__label">Transport</span>
+                          <span class="peer-diag__value">{sender.transportState ?? 'unknown'}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="call-debug-empty">No RTP senders.</p>
+                  {/if}
+                </div>
+                <div class="peer-diag__column">
+                  <h3>Remote Streams</h3>
+                  {#if peerDiagnostics.remoteStreams.length}
+                    <ul class="peer-diag__list">
+                      {#each peerDiagnostics.remoteStreams as stream (stream.id)}
+                        <li>
+                          <span class="peer-diag__headline">#{stream.id}</span>
+                          <span class="peer-diag__label">Audio</span>
+                          <span class="peer-diag__value">
+                            {stream.audioTracks.length
+                              ? stream.audioTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
+                              : 'none'}
+                          </span>
+                          <span class="peer-diag__label">Video</span>
+                          <span class="peer-diag__value">
+                            {stream.videoTracks.length
+                              ? stream.videoTracks.map((track) => formatTrackDiagnostics(track)).join(' | ')
+                              : 'none'}
+                          </span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="call-debug-empty">No remote streams attached.</p>
+                  {/if}
+                </div>
+              </div>
+            </div>
+            <div class="call-debug-panel__section call-debug-panel__section--tools">
+              <h2 class="call-debug-panel__title">Debug Tools</h2>
+              <div class="call-debug-actions">
+                <button
+                  type="button"
+                  class="call-debug-action"
+                  on:click={() => copyVoiceDebugBundle({ includeLogs: 25 })}
+                >
+                  <i class="bx bx-copy"></i>
+                  <span>Copy debug info</span>
+                </button>
+                <button
+                  type="button"
+                  class="call-debug-action"
+                  on:click={handleDebugPanelRefresh}
+                >
+                  <i class="bx bx-refresh"></i>
+                  <span>Refresh diagnostics</span>
+                </button>
+                <button
+                  type="button"
+                  class="call-debug-action"
+                  on:click={handleResetIceStrategy}
+                  disabled={!forceRelayIceTransport && !fallbackTurnActivated && !usingFallbackTurnServers}
+                >
+                  <i class="bx bx-undo"></i>
+                  <span>Reset ICE strategy</span>
+                </button>
+                <button
+                  type="button"
+                  class="call-debug-action"
+                  on:click={handleForceRestart}
+                  disabled={isRestartingCall || isConnecting}
+                >
+                  <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>
+                  <span>{isRestartingCall ? 'Restarting call...' : 'Restart call'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  {/if}
+
   {#if errorMessage}
     <div class="call-error">
       {errorMessage}
@@ -4293,6 +5058,99 @@
     }
   }
 
+  .call-header__debug {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 40%, transparent);
+    color: var(--text-70);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+  }
+
+  .call-header__debug i {
+    font-size: 1rem;
+  }
+
+  .call-header__debug:hover,
+  .call-header__debug:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
+    color: var(--text-90);
+    border-color: color-mix(in srgb, var(--color-border-strong) 65%, transparent);
+  }
+
+  .call-header__debug:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 40%, transparent);
+  }
+
+  .call-header__debug--active {
+    background: color-mix(in srgb, var(--color-accent) 32%, transparent);
+    color: var(--text-95);
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .call-header__debug--alert {
+    border-color: color-mix(in srgb, var(--color-warning, #facc15) 55%, transparent);
+  }
+
+  .call-header__debug-label {
+    display: none;
+  }
+
+  @media (min-width: 720px) {
+    .call-header__debug-label {
+      display: inline;
+    }
+  }
+
+  .call-header__debug-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-danger) 35%, transparent);
+    color: var(--text-95);
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0 0.35rem;
+  }
+
+  .call-header__debug-count--warn {
+    background: color-mix(in srgb, var(--color-warning, #facc15) 35%, transparent);
+    color: rgba(40, 32, 0, 0.85);
+  }
+
+  .call-header__debug-pulse {
+    position: absolute;
+    inset: -0.35rem -0.35rem auto auto;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-danger) 60%, transparent);
+    animation: debugPulse 1.6s infinite;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-danger) 20%, transparent);
+  }
+
+  @keyframes debugPulse {
+    0% {
+      transform: scale(0.8);
+      opacity: 0.9;
+    }
+    100% {
+      transform: scale(2.1);
+      opacity: 0;
+    }
+  }
+
   .call-header__minimize {
     display: inline-flex;
     align-items: center;
@@ -4362,6 +5220,9 @@
     color: var(--text-90);
     font-size: 0.85rem;
     border: 1px solid color-mix(in srgb, var(--color-warning, #facc15) 30%, transparent);
+    align-self: flex-start;
+    max-width: min(100%, 420px);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
   }
 
   .call-debug-banner i {
@@ -4386,15 +5247,141 @@
     background: color-mix(in srgb, var(--color-warning, #facc15) 25%, transparent);
   }
 
+  .call-debug-drawer {
+    position: fixed;
+    right: clamp(1rem, 3vw, 2rem);
+    bottom: clamp(1rem, 3vw, 2rem);
+    width: min(440px, calc(100vw - 2.5rem));
+    transform: translateY(calc(100% + 2rem));
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 200ms ease, opacity 200ms ease;
+    z-index: 30;
+  }
+
+  .call-debug-drawer--open {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
   .call-debug-panel {
     display: flex;
     flex-direction: column;
+    max-height: min(80vh, 720px);
+    background: rgba(10, 12, 20, 0.92);
+    backdrop-filter: blur(14px);
+    border-radius: 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow:
+      0 18px 48px rgba(0, 0, 0, 0.45),
+      0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+    padding: 1rem 1.1rem 1.15rem;
+    color: rgba(239, 243, 255, 0.95);
+  }
+
+  @media (max-width: 720px) {
+    .call-debug-drawer {
+      left: clamp(0.75rem, 3vw, 1.25rem);
+      right: clamp(0.75rem, 3vw, 1.25rem);
+      width: auto;
+    }
+
+    .call-debug-panel {
+      max-height: min(80vh, 640px);
+    }
+  }
+
+  .call-debug-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.75rem;
-    margin-bottom: 1rem;
-    padding: 0.75rem 1rem;
-    background: rgba(0, 0, 0, 0.35);
-    border-radius: var(--radius-lg);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .call-debug-panel__heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .call-debug-panel__heading i {
+    font-size: 1.1rem;
+  }
+
+  .call-debug-panel__header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .call-debug-panel__refresh {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    transition: background 150ms ease, border-color 150ms ease;
+  }
+
+  .call-debug-panel__refresh i {
+    font-size: 1rem;
+  }
+
+  .call-debug-panel__refresh:hover,
+  .call-debug-panel__refresh:focus-visible {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+
+  .call-debug-panel__refresh:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .call-debug-panel__close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.85);
+    transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+
+  .call-debug-panel__close i {
+    font-size: 1.1rem;
+  }
+
+  .call-debug-panel__close:hover,
+  .call-debug-panel__close:focus-visible {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.24);
+    color: rgba(15, 18, 30, 0.9);
+  }
+
+  .call-debug-panel__close:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .call-debug-panel__scroll {
+    overflow-y: auto;
+    margin-top: 0.9rem;
+    padding-right: 0.2rem;
   }
 
   .call-debug-panel__grid {
@@ -4443,6 +5430,131 @@
     color: rgba(255, 255, 255, 0.92);
   }
 
+  .call-debug-panel__section--participants {
+    gap: 0.75rem;
+  }
+
+  .call-debug-participants {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .call-debug-participants li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 0.75rem;
+    padding: 0.7rem 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .call-debug-participant__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .call-debug-participant__name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .call-debug-participant__status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    background: rgba(255, 255, 255, 0.09);
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .call-debug-participant__status--active {
+    background: color-mix(in srgb, var(--color-success, #16a34a) 35%, transparent);
+    color: rgba(15, 35, 25, 0.9);
+  }
+
+  .call-debug-participant__status--removed,
+  .call-debug-participant__status--left {
+    background: color-mix(in srgb, var(--color-danger) 35%, transparent);
+    color: rgba(55, 5, 5, 0.9);
+  }
+
+  .call-debug-participant__meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .call-debug-participant__meta code {
+    font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+      'Courier New', monospace;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 0.45rem;
+    padding: 0.15rem 0.45rem;
+    color: rgba(255, 255, 255, 0.8);
+  }
+
+  .call-debug-participant__badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    color: rgba(15, 24, 32, 0.92);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.6rem;
+    font-weight: 600;
+  }
+
+  .call-debug-participant__tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .tag i {
+    font-size: 0.9rem;
+  }
+
+  .tag--off {
+    background: rgba(255, 71, 71, 0.15);
+    color: rgba(255, 215, 215, 0.85);
+  }
+
+  .tag--active {
+    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    color: rgba(12, 22, 38, 0.85);
+  }
+
   .call-debug-logs {
     list-style: none;
     margin: 0;
@@ -4450,35 +5562,76 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
-    max-height: 180px;
+    max-height: 220px;
     overflow-y: auto;
   }
 
-  .call-debug-logs li {
+  .call-debug-log {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.4rem;
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 0.65rem;
+    border-radius: 0.75rem;
     padding: 0.75rem;
+    border-left: 4px solid rgba(255, 255, 255, 0.12);
+  }
+
+  .call-debug-log--error {
+    border-left-color: color-mix(in srgb, var(--color-danger) 65%, transparent);
+    background: rgba(255, 48, 48, 0.12);
+  }
+
+  .call-debug-log--warn {
+    border-left-color: color-mix(in srgb, var(--color-warning, #facc15) 65%, transparent);
+    background: rgba(255, 210, 92, 0.12);
+  }
+
+  .call-debug-log__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: rgba(255, 255, 255, 0.55);
+  }
+
+  .call-debug-log__pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    padding: 0.25rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.72);
+    font-weight: 600;
+  }
+
+  .call-debug-log--error .call-debug-log__pill {
+    background: color-mix(in srgb, var(--color-danger) 45%, transparent);
+    color: rgba(255, 245, 245, 0.92);
+  }
+
+  .call-debug-log--warn .call-debug-log__pill {
+    background: color-mix(in srgb, var(--color-warning, #facc15) 45%, transparent);
+    color: rgba(45, 32, 0, 0.85);
   }
 
   .call-debug-logs .time {
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: rgba(255, 255, 255, 0.5);
   }
 
   .call-debug-logs .msg {
     font-weight: 600;
     font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.85);
+    color: rgba(255, 255, 255, 0.9);
   }
 
   .call-debug-logs pre {
     margin: 0;
-    max-height: 120px;
+    max-height: 140px;
     overflow: auto;
     font-size: 0.75rem;
     line-height: 1.35;
@@ -4500,6 +5653,7 @@
     padding: 0.6rem 0.75rem;
     background: rgba(0, 0, 0, 0.35);
     border-radius: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     max-height: 180px;
     overflow: auto;
     font-size: 0.72rem;
@@ -4601,6 +5755,7 @@
   .call-debug-action {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
     padding: 0.55rem 0.8rem;
     border-radius: var(--radius-md);
@@ -4611,6 +5766,7 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
     transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+    width: 100%;
   }
 
   .call-debug-action i {
