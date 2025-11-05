@@ -23,10 +23,10 @@
       isActive: (path) => path.startsWith('/dms/notes')
     },
     {
-      href: '/notifications',
-      label: 'Alerts',
+      href: '/',
+      label: 'Activity',
       icon: 'bx-bell',
-      isActive: (path) => path.startsWith('/notifications')
+      isActive: (path) => path === '/'
     }
   ];
 
@@ -46,7 +46,7 @@
       {@const badge =
         link.href === '/dms'
           ? $dmUnreadCount
-          : link.href === '/notifications'
+          : link.href === '/'
             ? $notificationCount
             : 0}
       <a

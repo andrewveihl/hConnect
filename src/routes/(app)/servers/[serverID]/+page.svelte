@@ -859,7 +859,7 @@
           {/if}
 
           {#if serverId && activeChannel}
-            <div class="flex-1 overflow-hidden p-3 sm:p-4">
+            <div class="message-scroll-region flex-1 overflow-hidden p-3 sm:p-4">
               <MessageList
                 {messages}
                 users={profiles}
@@ -871,8 +871,8 @@
               />
             </div>
             <div
-              class="shrink-0 border-t border-subtle panel-muted p-3"
-              style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.5rem)"
+              class="chat-input-region shrink-0 border-t border-subtle panel-muted p-3"
+              style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
             >
               <ChatInput
                 placeholder={`Message #${activeChannel?.name ?? ''}`}

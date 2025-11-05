@@ -498,6 +498,34 @@ body {
   padding-bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
 }
 
+.chat-input-region {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: inherit;
+}
+
+.message-scroll-region {
+  position: relative;
+}
+
+.message-scroll-region .chat-scroll {
+  --chat-scroll-padding: calc(env(safe-area-inset-bottom, 0px) + 1rem);
+}
+
+@media (max-width: 767px) {
+  .chat-input-region {
+    bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -12px 28px rgba(5, 9, 16, 0.45);
+  }
+
+  .message-scroll-region .chat-scroll {
+    --chat-scroll-padding: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + 6rem);
+  }
+}
+
 .mobile-panel__header {
   display: flex;
   align-items: center;
@@ -911,8 +939,8 @@ body {
 
 .rail-badge {
   position: absolute;
-  top: 0.2rem;
-  right: 0.2rem;
+  top: -0.2rem;
+  right: -0.2rem;
   min-width: 1.35rem;
   height: 1.35rem;
   display: grid;

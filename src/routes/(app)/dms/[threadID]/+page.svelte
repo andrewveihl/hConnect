@@ -578,7 +578,7 @@ $: {
 
     <main class="flex-1 overflow-hidden panel-muted">
       <div class="h-full flex flex-col">
-        <div class="flex-1 overflow-hidden p-3 sm:p-4">
+        <div class="message-scroll-region flex-1 overflow-hidden p-3 sm:p-4">
           <MessageList
             {messages}
             users={messageUsers}
@@ -592,11 +592,11 @@ $: {
     </main>
 
     <div
-      class="border-t border-subtle panel p-3"
-      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.5rem)"
+      class="chat-input-region border-t border-subtle panel p-3"
+      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
     >
       <ChatInput
-        placeholder={`Message ${displayName}`}
+        placeholder={`Message`}
         on:send={onSend}
         on:submit={onSend}
         on:sendGif={(e) => handleSendGif(e.detail)}

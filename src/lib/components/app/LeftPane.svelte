@@ -6,7 +6,8 @@
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
   import logoMarkUrl from '$lib/assets/Logo_transparent.png';
-  import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
+  import { dmUnreadCount, notifications } from '$lib/stores/notifications';
+  import type { NotificationItem } from '$lib/stores/notifications';
 
   export let activeServerId: string | null = null;
   export let onCreateServer: (() => void) | null = null;
@@ -36,8 +37,14 @@
   };
 
   $: currentPath = $page?.url?.pathname ?? '/';
-  $: notificationsActive = currentPath.startsWith('/notifications');
   $: dmsActive = currentPath === '/dms' || currentPath.startsWith('/dms/');
+  $: activeDmThreadId =
+    currentPath.startsWith('/dms/') && currentPath.length > 5
+      ? currentPath.slice(5).split('/')[0] || null
+      : null;
+
+  let unreadDMs: NotificationItem[] = [];
+  $: unreadDMs = ($notifications ?? []).filter((item) => item?.kind === 'dm' && item.unread > 0);
 </script>
 
 <aside
@@ -47,7 +54,7 @@
 >
   <div class="h-4 shrink-0"></div>
 
-  <a href="/" class="rail-logo" aria-label="hConnect home">
+  <a href="/" class="rail-logo" aria-label="Activity">
     <img src={logoMarkUrl} alt="hConnect" class="rail-logo__image" />
   </a>
 
@@ -88,20 +95,33 @@
     </div>
   </div>
 
-  <div class="w-full grid place-items-center gap-2 p-2">
-    <a
-      href="/notifications"
-      class="rail-button rail-button--primary relative"
-      class:rail-button--active={notificationsActive}
-      class:rail-button--alert={$notificationCount > 0 && !notificationsActive}
-      aria-label="Notifications"
-      title="Notifications"
-    >
-      <i class="bx bx-bell text-xl leading-none"></i>
-      {#if $notificationCount}
-        <span class="rail-badge">{formatBadge($notificationCount)}</span>
-      {/if}
-    </a>
+  <div class="w-full flex flex-col items-center gap-2 p-2">
+    {#if unreadDMs.length}
+      <div class="flex flex-col items-center gap-2" aria-label="Unread direct messages">
+        {#each unreadDMs as dm (dm.id)}
+          <a
+            href={dm.href}
+            class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
+            class:rail-button--alert={activeDmThreadId !== dm.threadId}
+            aria-label={dm.title}
+            title={dm.title}
+            aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
+          >
+            {#if dm.photoURL}
+              <img
+                src={dm.photoURL}
+                alt={dm.title}
+                class="rail-button__image"
+                draggable="false"
+              />
+            {:else}
+              <i class="bx bx-user text-xl leading-none"></i>
+            {/if}
+            <span class="rail-badge">{formatBadge(dm.unread)}</span>
+          </a>
+        {/each}
+      </div>
+    {/if}
 
     <a
       href="/dms"
