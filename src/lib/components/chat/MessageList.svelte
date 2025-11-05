@@ -3,12 +3,14 @@
 
   const dispatch = createEventDispatcher();
 
+  type MentionView = { uid: string; handle?: string | null; label?: string | null };
+
   type ChatMessage =
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; text: string; type?: 'text' }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; url: string; type: 'gif' }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; file: { name: string; size?: number; url: string; contentType?: string }; type: 'file' }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll' }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; form: { title: string; questions: string[] }; type: 'form' };
+    | { id: string; uid?: string; createdAt?: any; displayName?: string; text: string; type?: 'text'; mentions?: MentionView[] }
+    | { id: string; uid?: string; createdAt?: any; displayName?: string; url: string; type: 'gif'; mentions?: MentionView[] }
+    | { id: string; uid?: string; createdAt?: any; displayName?: string; file: { name: string; size?: number; url: string; contentType?: string }; type: 'file'; mentions?: MentionView[] }
+    | { id: string; uid?: string; createdAt?: any; displayName?: string; poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll'; mentions?: MentionView[] }
+    | { id: string; uid?: string; createdAt?: any; displayName?: string; form: { title: string; questions: string[] }; type: 'form'; mentions?: MentionView[] };
 
   export let messages: ChatMessage[] = [];
   export let users: Record<string, any> = {};
@@ -63,6 +65,69 @@
     if (!name) return '?';
     const parts = name.trim().split(/\s+/).slice(0, 2);
     return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || name[0]?.toUpperCase() || '?';
+  }
+
+  const canonicalMentionToken = (value: string) =>
+    (value ?? '')
+      .replace(/^@/, '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+  function mentionSegments(text: string, mentions?: MentionView[]) {
+    const value = typeof text === 'string' ? text : '';
+    if (!value) return [{ type: 'text', value: '' }];
+    if (!mentions?.length) return [{ type: 'text', value }];
+    const lookup = new Map<string, MentionView>();
+
+    const register = (raw: string | null | undefined, mention: MentionView) => {
+      if (!raw) return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      const base = trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+      const compact = base.replace(/\s+/g, '');
+      const canonical = `@${canonicalMentionToken(base)}`;
+      lookup.set(base.toLowerCase(), mention);
+      lookup.set(compact.toLowerCase(), mention);
+      lookup.set(canonical, mention);
+    };
+
+    mentions.forEach((mention) => {
+      register(mention.handle ?? null, mention);
+      if (mention.label) {
+        register(mention.label, mention);
+        register(mention.label.replace(/\s+/g, ''), mention);
+        const first = mention.label.split(/\s+/).filter(Boolean)[0];
+        if (first) register(first, mention);
+      }
+    });
+
+    const segments: Array<{ type: 'text' | 'mention'; value: string; data?: MentionView }> = [];
+    const regex = /@[\p{L}\p{N}._-]+/gu;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(value))) {
+      const start = match.index;
+      if (start > lastIndex) {
+        segments.push({ type: 'text', value: value.slice(lastIndex, start) });
+      }
+      const token = match[0];
+      const canonicalKey = `@${canonicalMentionToken(token)}`;
+      const mention =
+        lookup.get(token.toLowerCase()) ?? lookup.get(token) ?? lookup.get(canonicalKey);
+      if (mention) {
+        const display = mention.label ? `@${mention.label}` : mention.handle ?? token;
+        segments.push({ type: 'mention', value: display, data: mention });
+      } else {
+        segments.push({ type: 'text', value: token });
+      }
+      lastIndex = regex.lastIndex;
+    }
+    if (lastIndex < value.length) {
+      segments.push({ type: 'text', value: value.slice(lastIndex) });
+    }
+    return segments;
   }
 
   const SAME_BLOCK_MINUTES = 5;
@@ -424,6 +489,11 @@
     border-color: var(--chat-bubble-other-border);
   }
 
+  .chat-mention {
+    color: var(--color-accent);
+    font-weight: 600;
+  }
+
   .chat-gif {
     display: block;
     max-width: min(440px, 100%);
@@ -630,7 +700,13 @@
             <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
               {#if !m.type || m.type === 'text'}
                 <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'}`}>
-                  {(m as any).text ?? (m as any).content ?? ''}
+                  {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
+                    {#if segment.type === 'mention'}
+                      <span class="chat-mention">{segment.value}</span>
+                    {:else}
+                      {segment.value}
+                    {/if}
+                  {/each}
                 </div>
               {:else if m.type === 'gif' && (m as any).url}
                 <img

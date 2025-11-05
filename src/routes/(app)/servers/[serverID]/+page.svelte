@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
+  import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
 
   import LeftPane from '$lib/components/app/LeftPane.svelte';
@@ -17,6 +19,7 @@
   import { db } from '$lib/firestore';
   import { collection, doc, onSnapshot, orderBy, query, getDocs, endBefore, limitToLast, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
+  import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
   import { markChannelRead } from '$lib/firebase/unread';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
@@ -31,14 +34,35 @@
     null;
 
   type Channel = { id: string; name: string; type: 'text' | 'voice'; position?: number };
+  type MentionSendRecord = { uid: string; handle: string; label: string };
 
   let channels: Channel[] = [];
   let activeChannel: Channel | null = null;
+  let requestedChannelId: string | null = null;
   let messages: any[] = [];
   let profiles: Record<string, any> = {};
   const profileUnsubs: Record<string, Unsubscribe> = {};
   let serverDisplayName = 'Server';
   let serverMetaUnsub: Unsubscribe | null = null;
+  let mentionOptions: MentionDirectoryEntry[] = [];
+  let mentionDirectoryStop: Unsubscribe | null = null;
+  let lastMentionServer: string | null = null;
+
+  $: {
+    const currentMentionServer = serverId ?? null;
+    if (currentMentionServer !== lastMentionServer) {
+      mentionDirectoryStop?.();
+      mentionOptions = [];
+      lastMentionServer = currentMentionServer;
+      if (currentMentionServer) {
+        mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
+          mentionOptions = entries;
+        });
+      } else {
+        mentionDirectoryStop = null;
+      }
+    }
+  }
 
   function pickString(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -191,6 +215,26 @@
 
     if (inferredType === 'form') {
       message.form = normalizeForm(raw?.form ?? {});
+    }
+
+    const mentionArray: MentionSendRecord[] = Array.isArray(raw?.mentions)
+      ? raw.mentions
+      : raw?.mentionsMap && typeof raw.mentionsMap === 'object'
+        ? Object.entries(raw.mentionsMap).map(([key, value]) => ({
+            uid: pickString(key) ?? '',
+            handle: pickString((value as any)?.handle) ?? null,
+            label: pickString((value as any)?.label) ?? null
+          }))
+        : [];
+    const mentions = mentionArray
+      .map((entry) => ({
+        uid: pickString(entry?.uid) ?? '',
+        handle: pickString((entry as any)?.handle) ?? null,
+        label: pickString((entry as any)?.label) ?? null
+      }))
+      .filter((entry) => entry.uid);
+    if (mentions.length) {
+      message.mentions = mentions;
     }
 
     return message;
@@ -350,6 +394,21 @@
 
     // close channels panel on mobile
     showChannels = false;
+
+    if (browser) {
+      try {
+        const current = $page?.url?.searchParams?.get('channel') ?? null;
+        if (current !== id) {
+          const nextUrl = new URL($page.url.href);
+          nextUrl.searchParams.set('channel', id);
+          goto(`${nextUrl.pathname}${nextUrl.search}`, {
+            replaceState: true,
+            keepfocus: true,
+            noScroll: true
+          });
+        }
+      } catch {}
+    }
   }
 
   /* ===========================
@@ -495,9 +554,21 @@
       });
 
       const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
+      const requestedId = requestedChannelId;
 
       if (!activeChannel && channels.length) {
-        if (isDesktop) {
+        if (requestedId) {
+          const target = channels.find((c) => c.id === requestedId);
+          if (target) {
+            pickChannel(target.id);
+          } else if (isDesktop) {
+            pickChannel(channels[0].id);
+          } else {
+            activeChannel = null;
+            showMembers = false;
+            showChannels = true;
+          }
+        } else if (isDesktop) {
           // desktop: auto-pick first channel
           pickChannel(channels[0].id);
         } else {
@@ -511,8 +582,24 @@
         if (updated) {
           activeChannel = updated;
         } else if (channels.length) {
-          if (isDesktop) pickChannel(channels[0].id);
-          else { activeChannel = null; showMembers = false; showChannels = true; }
+          if (requestedId) {
+            const target = channels.find((c) => c.id === requestedId);
+            if (target) {
+              pickChannel(target.id);
+            } else if (isDesktop) {
+              pickChannel(channels[0].id);
+            } else {
+              activeChannel = null;
+              showMembers = false;
+              showChannels = true;
+            }
+          } else if (isDesktop) {
+            pickChannel(channels[0].id);
+          } else {
+            activeChannel = null;
+            showMembers = false;
+            showChannels = true;
+          }
         } else {
           activeChannel = null;
           clearMessagesUnsub();
@@ -538,6 +625,10 @@
     unsubscribeVoice();
     serverMetaUnsub?.();
     serverMetaUnsub = null;
+    mentionDirectoryStop?.();
+    mentionDirectoryStop = null;
+    lastMentionServer = null;
+    mentionOptions = [];
   });
 
   // Persist read state when tab is hidden
@@ -554,19 +645,28 @@
     onDestroy(() => window.removeEventListener('visibilitychange', onVis));
   }
 
-  async function handleSend(text: string) {
-    const trimmed = text?.trim();
+  async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[] }) {
+    const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
+    const trimmed = raw?.trim?.() ?? '';
     if (!trimmed) return;
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const mentionList: MentionSendRecord[] =
+      typeof payload === 'object' && payload && Array.isArray(payload.mentions)
+        ? payload.mentions.filter(
+            (item): item is MentionSendRecord =>
+              !!item?.uid && (!!item?.handle || !!item?.label)
+          )
+        : [];
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'text',
         text: trimmed,
         uid: $user.uid,
         displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL()
+        photoURL: deriveCurrentPhotoURL(),
+        mentions: mentionList
       });
     } catch (err) {
       console.error(err);
@@ -664,6 +764,15 @@
       console.error(err);
       alert(`Failed to toggle reaction: ${err}`);
     }
+  }
+
+  $: requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
+  $: if (
+    requestedChannelId &&
+    requestedChannelId !== activeChannel?.id &&
+    channels.some((c) => c.id === requestedChannelId)
+  ) {
+    pickChannel(requestedChannelId);
   }
 
   $: if (voiceState && serverId && voiceState.serverId !== serverId && voiceState.visible) {
@@ -767,6 +876,7 @@
             >
               <ChatInput
                 placeholder={`Message #${activeChannel?.name ?? ''}`}
+                mentionOptions={mentionOptions}
                 onSend={handleSend}
                 onSendGif={handleSendGif}
                 onCreatePoll={handleCreatePoll}
@@ -861,7 +971,3 @@
 </div>
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
-
-
-
-

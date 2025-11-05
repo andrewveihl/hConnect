@@ -532,6 +532,13 @@ export function streamUnreadCount(threadId: string, uid: string, cb: (n: number)
   const readDocRef = doc(db, COL_DMS, threadId, SUB_READS, uid);
 
   let stopMsgs: Unsubscribe | undefined;
+  const isOtherMessage = (data: any) => {
+    const author =
+      (typeof data?.uid === 'string' && data.uid.trim()) ||
+      (typeof data?.authorId === 'string' && data.authorId.trim()) ||
+      null;
+    return !author || author !== uid;
+  };
 
   const stopRead = onSnapshot(readDocRef, (readSnap) => {
     const lastReadAt = readSnap.exists() ? (readSnap.data() as any)?.lastReadAt ?? null : null;
@@ -542,10 +549,22 @@ export function streamUnreadCount(threadId: string, uid: string, cb: (n: number)
 
     if (lastReadAt) {
       const qNew = query(base, where('createdAt', '>', lastReadAt), orderBy('createdAt', 'asc'));
-      stopMsgs = onSnapshot(qNew, (s) => cb(s.size));
+      stopMsgs = onSnapshot(qNew, (s) => {
+        let count = 0;
+        s.forEach((docSnap) => {
+          if (isOtherMessage(docSnap.data())) count += 1;
+        });
+        cb(count);
+      });
     } else {
       const qAll = query(base); // first-time: “all unread”
-      stopMsgs = onSnapshot(qAll, (s) => cb(s.size));
+      stopMsgs = onSnapshot(qAll, (s) => {
+        let count = 0;
+        s.forEach((docSnap) => {
+          if (isOtherMessage(docSnap.data())) count += 1;
+        });
+        cb(count);
+      });
     }
   });
 
