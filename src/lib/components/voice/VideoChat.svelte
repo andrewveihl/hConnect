@@ -23,7 +23,6 @@
     type DocumentReference,
     type Unsubscribe
   } from 'firebase/firestore';
-  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   const CALL_DOC_ID = 'live';
   const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
@@ -235,6 +234,7 @@
   const remoteCandidateKeys = new Set<string>();
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
   const DEBUG_PANEL_STORAGE_KEY = 'hconnect:voice:debug-panel-open';
+  const QUICK_STATS_STORAGE_KEY = 'hconnect:voice:debug.quickstats';
   let debugPanelVisible = false;
   let hasDebugAlerts = false;
   let mostRecentAlertId: string | null = null;
@@ -404,6 +404,7 @@
     ].slice(0, 250);
     voiceLogs = nextLogs;
     updateVoiceLogCounters(nextLogs);
+    appendVoiceDebugEvent('video-call', entryMessage, entryDetails, severity);
     if (!debugPanelVisible && severity !== 'info' && mostRecentAlertId !== id) {
       mostRecentAlertId = id;
       hasDebugAlerts = true;
@@ -603,6 +604,205 @@
     }));
   }
 
+  function describeStreamTracks(stream: MediaStream): Record<string, unknown> {
+    const describeTrack = (track: MediaStreamTrack) => ({
+      id: track.id,
+      kind: track.kind,
+      muted: track.muted,
+      enabled: track.enabled,
+      readyState: track.readyState,
+      label: track.label
+    });
+    return {
+      id: stream.id,
+      audioTracks: stream.getAudioTracks().map(describeTrack),
+      videoTracks: stream.getVideoTracks().map(describeTrack)
+    };
+  }
+
+  function summarizeRemoteStreamsForDebug(streamMap: Map<string, MediaStream>): Array<Record<string, unknown>> {
+    return Array.from(streamMap.entries()).map(([id, stream]) => {
+      const summary = describeStreamTracks(stream);
+      return { streamKey: id, ...summary };
+    });
+  }
+
+  function summarizeLocalStreamForDebug(stream: MediaStream | null): Record<string, unknown> | null {
+    if (!stream) return null;
+    const summary = describeStreamTracks(stream);
+    return summary;
+  }
+
+  type PeerConnectionStatsSnapshot = {
+    inboundAudio: Array<Record<string, unknown>>;
+    outboundAudio: Array<Record<string, unknown>>;
+    inboundVideo: Array<Record<string, unknown>>;
+    outboundVideo: Array<Record<string, unknown>>;
+    candidatePairs: Array<Record<string, unknown>>;
+    transports: Array<Record<string, unknown>>;
+  };
+
+  async function collectPeerConnectionStatsSnapshot(
+    connection: RTCPeerConnection
+  ): Promise<PeerConnectionStatsSnapshot | null> {
+    if (!connection || typeof connection.getStats !== 'function') return null;
+    try {
+      const report = await connection.getStats();
+      const snapshot: PeerConnectionStatsSnapshot = {
+        inboundAudio: [],
+        outboundAudio: [],
+        inboundVideo: [],
+        outboundVideo: [],
+        candidatePairs: [],
+        transports: []
+      };
+
+      const inboundFields = [
+        'trackIdentifier',
+        'mid',
+        'kind',
+        'ssrc',
+        'packetsReceived',
+        'packetsLost',
+        'bytesReceived',
+        'jitter',
+        'jitterBufferDelay',
+        'jitterBufferEmittedCount',
+        'totalSamplesReceived',
+        'totalSamplesDuration',
+        'totalAudioEnergy',
+        'audioLevel',
+        'framesDecoded',
+        'frameWidth',
+        'frameHeight',
+        'framesPerSecond',
+        'lastPacketReceivedTimestamp'
+      ];
+      const outboundFields = [
+        'trackIdentifier',
+        'mid',
+        'kind',
+        'ssrc',
+        'packetsSent',
+        'packetsLost',
+        'bytesSent',
+        'framesEncoded',
+        'frameWidth',
+        'frameHeight',
+        'framesPerSecond',
+        'qualityLimitationReason',
+        'totalEncodeTime',
+        'nackCount',
+        'pliCount',
+        'firCount',
+        'roundTripTime',
+        'totalRoundTripTime',
+        'retransmittedPacketsSent'
+      ];
+      const candidatePairFields = [
+        'state',
+        'nominated',
+        'writable',
+        'readable',
+        'currentRoundTripTime',
+        'availableOutgoingBitrate',
+        'availableIncomingBitrate',
+        'requestsReceived',
+        'requestsSent',
+        'responsesReceived',
+        'responsesSent',
+        'consentRequestsSent',
+        'bytesSent',
+        'bytesReceived',
+        'totalRoundTripTime',
+        'priority',
+        'localCandidateId',
+        'remoteCandidateId'
+      ];
+      const transportFields = [
+        'dtlsState',
+        'selectedCandidatePairId',
+        'bytesSent',
+        'bytesReceived',
+        'packetsSent',
+        'packetsReceived',
+        'iceRole',
+        'iceState',
+        'dtlsCipher',
+        'srtpCipher'
+      ];
+
+      const pick = (source: Record<string, any>, fields: string[]) => {
+        const result: Record<string, unknown> = {};
+        for (const field of fields) {
+          const value = source[field];
+          result[field] = value === undefined ? null : value;
+        }
+        return result;
+      };
+
+      report.forEach((stat) => {
+        const anyStat = stat as any;
+        switch (stat.type) {
+          case 'inbound-rtp': {
+            const summary = {
+              id: anyStat.id ?? null,
+              timestamp: anyStat.timestamp ?? null,
+              ...pick(anyStat, inboundFields)
+            };
+            if (anyStat.kind === 'audio') {
+              snapshot.inboundAudio.push(summary);
+            } else if (anyStat.kind === 'video') {
+              snapshot.inboundVideo.push(summary);
+            }
+            break;
+          }
+          case 'outbound-rtp': {
+            const summary = {
+              id: anyStat.id ?? null,
+              timestamp: anyStat.timestamp ?? null,
+              ...pick(anyStat, outboundFields)
+            };
+            if (anyStat.kind === 'audio') {
+              snapshot.outboundAudio.push(summary);
+            } else if (anyStat.kind === 'video') {
+              snapshot.outboundVideo.push(summary);
+            }
+            break;
+          }
+          case 'candidate-pair': {
+            const summary = {
+              id: anyStat.id ?? null,
+              timestamp: anyStat.timestamp ?? null,
+              ...pick(anyStat, candidatePairFields)
+            };
+            snapshot.candidatePairs.push(summary);
+            break;
+          }
+          case 'transport': {
+            const summary = {
+              id: anyStat.id ?? null,
+              timestamp: anyStat.timestamp ?? null,
+              ...pick(anyStat, transportFields)
+            };
+            snapshot.transports.push(summary);
+            break;
+          }
+          default:
+            break;
+        }
+      });
+
+      return snapshot;
+    } catch (err) {
+      voiceDebug('collectPeerConnectionStatsSnapshot failed', err);
+      appendVoiceDebugEvent('video-call', 'collectPeerConnectionStatsSnapshot failure', {
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+  }
+
   function describeTransceiverOrder(connection: RTCPeerConnection | null) {
     if (!connection || typeof connection.getTransceivers !== 'function') return [];
     return connection
@@ -619,7 +819,9 @@
       .filter(Boolean);
   }
 
-  function collectVoiceDebugBundle(options: { includeLogs?: number } = {}): string {
+  async function collectVoiceDebugBundle(
+    options: { includeLogs?: number; includeEvents?: number } = {}
+  ): Promise<string> {
     const now = new Date();
     const currentUser = get(user);
     const maxLogs = options.includeLogs ?? 20;
@@ -631,6 +833,28 @@
         streams: sender.streams?.map((stream) => stream.id) ?? [],
         transportState: (sender as any)?.transport?.state ?? null
       })) ?? [];
+    const localStreamSummary = summarizeLocalStreamForDebug(localStream);
+    const remoteStreamSummary = summarizeRemoteStreamsForDebug(remoteStreams);
+    let statsSnapshot: PeerConnectionStatsSnapshot | null = null;
+    if (pc && typeof pc.getStats === 'function') {
+      statsSnapshot = await collectPeerConnectionStatsSnapshot(pc);
+    }
+    if (statsSnapshot) {
+      setVoiceDebugSection('call.stats', statsSnapshot);
+    } else {
+      removeVoiceDebugSection('call.stats');
+    }
+    setVoiceDebugSection('call.lastBundle', {
+      capturedAt: now.toISOString(),
+      includeLogs: maxLogs,
+      includeEvents: options.includeEvents ?? null,
+      hasStats: !!statsSnapshot
+    });
+    appendVoiceDebugEvent('video-call', 'collectVoiceDebugBundle snapshot', {
+      includeLogs: maxLogs,
+      includeEvents: options.includeEvents ?? null,
+      hasStats: !!statsSnapshot
+    });
 
     const lines: string[] = [
       '=== hConnect Voice Debug ===',
@@ -644,9 +868,10 @@
       `renegotiation: pending=${JSON.stringify(pendingRenegotiationReasons)} awaiting_stable=${renegotiationAwaitingStable} needs_promotion=${renegotiationNeedsPromotion}`,
       `revisions: offer=${lastOfferRevision} answer=${lastAnswerRevision}`,
       `participants: ${JSON.stringify(summarizeParticipantsForDebug(participants), null, 2)}`,
+      `local_stream: ${JSON.stringify(localStreamSummary, null, 2)}`,
       `transceivers: ${JSON.stringify(transceiverSnapshot, null, 2)}`,
       `senders: ${JSON.stringify(senderSnapshot, null, 2)}`,
-      `remote_stream_ids: ${JSON.stringify(Array.from(remoteStreams.keys()), null, 2)}`,
+      `remote_streams: ${JSON.stringify(remoteStreamSummary, null, 2)}`,
       `status_message: ${statusMessage || 'n/a'}`,
       `error_message: ${errorMessage || 'n/a'}`,
       '',
@@ -662,23 +887,113 @@
       }
     }
 
+    if (statsSnapshot) {
+      lines.push('', 'webrtc_stats:');
+      lines.push(`  inbound_audio: ${JSON.stringify(statsSnapshot.inboundAudio, null, 2)}`);
+      lines.push(`  outbound_audio: ${JSON.stringify(statsSnapshot.outboundAudio, null, 2)}`);
+      lines.push(`  inbound_video: ${JSON.stringify(statsSnapshot.inboundVideo, null, 2)}`);
+      lines.push(`  outbound_video: ${JSON.stringify(statsSnapshot.outboundVideo, null, 2)}`);
+      lines.push(`  candidate_pairs: ${JSON.stringify(statsSnapshot.candidatePairs, null, 2)}`);
+      lines.push(`  transports: ${JSON.stringify(statsSnapshot.transports, null, 2)}`);
+    } else {
+      lines.push('', 'webrtc_stats:', '  (unavailable)');
+    }
+
+    lines.push('', formatVoiceDebugContext({ maxEvents: options.includeEvents ?? 60 }));
+
     return lines.join('\n');
   }
 
-  async function copyVoiceDebugBundle(options: { includeLogs?: number } = {}) {
-    const bundle = collectVoiceDebugBundle(options);
+  async function copyVoiceDebugBundle(
+    options: { includeLogs?: number; includeEvents?: number } = {}
+  ): Promise<{
+    status: 'copied' | 'logged' | 'failed';
+    length: number;
+    includeLogs: number;
+    includeEvents: number;
+    lineCount: number;
+    logCountCaptured: number;
+    durationMs: number;
+  }> {
+    const includeLogs = options.includeLogs ?? 20;
+    const includeEvents = options.includeEvents ?? 60;
+    const startedAt = now();
+    appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle requested', {
+      includeLogs,
+      includeEvents
+    });
+    const bundle = await collectVoiceDebugBundle({ includeLogs, includeEvents });
+    const lineCount = bundle.split('\n').length;
+    const logCountCaptured = Math.min(voiceLogs.length, includeLogs);
+
     try {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(bundle);
         statusMessage = 'Debug info copied to clipboard.';
+        const durationMs = Math.round(now() - startedAt);
+        appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle success', {
+          includeLogs,
+          includeEvents,
+          bundleLength: bundle.length,
+          lineCount,
+          logCountCaptured,
+          durationMs
+        });
+        return {
+          status: 'copied',
+          length: bundle.length,
+          includeLogs,
+          includeEvents,
+          lineCount,
+          logCountCaptured,
+          durationMs
+        };
       } else {
         console.info('[voice] debug bundle\n', bundle);
         statusMessage = 'Clipboard unavailable; bundle logged to console.';
+        const durationMs = Math.round(now() - startedAt);
+        appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle fallback', {
+          reason: 'clipboard-unavailable',
+          includeLogs,
+          includeEvents,
+          bundleLength: bundle.length,
+          lineCount,
+          logCountCaptured,
+          durationMs
+        });
+        return {
+          status: 'logged',
+          length: bundle.length,
+          includeLogs,
+          includeEvents,
+          lineCount,
+          logCountCaptured,
+          durationMs
+        };
       }
     } catch (err) {
       console.warn('Failed to copy debug bundle', err);
       statusMessage = 'Unable to copy debug info; check console output.';
       console.info('[voice] debug bundle\n', bundle);
+      const durationMs = Math.round(now() - startedAt);
+      appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle failure', {
+        includeLogs,
+        includeEvents,
+        bundleLength: bundle.length,
+        lineCount,
+        logCountCaptured,
+        durationMs,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return {
+        status: 'failed',
+        length: bundle.length,
+        includeLogs,
+        includeEvents,
+        lineCount,
+        logCountCaptured,
+        durationMs
+      };
     }
   }
 
@@ -1099,6 +1414,184 @@
   const DEFAULT_VOLUME = 0.85;
   const STORAGE_PREFIX = 'hconnect:voice:controls:';
 
+  type QuickStatItem = {
+    key: string;
+    label: string;
+    value: string;
+    tooltip?: string;
+  };
+
+  const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+
+  function toDisplayLabel(value: string | null | undefined, fallback = 'unknown'): string {
+    if (!value) return fallback;
+    return value;
+  }
+
+  function describeIcePolicyStatus(): string {
+    if (!hasTurnServers) return 'stun-only';
+    return forceRelayIceTransport ? 'relay-only' : 'all';
+  }
+
+  function describeTurnStatus(): string {
+    if (hasTurnServers) {
+      return usingFallbackTurnServers ? 'fallback (openrelay)' : 'configured';
+    }
+    return allowTurnFallback ? 'none' : 'none (disabled)';
+  }
+
+  function compactIdentifier(value: string | null, maxLength = 44): { display: string; tooltip: string } {
+    if (!value || value === 'none') {
+      return { display: 'none', tooltip: 'none' };
+    }
+    const tooltip = value;
+    if (value.length <= maxLength) {
+      return { display: value, tooltip };
+    }
+    const segments = value.split('/');
+    if (segments.length > 4) {
+      const compact = `${segments[0]}/${segments[1]}/…/${segments[segments.length - 1]}`;
+      return { display: compact, tooltip };
+    }
+    const head = value.slice(0, Math.ceil(maxLength / 2) - 1);
+    const tail = value.slice(-Math.floor(maxLength / 2) + 1);
+    return { display: `${head}…${tail}`, tooltip };
+  }
+
+  function abbreviate(value: string | null | undefined, limit = 10): string {
+    const text = toDisplayLabel(value).replace(/\s+/g, '-');
+    return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+  }
+
+  $: quickStatsItems = (() => {
+    const callDocPath = callRef?.path ?? 'none';
+    const compactCallDoc = compactIdentifier(callDocPath);
+    const logsCaptured = voiceLogs.length;
+    return [
+      { key: 'signaling', label: 'Signaling', value: toDisplayLabel(signalingState) },
+      { key: 'connection', label: 'Connection', value: toDisplayLabel(connectionState) },
+      { key: 'ice-connection', label: 'ICE Conn', value: toDisplayLabel(iceConnectionState) },
+      { key: 'ice-gathering', label: 'ICE Gather', value: toDisplayLabel(iceGatheringState) },
+      { key: 'local-ice', label: 'Local ICE', value: String(publishedCandidateCount) },
+      { key: 'remote-ice', label: 'Remote ICE', value: String(appliedCandidateCount) },
+      { key: 'ice-policy', label: 'ICE Policy', value: describeIcePolicyStatus() },
+      { key: 'turn', label: 'TURN', value: describeTurnStatus() },
+      {
+        key: 'role',
+        label: 'Role',
+        value: isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'
+      },
+      {
+        key: 'call-doc',
+        label: 'Call Doc',
+        value: compactCallDoc.display,
+        tooltip: compactCallDoc.tooltip
+      },
+      { key: 'errors', label: 'Errors', value: String(voiceErrorCount) },
+      { key: 'warnings', label: 'Warnings', value: String(voiceWarnCount) },
+      {
+        key: 'logs',
+        label: 'Logs cached',
+        value: `${Math.min(logsCaptured, 250)}/${logsCaptured}`,
+        tooltip: `${logsCaptured} total voice logs cached (showing up to 250)`
+      }
+    ] as QuickStatItem[];
+  })();
+
+  $: quickStatsSummary = [
+    `Sig:${abbreviate(signalingState)}`,
+    `Conn:${abbreviate(connectionState)}`,
+    `ICE:${abbreviate(iceConnectionState)}`,
+    `Role:${abbreviate(isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle')}`,
+    `Err:${voiceErrorCount}`,
+    `Warn:${voiceWarnCount}`
+  ].join(' • ');
+
+  $: quickStatsSummaryTooltip = [
+    ...quickStatsItems.map((item) => `${item.label}: ${item.tooltip ?? item.value}`),
+    statusMessage ? `Status: ${statusMessage}` : null,
+    errorMessage ? `Error: ${errorMessage}` : null
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  let quickStatsExpanded = false;
+  let copyInFlight = false;
+
+  function toggleQuickStats(expand?: boolean) {
+    const target = typeof expand === 'boolean' ? expand : !quickStatsExpanded;
+    if (target === quickStatsExpanded) return quickStatsExpanded;
+    quickStatsExpanded = target;
+    voiceDebug('Quick stats expanded changed', { expanded: quickStatsExpanded });
+    appendVoiceDebugEvent('video-call', 'quickStats toggle', { expanded: quickStatsExpanded });
+    if (browser && typeof localStorage !== 'undefined') {
+      try {
+        if (quickStatsExpanded) {
+          localStorage.setItem(QUICK_STATS_STORAGE_KEY, '1');
+        } else {
+          localStorage.removeItem(QUICK_STATS_STORAGE_KEY);
+        }
+      } catch {
+        /* ignore storage errors */
+      }
+    }
+    return quickStatsExpanded;
+  }
+  $: if (browser) {
+    setVoiceDebugSection('call.session', {
+      serverId,
+      channelId,
+      sessionVisible,
+      sessionChannelName,
+      sessionServerName,
+      isJoined,
+      isConnecting,
+      isOfferer,
+      activeSessionKey
+    });
+  }
+
+  $: if (browser) {
+    setVoiceDebugSection('call.participants', {
+      count: participants.length,
+      summary: summarizeParticipantsForDebug(participants)
+    });
+  }
+
+  $: if (browser) {
+    const remoteSummary = summarizeRemoteStreamsForDebug(remoteStreams);
+    setVoiceDebugSection('call.remoteStreams', {
+      count: remoteSummary.length,
+      streams: remoteSummary
+    });
+  }
+
+  $: if (browser) {
+    setVoiceDebugSection('call.localStream', {
+      stream: summarizeLocalStreamForDebug(localStream),
+      hasAudioTrack,
+      hasVideoTrack,
+      micMuted: isMicMuted,
+      cameraOff: isCameraOff,
+      screenSharing: isScreenSharing
+    });
+  }
+
+  $: if (browser) {
+    setVoiceDebugSection('call.status', {
+      statusMessage: statusMessage || null,
+      errorMessage: errorMessage || null,
+      voiceErrorCount,
+      voiceWarnCount,
+      pcState: {
+        signaling: pc?.signalingState ?? null,
+        connection: pc?.connectionState ?? null,
+        iceConnection: pc?.iceConnectionState ?? null,
+        iceGathering: pc?.iceGatheringState ?? null
+      }
+    });
+  }
+
   $: currentUserId = $user?.uid ?? null;
   $: selfParticipant = participants.find((p) => p.uid === currentUserId) ?? null;
   $: localHasAudio = selfParticipant?.hasAudio ?? (hasAudioTrack && !isMicMuted);
@@ -1273,12 +1766,15 @@
     if (browser && typeof window !== 'undefined') {
       let storedDebug = false;
       let storedPanelOpen = false;
+      let storedQuickStats = false;
       try {
         storedDebug = localStorage.getItem(DEBUG_STORAGE_KEY) === '1';
         storedPanelOpen = localStorage.getItem(DEBUG_PANEL_STORAGE_KEY) === '1';
+        storedQuickStats = localStorage.getItem(QUICK_STATS_STORAGE_KEY) === '1';
       } catch {
         storedDebug = false;
         storedPanelOpen = false;
+        storedQuickStats = false;
       }
       if (storedDebug) {
         debugLoggingEnabled = true;
@@ -1288,6 +1784,7 @@
       if (storedPanelOpen) {
         setDebugPanelVisibility(true);
       }
+      quickStatsExpanded = storedQuickStats;
       (window as any).hConnectVoiceDebug = (enable: boolean | undefined) => {
         setVoiceDebug(enable !== false);
         console.info('[voice] debug logging', enable === false ? 'disabled' : 'enabled');
@@ -1296,10 +1793,14 @@
         toggleDebugPanel(open);
         return debugPanelVisible;
       };
-      (window as any).hConnectVoiceDump = (options?: { includeLogs?: number }) =>
-        collectVoiceDebugBundle(options ?? {});
-      (window as any).hConnectVoiceCopyDebug = (options?: { includeLogs?: number }) =>
-        copyVoiceDebugBundle(options ?? {});
+      (window as any).hConnectVoiceDump = (options?: {
+        includeLogs?: number;
+        includeEvents?: number;
+      }) => collectVoiceDebugBundle(options ?? {});
+      (window as any).hConnectVoiceCopyDebug = (options?: {
+        includeLogs?: number;
+        includeEvents?: number;
+      }) => copyVoiceDebugBundle(options ?? {});
       voiceDebug('Voice component mounted');
       isTouchDevice = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
       window.addEventListener('beforeunload', onUnload);
@@ -1340,6 +1841,13 @@
     serverMetaUnsub?.();
     memberUnsub?.();
     hangUp().catch(() => {});
+    removeVoiceDebugSection('call.session');
+    removeVoiceDebugSection('call.participants');
+    removeVoiceDebugSection('call.remoteStreams');
+    removeVoiceDebugSection('call.localStream');
+    removeVoiceDebugSection('call.status');
+    removeVoiceDebugSection('call.stats');
+    removeVoiceDebugSection('call.lastBundle');
   });
 
   function avatarInitial(name: string | undefined): string {
@@ -1733,6 +2241,17 @@
   }
 
   async function handleSessionChange(next: VoiceSession | null) {
+    appendVoiceDebugEvent(
+      'video-call',
+      'handleSessionChange',
+      next
+        ? {
+            serverId: next.serverId,
+            channelId: next.channelId,
+            visible: next.visible
+          }
+        : { session: null }
+    );
     if (!next) {
       session = null;
       sessionVisible = false;
@@ -3117,370 +3636,198 @@
   }
 
   async function joinChannel() {
-
     voiceDebug('joinChannel start', { serverId, channelId, isJoined, isConnecting });
-
     if (!serverId || !channelId) {
-
       errorMessage = 'Select a voice channel to start a call.';
-
       return;
-
     }
-
     if (isJoined || isConnecting) return;
 
-
-
     const current = get(user);
-
     if (!current?.uid) {
-
       errorMessage = 'Sign in to join voice.';
-
       return;
-
     }
 
-
-
     isConnecting = true;
-
     errorMessage = '';
-
     statusMessage = 'Setting up call...';
 
-
-
     const database = getDb();
-
-
+    let joinRole: 'offerer' | 'answerer' | null = null;
+    let promoteToOfferer = false;
 
     try {
-
       await ensureMediaPermissions();
-
       const connection = createPeerConnection();
-
       if (!connection) throw new Error('Failed to create peer connection.');
 
-
-
       const docRef = doc(database, 'servers', serverId, 'channels', channelId, 'calls', CALL_DOC_ID);
-
       callRef = docRef;
 
-
-
       offerCandidatesRef = collection(docRef, 'offerCandidates');
-
       answerCandidatesRef = collection(docRef, 'answerCandidates');
-
       localCandidatesRef = null;
-
       participantsCollectionRef = collection(docRef, 'participants');
-
       subscribeParticipants();
-
       callDescriptionsRef = collection(docRef, 'descriptions');
-
       offerDescriptionRef = doc(callDescriptionsRef, 'offer');
-
       answerDescriptionRef = doc(callDescriptionsRef, 'answer');
-
       descriptionStorageEnabled = true;
-
       consumedOfferCandidateIds.clear();
-
       consumedAnswerCandidateIds.clear();
-
       remoteIceLogCountOfferer = 0;
-
       remoteIceLogCountAnswerer = 0;
 
-
-
       participantDocRef = doc(participantsCollectionRef, current.uid);
-
       lastPresenceSignature = null;
 
-      subscribeToMyProfile(database, current.uid);
-
-
-
       let existing = await getDoc(docRef);
-
       let existingData = existing.exists() ? (existing.data() as any) : null;
-
       if (existingData) {
-
         const offerLength = existingData?.offer?.length ?? existingData?.offer?.sdp?.length ?? 0;
-
         const answerLength = existingData?.answer?.length ?? existingData?.answer?.sdp?.length ?? 0;
-
-        if (
-
-          offerLength > CALL_DOC_SDP_RESET_THRESHOLD ||
-
-          answerLength > CALL_DOC_SDP_RESET_THRESHOLD
-
-        ) {
-
+        if (offerLength > CALL_DOC_SDP_RESET_THRESHOLD || answerLength > CALL_DOC_SDP_RESET_THRESHOLD) {
           voiceDebug('Existing call doc exceeded size threshold, resetting', {
-
             offerLength,
-
             answerLength
-
           });
-
           try {
-
             await purgeCallArtifacts();
-
             await deleteDoc(docRef);
-
           } catch (err) {
-
             console.warn('Failed to reset oversized call doc', err);
-
             voiceDebug('Failed to reset oversized call doc', err);
-
           }
-
           existing = await getDoc(docRef);
-
           existingData = existing.exists() ? (existing.data() as any) : null;
-
         }
-
       }
-
-
 
       attachDescriptionListeners();
 
-
-
       if (!existing.exists() || !existingData?.offer) {
-
-        isOfferer = true;
-
-        await startAsOfferer(connection, docRef, current, existingData);
-
+        promoteToOfferer = true;
       } else {
-
         isOfferer = false;
-
         processedRenegotiationSignals.clear();
-
         lastOfferRevision = existingData?.offer?.revision ?? 1;
-
         lastAnswerRevision = existingData?.answer?.revision ?? 0;
-
         voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
-
         attachAnswererIceHandlers(connection);
 
         const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
-
         const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
-
-        if (
-
+        const selfAuthored =
           offerUpdatedBy &&
-
           offerUpdatedBy === current.uid &&
+          (!existingData?.answer || answerUpdatedBy === current.uid);
 
-          (!existingData?.answer || answerUpdatedBy === current.uid)
-
-        ) {
-
+        if (selfAuthored) {
           voiceDebug('Existing offer authored by self; resetting call before joining as answerer', {
-
             offerUpdatedBy,
-
             answerUpdatedBy
-
           });
-
           try {
-
             await purgeCallArtifacts();
-
             await deleteDoc(docRef);
-
           } catch (err) {
-
             console.warn('Failed to reset self-authored offer', err);
-
             voiceDebug('Failed to reset self-authored offer', err);
-
           }
-
-          await startAsOfferer(connection, docRef, current, existingData);
-
-          return;
-
+          promoteToOfferer = true;
         }
 
-
-
-        const initialFallbackOffer =
-
-          typeof existingData.offer?.sdp === 'string'
-
-            ? ({
-
-                type: existingData.offer.type ?? 'offer',
-
-                sdp: existingData.offer.sdp
-
-              } as RTCSessionDescriptionInit)
-
-            : null;
-
-        const offerDescription = await ensureOfferDescription(lastOfferRevision, initialFallbackOffer);
-
-        if (!offerDescription?.sdp) {
-
-          voiceDebug('Offer description missing; promoting to offerer role.');
-
-          try {
-
-            await purgeCallArtifacts();
-
-            await deleteDoc(docRef);
-
-          } catch (err) {
-
-            console.warn('Failed to reset call while taking over as offerer', err);
-
-            voiceDebug('Failed to reset call while taking over as offerer', err);
-
-          }
-
-          await startAsOfferer(connection, docRef, current, existingData);
-
-        } else {
-
-          await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
-
-          voiceDebug('Applied existing offer', {
-
-            revision: lastOfferRevision,
-
-            length: offerDescription.sdp?.length ?? 0
-
-          });
-
-
-
-          const answerDescription = await connection.createAnswer();
-
-          await connection.setLocalDescription(answerDescription);
-
-
-
-          const answerRevision = lastAnswerRevision + 1;
-
-          lastAnswerRevision = answerRevision;
-
-          let answerStoredInDescriptions = false;
-
-          if (descriptionStorageEnabled && answerDescriptionRef) {
-
+        if (!promoteToOfferer) {
+          const initialFallbackOffer =
+            typeof existingData.offer?.sdp === 'string'
+              ? ({ type: existingData.offer.type ?? 'offer', sdp: existingData.offer.sdp } as RTCSessionDescriptionInit)
+              : null;
+          const offerDescription = await ensureOfferDescription(lastOfferRevision, initialFallbackOffer);
+          if (!offerDescription?.sdp) {
+            voiceDebug('Offer description missing; promoting to offerer role.');
             try {
-
-              await setDoc(
-
-                answerDescriptionRef,
-
-                {
-
-                  type: answerDescription.type,
-
-                  revision: answerRevision,
-
-                  sdp: answerDescription.sdp,
-
-                  length: answerDescription.sdp?.length ?? 0,
-
-                  updatedAt: serverTimestamp(),
-
-                  updatedBy: current.uid
-
-                },
-
-                { merge: true }
-
-              );
-
-              answerStoredInDescriptions = true;
-
+              await purgeCallArtifacts();
+              await deleteDoc(docRef);
             } catch (err) {
+              console.warn('Failed to reset call while taking over as offerer', err);
+              voiceDebug('Failed to reset call while taking over as offerer', err);
+            }
+            promoteToOfferer = true;
+          } else {
+            await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
+            voiceDebug('Applied existing offer', {
+              revision: lastOfferRevision,
+              length: offerDescription.sdp?.length ?? 0
+            });
 
-              console.warn('Failed to persist initial answer description doc', err);
+            const answerDescription = await connection.createAnswer();
+            await connection.setLocalDescription(answerDescription);
 
-              voiceDebug('Failed to persist initial answer description doc', err);
-
-              if (isPermissionError(err)) {
-
-                disableDescriptionStorage(err);
-
+            const answerRevision = lastAnswerRevision + 1;
+            lastAnswerRevision = answerRevision;
+            if (descriptionStorageEnabled && answerDescriptionRef) {
+              try {
+                await setDoc(
+                  answerDescriptionRef,
+                  {
+                    type: answerDescription.type,
+                    revision: answerRevision,
+                    sdp: answerDescription.sdp,
+                    length: answerDescription.sdp?.length ?? 0,
+                    updatedAt: serverTimestamp(),
+                    updatedBy: current.uid
+                  },
+                  { merge: true }
+                );
+              } catch (err) {
+                console.warn('Failed to persist initial answer description doc', err);
+                voiceDebug('Failed to persist initial answer description doc', err);
+                if (isPermissionError(err)) {
+                  disableDescriptionStorage(err);
+                }
               }
-
             }
 
+            latestAnswerDescription = {
+              revision: answerRevision,
+              type: answerDescription.type,
+              sdp: answerDescription.sdp ?? ''
+            };
+            const answerData: Record<string, unknown> = {
+              type: answerDescription.type,
+              revision: answerRevision,
+              length: answerDescription.sdp?.length ?? 0,
+              updatedAt: serverTimestamp(),
+              updatedBy: current.uid
+            };
+            if (answerDescription.sdp) {
+              answerData.sdp = answerDescription.sdp;
+            }
+            await updateDoc(docRef, {
+              answer: answerData,
+              answeredAt: serverTimestamp(),
+              answeredBy: current.uid
+            });
+            voiceDebug('Published initial answer', { answerRevision });
+            joinRole = 'answerer';
           }
-
-          latestAnswerDescription = {
-
-            revision: answerRevision,
-
-            type: answerDescription.type,
-
-            sdp: answerDescription.sdp ?? ''
-
-          };
-
-          const answerData: Record<string, unknown> = {
-
-            type: answerDescription.type,
-
-            revision: answerRevision,
-
-            length: answerDescription.sdp?.length ?? 0,
-
-            updatedAt: serverTimestamp(),
-
-            updatedBy: current.uid
-
-          };
-
-          if (answerDescription.sdp) {
-
-            answerData.sdp = answerDescription.sdp;
-
-          }
-
-          await updateDoc(docRef, {
-
-            answer: answerData,
-
-            answeredAt: serverTimestamp(),
-
-            answeredBy: current.uid
-
-          });
-
-          voiceDebug('Published initial answer', { answerRevision });
-
-
-
+        }
       }
-    }
 
+      if (promoteToOfferer) {
+        await startAsOfferer(connection, docRef, current, existingData);
+        joinRole = 'offerer';
+      }
+
+      if (!joinRole) {
+        joinRole = isOfferer ? 'offerer' : 'answerer';
+      }
+
+      await updateParticipantPresence({ joinedAt: serverTimestamp(), status: 'active' as const });
+      isJoined = true;
+      statusMessage = 'Waiting for others to join...';
+      voiceDebug('joinChannel ready', { joinRole, isOfferer });
     callUnsub = onSnapshot(docRef, (snapshot) => {
 
       sessionQueue = sessionQueue
@@ -3739,7 +4086,6 @@
 
 
 
-    statusMessage = 'Waiting for others to join...';
   } catch (err) {
     console.error('Failed to join voice call', err);
     voiceDebug('Failed to join voice call', err);
@@ -4301,6 +4647,62 @@
     voiceDebug('Manual diagnostics snapshot requested');
   }
 
+  async function handleDebugPanelCopy(
+    includeLogs = 40,
+    includeEvents = 80,
+    source: string = 'panel-header'
+  ) {
+    if (copyInFlight) return;
+    copyInFlight = true;
+    const startedAt = now();
+    statusMessage = 'Preparing debug bundle…';
+    voiceDebug('Debug copy requested', { includeLogs, includeEvents, source });
+    appendVoiceDebugEvent('video-call', 'handleDebugPanelCopy invoked', {
+      includeLogs,
+      includeEvents,
+      source
+    });
+
+    try {
+      const result = await copyVoiceDebugBundle({ includeLogs, includeEvents });
+      const totalDurationMs = Math.round(now() - startedAt);
+      voiceDebug('Debug copy completed', {
+        source,
+        outcome: result.status,
+        includeLogs: result.includeLogs,
+        includeEvents: result.includeEvents,
+        bundleLength: result.length,
+        lineCount: result.lineCount,
+        logCountCaptured: result.logCountCaptured,
+        durationMs: result.durationMs,
+        totalDurationMs,
+        statusMessage
+      });
+      appendVoiceDebugEvent('video-call', 'handleDebugPanelCopy resolved', {
+        source,
+        outcome: result.status,
+        includeLogs: result.includeLogs,
+        includeEvents: result.includeEvents,
+        bundleLength: result.length,
+        lineCount: result.lineCount,
+        logCountCaptured: result.logCountCaptured,
+        durationMs: result.durationMs,
+        totalDurationMs
+      });
+    } catch (err) {
+      const totalDurationMs = Math.round(now() - startedAt);
+      voiceDebug('Debug copy encountered error', { source, err, totalDurationMs });
+      appendVoiceDebugEvent('video-call', 'handleDebugPanelCopy error', {
+        source,
+        error: err instanceof Error ? err.message : String(err),
+        totalDurationMs
+      });
+      statusMessage = 'Failed to copy debug info. Check console output.';
+    } finally {
+      copyInFlight = false;
+    }
+  }
+
   function handleResetIceStrategy() {
     const wasForced = forceRelayIceTransport || fallbackTurnActivated || usingFallbackTurnServers;
     forceRelayIceTransport = false;
@@ -4704,6 +5106,15 @@
             <span>Call diagnostics</span>
           </div>
           <div class="call-debug-panel__header-actions">
+            <button
+              type="button"
+              class="call-debug-panel__copy"
+              on:click={() => handleDebugPanelCopy(150, 220, 'panel-header')}
+              disabled={copyInFlight}
+            >
+              <i class={`bx ${copyInFlight ? 'bx-loader bx-spin' : 'bx-clipboard'}`}></i>
+              <span>{copyInFlight ? 'Copying…' : 'Copy'}</span>
+            </button>
             <button type="button" class="call-debug-panel__refresh" on:click={handleDebugPanelRefresh}>
               <i class="bx bx-refresh"></i>
               <span>Refresh</span>
@@ -4721,67 +5132,42 @@
         <div class="call-debug-panel__scroll">
           <div class="call-debug-panel__grid">
             <div class="call-debug-panel__section call-debug-panel__section--stats">
-              <h2 class="call-debug-panel__title">Quick Stats</h2>
-              <div class="quick-stats">
-                <div>
-                  <span class="label">Signaling</span>
-                  <span class="value">{signalingState}</span>
-                </div>
-                <div>
-                  <span class="label">Connection</span>
-                  <span class="value">{connectionState}</span>
-                </div>
-                <div>
-                  <span class="label">ICE Connection</span>
-                  <span class="value">{iceConnectionState}</span>
-                </div>
-                <div>
-                  <span class="label">ICE Gathering</span>
-                  <span class="value">{iceGatheringState}</span>
-                </div>
-                <div>
-                  <span class="label">Local ICE</span>
-                  <span class="value">{publishedCandidateCount}</span>
-                </div>
-                <div>
-                  <span class="label">Remote ICE</span>
-                  <span class="value">{appliedCandidateCount}</span>
-                </div>
-                <div>
-                  <span class="label">ICE Policy</span>
-                  <span class="value">
-                    {hasTurnServers ? (forceRelayIceTransport ? 'relay-only' : 'all') : 'stun-only'}
-                  </span>
-                </div>
-                <div>
-                  <span class="label">TURN</span>
-                  <span class="value">
-                    {hasTurnServers
-                      ? usingFallbackTurnServers
-                        ? 'fallback (openrelay)'
-                        : 'configured'
-                      : allowTurnFallback
-                        ? 'none'
-                        : 'none (disabled)'}
-                  </span>
-                </div>
-                <div>
-                  <span class="label">Role</span>
-                  <span class="value">{isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'}</span>
-                </div>
-                <div>
-                  <span class="label">Call Doc</span>
-                  <span class="value">{callRef ? callRef.path : 'none'}</span>
-                </div>
-                <div>
-                  <span class="label">Errors</span>
-                  <span class="value">{voiceErrorCount}</span>
-                </div>
-                <div>
-                  <span class="label">Warnings</span>
-                  <span class="value">{voiceWarnCount}</span>
+              <div class="quick-stats__heading">
+                <h2 class="call-debug-panel__title">Quick Stats</h2>
+                <div class="quick-stats__actions">
+                  <div class="quick-stats__summary" title={quickStatsSummaryTooltip}>{quickStatsSummary}</div>
+                  <button
+                    type="button"
+                    class="quick-stats__toggle"
+                    on:click={() => toggleQuickStats()}
+                    aria-expanded={quickStatsExpanded}
+                    title={quickStatsExpanded ? 'Hide detailed stats' : 'Show detailed stats'}
+                  >
+                    <i class={`bx ${quickStatsExpanded ? 'bx-chevron-up' : 'bx-chevron-down'}`}></i>
+                    <span>{quickStatsExpanded ? 'Hide details' : 'Show details'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="quick-stats__copy"
+                    on:click={() => handleDebugPanelCopy(150, 220, 'quick-stats')}
+                    title="Copy expanded diagnostics bundle"
+                    disabled={copyInFlight}
+                  >
+                    <i class={`bx ${copyInFlight ? 'bx-loader bx-spin' : 'bx-clipboard'}`}></i>
+                    <span>{copyInFlight ? 'Copying…' : 'Copy logs'}</span>
+                  </button>
                 </div>
               </div>
+              {#if quickStatsExpanded}
+                <div class="quick-stats__grid">
+                  {#each quickStatsItems as stat (stat.key)}
+                    <div class="quick-stats__item">
+                      <span class="quick-stats__key">{stat.label}</span>
+                      <span class="quick-stats__value" title={stat.tooltip ?? stat.value}>{stat.value}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
             <div class="call-debug-panel__section call-debug-panel__section--participants">
               <h2 class="call-debug-panel__title">Participants</h2>
@@ -4943,10 +5329,11 @@
                 <button
                   type="button"
                   class="call-debug-action"
-                  on:click={() => copyVoiceDebugBundle({ includeLogs: 25 })}
+                  on:click={() => handleDebugPanelCopy(160, 240, 'tools-section')}
+                  disabled={copyInFlight}
                 >
-                  <i class="bx bx-copy"></i>
-                  <span>Copy debug info</span>
+                  <i class={`bx ${copyInFlight ? 'bx-loader bx-spin' : 'bx-copy'}`}></i>
+                  <span>{copyInFlight ? 'Copying…' : 'Copy debug info'}</span>
                 </button>
                 <button
                   type="button"
@@ -5313,7 +5700,7 @@
     position: fixed;
     right: clamp(1rem, 3vw, 2rem);
     bottom: clamp(1rem, 3vw, 2rem);
-    width: min(440px, calc(100vw - 2.5rem));
+    width: min(clamp(320px, 34vw, 520px), calc(100vw - 2rem));
     transform: translateY(calc(100% + 2rem));
     opacity: 0;
     pointer-events: none;
@@ -5330,7 +5717,7 @@
   .call-debug-panel {
     display: flex;
     flex-direction: column;
-    max-height: min(80vh, 720px);
+    max-height: clamp(340px, 70vh, 660px);
     background: rgba(10, 12, 20, 0.92);
     backdrop-filter: blur(14px);
     border-radius: 1rem;
@@ -5338,7 +5725,7 @@
     box-shadow:
       0 18px 48px rgba(0, 0, 0, 0.45),
       0 0 0 1px rgba(255, 255, 255, 0.04) inset;
-    padding: 1rem 1.1rem 1.15rem;
+    padding: 0.9rem 1rem 1.05rem;
     color: rgba(239, 243, 255, 0.95);
   }
 
@@ -5350,7 +5737,21 @@
     }
 
     .call-debug-panel {
-      max-height: min(80vh, 640px);
+      max-height: clamp(300px, 68vh, 560px);
+      padding: 0.85rem 0.9rem 1rem;
+    }
+  }
+
+  @media (max-width: 540px) {
+    .call-debug-drawer {
+      right: clamp(0.65rem, 4vw, 1rem);
+      left: clamp(0.65rem, 4vw, 1rem);
+      bottom: clamp(0.65rem, 4vw, 1rem);
+      width: auto;
+    }
+
+    .call-debug-panel {
+      border-radius: 0.85rem;
     }
   }
 
@@ -5379,8 +5780,11 @@
     display: inline-flex;
     align-items: center;
     gap: 0.45rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
+  .call-debug-panel__copy,
   .call-debug-panel__refresh {
     display: inline-flex;
     align-items: center;
@@ -5396,8 +5800,31 @@
     transition: background 150ms ease, border-color 150ms ease;
   }
 
+  .call-debug-panel__copy {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 85%, white);
+  }
+
   .call-debug-panel__refresh i {
     font-size: 1rem;
+  }
+
+  .call-debug-panel__copy i {
+    font-size: 1rem;
+  }
+
+  .call-debug-panel__copy:hover,
+  .call-debug-panel__copy:focus-visible {
+    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  }
+
+  .call-debug-panel__copy:disabled,
+  .quick-stats__copy:disabled,
+  .call-debug-action:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .call-debug-panel__refresh:hover,
@@ -5406,6 +5833,7 @@
     border-color: rgba(255, 255, 255, 0.28);
   }
 
+  .call-debug-panel__copy:focus-visible,
   .call-debug-panel__refresh:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
@@ -5444,6 +5872,7 @@
     overflow-y: auto;
     margin-top: 0.9rem;
     padding-right: 0.2rem;
+    max-height: calc(100% - 3.2rem);
   }
 
   .call-debug-panel__grid {
@@ -5452,6 +5881,18 @@
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     grid-auto-rows: minmax(0, 1fr);
     align-items: stretch;
+  }
+
+  @media (max-width: 900px) {
+    .call-debug-panel__grid {
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .call-debug-panel__grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .call-debug-panel__section {
@@ -5469,27 +5910,169 @@
     margin: 0;
   }
 
-  .quick-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 0.6rem;
-    font-size: 0.85rem;
+  .call-debug-panel__section--stats {
+    align-self: flex-start;
+    gap: 0.7rem;
+    width: min(100%, 310px);
   }
 
-  .quick-stats .label {
-    display: block;
-    font-size: 0.7rem;
+  @media (min-width: 960px) {
+    .call-debug-panel__section--stats {
+      width: min(280px, 34vw);
+    }
+  }
+
+  .quick-stats__heading {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .quick-stats__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .quick-stats__summary {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: rgba(255, 255, 255, 0.58);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .quick-stats__toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.68rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: rgba(255, 255, 255, 0.55);
+    transition: background 150ms ease, border-color 150ms ease;
   }
 
-  .quick-stats .value {
+  .quick-stats__toggle:hover,
+  .quick-stats__toggle:focus-visible {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+
+  .quick-stats__toggle:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  }
+
+  .quick-stats__toggle i {
+    font-size: 0.9rem;
+  }
+
+  .quick-stats__copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.4rem 0.8rem;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 85%, white);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    transition: background 150ms ease, border-color 150ms ease;
+  }
+
+  .quick-stats__copy i {
+    font-size: 1rem;
+  }
+
+  .quick-stats__copy:hover,
+  .quick-stats__copy:focus-visible {
+    background: color-mix(in srgb, var(--color-accent) 32%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 48%, transparent);
+  }
+
+  .quick-stats__copy:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .quick-stats__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .quick-stats__item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    padding: 0.5rem 0.55rem;
+    border-radius: 0.6rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(15, 18, 30, 0.45);
+    min-width: 0;
+  }
+
+  .quick-stats__key {
+    font-size: 0.63rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.58);
+  }
+
+  .quick-stats__value {
     font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
       'Courier New', monospace;
-    font-size: 0.8rem;
-    word-break: break-word;
+    font-size: 0.76rem;
     color: rgba(255, 255, 255, 0.92);
+    word-break: break-word;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @media (max-width: 620px) {
+    .quick-stats__grid {
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    }
+  }
+
+  @media (max-width: 540px) {
+    .quick-stats__actions {
+      gap: 0.3rem;
+    }
+
+    .quick-stats__summary {
+      order: 1;
+      width: 100%;
+    }
+
+    .quick-stats__toggle {
+      order: 2;
+    }
+
+    .quick-stats__copy {
+      order: 3;
+      width: 100%;
+      justify-content: center;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .quick-stats__grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .call-debug-panel__section--participants {

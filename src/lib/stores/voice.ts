@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { appendVoiceDebugEvent } from '$lib/utils/voiceDebugContext';
 
 export type VoiceSession = {
   serverId: string;
@@ -15,16 +16,35 @@ function createVoiceStore() {
     subscribe,
     join(serverId: string, channelId: string, channelName: string, serverName?: string | null) {
       set({ serverId, channelId, channelName, serverName, visible: true });
+      appendVoiceDebugEvent('voice-store', 'join', {
+        serverId,
+        channelId,
+        channelName,
+        serverName: serverName ?? null
+      });
     },
     leave() {
       set(null);
+      appendVoiceDebugEvent('voice-store', 'leave', {});
     },
     setVisible(visible: boolean) {
-      update((session) => (session ? { ...session, visible } : session));
+      update((session) => {
+        if (!session) return session;
+        appendVoiceDebugEvent('voice-store', 'setVisible', {
+          serverId: session.serverId,
+          channelId: session.channelId,
+          visible
+        });
+        return { ...session, visible };
+      });
     },
     setServerName(serverId: string, serverName: string | null) {
       update((session) => {
         if (!session || session.serverId !== serverId) return session;
+        appendVoiceDebugEvent('voice-store', 'setServerName', {
+          serverId,
+          serverName
+        });
         return { ...session, serverName };
       });
     }

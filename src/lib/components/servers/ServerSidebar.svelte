@@ -10,7 +10,6 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { subscribeUnreadForServer, type UnreadMap } from '$lib/firebase/unread';
-  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   import {
     collection,
@@ -71,6 +70,44 @@
     activeVoice = value;
   });
 
+  $: if (browser) {
+    setVoiceDebugSection('serverSidebar.channels', {
+      serverId: computedServerId ?? null,
+      totalChannels: channels.length,
+      voiceChannels: channels
+        .filter((c) => c.type === 'voice')
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          position: typeof c.position === 'number' ? c.position : null,
+          isPrivate: !!c.isPrivate
+        })),
+      reorderMode,
+      activeChannelId
+    });
+  }
+
+  $: if (browser) {
+    setVoiceDebugSection('serverSidebar.voicePresence', {
+      serverId: computedServerId ?? null,
+      watcherCount: voiceUnsubs.size,
+      presence: summarizeVoicePresence(voicePresence)
+    });
+  }
+
+  $: if (browser) {
+    setVoiceDebugSection('serverSidebar.voiceSession', {
+      activeVoice: activeVoice
+        ? {
+            serverId: activeVoice.serverId,
+            channelId: activeVoice.channelId,
+            channelName: activeVoice.channelName
+          }
+        : null,
+      computedServerId
+    });
+  }
+
   let unsubChannels: Unsubscribe | null = null;
   let unsubServerMeta: Unsubscribe | null = null;
   let unsubMyMember: Unsubscribe | null = null;
@@ -117,9 +154,32 @@
   }
 
   function resetVoiceWatchers() {
+    if (voiceUnsubs.size) {
+      appendVoiceDebugEvent('sidebar', 'resetVoiceWatchers', {
+        serverId: computedServerId ?? null,
+        watcherCount: voiceUnsubs.size
+      });
+    }
     voiceUnsubs.forEach((unsub) => unsub());
     voiceUnsubs.clear();
     voicePresence = {};
+  }
+
+  function summarizeVoicePresence(
+    state: Record<string, VoiceParticipant[]>
+  ): Record<string, unknown> {
+    const summary: Record<string, unknown> = {};
+    Object.entries(state).forEach(([channel, list]) => {
+      summary[channel] = {
+        count: list.length,
+        participants: list.slice(0, 8).map((member) => ({
+          uid: member.uid,
+          hasAudio: member.hasAudio ?? true,
+          hasVideo: member.hasVideo ?? false
+        }))
+      };
+    });
+    return summary;
   }
 
   function syncVoicePresenceWatchers(list: Chan[]) {
@@ -128,10 +188,24 @@
       return;
     }
 
-    const voiceIds = new Set(list.filter((c) => c.type === 'voice').map((c) => c.id));
+    const voiceChannels = list.filter((c) => c.type === 'voice');
+    const voiceIds = new Set(voiceChannels.map((c) => c.id));
+
+    if (browser) {
+      appendVoiceDebugEvent('sidebar', 'syncVoicePresenceWatchers', {
+        serverId: computedServerId ?? null,
+        voiceChannelCount: voiceChannels.length
+      });
+    }
 
     voiceUnsubs.forEach((unsub, channelId) => {
       if (!voiceIds.has(channelId)) {
+        if (browser) {
+          appendVoiceDebugEvent('sidebar', 'voicePresenceWatcherRemoved', {
+            serverId: computedServerId ?? null,
+            channelId
+          });
+        }
         unsub();
         voiceUnsubs.delete(channelId);
         voicePresence = { ...voicePresence, [channelId]: [] };
@@ -140,6 +214,14 @@
 
     list.forEach((chan) => {
       if (chan.type !== 'voice' || voiceUnsubs.has(chan.id)) return;
+
+      if (browser) {
+        appendVoiceDebugEvent('sidebar', 'voicePresenceWatcherAdded', {
+          serverId: computedServerId ?? null,
+          channelId: chan.id,
+          channelName: chan.name ?? null
+        });
+      }
 
       const db = getDb();
       const callDoc = doc(db, 'servers', computedServerId, 'channels', chan.id, 'calls', CALL_DOC_ID);
@@ -163,9 +245,22 @@
             .filter((p) => p.status !== 'left');
 
           voicePresence = { ...voicePresence, [chan.id]: participants };
+          if (browser) {
+            appendVoiceDebugEvent('sidebar', 'voicePresenceUpdate', {
+              serverId: computedServerId ?? null,
+              channelId: chan.id,
+              count: participants.length
+            });
+          }
         },
         () => {
           voicePresence = { ...voicePresence, [chan.id]: [] };
+          if (browser) {
+            appendVoiceDebugEvent('sidebar', 'voicePresenceWatcherError', {
+              serverId: computedServerId ?? null,
+              channelId: chan.id
+            });
+          }
         }
       );
 
@@ -481,11 +576,22 @@ $: if (reorderMode === 'default') {
     resetVoiceWatchers();
     unsubscribeVoiceSession();
     stopNotif?.();
+    removeVoiceDebugSection('serverSidebar.channels');
+    removeVoiceDebugSection('serverSidebar.voicePresence');
+    removeVoiceDebugSection('serverSidebar.voiceSession');
   });
 
   function pick(id: string) {
     if (reorderMode !== 'none') return;
     if (!id) return;
+    const chan = channelById(id);
+    if (chan?.type === 'voice' && browser) {
+      appendVoiceDebugEvent('sidebar', 'pick voice channel', {
+        serverId: computedServerId ?? null,
+        channelId: id,
+        channelName: chan.name ?? null
+      });
+    }
     onPickChannel(id);
     dispatch('pick', id);
     // Optimistically clear unread badge for picked channel
