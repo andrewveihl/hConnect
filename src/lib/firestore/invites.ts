@@ -24,6 +24,7 @@ export type ServerInvite = {
   id?: string;
   toUid: string;
   fromUid: string;
+  fromDisplayName?: string | null;
   serverId: string;
   serverName?: string | null;
   serverIcon?: string | null;
@@ -51,6 +52,7 @@ function inviteDoc(serverId: string, toUid: string) {
 export async function sendServerInvite(params: {
   toUid: string;
   fromUid: string;
+  fromDisplayName?: string | null;
   serverId: string;
   serverName?: string | null;
   serverIcon?: string | null;
@@ -60,6 +62,7 @@ export async function sendServerInvite(params: {
   const {
     toUid,
     fromUid,
+    fromDisplayName = null,
     serverId,
     serverName = null,
     serverIcon = null,
@@ -70,6 +73,7 @@ export async function sendServerInvite(params: {
   const payload = {
     toUid,
     fromUid,
+    fromDisplayName,
     serverId,
     serverName,
     serverIcon,

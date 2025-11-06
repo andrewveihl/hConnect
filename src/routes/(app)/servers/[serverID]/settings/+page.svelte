@@ -525,9 +525,14 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     inviteError = null;
     inviteLoading = { ...inviteLoading, [toUid]: true };
     try {
+      const fromDisplayName = (() => {
+        const raw = $user?.displayName ?? $user?.email ?? null;
+        return typeof raw === 'string' && raw.trim().length ? raw.trim() : null;
+      })();
       const res = await sendServerInvite({
         toUid,
         fromUid,
+        fromDisplayName,
         serverId: serverId!,
         serverName: serverName || serverId!,
         serverIcon,

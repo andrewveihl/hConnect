@@ -276,7 +276,7 @@ let avatarError: string | null = null;
 <div class="grid grid-cols-[72px_1fr] min-h-dvh app-bg text-primary">
   <LeftPane activeServerId={null} />
 
-  <div class="settings-shell panel overflow-hidden">
+  <div class="settings-shell panel">
     <header class="settings-bar">
       <div>
         <h1 class="settings-title">Account settings</h1>
@@ -292,7 +292,7 @@ let avatarError: string | null = null;
         <div class="settings-placeholder">Sign in to manage your settings.</div>
       {:else}
         <div class="settings-grid">
-          <section class="settings-card settings-card--accent settings-card--span">
+          <section class="settings-card settings-card--accent settings-card--profile">
             <header>
               <h2>Profile</h2>
               <p>These details appear to people you add or invite.</p>
@@ -401,7 +401,7 @@ let avatarError: string | null = null;
             </footer>
           </section>
 
-          <section class="settings-card">
+          <section class="settings-card settings-card--appearance">
             <header>
               <h2>Appearance</h2>
               <p>Pick the theme that feels right. Changes apply instantly.</p>
@@ -420,10 +420,14 @@ let avatarError: string | null = null;
               {/each}
             </div>
           </section>
-        </div>
 
-        <div class="settings-invite">
-          <InvitePanel {serverId} />
+          <section class="settings-card settings-card--invite">
+            <header>
+              <h2>Invites</h2>
+              <p>Review new invites and share access when you need to loop others in.</p>
+            </header>
+            <InvitePanel {serverId} embedded />
+          </section>
         </div>
       {/if}
     </main>
@@ -436,7 +440,12 @@ let avatarError: string | null = null;
     flex-direction: column;
     gap: 1.5rem;
     padding: calc(env(safe-area-inset-top, 0px) + 1.75rem) 2rem 1.75rem;
-    min-height: 100dvh;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scroll-padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
+    -webkit-overflow-scrolling: touch;
   }
 
   .settings-bar {
@@ -461,11 +470,9 @@ let avatarError: string | null = null;
   .settings-content {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
     overflow-x: hidden;
+    overflow-y: visible;
     padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
-    scroll-padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
-    -webkit-overflow-scrolling: touch;
   }
 
   .settings-placeholder {
@@ -481,16 +488,44 @@ let avatarError: string | null = null;
   .settings-grid {
     display: grid;
     gap: 1.25rem;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'profile'
+      'notifications'
+      'appearance'
+      'invite';
+  }
+
+  .settings-card--profile {
+    grid-area: profile;
+  }
+
+  .settings-card--notifications {
+    grid-area: notifications;
+  }
+
+  .settings-card--appearance {
+    grid-area: appearance;
+  }
+
+  .settings-card--invite {
+    grid-area: invite;
   }
 
   @media (min-width: 1024px) {
     .settings-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+      grid-template-areas:
+        'profile profile'
+        'notifications invite'
+        'appearance invite';
       align-items: start;
     }
+  }
 
-    .settings-grid > :first-child {
-      grid-column: span 2;
+  @media (min-width: 1280px) {
+    .settings-grid {
+      grid-template-columns: minmax(0, 1.65fr) minmax(0, 1.05fr);
     }
   }
 
@@ -542,10 +577,6 @@ let avatarError: string | null = null;
 
   .settings-avatar {
     display: grid;
-  }
-
-  .settings-card--span {
-    grid-column: 1 / -1;
   }
 
   @media (max-width: 640px) {
@@ -756,10 +787,6 @@ let avatarError: string | null = null;
     background: linear-gradient(135deg, rgba(32, 36, 44, 0.95), rgba(12, 15, 22, 0.85));
   }
 
-  .settings-invite {
-    margin-top: 1.5rem;
-  }
-
   @media (max-width: 1024px) {
     .settings-shell {
       padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) 1.5rem 1.5rem;
@@ -767,10 +794,15 @@ let avatarError: string | null = null;
 
     .settings-grid {
       grid-template-columns: minmax(0, 1fr);
+      grid-template-areas:
+        'profile'
+        'notifications'
+        'appearance'
+        'invite';
     }
 
-    .settings-grid > :first-child {
-      grid-column: 1;
+    .settings-content {
+      max-height: none;
     }
   }
 
