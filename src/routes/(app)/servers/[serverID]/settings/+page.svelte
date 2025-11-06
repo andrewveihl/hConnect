@@ -4,20 +4,25 @@
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
+  import { createChannel } from '$lib/firestore/channels';
   import { sendServerInvite } from '$lib/firestore/invites';
 
   import {
     collection, doc, getDoc, onSnapshot, getDocs,
     query, orderBy, setDoc, updateDoc, deleteDoc,
-    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove
+    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch
   } from 'firebase/firestore';
 
 const ICON_MAX_BYTES = 8 * 1024 * 1024;
 const FIRESTORE_IMAGE_LIMIT = 900 * 1024;
 const ICON_MAX_DIMENSION = 512;
+const DEFAULT_ACCENT = '#33c8bf';
+const DEFAULT_SIDEBAR = '#13171d';
+const DEFAULT_MENTION = '#f97316';
 
 // routing
   let serverId: string | null = null;
+  let serverOwnerId: string | null = null;
 
   // access
   let allowed = false;
@@ -29,6 +34,29 @@ const ICON_MAX_DIMENSION = 512;
   let serverIcon = '';
   let serverIconInput: HTMLInputElement | null = null;
   let serverIconError: string | null = null;
+  type ChatDensity = 'cozy' | 'compact';
+  type BubbleShape = 'rounded' | 'pill' | 'minimal';
+  let accentColor = DEFAULT_ACCENT;
+  let sidebarColor = DEFAULT_SIDEBAR;
+  let mentionColor = DEFAULT_MENTION;
+  let chatDensity: ChatDensity = 'cozy';
+  let chatBubbleShape: BubbleShape = 'rounded';
+  let chatHighlightMentions = true;
+  let chatAllowThreads = true;
+  let chatAllowReactions = true;
+  let chatShowJoinMessages = true;
+  let chatSlowModeSeconds = 0;
+  let inviteAutomationEnabled = false;
+  let inviteDomains: string[] = [];
+  let inviteDomainInput = '';
+  let inviteDefaultRoleId: string | null = null;
+  let inviteDefaultRoleSelection = '';
+  let inviteAutomationStatus: string | null = null;
+  let inviteAutomationError: string | null = null;
+  let inviteAutomationBusy = false;
+  let deleteConfirm = '';
+  let deleteBusy = false;
+  let deleteError: string | null = null;
 
   // tabs
   type Tab = 'overview' | 'members' | 'channels' | 'roles' | 'danger';
@@ -45,11 +73,39 @@ const ICON_MAX_DIMENSION = 512;
   let members: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string; roleIds?: string[] }> = [];
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = [];
   let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
-type Role = { id: string; name: string; color?: string | null; position?: number; permissions?: Record<string, boolean> };
+  let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
+  let newChannelName = '';
+  let newChannelType: 'text' | 'voice' = 'text';
+  let newChannelPrivate = false;
+  let channelCreateBusy = false;
+  let channelError: string | null = null;
+  type RolePermissionKey =
+    | 'manageServer'
+    | 'manageRoles'
+    | 'manageChannels'
+    | 'kickMembers'
+    | 'banMembers'
+    | 'reorderChannels'
+    | 'viewChannels'
+    | 'sendMessages'
+    | 'manageMessages'
+    | 'connectVoice'
+    | 'speakVoice';
+  type Role = {
+    id: string;
+    name: string;
+    color?: string | null;
+    position?: number;
+    permissions?: Partial<Record<RolePermissionKey, boolean>>;
+  };
   let roles: Role[] = [];
+  let sortedRoles: Role[] = [];
   let assignableRoles: Role[] = [];
   let newRoleName = '';
   let newRoleColor = '#5865f2';
+  let roleUpdateBusy: Record<string, boolean> = {};
+  let roleError: string | null = null;
+  let roleCollapsed: Record<string, boolean> = {};
 
   // profiles (people who have logged in)
   type Profile = {
@@ -59,10 +115,17 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     email?: string;
     photoURL?: string;
   };
-  let allProfiles: Profile[] = [];  // weÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ll filter this as you type
+  let allProfiles: Profile[] = [];
+  let memberSearch = '';
+  let memberRoleFilter: 'all' | 'owner' | 'admin' | 'custom' = 'all';
+  let filteredMembers: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string; roleIds?: string[] }> = [];
   let pendingInvitesByUid: Record<string, boolean> = {};
   let inviteLoading: Record<string, boolean> = {};
   let inviteError: string | null = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartAt = 0;
+  let touchStartTarget: EventTarget | null = null;
 
   function ownerFrom(data: any) {
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
@@ -76,7 +139,33 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     const data = snap.data() as any;
     serverName = data?.name ?? 'Server';
     serverIcon = data?.icon ?? null;
+    const appearance = data?.settings?.appearance ?? {};
+    accentColor = typeof appearance.accentColor === 'string' ? appearance.accentColor : DEFAULT_ACCENT;
+    sidebarColor = typeof appearance.sidebarColor === 'string' ? appearance.sidebarColor : DEFAULT_SIDEBAR;
+    mentionColor = typeof appearance.mentionColor === 'string' ? appearance.mentionColor : DEFAULT_MENTION;
+    const chatSettings = data?.settings?.chat ?? {};
+    chatBubbleShape =
+      chatSettings?.bubbleShape === 'pill' || chatSettings?.bubbleShape === 'minimal' ? chatSettings.bubbleShape : 'rounded';
+    chatDensity = chatSettings?.density === 'compact' ? 'compact' : 'cozy';
+    chatHighlightMentions = chatSettings?.highlightMentions ?? true;
+    chatAllowThreads = chatSettings?.allowThreads ?? true;
+    chatAllowReactions = chatSettings?.allowReactions ?? true;
+    chatShowJoinMessages = chatSettings?.showJoinMessages ?? true;
+    chatSlowModeSeconds = Number.isFinite(chatSettings?.slowModeSeconds) ? chatSettings.slowModeSeconds : 0;
+    const automation = data?.settings?.inviteAutomation ?? {};
+    inviteAutomationEnabled = automation?.enabled ?? false;
+    inviteDomains = Array.isArray(automation?.domains)
+      ? Array.from(
+          new Set(
+            automation.domains
+              .map((d: unknown) => (typeof d === 'string' ? d.trim().toLowerCase() : ''))
+              .filter((d: string) => d.length > 0)
+          )
+        )
+      : [];
+    inviteDefaultRoleId = typeof automation?.defaultRoleId === 'string' ? automation.defaultRoleId : null;
     const owner = ownerFrom(data);
+    serverOwnerId = owner ?? null;
 
     isOwner = !!($user?.uid && owner && $user.uid === owner);
 
@@ -122,16 +211,136 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
   function watchRoles() {
     const db = getDb();
-    return onSnapshot(collection(db, 'servers', serverId!, 'roles'), (snap) => {
+    const qRef = query(collection(db, 'servers', serverId!, 'roles'), orderBy('position'));
+    return onSnapshot(qRef, (snap) => {
       roles = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Role));
     });
   }
 
-  $: assignableRoles = roles.filter((role) => {
+  $: sortedChannels = [...channels].sort((a, b) => {
+    const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+    const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+    return ap - bp;
+  });
+  $: sortedRoles = [...roles].sort((a, b) => {
+    const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+    const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+    return ap - bp;
+  });
+  $: assignableRoles = sortedRoles.filter((role) => {
     const lower = (role.name ?? '').toLowerCase();
     return lower !== 'everyone' && lower !== 'admin';
   });
+  $: {
+    const ids = new Set(sortedRoles.map((r) => r.id));
+    const next: Record<string, boolean> = { ...roleCollapsed };
+    let changed = false;
+    for (const role of sortedRoles) {
+      if (!(role.id in next)) {
+        next[role.id] = true;
+        changed = true;
+      }
+    }
+    for (const key in next) {
+      if (!ids.has(key)) {
+        delete next[key];
+        changed = true;
+      }
+    }
+    if (changed) roleCollapsed = next;
+  }
+  $: filteredMembers = members.filter((member) => {
+    const term = memberSearch.trim().toLowerCase();
+    const matchesTerm =
+      !term ||
+      (member.displayName ?? '').toLowerCase().includes(term) ||
+      member.uid.toLowerCase().includes(term) ||
+      (Array.isArray(member.roleIds) &&
+        member.roleIds.some((roleId) => {
+          const target = sortedRoles.find((r) => r.id === roleId);
+          return target?.name?.toLowerCase().includes(term);
+        }));
+
+    if (!matchesTerm) return false;
+
+    if (memberRoleFilter === 'owner') {
+      return serverOwnerId ? member.uid === serverOwnerId : false;
+    }
+    if (memberRoleFilter === 'admin') {
+      return (member.role ?? '').toLowerCase() === 'admin';
+    }
+    if (memberRoleFilter === 'custom') {
+      return Array.isArray(member.roleIds) && member.roleIds.length > 0;
+    }
+    return true;
+  });
   $: canManageChannels = isOwner || isAdmin;
+  $: if (deleteError && deleteConfirm.trim().toLowerCase() === 'confirm') {
+    deleteError = null;
+  }
+  $: {
+    const nextDefaultRole = inviteDefaultRoleId ?? '';
+    if (inviteDefaultRoleSelection !== nextDefaultRole) {
+      inviteDefaultRoleSelection = nextDefaultRole;
+    }
+  }
+  const rolePermissionOptions: Array<{ key: RolePermissionKey; label: string; description: string }> = [
+    {
+      key: 'manageServer',
+      label: 'Manage server',
+      description: 'Adjust server profile, appearance, and automation.'
+    },
+    {
+      key: 'manageRoles',
+      label: 'Manage roles',
+      description: 'Create, edit, or delete roles and permissions.'
+    },
+    {
+      key: 'manageChannels',
+      label: 'Manage channels',
+      description: 'Create, edit, archive, or delete channels.'
+    },
+    {
+      key: 'reorderChannels',
+      label: 'Reorder channels',
+      description: 'Move channels up or down within sections.'
+    },
+    {
+      key: 'manageMessages',
+      label: 'Manage messages',
+      description: 'Delete, pin, or moderate chat content.'
+    },
+    {
+      key: 'sendMessages',
+      label: 'Send messages',
+      description: 'Post text messages and reactions.'
+    },
+    {
+      key: 'viewChannels',
+      label: 'View channels',
+      description: 'Access text and voice channels.'
+    },
+    {
+      key: 'kickMembers',
+      label: 'Kick members',
+      description: 'Remove members without banning.'
+    },
+    {
+      key: 'banMembers',
+      label: 'Ban members',
+      description: 'Permanently ban members from the server.'
+    },
+    {
+      key: 'connectVoice',
+      label: 'Connect to voice',
+      description: 'Join voice channels.'
+    },
+    {
+      key: 'speakVoice',
+      label: 'Speak in voice',
+      description: 'Talk in voice channels once connected.'
+    }
+  ];
 
   // NEW: watch first N profiles ordered by nameLower (users who have logged in)
   function watchProfiles() {
@@ -191,14 +400,102 @@ type Role = { id: string; name: string; color?: string | null; position?: number
   async function saveOverview() {
     const db = getDb();
     try {
+      const slowMode = Math.max(0, Math.round(Number.isFinite(chatSlowModeSeconds) ? Number(chatSlowModeSeconds) : 0));
+      chatSlowModeSeconds = slowMode;
       await updateDoc(doc(db, 'servers', serverId!), {
         name: serverName,
-        icon: serverIcon && serverIcon.trim().length ? serverIcon : null
+        icon: serverIcon && serverIcon.trim().length ? serverIcon : null,
+        'settings.appearance': {
+          accentColor,
+          sidebarColor,
+          mentionColor,
+          bubbleShape: chatBubbleShape
+        },
+        'settings.chat': {
+          density: chatDensity,
+          highlightMentions: chatHighlightMentions,
+          allowThreads: chatAllowThreads,
+          allowReactions: chatAllowReactions,
+          showJoinMessages: chatShowJoinMessages,
+          slowModeSeconds: slowMode
+        },
+        'settings.inviteAutomation': {
+          enabled: inviteAutomationEnabled,
+          domains: inviteDomains,
+          defaultRoleId: inviteDefaultRoleId
+        }
       });
-      alert('Saved.');
+      inviteAutomationStatus = 'Settings saved.';
+      inviteAutomationError = null;
     } catch (e) {
       console.error(e);
-      alert('Failed to save.');
+      inviteAutomationError = 'Failed to save settings.';
+    }
+  }
+
+  function normalizeDomain(value: string) {
+    return value.trim().toLowerCase().replace(/^\@+/, '');
+  }
+
+  function addInviteDomain() {
+    const cleaned = normalizeDomain(inviteDomainInput);
+    inviteDomainInput = '';
+    if (!cleaned) {
+      inviteAutomationError = 'Enter a domain to whitelist.';
+      return;
+    }
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(cleaned)) {
+      inviteAutomationError = 'That does not look like a valid domain.';
+      return;
+    }
+    if (inviteDomains.includes(cleaned)) {
+      inviteAutomationError = 'Domain already whitelisted.';
+      return;
+    }
+    inviteDomains = [...inviteDomains, cleaned];
+    inviteAutomationError = null;
+  }
+
+  function removeInviteDomain(domain: string) {
+    inviteDomains = inviteDomains.filter((d) => d !== domain);
+  }
+
+  async function sendAutoInvitesForDomains() {
+    if (!(isOwner || isAdmin) || !inviteAutomationEnabled) return;
+    const domainSet = new Set(inviteDomains);
+    if (!domainSet.size) {
+      inviteAutomationError = 'Add at least one domain before syncing.';
+      return;
+    }
+    const existingMembers = new Set(members.map((m) => m.uid));
+    const candidates = allProfiles.filter((profile) => {
+      if (!profile.email) return false;
+      const [, domainRaw] = profile.email.split('@');
+      if (!domainRaw) return false;
+      const domain = domainRaw.toLowerCase();
+      if (!domainSet.has(domain)) return false;
+      if (existingMembers.has(profile.uid)) return false;
+      return true;
+    });
+    if (candidates.length === 0) {
+      inviteAutomationStatus = 'Everyone from those domains is already a member or invited.';
+      inviteAutomationError = null;
+      return;
+    }
+    inviteAutomationBusy = true;
+    inviteAutomationStatus = `Sending invites to ${candidates.length} account${candidates.length === 1 ? '' : 's'}...`;
+    inviteAutomationError = null;
+    for (const candidate of candidates) {
+      try {
+        await inviteUser(candidate.uid);
+      } catch (err) {
+        console.error(err);
+        inviteAutomationError = 'Some invites could not be delivered.';
+      }
+    }
+    inviteAutomationBusy = false;
+    if (!inviteAutomationError) {
+      inviteAutomationStatus = 'Domain invites sent.';
     }
   }
 
@@ -327,13 +624,16 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     if (!name) return;
     const db = getDb();
     try {
-      await addDoc(collection(db, 'servers', serverId!, 'roles'), {
+      const ref = await addDoc(collection(db, 'servers', serverId!, 'roles'), {
         name,
         color: newRoleColor || null,
-        createdAt: serverTimestamp()
+        createdAt: serverTimestamp(),
+        position: sortedRoles.length,
+        permissions: {}
       });
       newRoleName = '';
       newRoleColor = '#5865f2';
+      roleCollapsed = { ...roleCollapsed, [ref.id]: false };
     } catch (e) {
       console.error(e);
       alert('Failed to create role.');
@@ -406,16 +706,100 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     }
   }
 
-  async function toggleRolePermission(roleId: string, key: 'reorderChannels', enabled: boolean) {
+  async function toggleRolePermission(roleId: string, key: RolePermissionKey, enabled: boolean) {
     if (!isAdmin) return;
     const db = getDb();
+    roleUpdateBusy = { ...roleUpdateBusy, [roleId]: true };
     try {
       await updateDoc(doc(db, 'servers', serverId!, 'roles', roleId), {
         [`permissions.${String(key)}`]: enabled
       });
+      roleError = null;
     } catch (e) {
       console.error(e);
-      alert('Failed to update role permissions.');
+      roleError = 'Failed to update role permissions.';
+    } finally {
+      const next = { ...roleUpdateBusy };
+      delete next[roleId];
+      roleUpdateBusy = next;
+    }
+  }
+
+  function toggleRoleCollapse(roleId: string) {
+    roleCollapsed = { ...roleCollapsed, [roleId]: !roleCollapsed[roleId] };
+  }
+
+  function countEnabledPerms(role: Role): number {
+    const perms = role.permissions ?? {};
+    let total = 0;
+    for (const value of Object.values(perms)) {
+      if (value) total += 1;
+    }
+    return total;
+  }
+
+  async function updateRoleDoc(roleId: string, updates: Record<string, unknown>) {
+    if (!isAdmin) return;
+    const db = getDb();
+    roleUpdateBusy = { ...roleUpdateBusy, [roleId]: true };
+    try {
+      await updateDoc(doc(db, 'servers', serverId!, 'roles', roleId), updates);
+      roleError = null;
+    } catch (e) {
+      console.error(e);
+      roleError = 'Failed to update role.';
+    } finally {
+      const next = { ...roleUpdateBusy };
+      delete next[roleId];
+      roleUpdateBusy = next;
+    }
+  }
+
+  async function setRoleName(roleId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      roleError = 'Role name cannot be empty.';
+      return;
+    }
+    const current = roles.find((r) => r.id === roleId);
+    if (current && (current.name ?? '').trim() === trimmed) return;
+    await updateRoleDoc(roleId, { name: trimmed });
+  }
+
+  async function setRoleColor(roleId: string, color: string) {
+    const normalized = color || null;
+    const current = roles.find((r) => r.id === roleId);
+    if ((current?.color ?? null) === normalized) return;
+    await updateRoleDoc(roleId, { color: normalized });
+  }
+
+  async function moveRole(roleId: string, direction: 'up' | 'down') {
+    if (!isAdmin) return;
+    const current = sortedRoles;
+    const index = current.findIndex((r) => r.id === roleId);
+    if (index === -1) return;
+    const delta = direction === 'up' ? -1 : 1;
+    const targetIndex = index + delta;
+    if (targetIndex < 0 || targetIndex >= current.length) return;
+    const ordered = [...current];
+    const [role] = ordered.splice(index, 1);
+    ordered.splice(targetIndex, 0, role);
+    const db = getDb();
+    const batch = writeBatch(db);
+    ordered.forEach((r, idx) => {
+      batch.update(doc(db, 'servers', serverId!, 'roles', r.id), { position: idx });
+    });
+    roleUpdateBusy = { ...roleUpdateBusy, [roleId]: true };
+    try {
+      await batch.commit();
+      roleError = null;
+    } catch (e) {
+      console.error(e);
+      roleError = 'Failed to reorder roles.';
+    } finally {
+      const next = { ...roleUpdateBusy };
+      delete next[roleId];
+      roleUpdateBusy = next;
     }
   }
 
@@ -423,10 +807,12 @@ type Role = { id: string; name: string; color?: string | null; position?: number
   async function renameChannel(id: string, oldName: string) {
     if (!isAdmin) return;
     const name = prompt('Rename channel to:', oldName);
-    if (!name || name.trim() === oldName) return;
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === oldName.trim()) return;
     const db = getDb();
     try {
-      await updateDoc(doc(db, 'servers', serverId!, 'channels', id), { name: name.trim() });
+      await updateDoc(doc(db, 'servers', serverId!, 'channels', id), { name: trimmed });
     } catch (e) {
       console.error(e);
       alert('Failed to rename channel.');
@@ -435,7 +821,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
   async function deleteChannel(id: string, name: string) {
     if (!isAdmin) return;
-    if (!confirm(`Delete channel ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ#${name}ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â? This cannot be undone.`)) return;
+    if (!confirm(`Delete channel ${name}? This cannot be undone.`)) return;
     const db = getDb();
     try {
       await deleteDoc(doc(db, 'servers', serverId!, 'channels', id));
@@ -445,11 +831,61 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     }
   }
 
+  async function moveChannel(channelId: string, direction: 'up' | 'down') {
+    if (!canManageChannels) return;
+    const ordered = sortedChannels;
+    const index = ordered.findIndex((c) => c.id === channelId);
+    if (index === -1) return;
+    const delta = direction === 'up' ? -1 : 1;
+    const targetIndex = index + delta;
+    if (targetIndex < 0 || targetIndex >= ordered.length) return;
+    const next = [...ordered];
+    const [channel] = next.splice(index, 1);
+    next.splice(targetIndex, 0, channel);
+    const db = getDb();
+    const batch = writeBatch(db);
+    next.forEach((c, idx) => {
+      batch.update(doc(db, 'servers', serverId!, 'channels', c.id), { position: idx });
+    });
+    try {
+      await batch.commit();
+    } catch (e) {
+      console.error(e);
+      alert('Failed to reorder channels.');
+    }
+  }
+
+  async function createChannelInline() {
+    if (!isAdmin) return;
+    const name = newChannelName.trim();
+    if (!name) {
+      channelError = 'Enter a channel name.';
+      return;
+    }
+    channelCreateBusy = true;
+    channelError = null;
+    try {
+      await createChannel(serverId!, name, newChannelType, newChannelPrivate);
+      newChannelName = '';
+      newChannelPrivate = false;
+    } catch (e) {
+      console.error(e);
+      channelError = 'Failed to create channel.';
+    } finally {
+      channelCreateBusy = false;
+    }
+  }
+
   // ----- actions: Danger Zone (owner only) -----
   async function deleteServer() {
     if (!isOwner) return;
-    if (!confirm('Delete this server and all its data? This cannot be undone.')) return;
-
+    if (deleteConfirm.trim().toLowerCase() !== 'confirm') {
+      deleteError = "Type 'confirm' to enable deletion.";
+      return;
+    }
+    if (!confirm('This will permanently delete the server, its channels, and messages. Continue?')) return;
+    deleteBusy = true;
+    deleteError = null;
     const db = getDb();
     try {
       const colls = ['channels', 'members', 'bans'];
@@ -458,12 +894,50 @@ type Role = { id: string; name: string; color?: string | null; position?: number
         await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
       }
       await deleteDoc(doc(db, 'servers', serverId!));
+      deleteConfirm = '';
       alert('Server deleted.');
       goto('/'); // go home
     } catch (e) {
       console.error(e);
-      alert('Failed to delete server. (Consider a Cloud Function for large deletes.)');
+      deleteError = 'Failed to delete server. Consider a Cloud Function for large deletes.';
+    } finally {
+      deleteBusy = false;
     }
+  }
+
+  function swipeEnabled() {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth <= 820;
+  }
+
+  function handleTouchStart(event: TouchEvent) {
+    if (!swipeEnabled() || event.touches.length === 0) return;
+    const touch = event.touches[0];
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchStartAt = performance.now();
+    touchStartTarget = event.target;
+  }
+
+  function handleTouchEnd(event: TouchEvent) {
+    if (!swipeEnabled() || event.changedTouches.length === 0) {
+      touchStartTarget = null;
+      return;
+    }
+    const targetEl = (touchStartTarget as HTMLElement | null);
+    if (targetEl?.closest('.settings-tabbar')) return;
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - touchStartX;
+    const deltaY = Math.abs(touch.clientY - touchStartY);
+    const elapsed = performance.now() - touchStartAt;
+    if (touchStartX > 40) {
+      touchStartTarget = null;
+      return;
+    }
+    if (deltaX > 70 && deltaY < 80 && elapsed < 500) {
+      goBack();
+    }
+    touchStartTarget = null;
   }
 
   // ===== INLINE INVITE (filter in-memory; no dialogs) =====
@@ -569,7 +1043,12 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 </svelte:head>
 
 {#if allowed}
-  <div class="settings-shell">
+  <div
+    class="settings-shell"
+    style={`--server-accent:${accentColor}; --server-sidebar:${sidebarColor}; --server-mention:${mentionColor};`}
+    on:touchstart|passive={handleTouchStart}
+    on:touchend|passive={handleTouchEnd}
+  >
     <div class="settings-container">
 
       <!-- header -->
@@ -617,12 +1096,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
             <div class="settings-grid settings-grid--two">
               <div>
                 <label class="settings-label" for="server-name">Server name</label>
-                <input
-                  id="server-name"
-                  class="input"
-                  bind:value={serverName}
-                  aria-label="Server name"
-                />
+                <input id="server-name" class="input" bind:value={serverName} aria-label="Server name" />
               </div>
               <div>
                 <label class="settings-label" for="server-icon-url">Server icon (URL or upload)</label>
@@ -652,13 +1126,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
                       Clear icon
                     </button>
                   </div>
-                  <input
-                    class="hidden"
-                    type="file"
-                    accept="image/*"
-                    bind:this={serverIconInput}
-                    on:change={onServerIconSelected}
-                  />
+                  <input class="hidden" type="file" accept="image/*" bind:this={serverIconInput} on:change={onServerIconSelected} />
                   {#if serverIconError}
                     <p class="text-xs text-red-300">{serverIconError}</p>
                   {/if}
@@ -668,13 +1136,252 @@ type Role = { id: string; name: string; color?: string | null; position?: number
                       <span class="text-xs text-soft">Tap save to apply changes.</span>
                     </div>
                   {:else}
-                    <p class="text-xs text-soft">Supported formats: JPG, PNG, GIF up to 8&nbsp;MB. Larger images are compressed automatically.</p>
+                    <p class="text-xs text-soft">
+                      Supported formats: JPG, PNG, GIF up to 8&nbsp;MB. Larger images are compressed automatically.
+                    </p>
                   {/if}
                 </div>
               </div>
             </div>
             <div class="settings-actions">
               <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <div>
+              <div class="settings-card__title">Appearance &amp; colors</div>
+              <div class="settings-card__subtitle">Tweak chat accents just for this server.</div>
+            </div>
+            <div class="settings-grid settings-grid--three">
+              <div class="settings-color-field">
+                <label class="settings-label" for="accent-color">Accent color</label>
+                <div class="settings-color-input">
+                  <input id="accent-color" type="color" bind:value={accentColor} aria-label="Server accent color" />
+                  <input
+                    class="input input--compact"
+                    value={accentColor}
+                    on:input={(e) => (accentColor = (e.currentTarget as HTMLInputElement).value)}
+                  />
+                </div>
+              </div>
+              <div class="settings-color-field">
+                <label class="settings-label" for="sidebar-color">Sidebar background</label>
+                <div class="settings-color-input">
+                  <input id="sidebar-color" type="color" bind:value={sidebarColor} aria-label="Sidebar background color" />
+                  <input
+                    class="input input--compact"
+                    value={sidebarColor}
+                    on:input={(e) => (sidebarColor = (e.currentTarget as HTMLInputElement).value)}
+                  />
+                </div>
+              </div>
+              <div class="settings-color-field">
+                <label class="settings-label" for="mention-color">Mention highlight</label>
+                <div class="settings-color-input">
+                  <input id="mention-color" type="color" bind:value={mentionColor} aria-label="Mention highlight color" />
+                  <input
+                    class="input input--compact"
+                    value={mentionColor}
+                    on:input={(e) => (mentionColor = (e.currentTarget as HTMLInputElement).value)}
+                  />
+                </div>
+              </div>
+            </div>
+            <div
+              class="settings-theme-preview"
+              style={`--preview-accent:${accentColor}; --preview-sidebar:${sidebarColor}; --preview-mention:${mentionColor};`}
+            >
+              <div class="settings-theme-preview__sidebar">
+                <span class="dot" style={`background:${accentColor};`}></span>
+                <span class="line"></span>
+              </div>
+              <div class="settings-theme-preview__chat">
+                <div class={`bubble bubble--${chatBubbleShape}`}>
+                  <span class="name">You</span>
+                  <span class="message">Looks good!</span>
+                </div>
+                <div class="bubble bubble--mention">
+                  <span class="name">Maya</span>
+                  <span class="message">@you let's ship it!</span>
+                </div>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <div>
+              <div class="settings-card__title">Chat behavior</div>
+              <div class="settings-card__subtitle">Control pacing, mentions, and reactions.</div>
+            </div>
+            <div class="settings-grid settings-grid--two">
+              <div class="settings-toggle">
+                <label class="settings-switch">
+                  <input type="checkbox" bind:checked={chatHighlightMentions} />
+                  <span>Highlight @mentions</span>
+                </label>
+                <p class="settings-caption">Adds a high contrast badge using your mention color.</p>
+              </div>
+              <div class="settings-toggle">
+                <label class="settings-switch">
+                  <input type="checkbox" bind:checked={chatAllowReactions} />
+                  <span>Allow message reactions</span>
+                </label>
+                <p class="settings-caption">Give members emoji reactions to keep threads tidy.</p>
+              </div>
+              <div class="settings-toggle">
+                <label class="settings-switch">
+                  <input type="checkbox" bind:checked={chatAllowThreads} />
+                  <span>Enable threaded replies</span>
+                </label>
+                <p class="settings-caption">Let side conversations live in thread bubbles.</p>
+              </div>
+              <div class="settings-toggle">
+                <label class="settings-switch">
+                  <input type="checkbox" bind:checked={chatShowJoinMessages} />
+                  <span>Show join / leave notices</span>
+                </label>
+                <p class="settings-caption">Drop a lightweight banner when teammates come and go.</p>
+              </div>
+              <div>
+                <label class="settings-label" for="chat-density">Chat density</label>
+                <div class="settings-chip-row">
+                  <button
+                    type="button"
+                    class:active-chip={chatDensity === 'cozy'}
+                    on:click={() => (chatDensity = 'cozy')}
+                  >
+                    Cozy
+                  </button>
+                  <button
+                    type="button"
+                    class:active-chip={chatDensity === 'compact'}
+                    on:click={() => (chatDensity = 'compact')}
+                  >
+                    Compact
+                  </button>
+                </div>
+                <p class="settings-caption">Compact mode tightens up message spacing.</p>
+              </div>
+              <div>
+                <label class="settings-label" for="slow-mode">Slow mode (seconds)</label>
+                <div class="settings-slowmode">
+                  <input
+                    id="slow-mode"
+                    type="range"
+                    min="0"
+                    max="300"
+                    step="5"
+                    value={chatSlowModeSeconds}
+                    on:input={(e) => (chatSlowModeSeconds = Number((e.currentTarget as HTMLInputElement).value))}
+                  />
+                  <input
+                    class="input input--compact w-20"
+                    type="number"
+                    min="0"
+                    max="300"
+                    step="5"
+                    bind:value={chatSlowModeSeconds}
+                  />
+                </div>
+                <p class="settings-caption">
+                  {chatSlowModeSeconds === 0 ? 'Off' : `Members can post every ${chatSlowModeSeconds}s`}
+                </p>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card--invite">
+            <div>
+              <div class="settings-card__title">Domain auto-invites</div>
+              <div class="settings-card__subtitle">Automatically welcome teammates from trusted email domains.</div>
+            </div>
+            <div class="settings-domain-grid">
+              <div class="settings-toggle">
+                <label class="settings-switch">
+                  <input type="checkbox" bind:checked={inviteAutomationEnabled} />
+                  <span>Auto invite matching domains</span>
+                </label>
+                <p class="settings-caption">Invites are queued the moment someone signs in with a whitelisted email.</p>
+              </div>
+              <div>
+                <label class="settings-label" for="domain-input">Allowed domains</label>
+                <div class="settings-domain-input">
+                  <input
+                    id="domain-input"
+                    class="input input--compact flex-1"
+                    placeholder="example.com"
+                    value={inviteDomainInput}
+                    on:input={(e) => (inviteDomainInput = (e.currentTarget as HTMLInputElement).value)}
+                  />
+                  <button type="button" class="btn btn-ghost" on:click={addInviteDomain}>Add</button>
+                </div>
+                {#if inviteDomains.length === 0}
+                  <p class="settings-caption">No domains yet. Add one like <code>company.com</code>.</p>
+                {:else}
+                  <div class="settings-domain-list">
+                    {#each inviteDomains as domain (domain)}
+                      <span class="settings-domain-pill">
+                        {domain}
+                        <button
+                          type="button"
+                          aria-label={`Remove ${domain}`}
+                          on:click={() => removeInviteDomain(domain)}
+                        >
+                          <i class="bx bx-x" aria-hidden="true"></i>
+                        </button>
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <div>
+                <label class="settings-label" for="auto-role">Default role</label>
+                <select
+                  id="auto-role"
+                  class="input"
+                  bind:value={inviteDefaultRoleSelection}
+                  on:change={() => {
+                    inviteDefaultRoleId = inviteDefaultRoleSelection ? inviteDefaultRoleSelection : null;
+                  }}
+                >
+                  <option value="">Use server default</option>
+                  {#each sortedRoles as role (role.id)}
+                    <option value={role.id}>{role.name}</option>
+                  {/each}
+                </select>
+                <p class="settings-caption">hConnect applies this role automatically after members accept.</p>
+              </div>
+            </div>
+            {#if inviteAutomationStatus}
+              <p class="settings-status settings-status--success">{inviteAutomationStatus}</p>
+            {/if}
+            {#if inviteAutomationError}
+              <p class="settings-status settings-status--error">{inviteAutomationError}</p>
+            {/if}
+            <div class="settings-actions settings-actions--stack">
+              <button
+                type="button"
+                class="btn btn-ghost"
+                disabled={!inviteAutomationEnabled || inviteAutomationBusy}
+                on:click={sendAutoInvitesForDomains}
+              >
+                {inviteAutomationBusy ? 'Syncing...' : 'Run domain sync'}
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary h-10 px-5"
+                on:click={saveOverview}
+                disabled={inviteAutomationBusy}
+              >
+                Save changes
+              </button>
             </div>
           </div>
         </div>
@@ -688,7 +1395,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
             </div>
             <input
               class="input input--compact settings-invite__input"
-              placeholder="Invite people by name, email, or UIDÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦"
+              placeholder="Invite people by name, email, or UID"
               bind:value={search}
             />
           </div>
@@ -697,7 +1404,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
             {#if !q}
               <div class="settings-invite__empty">Type to filter users who have logged in.</div>
             {:else if filtered.length === 0}
-              <div class="settings-invite__empty">No users match ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“{search}ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â.</div>
+              <div class="settings-invite__empty">No users match your search.</div>
             {:else}
               {#each filtered as r (r.uid)}
                 <div class="settings-invite__results-row">
@@ -741,15 +1448,64 @@ type Role = { id: string; name: string; color?: string | null; position?: number
         </div>
 
         <!-- current members list -->
-        <div class="settings-card space-y-3">
-          {#if members.length === 0}
-            <div class="text-white/60">No members yet.</div>
+        <div class="settings-card space-y-4">
+          <div class="settings-toolbar">
+            <input
+              class="input input--compact flex-1"
+              placeholder="Search members by name or email"
+              bind:value={memberSearch}
+            />
+            <div class="settings-toolbar__filters">
+              <button
+                type="button"
+                class:active-filter={memberRoleFilter === 'all'}
+                on:click={() => (memberRoleFilter = 'all')}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                class:active-filter={memberRoleFilter === 'owner'}
+                on:click={() => (memberRoleFilter = 'owner')}
+              >
+                Owners
+              </button>
+              <button
+                type="button"
+                class:active-filter={memberRoleFilter === 'admin'}
+                on:click={() => (memberRoleFilter = 'admin')}
+              >
+                Admins
+              </button>
+              <button
+                type="button"
+                class:active-filter={memberRoleFilter === 'custom'}
+                on:click={() => (memberRoleFilter = 'custom')}
+              >
+                Has custom roles
+              </button>
+            </div>
+          </div>
+
+          {#if filteredMembers.length === 0}
+            <div class="text-white/60">
+              {#if members.length === 0}
+                No members yet.
+              {:else}
+                No members match the current filters.
+              {/if}
+            </div>
           {/if}
-          {#each members as m (m.uid)}
+
+          {#each filteredMembers as m (m.uid)}
             <div class="p-2 rounded hover:bg-white/10 space-y-2">
               <div class="settings-member-row">
-                <img src={m.photoURL || ''} alt="" class="h-9 w-9 rounded-full bg-white/10"
-                     on:error={(e)=>((e.target as HTMLImageElement).style.display='none')} />
+                <img
+                  src={m.photoURL || ''}
+                  alt=""
+                  class="h-9 w-9 rounded-full bg-white/10"
+                  on:error={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+                />
                 <div class="flex-1 min-w-0">
                   <div class="truncate">{m.displayName || m.uid}</div>
                   <div class="text-xs text-white/50">{m.role || 'member'}</div>
@@ -757,20 +1513,33 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
                 {#if isOwner || isAdmin}
                   <div class="settings-member-row__actions">
-                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
                       disabled={!isOwner && m.role === 'admin'}
-                      on:click={() => setRole(m.uid, 'member')}>Member</button>
-                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                      on:click={() => setRole(m.uid, 'admin')}>Admin</button>
+                      on:click={() => setRole(m.uid, 'member')}
+                    >
+                      Member
+                    </button>
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                      on:click={() => setRole(m.uid, 'admin')}
+                    >
+                      Admin
+                    </button>
                   </div>
                 {/if}
 
                 {#if isOwner || isAdmin}
                   <div class="settings-member-row__moderation">
-                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                      on:click={() => kick(m.uid)}>Kick</button>
-                    <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                      on:click={() => ban(m.uid)}>Ban</button>
+                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15" on:click={() => kick(m.uid)}>
+                      Kick
+                    </button>
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                      on:click={() => ban(m.uid)}
+                    >
+                      Ban
+                    </button>
                   </div>
                 {/if}
               </div>
@@ -783,7 +1552,8 @@ type Role = { id: string; name: string; color?: string | null; position?: number
                         type="checkbox"
                         checked={Array.isArray(m.roleIds) && m.roleIds.includes(role.id)}
                         disabled={!isAdmin}
-                        on:change={(e) => toggleMemberRole(m.uid, role.id, (e.currentTarget as HTMLInputElement).checked)}
+                        on:change={(e) =>
+                          toggleMemberRole(m.uid, role.id, (e.currentTarget as HTMLInputElement).checked)}
                       />
                       <span>{role.name}</span>
                     </label>
@@ -816,27 +1586,90 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
       <!-- channels -->
       {#if tab === 'channels'}
+        <div class="settings-card settings-channel-create">
+          <form class="settings-channel-form" on:submit|preventDefault={createChannelInline}>
+            <div class="settings-channel-form__row">
+              <input
+                class="input flex-1"
+                placeholder="Channel name (e.g. general)"
+                bind:value={newChannelName}
+              />
+              <select class="input w-32" bind:value={newChannelType}>
+                <option value="text">Text</option>
+                <option value="voice">Voice</option>
+              </select>
+              <label class="settings-switch settings-switch--inline">
+                <input type="checkbox" bind:checked={newChannelPrivate} />
+                <span>Private</span>
+              </label>
+              <button
+                type="submit"
+                class="btn btn-primary"
+                disabled={!newChannelName.trim() || channelCreateBusy}
+              >
+                {channelCreateBusy ? 'Creating...' : 'Create'}
+              </button>
+            </div>
+            {#if channelError}
+              <p class="settings-status settings-status--error">{channelError}</p>
+            {/if}
+          </form>
+        </div>
+
         <div class="settings-card space-y-3">
-          {#if channels.length === 0}
+          {#if sortedChannels.length === 0}
             <div class="text-white/60">No channels yet.</div>
           {/if}
-          {#each channels as c (c.id)}
+          {#each sortedChannels as c, index (c.id)}
             <div class="flex flex-col gap-2 p-2 rounded hover:bg-white/10">
               <div class="settings-channel-row">
                 <div class="w-6 text-center">
                   {#if c.type === 'text'}<i class="bx bx-hash" aria-hidden="true"></i>{:else}<i class="bx bx-headphone" aria-hidden="true"></i>{/if}
                 </div>
-                <div class="flex-1 truncate">{c.name}</div>
-                {#if isOwner || isAdmin}
+                <div class="flex-1 min-w-0">
+                  <div class="truncate font-medium">{c.name}</div>
+                  <div class="text-xs text-white/40">
+                    {c.type === 'text' ? 'Text channel' : 'Voice channel'}{#if c.isPrivate} • Private{/if}
+                  </div>
+                </div>
+                {#if canManageChannels}
+                  <div class="settings-channel-row__reorder">
+                    <button
+                      type="button"
+                      class="settings-icon-btn"
+                      on:click={() => moveChannel(c.id, 'up')}
+                      disabled={index === 0}
+                      aria-label="Move channel up"
+                    >
+                      <i class="bx bx-chevron-up" aria-hidden="true"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-icon-btn"
+                      on:click={() => moveChannel(c.id, 'down')}
+                      disabled={index === sortedChannels.length - 1}
+                      aria-label="Move channel down"
+                    >
+                      <i class="bx bx-chevron-down" aria-hidden="true"></i>
+                    </button>
+                  </div>
                   <div class="settings-channel-row__actions">
-                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                      on:click={() => renameChannel(c.id, c.name)}>Rename</button>
-                    <button class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                      on:click={() => deleteChannel(c.id, c.name)}>Delete</button>
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                      on:click={() => renameChannel(c.id, c.name)}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                      on:click={() => deleteChannel(c.id, c.name)}
+                    >
+                      Delete
+                    </button>
                   </div>
                 {/if}
               </div>
-              {#if roles.length > 0}
+              {#if roles.length > 0 && c.isPrivate}
                 <div class="pl-6 pr-3 pb-2 text-[12px] text-white/60 flex flex-wrap items-center gap-2">
                   <span class="opacity-70">Allowed roles:</span>
                   <div class="flex flex-wrap gap-2">
@@ -846,7 +1679,8 @@ type Role = { id: string; name: string; color?: string | null; position?: number
                           type="checkbox"
                           checked={Array.isArray(c.allowedRoleIds) && c.allowedRoleIds.includes(role.id)}
                           disabled={!canManageChannels}
-                          on:change={(e) => toggleChannelRole(c.id, role.id, (e.currentTarget as HTMLInputElement).checked)}
+                          on:change={(e) =>
+                            toggleChannelRole(c.id, role.id, (e.currentTarget as HTMLInputElement).checked)}
                         />
                         <span>{role.name}</span>
                       </label>
@@ -864,7 +1698,7 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
       {#if tab === 'roles'}
         <div class="settings-card space-y-4">
-          <form class="flex flex-col sm:flex-row gap-2 sm:items-center" on:submit|preventDefault={createRole}>
+          <form class="settings-role-create" on:submit|preventDefault={createRole}>
             <input
               class="flex-1 rounded bg-white/10 px-3 py-2"
               placeholder="Role name (e.g. Moderator)"
@@ -885,42 +1719,113 @@ type Role = { id: string; name: string; color?: string | null; position?: number
             </button>
           </form>
 
-          {#if roles.length === 0}
+          {#if roleError}
+            <p class="settings-status settings-status--error">{roleError}</p>
+          {/if}
+
+          {#if sortedRoles.length === 0}
             <div class="text-white/60 text-sm">No custom roles yet. Use the form above to add one.</div>
           {:else}
             <div class="space-y-2">
-              {#each roles as role}
-                <div class="settings-role-row">
-                  <div class="settings-role-row__meta">
-                    <span
-                      class="inline-block w-3 h-3 rounded-full ring-2 ring-white/20"
-                      style={`background:${role.color || '#33c8bf'}`}
-                    ></span>
-                    <div class="min-w-0">
-                      <div class="font-medium truncate">{role.name}</div>
-                      {#if role.color}
-                        <div class="text-xs text-white/50">{role.color}</div>
-                      {/if}
+              {#each sortedRoles as role, index (role.id)}
+                <div class="settings-role-card">
+                  <button
+                    type="button"
+                    class="settings-role-summary"
+                    aria-expanded={!roleCollapsed[role.id]}
+                    on:click={() => toggleRoleCollapse(role.id)}
+                  >
+                    <span class="settings-role-summary__left">
+                      <span
+                        class="settings-role-summary__swatch"
+                        style={`background:${role.color ?? '#5865f2'}`}
+                      ></span>
+                      <span class="settings-role-summary__name">{role.name}</span>
+                    </span>
+                    <span class="settings-role-summary__meta">
+                      {countEnabledPerms(role)} / {rolePermissionOptions.length} permissions
+                    </span>
+                    <i
+                      class="bx bx-chevron-down"
+                      class:is-open={!roleCollapsed[role.id]}
+                      aria-hidden="true"
+                    ></i>
+                  </button>
+                  {#if !roleCollapsed[role.id]}
+                    <div class="settings-role-body">
+                      <div class="settings-role-header">
+                        <div class="settings-role-header__meta">
+                          <input
+                            class="settings-role-name"
+                            value={role.name}
+                            aria-label="Role name"
+                            on:blur={(e) => setRoleName(role.id, (e.currentTarget as HTMLInputElement).value)}
+                            disabled={!isAdmin || roleUpdateBusy[role.id]}
+                          />
+                          <input
+                            class="settings-role-color"
+                            type="color"
+                            aria-label="Role color"
+                            value={role.color ?? '#5865f2'}
+                            on:input={(e) => setRoleColor(role.id, (e.currentTarget as HTMLInputElement).value)}
+                            disabled={!isAdmin || roleUpdateBusy[role.id]}
+                            title="Role color"
+                          />
+                        </div>
+                        <div class="settings-role-header__actions">
+                          <button
+                            type="button"
+                            class="settings-icon-btn"
+                            on:click={() => moveRole(role.id, 'up')}
+                            disabled={index === 0 || roleUpdateBusy[role.id]}
+                            aria-label="Move role up"
+                          >
+                            <i class="bx bx-chevron-up" aria-hidden="true"></i>
+                          </button>
+                          <button
+                            type="button"
+                            class="settings-icon-btn"
+                            on:click={() => moveRole(role.id, 'down')}
+                            disabled={index === sortedRoles.length - 1 || roleUpdateBusy[role.id]}
+                            aria-label="Move role down"
+                          >
+                            <i class="bx bx-chevron-down" aria-hidden="true"></i>
+                          </button>
+                          <button
+                            class="px-3 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                            on:click={() => deleteRole(role.id, role.name)}
+                            disabled={!isOwner || roleUpdateBusy[role.id]}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                      <div class="settings-role-header__tagline">
+                        <span class="text-xs text-white/40">ID: {role.id}</span>
+                      </div>
+                      <div class="settings-role-permissions">
+                        {#each rolePermissionOptions as option}
+                          <label class="settings-permission">
+                            <input
+                              type="checkbox"
+                              checked={!!role.permissions?.[option.key]}
+                              disabled={!isAdmin || roleUpdateBusy[role.id]}
+                              on:change={(e) =>
+                                toggleRolePermission(
+                                  role.id,
+                                  option.key,
+                                  (e.currentTarget as HTMLInputElement).checked
+                                )}
+                            />
+                            <span>
+                              <strong>{option.label}</strong>
+                              <small>{option.description}</small>
+                            </span>
+                          </label>
+                        {/each}
+                      </div>
                     </div>
-                  </div>
-                  <div class="settings-role-row__actions">
-                    <label class="flex items-center gap-2 text-xs text-white/70 select-none">
-                      <input
-                        type="checkbox"
-                        checked={!!role.permissions?.reorderChannels}
-                        disabled={!isAdmin}
-                        on:change={(e) => toggleRolePermission(role.id, 'reorderChannels', (e.currentTarget as HTMLInputElement).checked)}
-                      />
-                      <span>Can reorder channels</span>
-                    </label>
-                    <button
-                      class="px-3 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
-                      on:click={() => deleteRole(role.id, role.name)}
-                      disabled={!isOwner}
-                    >
-                      Delete
-                    </button>
-                  </div>
+                  {/if}
                 </div>
               {/each}
             </div>
@@ -937,13 +1842,25 @@ type Role = { id: string; name: string; color?: string | null; position?: number
               Deleting the server will remove channels, members, and bans. This cannot be undone.
             </p>
           </div>
+          <div class="settings-danger-confirm">
+            <label class="settings-label" for="delete-confirm">Type <code>confirm</code> to authorize deletion</label>
+            <input
+              id="delete-confirm"
+              class="input input--danger"
+              placeholder="confirm"
+              bind:value={deleteConfirm}
+            />
+          </div>
+          {#if deleteError}
+            <p class="settings-status settings-status--error">{deleteError}</p>
+          {/if}
           <div class="settings-actions justify-start">
             <button
-              class="btn btn-sm"
-              disabled={!isOwner}
+              class="btn btn-sm btn-danger"
+              disabled={!isOwner || deleteBusy}
               on:click={deleteServer}
             >
-              Delete Server
+              {deleteBusy ? 'Deleting...' : 'Delete Server'}
             </button>
             {#if !isOwner}
               <span class="settings-caption text-red-200/85">Only the owner can delete the server.</span>
@@ -958,9 +1875,15 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 <style>
   .settings-shell {
     min-height: 100dvh;
+    height: 100dvh;
     background: var(--color-app-bg);
     color: var(--color-text-primary);
     padding-bottom: max(env(safe-area-inset-bottom), 4rem);
+    --preview-accent: var(--server-accent, var(--color-accent));
+    --preview-sidebar: var(--server-sidebar, var(--color-panel));
+    --preview-mention: var(--server-mention, #f97316);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .settings-container {
@@ -976,12 +1899,21 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    align-items: flex-start;
+    align-items: center;
     border-radius: var(--radius-lg);
     background: color-mix(in srgb, var(--color-panel) 94%, transparent);
     border: 1px solid var(--color-border-subtle);
     box-shadow: var(--shadow-elevated);
     padding: clamp(1.25rem, 2.8vw, 1.75rem);
+    position: relative;
+  }
+
+  .settings-heading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.35rem;
   }
 
   @media (min-width: 640px) {
@@ -1002,6 +1934,9 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     display: grid;
     place-items: center;
     transition: background 150ms ease, border 150ms ease, transform 150ms ease;
+    position: absolute;
+    left: clamp(0.6rem, 1.5vw, 1rem);
+    top: clamp(0.6rem, 1.5vw, 1rem);
   }
 
   .settings-back:hover {
@@ -1020,7 +1955,8 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     margin: 0.3rem 0 0;
     font-size: 0.95rem;
     color: var(--text-60);
-    max-width: 40ch;
+    max-width: 48ch;
+    text-align: center;
   }
 
   .settings-tabbar {
@@ -1033,6 +1969,11 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     padding: 0.3rem;
     scroll-snap-type: x proximity;
     -webkit-overflow-scrolling: touch;
+    margin: 0 auto;
+    justify-content: flex-start;
+    width: 100%;
+    max-width: 100%;
+    touch-action: pan-x;
   }
 
   .settings-tabbar::-webkit-scrollbar {
@@ -1041,6 +1982,12 @@ type Role = { id: string; name: string; color?: string | null; position?: number
 
   .settings-tabbar {
     scrollbar-width: none;
+  }
+
+  @media (min-width: 768px) {
+    .settings-tabbar {
+      justify-content: center;
+    }
   }
 
   .settings-tab {
@@ -1287,28 +2234,493 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     flex-wrap: wrap;
   }
 
-  .settings-role-row {
+  .settings-color-field {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--color-border-subtle);
-    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
-    padding: 0.85rem clamp(0.85rem, 2vw, 1rem);
+    gap: 0.5rem;
   }
 
-  .settings-role-row__meta {
+  .settings-color-input {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    min-width: 0;
+    gap: 0.6rem;
   }
 
-  .settings-role-row__actions {
+  .settings-color-input .input--compact,
+  .settings-color-input .input {
+    width: 7rem;
+  }
+
+  .settings-theme-preview {
+    display: flex;
+    gap: 1.4rem;
+    align-items: center;
+    border-radius: var(--radius-lg);
+    border: 1px dashed var(--color-border-subtle);
+    padding: 1rem;
+    background: color-mix(in srgb, var(--preview-sidebar, #13171d) 72%, transparent);
+  }
+
+  .settings-theme-preview__sidebar {
+    width: min(44%, 160px);
+    min-height: 92px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--preview-sidebar, #13171d) 92%, transparent);
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .settings-theme-preview__sidebar .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: var(--preview-accent, #33c8bf);
+  }
+
+  .settings-theme-preview__sidebar .line {
+    height: 6px;
+    width: 70%;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .settings-theme-preview__chat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+  .bubble {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.6rem 0.85rem;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--preview-accent, #33c8bf) 24%, transparent);
+    color: white;
+    width: fit-content;
+    max-width: 220px;
+  }
+
+  .bubble--pill {
+    border-radius: 999px;
+  }
+
+  .bubble--minimal {
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--preview-accent, #33c8bf) 12%, transparent);
+  }
+
+  .bubble--mention {
+    background: color-mix(in srgb, var(--preview-mention, #f97316) 30%, transparent);
+  }
+
+  .bubble .name {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.75;
+  }
+
+  .bubble .message {
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+
+  .settings-domain-grid {
+    display: grid;
+    gap: 1.25rem;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
+  .settings-domain-input {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
+  }
+
+  .settings-domain-input .btn {
+    white-space: nowrap;
+  }
+
+  .settings-domain-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+  }
+
+  .settings-domain-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.7rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 85%, white);
+  }
+
+  .settings-domain-pill button {
+    border: none;
+    background: transparent;
+    color: inherit;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .settings-status {
+    font-size: 0.8rem;
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.75rem;
+    border: 1px solid transparent;
+  }
+
+  .settings-status--success {
+    color: color-mix(in srgb, var(--color-accent) 90%, white);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .settings-status--error {
+    color: rgba(248, 113, 113, 0.92);
+    background: rgba(248, 113, 113, 0.12);
+    border-color: rgba(248, 113, 113, 0.35);
+  }
+
+  .settings-actions--stack {
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+
+  .settings-actions--stack .btn {
+    min-width: 160px;
+  }
+
+  .settings-chip-row {
+    display: inline-flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+  }
+
+  .settings-chip-row button {
+    border: none;
+    background: transparent;
+    padding: 0.4rem 0.9rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.85rem;
+    color: var(--text-70);
+  }
+
+  .settings-chip-row button:hover {
+    background: color-mix(in srgb, var(--color-panel) 82%, transparent);
+  }
+
+  .settings-chip-row button.active-chip {
+    background: var(--color-accent-soft);
+    color: var(--color-accent-strong);
+  }
+
+  .settings-slowmode {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .settings-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .settings-toolbar__filters {
+    display: inline-flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .settings-toolbar__filters button {
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    color: var(--text-70);
+    border-radius: var(--radius-pill);
+    padding: 0.35rem 0.9rem;
+    font-size: 0.8rem;
+  }
+
+  .settings-toolbar__filters button:hover {
+    background: color-mix(in srgb, var(--color-panel) 86%, transparent);
+  }
+
+  .settings-toolbar__filters button.active-filter {
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    background: var(--color-accent-soft);
+    color: var(--color-accent-strong);
+  }
+
+  .settings-channel-create {
+    gap: 0.75rem;
+  }
+
+  .settings-channel-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .settings-channel-form__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .settings-switch--inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+    font-size: 0.85rem;
+  }
+
+  .settings-switch--inline input {
+    accent-color: var(--color-accent);
+  }
+
+  .settings-icon-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+    color: var(--text-70);
+    display: grid;
+    place-items: center;
+    transition: background 150ms ease, color 150ms ease, border 150ms ease;
+  }
+
+  .settings-icon-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .settings-icon-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .settings-channel-row__reorder {
+    display: flex;
+    gap: 0.35rem;
+  }
+
+  .settings-role-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+    padding: 0.9rem clamp(0.9rem, 2vw, 1.1rem);
+  }
+
+  .settings-role-summary {
+    border: none;
+    background: transparent;
+    color: inherit;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    justify-content: space-between;
+    font-weight: 600;
+    font-size: 0.95rem;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .settings-role-summary:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+
+  .settings-role-summary__left {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+
+  .settings-role-summary__swatch {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+  }
+
+  .settings-role-summary__name {
+    min-width: 0;
+    max-width: 180px;
+    text-align: left;
+    display: inline-block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .settings-role-summary__meta {
+    font-size: 0.75rem;
+    color: var(--text-60);
+    margin-left: auto;
+    margin-right: 0.5rem;
+    white-space: nowrap;
+  }
+
+  .settings-role-summary i {
+    transition: transform 160ms ease;
+    font-size: 1.1rem;
+  }
+
+  .settings-role-summary i.is-open {
+    transform: rotate(180deg);
+  }
+
+  .settings-role-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+
+  .settings-role-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .settings-role-header__meta {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .settings-role-name {
+    font-size: 0.95rem;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.35rem 0.6rem;
+    color: inherit;
+    min-width: 140px;
+  }
+
+  .settings-role-name:disabled {
+    opacity: 0.8;
+  }
+
+  .settings-role-color {
+    width: 48px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border-subtle);
+    background: transparent;
+  }
+
+  .settings-role-header__actions {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+
+  .settings-role-permissions {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  }
+
+  .settings-permission {
+    display: flex;
+    gap: 0.55rem;
+    align-items: flex-start;
+    font-size: 0.85rem;
+    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-md);
+    padding: 0.6rem 0.8rem;
+  }
+
+  .settings-permission input {
+    margin-top: 0.2rem;
+  }
+
+  .settings-permission strong {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--color-text-primary);
+  }
+
+  .settings-permission small {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-60);
+  }
+
+  .settings-role-header__tagline {
+    font-size: 0.75rem;
+    color: var(--text-60);
+  }
+
+  .settings-role-create {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .btn-danger {
+    background: rgba(248, 113, 113, 0.18);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    color: #f87171;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(248, 113, 113, 0.28);
+    border-color: rgba(248, 113, 113, 0.55);
+  }
+
+  .input--danger {
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    background: rgba(248, 113, 113, 0.08);
+  }
+
+  .settings-danger-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .settings-danger-confirm code {
+    background: rgba(248, 113, 113, 0.16);
+    color: #fca5a5;
+    padding: 0.15rem 0.35rem;
+    border-radius: var(--radius-sm);
   }
 
   @media (max-width: 560px) {
@@ -1319,6 +2731,10 @@ type Role = { id: string; name: string; color?: string | null; position?: number
     .settings-header {
       padding: 1.1rem;
       border-radius: var(--radius-md);
+    }
+
+    .settings-heading {
+      text-align: center;
     }
 
     .settings-heading h1 {
@@ -1352,6 +2768,24 @@ type Role = { id: string; name: string; color?: string | null; position?: number
       gap: 0.9rem;
     }
 
+    .settings-toolbar {
+      gap: 0.6rem;
+    }
+
+    .settings-toolbar__filters {
+      width: 100%;
+    }
+
+    .settings-toolbar__filters button {
+      flex: 1 1 45%;
+      justify-content: center;
+    }
+
+    .settings-chip-row {
+      width: 100%;
+      justify-content: space-between;
+    }
+
     .settings-member-row__actions,
     .settings-member-row__moderation,
     .settings-channel-row__actions {
@@ -1364,12 +2798,34 @@ type Role = { id: string; name: string; color?: string | null; position?: number
       gap: 0.9rem;
     }
 
-    .settings-role-row {
+    .settings-theme-preview {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .settings-channel-form__row {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .settings-channel-form__row .btn {
+      width: 100%;
+    }
+
+    .settings-role-card {
       border-radius: var(--radius-md);
     }
 
     .settings-actions {
       justify-content: center;
+    }
+
+    .settings-actions--stack .btn {
+      width: 100%;
+    }
+
+    .settings-role-header {
+      align-items: flex-start;
     }
   }
 </style>
