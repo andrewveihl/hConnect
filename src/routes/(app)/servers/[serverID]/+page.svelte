@@ -9,9 +9,8 @@
   import ServerSidebar from '$lib/components/servers/ServerSidebar.svelte';
   import ChannelHeader from '$lib/components/servers/ChannelHeader.svelte';
   import MembersPane from '$lib/components/servers/MembersPane.svelte';
-  import MessageList from '$lib/components/chat/MessageList.svelte';
-  import ChatInput from '$lib/components/chat/ChatInput.svelte';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
+  import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
@@ -267,6 +266,25 @@
     voiceState = value;
   });
 
+  $: {
+    const visible = !!(voiceState && voiceState.visible);
+    if (visible !== lastVoiceVisible) {
+      lastVoiceVisible = visible;
+      if (isMobile) {
+        mobileVoicePane = visible ? 'call' : 'chat';
+      }
+    }
+  }
+
+  $: if (isMobile !== lastIsMobile) {
+    lastIsMobile = isMobile;
+    if (!isMobile) {
+      mobileVoicePane = 'chat';
+    } else if (voiceState?.visible) {
+      mobileVoicePane = 'call';
+    }
+  }
+
   $: if ($user?.uid) {
     const fallbackPhoto = pickString($user.photoURL) ?? null;
     updateProfileCache($user.uid, {
@@ -416,6 +434,13 @@
      =========================== */
   let showChannels = false;
   let showMembers = false;
+  let isMobile = false;
+  let mobileVoicePane: 'call' | 'chat' = 'chat';
+  let mobilePaneTracking = false;
+  let mobilePaneStartX = 0;
+  let mobilePaneStartY = 0;
+  let lastVoiceVisible = false;
+  let lastIsMobile = false;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 40;
@@ -432,6 +457,13 @@
     const lgQuery = window.matchMedia('(min-width: 1024px)');
 
     const onMedia = () => {
+      const nextIsMobile = !mdQuery.matches;
+      isMobile = nextIsMobile;
+      if (!nextIsMobile) {
+        mobileVoicePane = 'chat';
+      } else if (voiceState?.visible) {
+        mobileVoicePane = 'call';
+      }
       if (mdQuery.matches) showChannels = false;
       if (lgQuery.matches) showMembers = false;
     };
@@ -510,6 +542,38 @@
     const cleanup = setupGestures();
     return () => cleanup();
   });
+
+  function setMobileVoicePane(pane: 'call' | 'chat') {
+    mobileVoicePane = pane;
+  }
+
+  function handleMobilePaneTouchStart(event: TouchEvent) {
+    if (!isMobile || !(voiceState && voiceState.visible)) return;
+    if (event.touches.length !== 1) return;
+    mobilePaneTracking = true;
+    const touch = event.touches[0];
+    mobilePaneStartX = touch.clientX;
+    mobilePaneStartY = touch.clientY;
+  }
+
+  function handleMobilePaneTouchMove(event: TouchEvent) {
+    if (!mobilePaneTracking || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - mobilePaneStartX;
+    const dy = touch.clientY - mobilePaneStartY;
+    if (Math.abs(dy) > Math.abs(dx) * 1.25) return;
+    if (mobileVoicePane === 'call' && dx <= -SWIPE) {
+      mobileVoicePane = 'chat';
+      mobilePaneTracking = false;
+    } else if (mobileVoicePane === 'chat' && dx >= SWIPE) {
+      mobileVoicePane = 'call';
+      mobilePaneTracking = false;
+    }
+  }
+
+  function handleMobilePaneTouchEnd() {
+    mobilePaneTracking = false;
+  }
 
   $: {
     if (serverId) {
@@ -820,10 +884,70 @@
         }}
       />
 
-      <div class={`flex-1 panel-muted flex flex-col ${voiceState?.visible ? '' : 'overflow-hidden'}`}>
-        {#if voiceState && voiceState.visible}
-          <VideoChat />
+      <div class="flex-1 panel-muted flex flex-col min-h-0">
+        {#if isMobile && voiceState && voiceState.visible}
+          <div class="mobile-call-wrapper md:hidden" on:touchstart={handleMobilePaneTouchStart} on:touchmove={handleMobilePaneTouchMove} on:touchend={handleMobilePaneTouchEnd}>
+            <div class="mobile-call-tabs">
+              <button
+                type="button"
+                class={`mobile-call-tab ${mobileVoicePane === 'call' ? 'is-active' : ''}`}
+                on:click={() => setMobileVoicePane('call')}
+                aria-pressed={mobileVoicePane === 'call'}
+              >
+                <i class="bx bx-headphone"></i>
+                <span>Call</span>
+              </button>
+              <button
+                type="button"
+                class={`mobile-call-tab ${mobileVoicePane === 'chat' ? 'is-active' : ''}`}
+                on:click={() => setMobileVoicePane('chat')}
+                aria-pressed={mobileVoicePane === 'chat'}
+              >
+                <i class="bx bx-message-dots"></i>
+                <span>Messages</span>
+              </button>
+            </div>
+
+            {#if mobileVoicePane === 'call'}
+              <div class="mobile-call-card">
+                <VideoChat layout="embedded" on:openMobileChat={() => setMobileVoicePane('chat')} />
+              </div>
+            {:else}
+              <div class="mobile-chat-card">
+                <ChannelMessagePane
+                  hasChannel={Boolean(serverId && activeChannel)}
+                  channelName={activeChannel?.name ?? ''}
+                  {messages}
+                  {profiles}
+                  currentUserId={$user?.uid ?? null}
+                  {mentionOptions}
+                  listClass="flex-1 overflow-y-auto p-3"
+                  inputWrapperClass="border-t border-subtle panel-muted p-3"
+                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                  emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+                  onVote={handleVote}
+                  onSubmitForm={handleFormSubmit}
+                  onReact={handleReaction}
+                  onLoadMore={() => {
+                    if (serverId && activeChannel?.id) {
+                      loadOlderMessages(serverId, activeChannel.id);
+                    }
+                  }}
+                  onSend={handleSend}
+                  onSendGif={handleSendGif}
+                  onCreatePoll={handleCreatePoll}
+                  onCreateForm={handleCreateForm}
+                />
+              </div>
+            {/if}
+          </div>
         {:else}
+          {#if voiceState && voiceState.visible}
+            <div class="flex-none mb-4 md:mb-5">
+              <VideoChat layout="embedded" on:openMobileChat={() => setMobileVoicePane('chat')} />
+            </div>
+          {/if}
+
           {#if voiceState && !voiceState.visible}
             <div class="shrink-0 border-b border-subtle px-3 py-2 text-sm text-soft flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
               <div class="flex-1 truncate">
@@ -858,40 +982,27 @@
             </div>
           {/if}
 
-          {#if serverId && activeChannel}
-            <div class="message-scroll-region flex-1 overflow-hidden p-3 sm:p-4">
-              <MessageList
-                {messages}
-                users={profiles}
-                currentUserId={$user?.uid ?? null}
-                on:vote={handleVote}
-                on:submitForm={handleFormSubmit}
-                on:react={handleReaction}
-                on:loadMore={() => serverId && activeChannel?.id && loadOlderMessages(serverId, activeChannel.id)}
-              />
-            </div>
-            <div
-              class="chat-input-region shrink-0 border-t border-subtle panel-muted p-3"
-              style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
-            >
-              <ChatInput
-                placeholder={`Message #${activeChannel?.name ?? ''}`}
-                mentionOptions={mentionOptions}
-                onSend={handleSend}
-                onSendGif={handleSendGif}
-                onCreatePoll={handleCreatePoll}
-                onCreateForm={handleCreateForm}
-              />
-            </div>
-          {:else}
-            <div class="flex-1 grid place-items-center text-soft">
-              {#if !serverId}
-                <div>Pick a server to start chatting.</div>
-              {:else}
-                <div>Pick a channel to start chatting.</div>
-              {/if}
-            </div>
-          {/if}
+          <ChannelMessagePane
+            hasChannel={Boolean(serverId && activeChannel)}
+            channelName={activeChannel?.name ?? ''}
+            {messages}
+            {profiles}
+            currentUserId={$user?.uid ?? null}
+            {mentionOptions}
+            emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+            onVote={handleVote}
+            onSubmitForm={handleFormSubmit}
+            onReact={handleReaction}
+            onLoadMore={() => {
+              if (serverId && activeChannel?.id) {
+                loadOlderMessages(serverId, activeChannel.id);
+              }
+            }}
+            onSend={handleSend}
+            onSendGif={handleSendGif}
+            onCreatePoll={handleCreatePoll}
+            onCreateForm={handleCreateForm}
+          />
         {/if}
       </div>
     </div>
@@ -971,3 +1082,104 @@
 </div>
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
+<style>
+  .mobile-call-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.75rem 0.9rem 0.95rem;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .mobile-call-tabs {
+    display: inline-flex;
+    align-self: center;
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    border-radius: 999px;
+    padding: 0.35rem;
+    gap: 0.35rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 8px 24px rgba(7, 10, 22, 0.4);
+  }
+
+  .mobile-call-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.48rem 1.05rem;
+    border-radius: 999px;
+    border: none;
+    background: transparent;
+    color: var(--text-55);
+    font-size: 0.78rem;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    transition: background 170ms ease, color 170ms ease, transform 170ms ease, box-shadow 170ms ease;
+  }
+
+  .mobile-call-tab i {
+    font-size: 1.05rem;
+  }
+
+  .mobile-call-tab.is-active {
+    background: color-mix(in srgb, var(--color-accent) 26%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 85%, white);
+    box-shadow:
+      0 10px 28px rgba(10, 12, 20, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+
+  .mobile-call-card,
+  .mobile-chat-card {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-radius: 1.3rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    box-shadow:
+      0 24px 45px rgba(10, 15, 30, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+  }
+
+  .mobile-call-card {
+    background: color-mix(in srgb, var(--color-panel) 86%, transparent);
+    padding: 0.6rem;
+    height: clamp(220px, 52vh, 360px);
+  }
+
+  .mobile-call-card :global(.voice-root) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mobile-call-card :global(.call-shell) {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .mobile-chat-card {
+    background: color-mix(in srgb, var(--color-panel-muted) 94%, transparent);
+    padding: 0.65rem;
+  }
+
+  .mobile-chat-card :global(.chat-input-region) {
+    border-radius: 0 0 1.3rem 1.3rem;
+  }
+
+  .mobile-chat-card :global(.message-scroll-region) {
+    border-radius: 1.3rem 1.3rem 0 0;
+  }
+
+  @media (min-width: 768px) {
+    .mobile-call-wrapper {
+      display: none;
+    }
+  }
+</style>

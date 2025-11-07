@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
@@ -198,6 +198,12 @@
   let isScreenSharePending = false;
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = false;
+  let isPlaybackMuted = false;
+  export let layout: 'standalone' | 'embedded' = 'standalone';
+  let compactMediaQuery: MediaQueryList | null = null;
+  let compactMatch = false;
+  let isCompact = false;
+  let handleCompactChange: ((event: MediaQueryListEvent) => void) | null = null;
   let isRestartingCall = false;
   let reconnectAttemptCount = 0;
   let signalingState = 'closed';
@@ -237,9 +243,24 @@
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
   const DEBUG_PANEL_STORAGE_KEY = 'hconnect:voice:debug-panel-open';
   const QUICK_STATS_STORAGE_KEY = 'hconnect:voice:debug.quickstats';
+  const DEBUG_PANEL_DRAG_MARGIN = 12;
   let debugPanelVisible = false;
   let hasDebugAlerts = false;
   let mostRecentAlertId: string | null = null;
+  let debugPanelPosition: { x: number; y: number } | null = null;
+  type DebugPanelDragState = {
+    pointerId: number;
+    offsetX: number;
+    offsetY: number;
+    width: number;
+    height: number;
+    handle: HTMLElement;
+  };
+  let debugPanelDrag: DebugPanelDragState | null = null;
+  let isDebugPanelDragging = false;
+  let debugPanelDrawerEl: HTMLElement | null = null;
+  const dispatch = createEventDispatcher<{ openMobileChat: void }>();
+
   const DEFAULT_STUN_SERVERS = [
     'stun:stun.l.google.com:19302',
     'stun:stun1.l.google.com:19302',
@@ -430,10 +451,109 @@
     hasDebugAlerts = false;
   }
 
+  function clampDebugPanelPosition(x: number, y: number, width: number, height: number) {
+    if (!browser) return { x, y };
+    const margin = DEBUG_PANEL_DRAG_MARGIN;
+    const maxX = Math.max(margin, window.innerWidth - width - margin);
+    const maxY = Math.max(margin, window.innerHeight - height - margin);
+    return {
+      x: Math.min(Math.max(margin, x), maxX),
+      y: Math.min(Math.max(margin, y), maxY)
+    };
+  }
+
+  function stopDebugPanelDrag(applyClamp = true) {
+    if (!debugPanelDrag) return;
+    if (browser) {
+      window.removeEventListener('pointermove', handleDebugPanelPointerMove);
+      window.removeEventListener('pointerup', handleDebugPanelPointerEnd);
+      window.removeEventListener('pointercancel', handleDebugPanelPointerEnd);
+    }
+    const { handle, pointerId } = debugPanelDrag;
+    if (handle && handle.hasPointerCapture(pointerId)) {
+      try {
+        handle.releasePointerCapture(pointerId);
+      } catch {
+        /* ignore release errors */
+      }
+    }
+    debugPanelDrag = null;
+    isDebugPanelDragging = false;
+    if (applyClamp && debugPanelPosition && debugPanelDrawerEl) {
+      const rect = debugPanelDrawerEl.getBoundingClientRect();
+      debugPanelPosition = clampDebugPanelPosition(debugPanelPosition.x, debugPanelPosition.y, rect.width, rect.height);
+    }
+  }
+
+  function openMobileChatPanel() {
+    dispatch('openMobileChat');
+  }
+
+  function cancelDebugPanelDrag() {
+    if (!debugPanelDrag) return;
+    stopDebugPanelDrag();
+  }
+
+  function handleDebugPanelPointerDown(event: PointerEvent) {
+    if (!browser || !debugPanelVisible) return;
+    if (!event.isPrimary || event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('button, a, input, textarea, select, [data-debug-panel-no-drag]')) {
+      return;
+    }
+    if (!debugPanelDrawerEl) return;
+    if (debugPanelDrag) {
+      stopDebugPanelDrag(false);
+    }
+    const rect = debugPanelDrawerEl.getBoundingClientRect();
+    const handle = event.currentTarget as HTMLElement;
+    debugPanelDrag = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+      handle
+    };
+    debugPanelPosition = clampDebugPanelPosition(rect.left, rect.top, rect.width, rect.height);
+    isDebugPanelDragging = true;
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      /* ignore pointer capture failures */
+    }
+    window.addEventListener('pointermove', handleDebugPanelPointerMove);
+    window.addEventListener('pointerup', handleDebugPanelPointerEnd);
+    window.addEventListener('pointercancel', handleDebugPanelPointerEnd);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDebugPanelPointerMove(event: PointerEvent) {
+    if (!browser || !debugPanelDrag || event.pointerId !== debugPanelDrag.pointerId) return;
+    const { offsetX, offsetY, width, height } = debugPanelDrag;
+    const nextX = event.clientX - offsetX;
+    const nextY = event.clientY - offsetY;
+    debugPanelPosition = clampDebugPanelPosition(nextX, nextY, width, height);
+    event.preventDefault();
+  }
+
+  function handleDebugPanelPointerEnd(event: PointerEvent) {
+    if (!debugPanelDrag || event.pointerId !== debugPanelDrag.pointerId) return;
+    stopDebugPanelDrag();
+    event.preventDefault();
+  }
+
   function setDebugPanelVisibility(open: boolean) {
     debugPanelVisible = open;
     if (open) {
       acknowledgeDebugAlerts();
+      if (debugPanelPosition && debugPanelDrawerEl) {
+        const rect = debugPanelDrawerEl.getBoundingClientRect();
+        debugPanelPosition = clampDebugPanelPosition(debugPanelPosition.x, debugPanelPosition.y, rect.width, rect.height);
+      }
+    } else {
+      cancelDebugPanelDrag();
     }
     voiceDebug('Debug panel visibility', { open });
     if (!browser || typeof localStorage === 'undefined') return;
@@ -1411,6 +1531,10 @@
   $: micButtonLabel = hasAudioTrack && !isMicMuted ? 'Mute mic' : 'Enable mic';
   $: cameraButtonLabel = hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video';
   $: screenShareButtonLabel = isScreenSharing ? 'Stop sharing' : 'Share screen';
+  $: playbackButtonLabel = isPlaybackMuted ? 'Unmute call audio' : 'Mute call audio';
+  $: playbackButtonText = isPlaybackMuted ? 'Unmute' : 'Mute audio';
+  $: isEmbedded = layout === 'embedded';
+  $: isCompact = isEmbedded && compactMatch;
   $: participantCount = participants.length;
 
   const DEFAULT_VOLUME = 0.85;
@@ -1764,6 +1888,12 @@
         }
       }
     };
+    const onResize = () => {
+      if (debugPanelPosition && debugPanelDrawerEl) {
+        const rect = debugPanelDrawerEl.getBoundingClientRect();
+        debugPanelPosition = clampDebugPanelPosition(debugPanelPosition.x, debugPanelPosition.y, rect.width, rect.height);
+      }
+    };
 
     if (browser && typeof window !== 'undefined') {
       let storedDebug = false;
@@ -1808,12 +1938,25 @@
       window.addEventListener('beforeunload', onUnload);
       window.addEventListener('pointerdown', onPointerDown);
       window.addEventListener('keydown', onKeyDown);
+      window.addEventListener('resize', onResize);
+      compactMediaQuery = window.matchMedia('(max-width: 780px)');
+      handleCompactChange = (event: MediaQueryListEvent) => {
+        compactMatch = event.matches;
+      };
+      compactMatch = compactMediaQuery.matches;
+      compactMediaQuery.addEventListener('change', handleCompactChange);
     }
     return () => {
       if (browser && typeof window !== 'undefined') {
         window.removeEventListener('beforeunload', onUnload);
         window.removeEventListener('pointerdown', onPointerDown);
         window.removeEventListener('keydown', onKeyDown);
+        window.removeEventListener('resize', onResize);
+        if (compactMediaQuery && handleCompactChange) {
+          compactMediaQuery.removeEventListener('change', handleCompactChange);
+          compactMediaQuery = null;
+          handleCompactChange = null;
+        }
         try {
           delete (window as any).hConnectVoiceDebug;
         } catch {
@@ -1839,6 +1982,7 @@
   });
 
   onDestroy(() => {
+    cancelDebugPanelDrag();
     voiceUnsubscribe?.();
     serverMetaUnsub?.();
     memberUnsub?.();
@@ -1906,9 +2050,10 @@
     if (!controls) return;
     const audio = audioRefs.get(uid);
     if (audio) {
-      audio.volume = controls.muted ? 0 : controls.volume;
-      audio.muted = controls.muted;
-      if (!controls.muted) {
+      const shouldMute = controls.muted || isPlaybackMuted;
+      audio.volume = shouldMute ? 0 : controls.volume;
+      audio.muted = shouldMute;
+      if (!shouldMute) {
         audio.play?.().catch(() => {});
       }
     }
@@ -4523,6 +4668,11 @@
     }
   }
 
+  function togglePlaybackMute() {
+    isPlaybackMuted = !isPlaybackMuted;
+    audioRefs.forEach((_, uid) => applyParticipantControls(uid));
+  }
+
   async function refreshDevices() {
     voiceDebug('refreshDevices invoked', { hasAudioTrack, hasVideoTrack, isMicMuted, isCameraOff });
     const tasks: Promise<boolean>[] = [];
@@ -4779,9 +4929,13 @@
   }
 </script>
 
-<div class="voice-root">
-  <div class="call-shell">
-    {#if debugLoggingEnabled}
+<div
+  class="voice-root"
+  class:voice-root--embedded={isEmbedded}
+  class:voice-root--compact={isCompact}
+>
+  <div class="call-shell" class:call-shell--embedded={isEmbedded}>
+    {#if debugLoggingEnabled && !isCompact}
       <div class="call-debug-banner">
         <i class="bx bx-bug"></i>
         Debug logging active - open the browser console to view `[voice]` events.
@@ -4790,65 +4944,83 @@
         </button>
       </div>
     {/if}
-    <header class="call-header">
-      <div class="call-header__info">
-        <div class="call-header__icon">
-          <i class="bx bx-hash"></i>
-        </div>
-        <div>
-          <div class="call-header__title">#{sessionChannelName || 'Voice channel'}</div>
-          {#if sessionServerName}
-            <div class="call-header__subtitle">{sessionServerName}</div>
-          {/if}
-        </div>
-      </div>
-      <div class="call-header__actions">
-        <div class="call-header__count">
-          <i class="bx bx-user-voice"></i>
-          <span>{participantCount}</span>
-        </div>
-        <div class="call-status">
-          <span class={`call-status__dot ${remoteConnected ? 'call-status__dot--online' : ''}`}>
-            {#if remoteConnected}
-              <span class="call-status__pulse"></span>
+    {#if !isCompact}
+      <header class="call-header">
+        <div class="call-header__info">
+          <div class="call-header__icon">
+            <i class="bx bx-hash"></i>
+          </div>
+          <div>
+            <div class="call-header__title">#{sessionChannelName || 'Voice channel'}</div>
+            {#if sessionServerName}
+              <div class="call-header__subtitle">{sessionServerName}</div>
             {/if}
-          </span>
-          <span class="call-status__label">{remoteConnected ? 'Voice connected' : 'Connecting'}</span>
+          </div>
         </div>
-        {#if debugLoggingEnabled}
+        <div class="call-header__actions">
+          <div class="call-header__count">
+            <i class="bx bx-user-voice"></i>
+            <span>{participantCount}</span>
+          </div>
+          <div class="call-status">
+            <span class={`call-status__dot ${remoteConnected ? 'call-status__dot--online' : ''}`}>
+              {#if remoteConnected}
+                <span class="call-status__pulse"></span>
+              {/if}
+            </span>
+            <span class="call-status__label">{remoteConnected ? 'Voice connected' : 'Connecting'}</span>
+          </div>
+          {#if debugLoggingEnabled}
+            <button
+              type="button"
+              class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
+              on:click={() => toggleDebugPanel()}
+              aria-pressed={debugPanelVisible}
+              aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
+            >
+              <i class="bx bx-bug"></i>
+              <span class="call-header__debug-label">Debug</span>
+              {#if voiceErrorCount > 0}
+                <span class="call-header__debug-count" aria-label={`Detected ${voiceErrorCount} error${voiceErrorCount === 1 ? '' : 's'}`}>
+                  {voiceErrorCount}
+                </span>
+              {:else if voiceWarnCount > 0}
+                <span class="call-header__debug-count call-header__debug-count--warn">{voiceWarnCount}</span>
+              {/if}
+              {#if hasDebugAlerts}
+                <span class="call-header__debug-pulse" aria-hidden="true"></span>
+              {/if}
+            </button>
+          {/if}
           <button
             type="button"
-            class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
-            on:click={() => toggleDebugPanel()}
-            aria-pressed={debugPanelVisible}
-            aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
+            class="call-header__minimize"
+            on:click={handleMinimize}
+            aria-label="Hide call"
           >
-            <i class="bx bx-bug"></i>
-            <span class="call-header__debug-label">Debug</span>
-            {#if voiceErrorCount > 0}
-              <span class="call-header__debug-count" aria-label={`Detected ${voiceErrorCount} error${voiceErrorCount === 1 ? '' : 's'}`}>
-                {voiceErrorCount}
-              </span>
-            {:else if voiceWarnCount > 0}
-              <span class="call-header__debug-count call-header__debug-count--warn">{voiceWarnCount}</span>
-            {/if}
-            {#if hasDebugAlerts}
-              <span class="call-header__debug-pulse" aria-hidden="true"></span>
-            {/if}
+            <i class="bx bx-minus"></i>
+            <span class="call-header__minimize-label">Hide</span>
           </button>
-        {/if}
-        <button
-          type="button"
-          class="call-header__minimize"
-          on:click={handleMinimize}
-          aria-label="Hide call"
-        >
-          <i class="bx bx-minus"></i>
-          <span class="call-header__minimize-label">Hide</span>
-        </button>
+        </div>
+      </header>
+    {:else}
+      <div class="compact-call-header">
+        <div class="compact-call-header__title">
+          <i class="bx bx-hash"></i>
+          <span>#{sessionChannelName || 'Voice channel'}</span>
+        </div>
+        <div class="compact-call-header__meta">
+          <span class={`compact-call-header__status ${remoteConnected ? 'is-online' : ''}`}>
+            {remoteConnected ? 'Connected' : 'Connecting'}
+          </span>
+          <span class="compact-call-header__count">
+            <i class="bx bx-user-voice"></i>
+            {participantCount}
+          </span>
+        </div>
       </div>
-    </header>
-    <section class="call-stage">
+    {/if}
+    <section class="call-stage" class:call-stage--embedded={isEmbedded}>
       {#if isJoined && participantTiles.length}
         <div class="call-grid">
           {#each participantTiles as tile (tile.uid)}
@@ -4994,7 +5166,11 @@
       {/if}
     </section>
 
-    <footer class="call-controls" style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)">
+    <footer
+      class="call-controls"
+      class:call-controls--embedded={isEmbedded}
+      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)"
+    >
       {#if !isJoined}
         <div class="call-controls__row call-controls__row--join">
           <button
@@ -5056,25 +5232,24 @@
             </div>
             <div class="call-controls__item">
               <button
-                class={controlClasses({ disabled: !hasAudioTrack && !hasVideoTrack })}
-                on:click={refreshDevices}
-                aria-label="Refresh devices"
-                disabled={!hasAudioTrack && !hasVideoTrack}
+                class={controlClasses({ active: !isPlaybackMuted })}
+                on:click={togglePlaybackMute}
+                aria-label={playbackButtonLabel}
               >
-                <i class="bx bx-sync"></i>
+                <i class={`bx ${isPlaybackMuted ? 'bx-volume-mute' : 'bx-volume-full'}`}></i>
               </button>
-              <span>Refresh</span>
+              <span>{playbackButtonText}</span>
             </div>
-            <div class="call-controls__item">
+            <div class="call-controls__item call-controls__item--mobile-chat">
               <button
-                class={controlClasses({ disabled: isRestartingCall || isConnecting })}
-                on:click={handleForceRestart}
-                aria-label="Restart call"
-                disabled={isRestartingCall || isConnecting}
+                type="button"
+                class={controlClasses()}
+                on:click={openMobileChatPanel}
+                aria-label="Open message thread"
               >
-                <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>
+                <i class="bx bx-message-dots"></i>
               </button>
-              <span>{isRestartingCall ? 'Restarting' : 'Restart'}</span>
+              <span>Messages</span>
             </div>
           </div>
           <div class="call-controls__group call-controls__group--exit">
@@ -5097,12 +5272,21 @@
   {#if debugLoggingEnabled}
     <div
       class={`call-debug-drawer ${debugPanelVisible ? 'call-debug-drawer--open' : ''}`}
+      class:call-debug-drawer--custom={!!debugPanelPosition}
+      class:call-debug-drawer--dragging={isDebugPanelDragging}
+      bind:this={debugPanelDrawerEl}
       role="dialog"
       aria-modal="false"
       aria-label="Call diagnostics"
+      style:left={debugPanelPosition ? `${debugPanelPosition.x}px` : undefined}
+      style:top={debugPanelPosition ? `${debugPanelPosition.y}px` : undefined}
     >
       <section class="call-debug-panel">
-        <header class="call-debug-panel__header">
+        <header
+          class="call-debug-panel__header"
+          class:call-debug-panel__header--dragging={isDebugPanelDragging}
+          on:pointerdown={handleDebugPanelPointerDown}
+        >
           <div class="call-debug-panel__heading">
             <i class="bx bx-bug"></i>
             <span>Call diagnostics</span>
@@ -5379,13 +5563,117 @@
 </div>
 
 <style>
-  .voice-root {
+.voice-root {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     min-height: 100%;
     padding: clamp(0.75rem, 2vw, 1.5rem);
     color: var(--text-100);
+}
+
+  .voice-root--compact .call-shell {
+    padding: 0.5rem;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+.voice-root--compact .call-stage {
+  padding: 0.3rem;
+  border: none;
+  background: transparent;
+  height: clamp(140px, 40vh, 260px);
+  overflow-y: auto;
+}
+
+.voice-root--compact .call-stage--embedded {
+  min-height: auto;
+  max-height: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  flex: 1;
+}
+
+.voice-root--compact .call-grid {
+  grid-template-columns: 1fr;
+  gap: 0.3rem;
+}
+
+.voice-root--compact .call-tile {
+  min-height: 125px;
+}
+
+  .voice-root--compact .call-controls {
+    padding: 0.45rem;
+    margin-top: auto;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+  }
+
+  .voice-root--compact .call-controls__item span {
+    display: none;
+  }
+
+  .voice-root--compact .call-controls__group--main {
+    gap: 0.45rem;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+.voice-root--compact .call-header,
+.voice-root--compact .call-debug-banner {
+  display: none !important;
+}
+
+.compact-call-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: color-mix(in srgb, var(--color-panel) 82%, transparent);
+  border-radius: 0.85rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+  color: var(--text-80);
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.compact-call-header__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.compact-call-header__title i {
+  font-size: 1rem;
+  color: var(--color-accent);
+}
+
+.compact-call-header__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.68rem;
+  color: var(--text-60);
+}
+
+.compact-call-header__status.is-online {
+  color: var(--color-accent);
+}
+
+.compact-call-header__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+  .voice-root--embedded {
+    min-height: auto;
+    padding: clamp(0.65rem, 2vw, 1.1rem);
+    gap: clamp(0.9rem, 1.7vw, 1.3rem);
+    width: 100%;
   }
 
   .call-shell {
@@ -5398,6 +5686,15 @@
     border: 1px solid var(--color-border-subtle);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     padding: clamp(1rem, 2.5vw, 1.75rem);
+  }
+
+  .call-shell--embedded {
+    flex: none;
+    box-shadow:
+      0 12px 28px rgba(8, 12, 24, 0.32),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    background: color-mix(in srgb, var(--color-panel) 86%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 68%, transparent);
   }
 
   .call-header {
@@ -5431,6 +5728,29 @@
       width: 2.5rem;
       height: 2.5rem;
       font-size: 1.1rem;
+    }
+
+    .voice-root--embedded {
+      padding: 0.58rem;
+    }
+
+    .call-shell--embedded {
+      padding: 0.55rem;
+      gap: 0.55rem;
+    }
+
+    .call-stage--embedded {
+      min-height: clamp(160px, 46vh, 360px);
+      max-height: clamp(200px, 50vh, 400px);
+      padding: 0.5rem;
+    }
+
+    .call-controls--embedded {
+      padding: 0.55rem;
+    }
+
+    .call-debug-banner {
+      display: none;
     }
   }
 
@@ -5644,21 +5964,32 @@
     min-height: 0;
     display: flex;
     background: linear-gradient(
-      155deg,
-      color-mix(in srgb, var(--color-panel) 65%, transparent),
-      color-mix(in srgb, var(--color-panel-muted) 55%, transparent)
+      160deg,
+      color-mix(in srgb, var(--color-panel) 56%, transparent),
+      color-mix(in srgb, var(--color-panel-muted) 42%, transparent)
     );
     border-radius: var(--radius-lg);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    padding: clamp(0.75rem, 2vw, 1.25rem);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    padding: clamp(0.65rem, 2vw, 1.05rem);
+  }
+
+  .call-stage--embedded {
+    flex: none;
+    min-height: clamp(140px, 38vh, 360px);
+    max-height: clamp(200px, 44vh, 420px);
+    border-radius: var(--radius-lg);
+    padding: clamp(0.45rem, 1.2vw, 0.75rem);
+    background: color-mix(in srgb, var(--color-panel-muted) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
   }
 
   .call-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: clamp(0.75rem, 2vw, 1.25rem);
     width: 100%;
     align-content: start;
+    align-items: stretch;
   }
   .call-debug-banner {
     display: flex;
@@ -5716,6 +6047,16 @@
     pointer-events: auto;
   }
 
+  .call-debug-drawer--custom {
+    right: auto;
+    bottom: auto;
+    transform: translate3d(0, 0, 0);
+  }
+
+  .call-debug-drawer--dragging {
+    transition: none !important;
+  }
+
   .call-debug-panel {
     display: flex;
     flex-direction: column;
@@ -5762,6 +6103,13 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+  }
+
+  .call-debug-panel__header--dragging {
+    cursor: grabbing;
   }
 
   .call-debug-panel__heading {
@@ -5784,6 +6132,10 @@
     gap: 0.45rem;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+
+  .call-debug-panel__header-actions button {
+    cursor: pointer;
   }
 
   .call-debug-panel__copy,
@@ -6434,7 +6786,13 @@
 
   @media (min-width: 1200px) {
     .call-grid {
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+  }
+
+  @media (min-width: 1600px) {
+    .call-grid {
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
     }
   }
 
@@ -6444,9 +6802,17 @@
     overflow: hidden;
     background: color-mix(in srgb, var(--color-panel) 75%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-    min-height: 220px;
     display: flex;
+    flex-direction: column;
     transition: box-shadow 0.18s ease, border-color 0.18s ease;
+    min-height: 220px;
+  }
+
+  @supports (aspect-ratio: 16 / 9) {
+    .call-tile {
+      aspect-ratio: var(--call-tile-aspect, 16 / 9);
+      min-height: 0;
+    }
   }
 
   .call-tile--self {
@@ -6467,7 +6833,7 @@
     position: relative;
     flex: 1;
     display: flex;
-    align-items: stretch;
+    align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.64);
   }
@@ -6475,7 +6841,8 @@
   .call-tile__media video {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: var(--call-video-object-fit, contain);
+    background: rgba(0, 0, 0, 0.85);
     display: none;
   }
 
@@ -6748,6 +7115,12 @@
     padding: clamp(0.9rem, 2vw, 1.25rem);
   }
 
+  .call-controls--embedded {
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-panel) 82%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 56%, transparent);
+  }
+
   .call-controls__row {
     display: flex;
     flex-wrap: wrap;
@@ -6833,6 +7206,10 @@
     color: var(--text-55);
   }
 
+  .call-controls__item--mobile-chat {
+    display: none;
+  }
+
   .call-controls__item span {
     max-width: 6rem;
     text-align: center;
@@ -6908,6 +7285,7 @@
 
     .call-controls__group--main {
       justify-content: center;
+      gap: 0.9rem;
     }
 
     .call-controls__row--connected {
@@ -6928,6 +7306,10 @@
       order: 3;
       justify-content: center;
     }
+
+    .call-controls__item--mobile-chat {
+      display: flex;
+    }
   }
 
   @media (max-width: 480px) {
@@ -6936,11 +7318,20 @@
     }
 
     .call-controls__group--main {
-      gap: 0.85rem;
+      gap: 0.58rem;
+    }
+
+    .call-controls__item {
+      gap: 0.18rem;
     }
 
     .call-controls__item span {
-      font-size: 0.7rem;
+      font-size: 0.6rem;
+      letter-spacing: 0.04em;
+    }
+
+    .call-controls__item--mobile-chat span {
+      font-size: 0.58rem;
     }
   }
 </style>
