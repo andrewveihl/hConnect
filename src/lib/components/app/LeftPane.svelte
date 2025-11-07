@@ -11,6 +11,8 @@
 
   export let activeServerId: string | null = null;
   export let onCreateServer: (() => void) | null = null;
+  export let padForDock = true;
+  export let showBottomActions = true;
 
   let servers: { id: string; name: string; icon?: string | null }[] = [];
   let unsub: (() => void) | undefined;
@@ -49,7 +51,9 @@
 
 <aside
   class="app-rail h-dvh w-[72px] sticky top-0 left-0 z-30 flex flex-col items-center select-none"
-  style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 12px);"
+  style:padding-bottom={padForDock
+    ? 'calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 12px)'
+    : '0.85rem'}
   aria-label="Server list"
 >
   <div class="h-4 shrink-0"></div>
@@ -95,72 +99,89 @@
     </div>
   </div>
 
-  <div class="w-full flex flex-col items-center gap-2 p-2">
-    {#if unreadDMs.length}
-      <div class="flex flex-col items-center gap-2" aria-label="Unread direct messages">
-        {#each unreadDMs as dm (dm.id)}
-          <a
-            href={dm.href}
-            class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
-            class:rail-button--alert={activeDmThreadId !== dm.threadId}
-            aria-label={dm.title}
-            title={dm.title}
-            aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
-          >
-            {#if dm.photoURL}
-              <img
-                src={dm.photoURL}
-                alt={dm.title}
-                class="rail-button__image"
-                draggable="false"
-              />
-            {:else}
-              <i class="bx bx-user text-xl leading-none"></i>
-            {/if}
-            <span class="rail-badge">{formatBadge(dm.unread)}</span>
-          </a>
-        {/each}
+  {#if showBottomActions}
+    <div
+      class="rail-bottom w-full flex flex-col items-center gap-3 p-3 mt-auto"
+      style:padding-bottom={padForDock
+        ? '1rem'
+        : 'calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.25rem)'}
+    >
+      {#if unreadDMs.length}
+        <div class="flex flex-col items-center gap-2 w-full" aria-label="Unread direct messages">
+          {#each unreadDMs as dm (dm.id)}
+            <a
+              href={dm.href}
+              class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
+              class:rail-button--alert={activeDmThreadId !== dm.threadId}
+              aria-label={dm.title}
+              title={dm.title}
+              aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
+            >
+              {#if dm.photoURL}
+                <img
+                  src={dm.photoURL}
+                  alt={dm.title}
+                  class="rail-button__image"
+                  draggable="false"
+                />
+              {:else}
+                <i class="bx bx-user text-xl leading-none"></i>
+              {/if}
+              <span class="rail-badge">{formatBadge(dm.unread)}</span>
+            </a>
+          {/each}
+        </div>
+      {/if}
+
+      <div class="w-full flex flex-col items-center gap-2 pt-1">
+        <VoiceRailItem />
+
+        <a
+          href="/settings"
+          class="rail-button rail-button--profile overflow-hidden"
+          aria-label="Profile"
+          title="Profile"
+        >
+          {#if $user?.photoURL}
+            <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
+          {:else}
+            <i class="bx bx-user text-xl leading-none"></i>
+          {/if}
+        </a>
+
+        <a
+          href="/settings"
+          class="rail-button rail-button--compact"
+          aria-label="Settings"
+          title="Settings"
+        >
+          <i class="bx bx-cog text-lg leading-none"></i>
+        </a>
       </div>
-    {/if}
 
-    <a
-      href="/dms"
-      class="rail-button rail-button--primary relative"
-      class:rail-button--active={dmsActive}
-      class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
-      aria-label="Home / DMs"
-      title="Home / DMs"
-    >
-      <i class="bx bx-message-dots text-xl leading-none"></i>
-      {#if $dmUnreadCount}
-        <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
-      {/if}
-    </a>
-
-    <VoiceRailItem />
-
-    <a
-      href="/settings"
-      class="rail-button rail-button--profile overflow-hidden"
-      aria-label="Profile"
-      title="Profile"
-    >
-      {#if $user?.photoURL}
-        <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
-      {:else}
-        <i class="bx bx-user text-xl leading-none"></i>
-      {/if}
-    </a>
-
-    <a
-      href="/settings"
-      class="rail-button rail-button--compact"
-      aria-label="Settings"
-      title="Settings"
-    >
-      <i class="bx bx-cog text-lg leading-none"></i>
-    </a>
-  </div>
+      <a
+        href="/dms"
+        class="rail-button rail-button--primary relative mt-2"
+        class:rail-button--active={dmsActive}
+        class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
+        aria-label="Home / DMs"
+        title="Home / DMs"
+      >
+        <i class="bx bx-message-dots text-xl leading-none"></i>
+        {#if $dmUnreadCount}
+          <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
+        {/if}
+      </a>
+    </div>
+  {/if}
 </aside>
 
 <NewServerModal bind:open={localCreateOpen} onClose={() => (localCreateOpen = false)} />
+
+<style>
+  @media (max-width: 767px) {
+    :global(.app-rail .rail-bottom) {
+      display: none;
+    }
+  }
+</style>

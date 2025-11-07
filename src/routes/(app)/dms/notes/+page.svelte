@@ -70,9 +70,6 @@
   }
 
   onMount(() => {
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      showThreads = true;
-    }
     const cleanup = setupGestures();
     return cleanup;
   });
@@ -108,32 +105,23 @@
       </div>
     </header>
 
-    <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
-      <div class="mx-auto flex w-full max-w-5xl flex-col gap-6 sm:gap-8">
-        <div class="surface notes-surface px-5 py-4 text-sm text-muted sm:text-base">
-          Notes stay private to you and sync seamlessly across devices. Capture quick ideas, outline plans, and keep your personal tasks in reach.
-        </div>
-        <div class="surface notes-board-shell p-3 sm:p-5">
-          <div class="panel notes-board-panel border border-subtle p-4 sm:p-6 lg:p-8">
-            <NotesBoard />
-          </div>
-        </div>
+    <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8 notes-main">
+      <div class="notes-board-container">
+        <NotesBoard />
       </div>
     </main>
   </div>
 </div>
 
 <style>
-  :global(.notes-surface) {
-    border-radius: calc(var(--radius-lg) * 1.1);
+  .notes-main {
+    min-height: 0;
   }
 
-  :global(.notes-board-shell) {
-    border-radius: calc(var(--radius-lg) * 1.2);
-  }
-
-  :global(.notes-board-panel) {
-    border-radius: calc(var(--radius-lg) * 1.3);
+  .notes-board-container {
+    width: 100%;
+    max-width: 960px;
+    margin: 0 auto;
   }
 </style>
 

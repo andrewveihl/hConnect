@@ -16,6 +16,7 @@
   export let inputPaddingBottom =
     'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)';
   export let emptyMessage = 'Pick a channel to start chatting.';
+  export let hideInput = false;
 
   export let onVote: (event: CustomEvent<any>) => void = () => {};
   export let onSubmitForm: (event: CustomEvent<any>) => void = () => {};
@@ -39,16 +40,18 @@
       on:loadMore={onLoadMore}
     />
   </div>
-  <div class={inputWrapperClass} style:padding-bottom={inputPaddingBottom ?? undefined}>
-    <ChatInput
-      placeholder={`Message #${channelName}`}
-      {mentionOptions}
-      onSend={onSend}
-      onSendGif={onSendGif}
-      onCreatePoll={onCreatePoll}
-      onCreateForm={onCreateForm}
-    />
-  </div>
+  {#if !hideInput}
+    <div class={inputWrapperClass} style:padding-bottom={inputPaddingBottom ?? undefined}>
+      <ChatInput
+        placeholder={`Message #${channelName}`}
+        {mentionOptions}
+        onSend={onSend}
+        onSendGif={onSendGif}
+        onCreatePoll={onCreatePoll}
+        onCreateForm={onCreateForm}
+      />
+    </div>
+  {/if}
 {:else}
   <div class="flex-1 grid place-items-center text-soft">
     <slot name="empty">

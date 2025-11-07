@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
+  import { user } from '$lib/stores/user';
 
   type Link = {
     href: string;
@@ -17,16 +18,16 @@
       isActive: (path) => path === '/dms' || (path.startsWith('/dms/') && !path.startsWith('/dms/notes'))
     },
     {
-      href: '/dms/notes',
-      label: 'Notes',
-      icon: 'bx-notepad',
-      isActive: (path) => path.startsWith('/dms/notes')
-    },
-    {
       href: '/',
       label: 'Activity',
       icon: 'bx-bell',
       isActive: (path) => path === '/'
+    },
+    {
+      href: '/dms/notes',
+      label: 'Notes',
+      icon: 'bx-notepad',
+      isActive: (path) => path.startsWith('/dms/notes')
     }
   ];
 
@@ -63,6 +64,19 @@
         {/if}
       </a>
     {/each}
+    <a
+      href="/settings"
+      class={`mobile-dock__item mobile-dock__item--profile ${currentPath.startsWith('/settings') ? 'is-active' : ''}`}
+      aria-label="Profile"
+      aria-current={currentPath.startsWith('/settings') ? 'page' : undefined}
+    >
+      {#if $user?.photoURL}
+        <img src={$user.photoURL} alt="Me" class="mobile-dock__avatar" />
+      {:else}
+        <i class="bx bx-user mobile-dock__icon" aria-hidden="true"></i>
+      {/if}
+      <span class="mobile-dock__label">Me</span>
+    </a>
   </div>
 </nav>
 
@@ -81,7 +95,7 @@
 
   .mobile-dock__inner {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.5rem;
   }
 
@@ -143,5 +157,17 @@
 
   .mobile-dock__item--alert {
     color: var(--color-accent);
+  }
+
+  .mobile-dock__item--profile {
+    padding-inline: 0.4rem;
+  }
+
+  .mobile-dock__avatar {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 999px;
+    object-fit: cover;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
   }
 </style>

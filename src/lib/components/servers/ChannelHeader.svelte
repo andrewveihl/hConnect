@@ -12,7 +12,7 @@
       <button
         class="channel-header__toggle md:hidden"
         type="button"
-        aria-label="Show channels"
+        aria-label="Show servers"
         on:click={() => onToggleChannels?.()}
       >
         <i class="bx bx-chevron-left text-xl"></i>
