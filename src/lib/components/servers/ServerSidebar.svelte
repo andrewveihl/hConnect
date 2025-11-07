@@ -789,7 +789,7 @@ $: if (reorderMode === 'default') {
       {/if}
     </div>
 
-    <div class="flex items-center gap-1">
+    <div class="flex items-center gap-1.5 pr-1">
       {#if canManageChannels || canReorderPersonal}
         {#if reorderMode === 'none'}
           <button

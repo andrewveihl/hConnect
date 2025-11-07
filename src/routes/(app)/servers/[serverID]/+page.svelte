@@ -441,6 +441,7 @@
   let mobilePaneStartY = 0;
   let lastVoiceVisible = false;
   let lastIsMobile = false;
+  let hideMessageInput = false;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 40;
@@ -449,6 +450,11 @@
   let tracking = false;
   let startX = 0;
   let startY = 0;
+
+  const inLeftEdgeZone = (value: number) => {
+    if (isMobile) return value <= EDGE_ZONE;
+    return value >= LEFT_RAIL && value <= LEFT_RAIL + EDGE_ZONE;
+  };
 
   function setupGestures() {
     if (typeof window === 'undefined') return () => {};
@@ -481,7 +487,7 @@
       startX = touch.clientX;
       startY = touch.clientY;
 
-      const nearLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE;
+      const nearLeft = inLeftEdgeZone(startX);
       const nearRight = window.innerWidth - startX <= EDGE_ZONE;
       tracking = nearLeft || nearRight || showChannels || showMembers;
     };
@@ -495,7 +501,7 @@
       if (Math.abs(dy) > Math.abs(dx) * 1.35) return;
 
       if (!showChannels && !showMembers) {
-        const fromLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE && dx >= SWIPE;
+        const fromLeft = inLeftEdgeZone(startX) && dx >= SWIPE;
         const fromRight = window.innerWidth - startX <= EDGE_ZONE && dx <= -SWIPE;
         if (fromLeft) {
           showChannels = true;
@@ -574,6 +580,8 @@
   function handleMobilePaneTouchEnd() {
     mobilePaneTracking = false;
   }
+
+  $: hideMessageInput = isMobile && showChannels;
 
   $: {
     if (serverId) {
@@ -846,16 +854,21 @@
   // mobile: when switching servers, open channels panel
   $: if (serverId) {
     const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
-    if (!isDesktop) { showChannels = true; showMembers = false; }
+    if (!isDesktop && !activeChannel) {
+      showChannels = true;
+      showMembers = false;
+    }
   }
 </script>
 
 <!-- Layout summary:
-  - Mobile (<768px): keep the 72px server rail visible while channels/members slide in.
-  - Desktop (>=1024px): channels stay pinned; members pane opens at large breakpoints.
+  - Mobile (<768px): hide the server rail until the nav drawer opens (swipe/right button), with members on the right swipe.
+  - Desktop (>=1024px): server rail + channels stay pinned; members pane opens at large breakpoints.
 -->
 <div class="flex h-dvh app-bg text-primary overflow-hidden">
-  <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
+  <div class="hidden md:flex md:shrink-0">
+    <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
+  </div>
   <div class="flex flex-1 overflow-hidden panel-muted">
     <div class="hidden md:flex md:w-80 xl:w-80 shrink-0 flex-col border-r border-subtle">
       {#if serverId}
@@ -937,6 +950,7 @@
                   onSendGif={handleSendGif}
                   onCreatePoll={handleCreatePoll}
                   onCreateForm={handleCreateForm}
+                  hideInput={hideMessageInput}
                 />
               </div>
             {/if}
@@ -1002,6 +1016,7 @@
             onSendGif={handleSendGif}
             onCreatePoll={handleCreatePoll}
             onCreateForm={handleCreateForm}
+            hideInput={hideMessageInput}
           />
         {/if}
       </div>
@@ -1019,37 +1034,38 @@
 
 <!-- ======= MOBILE FULL-SCREEN PANELS (leave 72px rail visible) ======= -->
 
-<!-- Channels panel (slides from left) -->
+<!-- Navigation panel (servers + channels, slides from left) -->
 <div
   class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform"
   style:transform={showChannels ? 'translateX(0)' : 'translateX(-100%)'}
   style:pointer-events={showChannels ? 'auto' : 'none'}
-  aria-label="Channels"
+  aria-label="Servers and channels"
+  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >
-  <!-- mobile-only top bar (prevents stray arrow on desktop) -->
-  <div class="mobile-panel__header md:hidden">
-    <button
-      class="mobile-panel__close -ml-2"
-      aria-label="Back to chat"
-      type="button"
-      on:click={() => (showChannels = false)}
-    >
-      <i class="bx bx-chevron-left text-2xl"></i>
-    </button>
-    <div class="mobile-panel__title">Channels</div>
-  </div>
 
-  <div class="flex-1 overflow-y-auto">
-    {#if serverId}
-      <ServerSidebar
-        serverId={serverId}
-        activeChannelId={activeChannel?.id ?? null}
-        onPickChannel={(id) => pickChannel(id)}
-        on:pick={() => (showChannels = false)}
-      />
-    {:else}
-      <div class="p-4 text-white/70">Select a server to view channels.</div>
+  <div class="mobile-panel__body md:hidden">
+    {#if showChannels}
+      <div class="mobile-panel__servers">
+        <LeftPane
+          activeServerId={serverId}
+          onCreateServer={() => (showCreate = true)}
+          padForDock={false}
+          showBottomActions={false}
+        />
+      </div>
     {/if}
+    <div class="mobile-panel__channels">
+      {#if serverId}
+        <ServerSidebar
+          serverId={serverId}
+          activeChannelId={activeChannel?.id ?? null}
+          onPickChannel={(id) => pickChannel(id)}
+          on:pick={() => (showChannels = false)}
+        />
+      {:else}
+        <div class="p-4 text-white/70">Select a server to view channels.</div>
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -1059,6 +1075,7 @@
   style:transform={showMembers ? 'translateX(0)' : 'translateX(100%)'}
   style:pointer-events={showMembers ? 'auto' : 'none'}
   aria-label="Members"
+  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >
   <div class="mobile-panel__header md:hidden">
     <button
@@ -1083,6 +1100,56 @@
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
 <style>
+  .mobile-panel__body {
+    flex: 1;
+    display: flex;
+    background: var(--color-panel);
+    border-top: 1px solid var(--color-border-subtle);
+    min-height: 0;
+  }
+
+  .mobile-panel {
+    padding-bottom: 0;
+  }
+
+  .mobile-panel__servers {
+    width: 84px;
+    flex: 0 0 84px;
+    display: flex;
+    justify-content: center;
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-right: 1px solid var(--color-border-subtle);
+    overflow-y: auto;
+  }
+
+  .mobile-panel__servers :global(.app-rail) {
+    position: relative;
+    inset: auto;
+    width: 72px;
+    height: 100%;
+    min-height: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding-top: 0.5rem;
+  }
+
+  .mobile-panel__channels {
+    flex: 1;
+    min-width: 0;
+    background: color-mix(in srgb, var(--color-panel-muted) 96%, transparent);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mobile-panel__channels :global(.sidebar-surface) {
+    flex: 1;
+    min-height: 0;
+    border-right: none !important;
+    border-left: none !important;
+    border: none !important;
+  }
+
   .mobile-call-wrapper {
     display: flex;
     flex-direction: column;
