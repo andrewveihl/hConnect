@@ -1,8 +1,13 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { db } from '$lib/firestore';
+  import { onDestroy, onMount } from 'svelte';
+  import { browser } from '$app/environment';
+  import { goto } from '$app/navigation';
   import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
+  import { db } from '$lib/firestore';
+  import { getOrCreateDMThread } from '$lib/firestore/dms';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { user } from '$lib/stores/user';
+  import MemberProfileCard from './MemberProfileCard.svelte';
 
   export let serverId: string;
   export let showHeader = true;
@@ -44,6 +49,12 @@
     roles: RoleDoc[];
   };
 
+  type MemberGroup = {
+    id: PresenceState;
+    label: string;
+    members: MemberRow[];
+  };
+
   type PresenceDoc = {
     state?: string | null;
     status?: string | null;
@@ -61,12 +72,33 @@
   let presenceDocs: Record<string, PresenceDoc> = {};
   let roles: Record<string, RoleDoc> = {};
   let rows: MemberRow[] = [];
+  let groupedRows: MemberGroup[] = [];
+  let selectedUid: string | null = null;
+  let selectedMember: MemberRow | null = null;
+  let selectedProfile: ProfileDoc | null = null;
+  let popoverPos = { top: 0, left: 0 };
+  let cardLoading = false;
+  let cardError: string | null = null;
+  let isMobileView = false;
+  let canMessageSelected = false;
+  let mediaQuery: MediaQueryList | null = null;
+  let me: any = null;
+  $: me = $user;
 
   let membersUnsub: Unsubscribe | null = null;
   let rolesUnsub: Unsubscribe | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
   let currentServer: string | null = null;
+  const statusOrder: PresenceState[] = ['online', 'idle', 'offline'];
+  const statusLabels: Record<PresenceState, string> = {
+    online: 'Online',
+    idle: 'Idle',
+    offline: 'Offline'
+  };
+  $: selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
+  $: selectedProfile = selectedUid ? profiles[selectedUid] ?? null : null;
+  $: canMessageSelected = Boolean(selectedMember && me?.uid && selectedMember.uid !== me.uid);
 
   function pickString(value: unknown): string | undefined {
     if (typeof value === 'string') {
@@ -194,11 +226,11 @@
   const statusClass = (state: PresenceState) => {
     switch (state) {
       case 'online':
-        return 'bg-emerald-400';
+        return 'presence-dot--online';
       case 'idle':
-        return 'bg-amber-400';
+        return 'presence-dot--away';
       default:
-        return 'bg-zinc-500';
+        return 'presence-dot--offline';
     }
   };
 
@@ -211,7 +243,7 @@
     const computed: MemberRow[] = Object.values(members).map((member) => {
       const label = labelFor(member.uid);
       const status = presenceState(member.uid);
-      const tooltip = label === 'Member' ? member.uid : label;
+      const tooltip = label;
       const baseRole = typeof (member as any)?.role === 'string' ? ((member as any).role as 'owner' | 'admin' | 'member') : null;
       const roleIds = Array.isArray((member as any)?.roleIds) ? ((member as any).roleIds as string[]) : [];
       const resolvedRoles = roleIds
@@ -233,6 +265,25 @@
       a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
     );
   }
+
+  onMount(() => {
+    if (!browser) return;
+    mediaQuery = window.matchMedia('(max-width: 640px)');
+    const update = () => {
+      isMobileView = mediaQuery?.matches ?? false;
+    };
+    update();
+    mediaQuery.addEventListener('change', update);
+    return () => {
+      mediaQuery?.removeEventListener('change', update);
+    };
+  });
+
+  $: groupedRows = statusOrder.map((status) => ({
+    id: status,
+    label: statusLabels[status],
+    members: rows.filter((row) => row.status === status)
+  }));
 
   function unsubscribePresence(uid: string) {
     if (presenceUnsubs[uid]) {
@@ -257,6 +308,56 @@
     presenceDocs = {};
     roles = {};
     rows = [];
+  }
+
+  function openMemberProfile(uid: string, anchorEl?: HTMLElement | null) {
+    selectedUid = uid;
+    cardError = null;
+    cardLoading = false;
+    if (anchorEl) {
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const viewportHeight = browser ? window.innerHeight : 0;
+      const center = anchorRect.top + anchorRect.height / 2;
+      const clamped =
+        viewportHeight > 0 ? Math.min(Math.max(center, 64), viewportHeight - 64) : center;
+      popoverPos = {
+        top: clamped,
+        left: anchorRect.left
+      };
+    } else {
+      popoverPos = { top: 0, left: 0 };
+    }
+  }
+
+  function closeMemberProfile() {
+    selectedUid = null;
+    cardError = null;
+    cardLoading = false;
+  }
+
+  async function startDirectMessage(uid: string) {
+    if (!me?.uid || uid === me.uid) return;
+    cardError = null;
+    cardLoading = true;
+    try {
+      const thread = await getOrCreateDMThread([me.uid, uid], me.uid);
+      if (thread?.id) {
+        closeMemberProfile();
+        await goto(`/dms/${thread.id}`);
+      } else {
+        throw new Error('Unable to open direct message.');
+      }
+    } catch (err: any) {
+      cardError = err?.message ?? 'Failed to start DM. Please try again.';
+    } finally {
+      cardLoading = false;
+    }
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && selectedUid) {
+      closeMemberProfile();
+    }
   }
 
   function subscribePresence(database: ReturnType<typeof db>, uid: string) {
@@ -366,7 +467,9 @@
   });
 </script>
 
-<div class="flex flex-col h-full w-full panel text-primary">
+<svelte:window on:keydown={handleWindowKeydown} />
+
+<div class="flex flex-col h-full w-full panel text-primary relative">
   {#if showHeader}
     <div class="flex items-center gap-3 px-3 py-3 border-b border-subtle text-soft sm:px-4">
       <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
@@ -379,51 +482,87 @@
   {/if}
   <div class="flex flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
     {#if rows.length}
-      <ul class="flex w-full flex-col gap-2 p-0 m-0 list-none sm:gap-3">
-        {#each rows as member (member.uid)}
-          <li class="w-full">
-            <div class="member-card">
-              <div class="member-card__avatar">
-                {#if member.avatar}
-                  <img
-                    src={member.avatar}
-                    alt={member.label}
-                    class="h-full w-full object-cover"
-                    loading="lazy"
-                  />
-                {:else}
-                  <i class="bx bx-user text-lg text-soft"></i>
-                {/if}
-                <span class={`member-card__status ${statusClass(member.status)}`} aria-hidden="true"></span>
+      <div class="member-groups">
+        {#each groupedRows as group (group.id)}
+          {#if group.members.length}
+            <section class="member-group" aria-label={`${group.label} members`}>
+              <div class="member-group__header">
+                <span class="member-group__count">{group.members.length}</span>
+                <span class="member-group__label">{group.label}</span>
               </div>
-              <div class="member-card__meta">
-                <span class="member-card__name" title={member.tooltip}>
-                  {member.label}
-                </span>
-                {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
-                  <div class="member-roles">
-                    {#if member.baseRole === 'owner'}
-                      <span class="member-role" data-tone="owner">Owner</span>
-                    {:else if member.baseRole === 'admin'}
-                      <span class="member-role" data-tone="admin">Admin</span>
-                    {/if}
-                    {#each member.roles as role}
-                      <span
-                        class="member-role"
-                        style={role.color ? `--member-role-color: ${role.color}` : undefined}
-                      >
-                        {role.name}
-                      </span>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            </div>
-          </li>
+              <ul class="member-group__list">
+                {#each group.members as member (member.uid)}
+                  <li>
+                    <button
+                      type="button"
+                      class="member-row"
+                      on:click={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
+                    >
+                      <div class="member-row__avatar">
+                        {#if member.avatar}
+                          <img
+                            src={member.avatar}
+                            alt={member.label}
+                            class="h-full w-full object-cover"
+                            loading="lazy"
+                          />
+                        {:else}
+                          <i class="bx bx-user text-soft"></i>
+                        {/if}
+                        <span
+                          class={`presence-dot ${statusClass(member.status)}`}
+                          aria-label={member.status}
+                        ></span>
+                      </div>
+                      <div class="member-row__body">
+                        <div class="member-row__top">
+                          <span class="member-row__name" title={member.tooltip}>
+                            {member.label}
+                          </span>
+                        </div>
+                        {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
+                          <div class="member-roles member-row__roles">
+                            {#if member.baseRole === 'owner'}
+                              <span class="member-role" data-tone="owner">Owner</span>
+                            {:else if member.baseRole === 'admin'}
+                              <span class="member-role" data-tone="admin">Admin</span>
+                            {/if}
+                            {#each member.roles as role}
+                              <span
+                                class="member-role"
+                                style={role.color ? `--member-role-color: ${role.color}` : undefined}
+                              >
+                                {role.name}
+                              </span>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/if}
         {/each}
-      </ul>
+      </div>
     {:else}
       <div class="text-xs text-soft px-2">No members yet.</div>
     {/if}
   </div>
 </div>
+
+<MemberProfileCard
+  open={!!selectedMember}
+  member={selectedMember}
+  profile={selectedProfile}
+  statusClassName={statusClass(selectedMember?.status ?? 'offline')}
+  isMobile={isMobileView}
+  anchorTop={popoverPos.top}
+  anchorLeft={popoverPos.left}
+  loading={cardLoading}
+  error={cardError}
+  canMessage={canMessageSelected}
+  on:close={closeMemberProfile}
+  on:dm={() => selectedMember && startDirectMessage(selectedMember.uid)}
+/>
