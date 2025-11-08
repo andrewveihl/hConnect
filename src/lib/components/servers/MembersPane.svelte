@@ -7,6 +7,7 @@
   import { getOrCreateDMThread } from '$lib/firestore/dms';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { user } from '$lib/stores/user';
+  import InvitePanel from '$lib/components/app/InvitePanel.svelte';
   import MemberProfileCard from './MemberProfileCard.svelte';
 
   export let serverId: string;
@@ -83,6 +84,23 @@
   let canMessageSelected = false;
   let mediaQuery: MediaQueryList | null = null;
   let me: any = null;
+  let myMember: MemberDoc | null = null;
+  let myBaseRole: 'owner' | 'admin' | 'member' | null = null;
+  let canInviteMembers = false;
+  const INITIAL_MEMBER_BATCH = 60;
+  const MEMBER_BATCH_SIZE = 40;
+  let visibleMemberCount = INITIAL_MEMBER_BATCH;
+  let visibleRows: MemberRow[] = [];
+  let visibleGroupMap: Record<PresenceState, MemberRow[]> = {
+    online: [],
+    idle: [],
+    offline: []
+  };
+  let allMembersVisible = true;
+  let loadMoreSentinel: HTMLDivElement | null = null;
+  let memberScrollContainer: HTMLDivElement | null = null;
+  let loadObserver: IntersectionObserver | null = null;
+  let showInviteDialog = false;
   $: me = $user;
 
   let membersUnsub: Unsubscribe | null = null;
@@ -99,6 +117,39 @@
   $: selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
   $: selectedProfile = selectedUid ? profiles[selectedUid] ?? null : null;
   $: canMessageSelected = Boolean(selectedMember && me?.uid && selectedMember.uid !== me.uid);
+  $: myMember = me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null;
+  $: myBaseRole =
+    typeof (myMember as any)?.role === 'string'
+      ? ((myMember as any).role as 'owner' | 'admin' | 'member')
+      : null;
+  $: canInviteMembers = myBaseRole === 'owner' || myBaseRole === 'admin';
+  $: if (!canInviteMembers && showInviteDialog) {
+    showInviteDialog = false;
+  }
+  $: {
+    const total = rows.length;
+    if (total === 0) {
+      if (visibleMemberCount !== INITIAL_MEMBER_BATCH) {
+        visibleMemberCount = INITIAL_MEMBER_BATCH;
+      }
+      allMembersVisible = true;
+    } else {
+      if (visibleMemberCount < 1) {
+        visibleMemberCount = Math.min(INITIAL_MEMBER_BATCH, total);
+      } else if (visibleMemberCount > total) {
+        visibleMemberCount = total;
+      }
+      allMembersVisible = visibleMemberCount >= total;
+    }
+  }
+  $: visibleRows = rows.slice(0, visibleMemberCount);
+  $: visibleGroupMap = statusOrder.reduce(
+    (acc, status) => {
+      acc[status] = visibleRows.filter((row) => row.status === status);
+      return acc;
+    },
+    { online: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
+  );
 
   function pickString(value: unknown): string | undefined {
     if (typeof value === 'string') {
@@ -355,9 +406,68 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && selectedUid) {
-      closeMemberProfile();
+    if (event.key === 'Escape') {
+      if (showInviteDialog) {
+        showInviteDialog = false;
+        return;
+      }
+      if (selectedUid) {
+        closeMemberProfile();
+      }
     }
+  }
+
+  function openInviteDialog() {
+    if (!canInviteMembers) return;
+    showInviteDialog = true;
+  }
+
+  function closeInviteDialog() {
+    showInviteDialog = false;
+  }
+
+  function loadMoreMembers() {
+    if (allMembersVisible) return;
+    const next = Math.min(rows.length, visibleMemberCount + MEMBER_BATCH_SIZE);
+    if (next !== visibleMemberCount) {
+      visibleMemberCount = next;
+    }
+  }
+
+  function teardownLoadObserver() {
+    loadObserver?.disconnect();
+    loadObserver = null;
+  }
+
+  function setupLoadObserver() {
+    if (!loadMoreSentinel) return;
+    loadObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreMembers();
+        }
+      },
+      {
+        root: memberScrollContainer ?? null,
+        rootMargin: '0px 0px 200px 0px',
+        threshold: 0.1
+      }
+    );
+    loadObserver.observe(loadMoreSentinel);
+  }
+
+  function refreshLoadObserver() {
+    if (!browser) return;
+    teardownLoadObserver();
+    if (loadMoreSentinel) {
+      setupLoadObserver();
+    }
+  }
+
+  $: {
+    loadMoreSentinel;
+    memberScrollContainer;
+    refreshLoadObserver();
   }
 
   function subscribePresence(database: ReturnType<typeof db>, uid: string) {
@@ -406,6 +516,7 @@
   function subscribeMembers(server: string) {
     if (currentServer === server) return;
     currentServer = server;
+    visibleMemberCount = INITIAL_MEMBER_BATCH;
 
     membersUnsub?.();
     cleanupProfiles();
@@ -458,12 +569,14 @@
     roles = {};
     cleanupProfiles();
     currentServer = null;
+    visibleMemberCount = INITIAL_MEMBER_BATCH;
   }
 
   onDestroy(() => {
     membersUnsub?.();
     rolesUnsub?.();
     cleanupProfiles();
+    teardownLoadObserver();
   });
 </script>
 
@@ -473,84 +586,139 @@
   {#if showHeader}
     <div class="flex items-center gap-3 px-3 py-3 border-b border-subtle text-soft sm:px-4">
       <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
-      <div class="ml-auto flex flex-1 justify-end">
+      <div class="ml-auto flex flex-1 items-center justify-end gap-2">
+        {#if canInviteMembers}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-white/60 focus-visible:ring-offset-transparent sm:text-sm"
+            on:click={openInviteDialog}
+            aria-label="Invite members"
+          >
+            <i class="bx bx-plus text-sm"></i>
+            <span class="hidden sm:inline">Invite</span>
+          </button>
+        {/if}
         <span class="inline-flex h-7 min-w-[3.5rem] items-center justify-center rounded-full bg-white/[0.08] px-3 text-xs font-semibold text-soft sm:h-8 sm:min-w-[4rem] sm:text-sm">
           {rows.length}
         </span>
       </div>
     </div>
   {/if}
-  <div class="flex flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
+  <div
+    class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
+    bind:this={memberScrollContainer}
+  >
     {#if rows.length}
       <div class="member-groups">
         {#each groupedRows as group (group.id)}
           {#if group.members.length}
+            {@const groupMembers = visibleGroupMap[group.id] ?? []}
             <section class="member-group" aria-label={`${group.label} members`}>
               <div class="member-group__header">
                 <span class="member-group__count">{group.members.length}</span>
                 <span class="member-group__label">{group.label}</span>
               </div>
               <ul class="member-group__list">
-                {#each group.members as member (member.uid)}
-                  <li>
-                    <button
-                      type="button"
-                      class="member-row"
-                      on:click={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
-                    >
-                      <div class="member-row__avatar">
-                        {#if member.avatar}
-                          <img
-                            src={member.avatar}
-                            alt={member.label}
-                            class="h-full w-full object-cover"
-                            loading="lazy"
-                          />
-                        {:else}
-                          <i class="bx bx-user text-soft"></i>
-                        {/if}
-                        <span
-                          class={`presence-dot ${statusClass(member.status)}`}
-                          aria-label={member.status}
-                        ></span>
-                      </div>
-                      <div class="member-row__body">
-                        <div class="member-row__top">
-                          <span class="member-row__name" title={member.tooltip}>
-                            {member.label}
-                          </span>
+                {#if groupMembers.length}
+                  {#each groupMembers as member (member.uid)}
+                    <li>
+                      <button
+                        type="button"
+                        class="member-row"
+                        on:click={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
+                      >
+                        <div class="member-row__avatar">
+                          {#if member.avatar}
+                            <img
+                              src={member.avatar}
+                              alt={member.label}
+                              class="h-full w-full object-cover"
+                              loading="lazy"
+                            />
+                          {:else}
+                            <i class="bx bx-user text-soft"></i>
+                          {/if}
+                          <span
+                            class={`presence-dot ${statusClass(member.status)}`}
+                            aria-label={member.status}
+                          ></span>
                         </div>
-                        {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
-                          <div class="member-roles member-row__roles">
-                            {#if member.baseRole === 'owner'}
-                              <span class="member-role" data-tone="owner">Owner</span>
-                            {:else if member.baseRole === 'admin'}
-                              <span class="member-role" data-tone="admin">Admin</span>
-                            {/if}
-                            {#each member.roles as role}
-                              <span
-                                class="member-role"
-                                style={role.color ? `--member-role-color: ${role.color}` : undefined}
-                              >
-                                {role.name}
-                              </span>
-                            {/each}
+                        <div class="member-row__body">
+                          <div class="member-row__top">
+                            <span class="member-row__name" title={member.tooltip}>
+                              {member.label}
+                            </span>
                           </div>
-                        {/if}
-                      </div>
-                    </button>
+                          {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
+                            <div class="member-roles member-row__roles">
+                              {#if member.baseRole === 'owner'}
+                                <span class="member-role" data-tone="owner">Owner</span>
+                              {:else if member.baseRole === 'admin'}
+                                <span class="member-role" data-tone="admin">Admin</span>
+                              {/if}
+                              {#each member.roles as role}
+                                <span
+                                  class="member-role"
+                                  style={role.color ? `--member-role-color: ${role.color}` : undefined}
+                                >
+                                  {role.name}
+                                </span>
+                              {/each}
+                            </div>
+                          {/if}
+                        </div>
+                      </button>
+                    </li>
+                  {/each}
+                {:else if !allMembersVisible}
+                  <li>
+                    <div class="member-row member-row--placeholder">
+                      Scroll to load {group.label.toLowerCase()} members...
+                    </div>
                   </li>
-                {/each}
+                {/if}
               </ul>
             </section>
           {/if}
         {/each}
+        <div class="members-pane__sentinel" bind:this={loadMoreSentinel} aria-hidden="true">
+          {#if allMembersVisible}
+            <span class="text-xs text-soft">Showing all {rows.length} members</span>
+          {:else}
+            <span class="text-xs text-soft">Showing {visibleMemberCount} of {rows.length} members...</span>
+          {/if}
+        </div>
       </div>
     {:else}
       <div class="text-xs text-soft px-2">No members yet.</div>
     {/if}
   </div>
 </div>
+
+{#if showInviteDialog && canInviteMembers}
+  <div class="members-pane__invite-overlay" role="dialog" aria-modal="true" aria-label="Invite members">
+    <div class="members-pane__invite-backdrop" on:click={closeInviteDialog}></div>
+    <div class="members-pane__invite-card" role="document">
+      <div class="members-pane__invite-header">
+        <div>
+          <h3 class="members-pane__invite-title">Invite members</h3>
+          <p class="members-pane__invite-subtitle">Share access with teammates you trust.</p>
+        </div>
+        <button
+          type="button"
+          class="members-pane__invite-close"
+          aria-label="Close invite dialog"
+          on:click={closeInviteDialog}
+        >
+          <i class="bx bx-x text-xl"></i>
+        </button>
+      </div>
+      <div class="members-pane__invite-body">
+        <InvitePanel {serverId} embedded />
+      </div>
+    </div>
+  </div>
+{/if}
 
 <MemberProfileCard
   open={!!selectedMember}
@@ -566,3 +734,109 @@
   on:close={closeMemberProfile}
   on:dm={() => selectedMember && startDirectMessage(selectedMember.uid)}
 />
+
+<style>
+  .members-pane__scroll {
+    min-height: 0;
+  }
+
+  .member-row--placeholder {
+    cursor: default;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-style: italic;
+    color: var(--text-60);
+  }
+
+  .members-pane__sentinel {
+    text-align: center;
+    padding: 0.5rem 0 0.25rem;
+    color: var(--text-60);
+  }
+
+  .members-pane__invite-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(1rem, 3vw, 2.5rem);
+  }
+
+  .members-pane__invite-backdrop {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, var(--color-app-overlay, rgba(0, 0, 0, 0.55)) 85%, transparent);
+    backdrop-filter: blur(4px);
+  }
+
+  .members-pane__invite-card {
+    position: relative;
+    width: min(640px, 100%);
+    max-height: 90vh;
+    border-radius: var(--radius-lg);
+    background: var(--color-panel);
+    border: 1px solid var(--color-border-subtle);
+    box-shadow: var(--shadow-elevated);
+    padding: 1rem 1.25rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .members-pane__invite-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .members-pane__invite-title {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .members-pane__invite-subtitle {
+    margin: 0.3rem 0 0;
+    font-size: 0.9rem;
+    color: var(--text-70);
+  }
+
+  .members-pane__invite-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    color: inherit;
+    cursor: pointer;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+
+  .members-pane__invite-close:hover {
+    background: color-mix(in srgb, var(--color-panel) 85%, white 8%);
+  }
+
+  .members-pane__invite-close:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .members-pane__invite-body {
+    overflow: auto;
+    padding-right: 0.25rem;
+  }
+
+  @media (max-width: 640px) {
+    .members-pane__invite-card {
+      padding: 0.9rem;
+      border-radius: var(--radius-md);
+    }
+  }
+</style>

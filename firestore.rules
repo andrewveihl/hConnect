@@ -116,6 +116,12 @@ service cloud.firestore {
 
       match /servers/{serverId} {
         allow read, write: if isSignedIn() && request.auth.uid == uid;
+        allow delete: if isSignedIn()
+          && (
+            request.auth.uid == uid ||
+            isServerOwner(serverId) ||
+            isServerAdmin(serverId)
+          );
       }
 
       match /dms/{threadId} {
@@ -282,7 +288,12 @@ service cloud.firestore {
 
     /* ---------------- Optional global invites index ---------------- */
     match /invites/{inviteId} {
-      allow read: if isSignedIn() && resource.data.toUid == request.auth.uid;
+      allow read: if isSignedIn()
+        && (
+          resource.data.toUid == request.auth.uid ||
+          isServerOwner(resource.data.serverId) ||
+          isServerAdmin(resource.data.serverId)
+        );
 
       allow create: if isSignedIn()
         && request.resource.data.serverId is string

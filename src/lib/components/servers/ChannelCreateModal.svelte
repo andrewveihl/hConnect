@@ -1,6 +1,10 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
   import { createChannel } from '$lib/firestore/channels';
+  import { getDb } from '$lib/firebase';
+  import { collection, onSnapshot, orderBy, query, type Unsubscribe } from 'firebase/firestore';
 
   export let open = false;
   export let serverId: string | undefined;
@@ -14,11 +18,17 @@
     ($page.params as any).serverId ??
     ($page.params as any).id;
 
+  type Role = { id: string; name?: string };
+
   let chName = '';
   let chType: 'text' | 'voice' = 'text';
   let chPrivate = false;
   let busy = false;
   let errorMsg = '';
+  let selectedRoleIds: string[] = [];
+  let roleOptions: Role[] = [];
+  let roleStop: Unsubscribe | null = null;
+  let roleWatcherServerId: string | null = null;
 
   function reset() {
     chName = '';
@@ -26,6 +36,7 @@
     chPrivate = false;
     busy = false;
     errorMsg = '';
+    selectedRoleIds = [];
   }
   function close() { reset(); onClose(); }
 
@@ -35,7 +46,13 @@
     const name = (chName.trim() || (chType === 'text' ? 'new-text' : 'New Voice')).toLowerCase();
 
     try {
-      const id = await createChannel(serverIdFinal, name, chType, chPrivate);
+      const id = await createChannel(
+        serverIdFinal,
+        name,
+        chType,
+        chPrivate,
+        chPrivate ? selectedRoleIds : []
+      );
       onCreated(id);
       close();
     } catch (e: any) {
@@ -44,6 +61,47 @@
       busy = false;
     }
   }
+
+  $: {
+    const nextId = browser ? serverIdFinal ?? null : null;
+    if (roleWatcherServerId === nextId) {
+      // no change
+    } else {
+      roleWatcherServerId = nextId;
+      roleStop?.();
+      roleStop = null;
+      roleOptions = [];
+      if (browser && nextId) {
+        const db = getDb();
+        const q = query(collection(db, 'servers', nextId, 'roles'), orderBy('position'));
+        roleStop = onSnapshot(q, (snap) => {
+          roleOptions = snap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }));
+        });
+      }
+    }
+  }
+
+  $: {
+    const available = new Set(roleOptions.map((role) => role.id));
+    if (selectedRoleIds.some((id) => !available.has(id))) {
+      selectedRoleIds = selectedRoleIds.filter((id) => available.has(id));
+    }
+  }
+
+  $: if ((!browser || !chPrivate) && selectedRoleIds.length) {
+    selectedRoleIds = [];
+  }
+
+  function toggleRole(roleId: string, enabled: boolean) {
+    selectedRoleIds = enabled
+      ? Array.from(new Set([...selectedRoleIds, roleId]))
+      : selectedRoleIds.filter((id) => id !== roleId);
+  }
+
+  onDestroy(() => {
+    roleStop?.();
+    roleStop = null;
+  });
 </script>
 
 {#if open}
@@ -94,6 +152,36 @@
             <div class="text-xs text-white/50 mt-1">Saved as <code>isPrivate</code> on the channel.</div>
           </div>
 
+          {#if chPrivate}
+            <div class="channel-modal-roles">
+              {#if roleOptions.length === 0}
+                <p class="text-xs text-white/45">
+                  No custom roles yet. Create a role in server settings to limit who can access this channel.
+                </p>
+              {:else}
+                <p class="text-xs text-white/60">Allow these roles to view the channel:</p>
+                <div class="channel-modal-roles__grid">
+                  {#each roleOptions as role}
+                    <label class="channel-modal-role">
+                      <input
+                        type="checkbox"
+                        checked={selectedRoleIds.includes(role.id)}
+                        on:change={(event) =>
+                          toggleRole(role.id, (event.currentTarget as HTMLInputElement).checked)}
+                      />
+                      <span>{role.name || 'Role'}</span>
+                    </label>
+                  {/each}
+                </div>
+                {#if !selectedRoleIds.length}
+                  <p class="text-[11px] text-white/45">
+                    No roles selected yet. Everyone will still see this channel until you pick one.
+                  </p>
+                {/if}
+              {/if}
+            </div>
+          {/if}
+
           {#if errorMsg}
             <div class="text-sm text-red-400">{errorMsg}</div>
           {/if}
@@ -116,5 +204,33 @@
   </div>
 {/if}
 
+<style>
+  .channel-modal-roles {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.25rem 0;
+  }
 
+  .channel-modal-roles__grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .channel-modal-role {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.8rem;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .channel-modal-role input {
+    accent-color: var(--color-accent, #33c8bf);
+  }
+</style>
 
