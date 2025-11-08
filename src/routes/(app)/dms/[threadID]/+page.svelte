@@ -65,6 +65,7 @@ type MentionSendRecord = { uid: string; handle: string | null; label: string | n
 
   let showThreads = false;
   let showInfo = false;
+  let lastThreadID: string | null = null;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -261,6 +262,11 @@ $: {
 
   $: if (threadID) {
     loadThreadMeta();
+  }
+
+  $: if (threadID && threadID !== lastThreadID) {
+    lastThreadID = threadID;
+    showInfo = false;
   }
 
   $: {
@@ -555,17 +561,24 @@ $: {
         >
           <i class="bx bx-menu text-2xl"></i>
         </button>
-        <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
-          {#if otherProfile?.photoURL}
-            <img class="w-9 h-9 object-cover" src={otherProfile.photoURL} alt="" />
-          {:else}
-            <i class="bx bx-user text-lg text-white/80"></i>
-          {/if}
-        </div>
-        <div class="min-w-0">
-          <div class="font-semibold leading-5 truncate">{displayName}</div>
-          {#if otherProfile?.email}<div class="text-xs text-white/60 truncate">{otherProfile.email}</div>{/if}
-        </div>
+        <button
+          class="flex items-center gap-3 min-w-0 flex-1 text-left px-1 py-1 rounded hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 transition"
+          type="button"
+          aria-label="View participant profile"
+          on:click={() => (showInfo = true)}
+        >
+          <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
+            {#if otherProfile?.photoURL}
+              <img class="w-9 h-9 object-cover" src={otherProfile.photoURL} alt="" />
+            {:else}
+              <i class="bx bx-user text-lg text-white/80"></i>
+            {/if}
+          </div>
+          <div class="min-w-0">
+            <div class="font-semibold leading-5 truncate">{displayName}</div>
+            {#if otherProfile?.email}<div class="text-xs text-white/60 truncate">{otherProfile.email}</div>{/if}
+          </div>
+        </button>
       </div>
       <button
         class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
@@ -606,43 +619,56 @@ $: {
     </div>
   </div>
 
-  <aside class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
-    <div class="p-4 w-full">
-      {#if metaLoading}
-        <div class="animate-pulse text-white/50">Loading profile...</div>
-      {:else if otherProfile}
-        <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
-          <div class="w-20 h-20 rounded-full overflow-hidden bg-white/10 border border-white/10">
-            {#if otherProfile.photoURL}
-              <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+  {#if showInfo}
+    <aside class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
+      <div class="p-4 w-full">
+        <div class="flex items-center justify-between mb-4">
+          <div class="text-sm uppercase tracking-wide text-white/60">Profile</div>
+          <button
+            class="p-2 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition"
+            type="button"
+            aria-label="Close profile panel"
+            on:click={() => (showInfo = false)}
+          >
+            <i class="bx bx-x text-2xl"></i>
+          </button>
+        </div>
+        {#if metaLoading}
+          <div class="animate-pulse text-white/50">Loading profile...</div>
+        {:else if otherProfile}
+          <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
+            <div class="w-20 h-20 rounded-full overflow-hidden bg-white/10 border border-white/10">
+              {#if otherProfile.photoURL}
+                <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+              {:else}
+                <div class="w-full h-full grid place-items-center text-3xl text-white/70">
+                  <i class="bx bx-user"></i>
+                </div>
+              {/if}
+            </div>
+            <div class="text-lg font-semibold">{displayName}</div>
+            {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
+          </div>
+
+          <div class="mt-4 space-y-3 text-sm text-white/70">
+            {#if otherProfile.bio}
+              <p>{otherProfile.bio}</p>
             {:else}
-              <div class="w-full h-full grid place-items-center text-3xl text-white/70">
-                <i class="bx bx-user"></i>
-              </div>
+              <p>This user hasn't added a bio yet.</p>
+            {/if}
+            {#if otherProfile.email}
+              <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
+                <i class="bx bx-envelope"></i>
+                <span>Send email</span>
+              </a>
             {/if}
           </div>
-          <div class="text-lg font-semibold">{displayName}</div>
-          {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
-        </div>
-
-        <div class="mt-4 space-y-3 text-sm text-white/70">
-          {#if otherProfile.bio}
-            <p>{otherProfile.bio}</p>
-          {:else}
-            <p>This user hasn't added a bio yet.</p>
-          {/if}
-          {#if otherProfile.email}
-            <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
-              <i class="bx bx-envelope"></i>
-              <span>Send email</span>
-            </a>
-          {/if}
-        </div>
-      {:else}
-        <div class="text-white/50">Profile unavailable.</div>
-      {/if}
-    </div>
-  </aside>
+        {:else}
+          <div class="text-white/50">Profile unavailable.</div>
+        {/if}
+      </div>
+    </aside>
+  {/if}
 </div>
 
 <!-- Mobile overlays -->
