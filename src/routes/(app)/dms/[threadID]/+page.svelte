@@ -62,6 +62,7 @@ type MentionSendRecord = { uid: string; handle: string | null; label: string | n
 
   let otherUid: string | null = null;
   let otherProfile: any = null;
+  let otherMessageUser: any = null;
   let metaLoading = true;
 
   let showThreads = false;
@@ -303,11 +304,11 @@ type MentionSendRecord = { uid: string; handle: string | null; label: string | n
   }
 
   function normalizeUserRecord(uid: string, data: any = {}) {
+    const fallbackLabel = pickString(data?.email) ?? uid ?? 'Member';
     const displayName =
       pickString(data?.displayName) ??
       pickString(data?.name) ??
-      pickString(data?.email) ??
-      'Member';
+      fallbackLabel;
     const name =
       pickString(data?.name) ??
       displayName;
@@ -399,8 +400,8 @@ $: {
         pickString(m.photoURL);
       next[m.uid] = {
         ...existing,
-        displayName: displayName ?? existing.displayName ?? 'Member',
-        name: name ?? existing.name ?? displayName ?? 'Member',
+        displayName: displayName ?? existing.displayName ?? m.uid ?? 'Member',
+        name: name ?? existing.name ?? displayName ?? m.uid ?? 'Member',
         photoURL: photoURL ?? existing.photoURL ?? null
       };
     }
@@ -662,11 +663,16 @@ $: {
     handleSend(e.detail ?? '');
   }
 
+  $: otherMessageUser = otherUid ? messageUsers[otherUid] ?? null : null;
+
   $: displayName =
     pickString(otherProfile?.displayName) ??
     pickString(otherProfile?.name) ??
+    pickString(otherMessageUser?.displayName) ??
+    pickString(otherMessageUser?.name) ??
     pickString(otherProfile?.email) ??
-    (otherProfile ? 'Member' : 'Direct Message');
+    pickString(otherMessageUser?.email) ??
+    (otherProfile || otherMessageUser ? otherUid ?? 'Member' : 'Direct Message');
 </script>
 
 <div class="flex flex-1 overflow-hidden panel-muted">

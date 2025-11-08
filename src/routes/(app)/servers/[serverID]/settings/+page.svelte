@@ -5,12 +5,14 @@
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
   import { createChannel } from '$lib/firestore/channels';
-  import { sendServerInvite } from '$lib/firestore/invites';
+  import { removeUserMembership } from '$lib/firestore/servers';
+  import { sendServerInvite, type ServerInvite } from '$lib/firestore/invites';
+  import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 
   import {
     collection, doc, getDoc, onSnapshot, getDocs,
     query, orderBy, setDoc, updateDoc, deleteDoc,
-    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch
+    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch, where
   } from 'firebase/firestore';
 
 const ICON_MAX_BYTES = 8 * 1024 * 1024;
@@ -69,14 +71,34 @@ const DEFAULT_MENTION = '#f97316';
     { id: 'danger', label: 'Danger Zone' }
   ];
 
+  type ServerMember = {
+    uid: string;
+    role?: string;
+    roleIds?: string[];
+    displayName?: string;
+    nickname?: string;
+    name?: string;
+    email?: string;
+    photoURL?: string | null;
+    [key: string]: unknown;
+  };
+
+  type EnrichedMember = ServerMember & {
+    displayName: string;
+    photoURL?: string | null;
+  };
+
   // live lists
-  let members: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string; roleIds?: string[] }> = [];
+  let members: ServerMember[] = [];
+  let membersWithProfiles: EnrichedMember[] = [];
+  let memberDirectory: Record<string, MentionDirectoryEntry> = {};
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = [];
   let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
   let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
   let newChannelName = '';
   let newChannelType: 'text' | 'voice' = 'text';
   let newChannelPrivate = false;
+  let newChannelAllowedRoleIds: string[] = [];
   let channelCreateBusy = false;
   let channelError: string | null = null;
   type RolePermissionKey =
@@ -116,11 +138,18 @@ const DEFAULT_MENTION = '#f97316';
     photoURL?: string;
   };
   let allProfiles: Profile[] = [];
+  let profileIndex: Record<string, Profile> = {};
+  let inviteProfiles: Record<string, Profile> = {};
+  const inviteProfileStops = new Map<string, Unsubscribe>();
   let memberSearch = '';
   let memberRoleFilter: 'all' | 'owner' | 'admin' | 'custom' = 'all';
-  let filteredMembers: Array<{ uid: string; displayName?: string; photoURL?: string; role?: string; roleIds?: string[] }> = [];
-  let pendingInvitesByUid: Record<string, boolean> = {};
+  let filteredMembers: EnrichedMember[] = [];
+  let pendingInvites: ServerInvite[] = [];
+  let pendingInvitesByUid: Record<string, ServerInvite> = {};
   let inviteLoading: Record<string, boolean> = {};
+  let inviteCancelBusy: Record<string, boolean> = {};
+  let clearInvitesBusy = false;
+  let clearInvitesError: string | null = null;
   let inviteError: string | null = null;
   let touchStartX = 0;
   let touchStartY = 0;
@@ -217,6 +246,129 @@ const DEFAULT_MENTION = '#f97316';
     });
   }
 
+  function watchPendingInvites() {
+    const db = getDb();
+    const qRef = query(
+      collection(db, 'invites'),
+      where('serverId', '==', serverId!),
+      where('status', '==', 'pending')
+    );
+    return onSnapshot(
+      qRef,
+      (snap) => {
+        const list: ServerInvite[] = [];
+        const map: Record<string, ServerInvite> = {};
+        snap.forEach((d) => {
+          const data = d.data() as ServerInvite;
+          const invite: ServerInvite = { id: d.id, ...data };
+          list.push(invite);
+          if (invite.toUid) {
+            map[invite.toUid] = invite;
+          }
+        });
+        list.sort((a, b) => {
+          const aTs = ((a.createdAt as any)?.toMillis?.() ?? 0) as number;
+          const bTs = ((b.createdAt as any)?.toMillis?.() ?? 0) as number;
+          return bTs - aTs;
+        });
+        pendingInvites = list;
+        pendingInvitesByUid = map;
+        syncInviteProfileWatchers(list);
+      },
+      () => {
+        pendingInvites = [];
+        pendingInvitesByUid = {};
+        syncInviteProfileWatchers([]);
+      }
+    );
+  }
+
+  function resolveMemberLabel(member: ServerMember, entry?: MentionDirectoryEntry): string {
+    if (entry?.label && entry.label.trim().length) return entry.label;
+    const candidates = [
+      typeof member.nickname === 'string' ? member.nickname : null,
+      typeof member.displayName === 'string' ? member.displayName : null,
+      typeof member.name === 'string' ? member.name : null,
+      typeof member.email === 'string' ? member.email : null
+    ];
+    for (const value of candidates) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.length) return trimmed;
+      }
+    }
+    return member.uid;
+  }
+
+  function resolveMemberAvatar(member: ServerMember, entry?: MentionDirectoryEntry): string | null {
+    const value = entry?.avatar ?? (typeof member.photoURL === 'string' ? member.photoURL : null);
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : null;
+    }
+    return null;
+  }
+
+  function profileForInvite(uid: string | null | undefined): Profile | null {
+    if (!uid || typeof uid !== 'string') return null;
+    return profileIndex[uid] ?? inviteProfiles[uid] ?? null;
+  }
+
+  function syncInviteProfileWatchers(invites: ServerInvite[]) {
+    const desired = new Set(
+      invites
+        .map((invite) => invite.toUid)
+        .filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
+    );
+    const db = getDb();
+    desired.forEach((uid) => {
+      if (profileIndex[uid] || inviteProfileStops.has(uid)) return;
+      const ref = doc(db, 'profiles', uid);
+      const stop = onSnapshot(
+        ref,
+        (snap) => {
+          if (snap.exists()) {
+            inviteProfiles = { ...inviteProfiles, [uid]: { uid, ...(snap.data() as any) } };
+          } else if (inviteProfiles[uid]) {
+            const { [uid]: _, ...rest } = inviteProfiles;
+            inviteProfiles = rest;
+          }
+        },
+        () => {
+          inviteProfileStops.get(uid)?.();
+          inviteProfileStops.delete(uid);
+          if (inviteProfiles[uid]) {
+            const { [uid]: _, ...rest } = inviteProfiles;
+            inviteProfiles = rest;
+          }
+        }
+      );
+      inviteProfileStops.set(uid, stop);
+    });
+    inviteProfileStops.forEach((stop, uid) => {
+      if (!desired.has(uid) || profileIndex[uid]) {
+        stop();
+        inviteProfileStops.delete(uid);
+        if (inviteProfiles[uid]) {
+          const { [uid]: _, ...rest } = inviteProfiles;
+          inviteProfiles = rest;
+        }
+      }
+    });
+  }
+
+  $: membersWithProfiles = members.map((member) => {
+    const entry = memberDirectory[member.uid];
+    return {
+      ...member,
+      displayName: resolveMemberLabel(member, entry),
+      photoURL: resolveMemberAvatar(member, entry)
+    };
+  });
+  $: profileIndex = allProfiles.reduce<Record<string, Profile>>((acc, profile) => {
+    acc[profile.uid] = profile;
+    return acc;
+  }, {});
   $: sortedChannels = [...channels].sort((a, b) => {
     const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
     const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
@@ -231,6 +383,15 @@ const DEFAULT_MENTION = '#f97316';
     const lower = (role.name ?? '').toLowerCase();
     return lower !== 'everyone' && lower !== 'admin';
   });
+  $: {
+    const availableRoleIds = new Set(sortedRoles.map((r) => r.id));
+    if (newChannelAllowedRoleIds.some((id) => !availableRoleIds.has(id))) {
+      newChannelAllowedRoleIds = newChannelAllowedRoleIds.filter((id) => availableRoleIds.has(id));
+    }
+  }
+  $: if (!newChannelPrivate && newChannelAllowedRoleIds.length) {
+    newChannelAllowedRoleIds = [];
+  }
   $: {
     const ids = new Set(sortedRoles.map((r) => r.id));
     const next: Record<string, boolean> = { ...roleCollapsed };
@@ -249,12 +410,14 @@ const DEFAULT_MENTION = '#f97316';
     }
     if (changed) roleCollapsed = next;
   }
-  $: filteredMembers = members.filter((member) => {
+  $: filteredMembers = membersWithProfiles.filter((member) => {
     const term = memberSearch.trim().toLowerCase();
+    const dirHandle = memberDirectory[member.uid]?.handle?.toLowerCase() ?? '';
     const matchesTerm =
       !term ||
-      (member.displayName ?? '').toLowerCase().includes(term) ||
+      member.displayName.toLowerCase().includes(term) ||
       member.uid.toLowerCase().includes(term) ||
+      (dirHandle && dirHandle.includes(term)) ||
       (Array.isArray(member.roleIds) &&
         member.roleIds.some((roleId) => {
           const target = sortedRoles.find((r) => r.id === roleId);
@@ -367,6 +530,8 @@ const DEFAULT_MENTION = '#f97316';
     let offChannels: (() => void) | null = null;
     let offProfiles: (() => void) | null = null;
     let offRoles: (() => void) | null = null;
+    let offDirectory: (() => void) | null = null;
+    let offInvites: (() => void) | null = null;
 
     (async () => {
       serverId = $page.params.serverID || ($page.params as any).serverId || null;
@@ -383,6 +548,14 @@ const DEFAULT_MENTION = '#f97316';
       offChannels = watchChannels();
       offProfiles = watchProfiles();
       offRoles = watchRoles();
+      offDirectory = subscribeServerDirectory(serverId!, (entries) => {
+        const next: Record<string, MentionDirectoryEntry> = {};
+        for (const entry of entries) {
+          next[entry.uid] = entry;
+        }
+        memberDirectory = next;
+      });
+      offInvites = watchPendingInvites();
     })();
 
     return () => {
@@ -392,6 +565,11 @@ const DEFAULT_MENTION = '#f97316';
       offChannels?.();
       offProfiles?.();
       offRoles?.();
+      offDirectory?.();
+      offInvites?.();
+      inviteProfileStops.forEach((stop) => stop());
+      inviteProfileStops.clear();
+      inviteProfiles = {};
       pendingInvitesByUid = {};
     };
   });
@@ -583,6 +761,7 @@ const DEFAULT_MENTION = '#f97316';
     const db = getDb();
     try {
       await deleteDoc(doc(db, 'servers', serverId!, 'members', uid));
+      await removeUserMembership(serverId!, uid);
     } catch (e) {
       console.error(e);
       alert('Failed to kick user.');
@@ -601,6 +780,7 @@ const DEFAULT_MENTION = '#f97316';
         by: $user?.uid ?? null
       });
       await deleteDoc(doc(db, 'servers', serverId!, 'members', uid));
+      await removeUserMembership(serverId!, uid);
     } catch (e) {
       console.error(e);
       alert('Failed to ban user.');
@@ -704,6 +884,12 @@ const DEFAULT_MENTION = '#f97316';
       console.error(e);
       alert('Failed to update channel access.');
     }
+  }
+
+  function toggleNewChannelRole(roleId: string, enabled: boolean) {
+    newChannelAllowedRoleIds = enabled
+      ? Array.from(new Set([...newChannelAllowedRoleIds, roleId]))
+      : newChannelAllowedRoleIds.filter((id) => id !== roleId);
   }
 
   async function toggleRolePermission(roleId: string, key: RolePermissionKey, enabled: boolean) {
@@ -865,9 +1051,16 @@ const DEFAULT_MENTION = '#f97316';
     channelCreateBusy = true;
     channelError = null;
     try {
-      await createChannel(serverId!, name, newChannelType, newChannelPrivate);
+      await createChannel(
+        serverId!,
+        name,
+        newChannelType,
+        newChannelPrivate,
+        newChannelPrivate ? newChannelAllowedRoleIds : []
+      );
       newChannelName = '';
       newChannelPrivate = false;
+      newChannelAllowedRoleIds = [];
     } catch (e) {
       console.error(e);
       channelError = 'Failed to create channel.';
@@ -959,19 +1152,6 @@ const DEFAULT_MENTION = '#f97316';
     })
     .slice(0, 50); // keep list tidy
 
-  $: if (members.length && Object.keys(pendingInvitesByUid).length) {
-    const memberIds = new Set(members.map((m) => m.uid));
-    const next = { ...pendingInvitesByUid };
-    let changed = false;
-    for (const uid of memberIds) {
-      if (next[uid]) {
-        delete next[uid];
-        changed = true;
-      }
-    }
-    if (changed) pendingInvitesByUid = next;
-  }
-
   // invite to first text channel (keeps your current accept flow)
   async function inviteUser(toUid: string) {
     if (!(isOwner || isAdmin)) return;
@@ -983,6 +1163,7 @@ const DEFAULT_MENTION = '#f97316';
     if (!fallback) { alert('Create a channel first.'); return; }
 
     if (pendingInvitesByUid[toUid]) {
+      inviteError = 'That user already has a pending invite to this server.';
       console.debug('[ServerSettings] inviteUser skipped; pending invite already exists', {
         toUid,
         invite: pendingInvitesByUid[toUid]
@@ -1019,23 +1200,88 @@ const DEFAULT_MENTION = '#f97316';
         if (pendingInvitesByUid[toUid]) {
           const { [toUid]: _, ...rest } = pendingInvitesByUid;
           pendingInvitesByUid = rest;
+          pendingInvites = pendingInvites.filter((invite) => invite.toUid !== toUid);
         }
       } else {
-        pendingInvitesByUid = { ...pendingInvitesByUid, [toUid]: true };
         if (res.alreadyExisted) {
           inviteError = `User already has a pending invite.`;
           console.debug('[ServerSettings] sendServerInvite already existed', { toUid, res });
         } else {
+          const inviteId = res.inviteId ?? `${serverId!}__${toUid}`;
+          const inviteStub: ServerInvite = {
+            id: inviteId,
+            toUid,
+            fromUid,
+            fromDisplayName,
+            serverId: serverId!,
+            serverName: serverName || serverId!,
+            serverIcon: serverIcon && serverIcon.trim().length ? serverIcon : null,
+            channelId: fallback.id,
+            channelName: fallback.name || 'general',
+            type: 'channel',
+            status: 'pending',
+            createdAt: null as any
+          };
+          pendingInvitesByUid = { ...pendingInvitesByUid, [toUid]: inviteStub };
+          pendingInvites = [...pendingInvites.filter((invite) => invite.toUid !== toUid), inviteStub];
           console.debug('[ServerSettings] sendServerInvite ok', { toUid, res });
         }
       }
       (window as any)?.navigator?.vibrate?.(10);
-    } catch (e) {
-      console.error('[ServerSettings] inviteUser error', e);
-      inviteError = (e as Error)?.message ?? 'Failed to send invite.';
-    }
-    inviteLoading = { ...inviteLoading, [toUid]: false };
+  } catch (e) {
+    console.error('[ServerSettings] inviteUser error', e);
+    inviteError = (e as Error)?.message ?? 'Failed to send invite.';
   }
+  inviteLoading = { ...inviteLoading, [toUid]: false };
+}
+
+async function cancelInvite(invite: ServerInvite) {
+  if (!(isOwner || isAdmin)) return;
+  const toUid = invite?.toUid;
+  if (!toUid || !serverId) return;
+  const inviteId = invite.id ?? `${serverId}__${toUid}`;
+  inviteError = null;
+  inviteCancelBusy = { ...inviteCancelBusy, [inviteId]: true };
+  try {
+    await deleteDoc(doc(getDb(), 'invites', inviteId));
+    const { [toUid]: _, ...rest } = pendingInvitesByUid;
+    pendingInvitesByUid = rest;
+    pendingInvites = pendingInvites.filter((entry) => entry.toUid !== toUid);
+    console.debug('[ServerSettings] cancelInvite ok', { inviteId });
+  } catch (e) {
+    console.error('[ServerSettings] cancelInvite error', e);
+    inviteError = 'Failed to remove invite.';
+  } finally {
+    inviteCancelBusy = { ...inviteCancelBusy, [inviteId]: false };
+  }
+}
+
+async function clearPendingInvites() {
+  if (!(isOwner || isAdmin) || clearInvitesBusy || !pendingInvites.length || !serverId) return;
+  if (!confirm('Remove all pending invites for this server?')) return;
+  clearInvitesBusy = true;
+  clearInvitesError = null;
+  const db = getDb();
+  try {
+    const batch = writeBatch(db);
+    for (const invite of pendingInvites) {
+      const inviteId = invite.id ?? `${serverId}__${invite.toUid}`;
+      batch.delete(doc(db, 'invites', inviteId));
+    }
+    await batch.commit();
+    pendingInvites = [];
+    pendingInvitesByUid = {};
+    inviteProfiles = {};
+    inviteProfileStops.forEach((stop) => stop());
+    inviteProfileStops.clear();
+    console.debug('[ServerSettings] clearPendingInvites ok');
+  } catch (e) {
+    console.error('[ServerSettings] clearPendingInvites error', e);
+    clearInvitesError = 'Failed to clear invites.';
+  } finally {
+    clearInvitesBusy = false;
+  }
+}
 </script>
 
 <svelte:head>
@@ -1422,12 +1668,13 @@ const DEFAULT_MENTION = '#f97316';
                     <button
                       class="btn btn-primary btn-sm"
                       disabled={!isOwner || pendingInvitesByUid[r.uid] || inviteLoading[r.uid]}
+                      title={pendingInvitesByUid[r.uid] ? 'Invite already pending' : undefined}
                       on:click={() => inviteUser(r.uid)}
                     >
                       {#if pendingInvitesByUid[r.uid]}
-                        Sent
+                        Pending
                       {:else if inviteLoading[r.uid]}
-                        SendingÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦
+                        Sending...
                       {:else}
                         Invite
                       {/if}
@@ -1444,6 +1691,72 @@ const DEFAULT_MENTION = '#f97316';
 
           {#if (isOwner || isAdmin) && !isOwner}
             <div class="settings-caption">Only the channel owner can send invites under current rules.</div>
+          {/if}
+        </div>
+
+        <div class="settings-card space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div class="settings-card__title">Pending invites</div>
+              <div class="settings-card__subtitle">Members who have not accepted yet.</div>
+            </div>
+            <div class="flex items-center gap-2 text-sm text-white/70">
+              <span>{pendingInvites.length} pending</span>
+              {#if (isOwner || isAdmin) && pendingInvites.length}
+                <button
+                  class="btn btn-danger btn-sm"
+                  disabled={clearInvitesBusy}
+                  on:click={clearPendingInvites}
+                >
+                  {clearInvitesBusy ? 'Clearing...' : 'Clear invites'}
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          {#if pendingInvites.length === 0}
+            <div class="text-white/60">No pending invites.</div>
+          {:else}
+            <ul class="space-y-2">
+              {#each pendingInvites as invite (invite.id ?? invite.toUid)}
+                {@const profile = profileForInvite(invite.toUid)}
+                <li class="p-2 rounded bg-white/5">
+                  <div class="settings-member-row">
+                    <img
+                      src={profile?.photoURL || ''}
+                      alt=""
+                      class="h-10 w-10 rounded-full bg-white/10"
+                      on:error={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+                    />
+                    <div class="flex-1 min-w-0">
+                      <div class="truncate font-medium">
+                        {profile?.displayName || profile?.email || invite.toUid}
+                      </div>
+                      <div class="text-xs text-white/60 truncate">
+                        {#if profile?.email}{profile.email}{:else}No email on file{/if}
+                        {#if invite.fromDisplayName}
+                          &nbsp;•&nbsp;Invited by {invite.fromDisplayName}
+                        {:else if invite.fromUid}
+                          &nbsp;•&nbsp;Invited by {invite.fromUid}
+                        {/if}
+                      </div>
+                    </div>
+                    {#if isOwner || isAdmin}
+                      <button
+                        class="btn btn-danger btn-sm"
+                        disabled={inviteCancelBusy[invite.id ?? `${serverId}__${invite.toUid}`]}
+                        on:click={() => cancelInvite(invite)}
+                      >
+                        {inviteCancelBusy[invite.id ?? `${serverId}__${invite.toUid}`] ? 'Removing...' : 'Remove invite'}
+                      </button>
+                    {/if}
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          {#if clearInvitesError}
+            <div class="settings-alert settings-alert--error">{clearInvitesError}</div>
           {/if}
         </div>
 
@@ -1610,6 +1923,33 @@ const DEFAULT_MENTION = '#f97316';
                 {channelCreateBusy ? 'Creating...' : 'Create'}
               </button>
             </div>
+            {#if newChannelPrivate}
+              <div class="settings-channel-form__roles">
+                {#if sortedRoles.length === 0}
+                  <p class="text-xs text-white/50">Create a role first in the Roles tab to limit who can join this private channel.</p>
+                {:else}
+                  <p class="text-xs text-white/60">Allow these roles to join:</p>
+                  <div class="settings-channel-form__roles-grid">
+                    {#each sortedRoles as role}
+                      <label class="settings-chip">
+                        <input
+                          type="checkbox"
+                          checked={newChannelAllowedRoleIds.includes(role.id)}
+                          on:change={(event) =>
+                            toggleNewChannelRole(role.id, (event.currentTarget as HTMLInputElement).checked)}
+                        />
+                        <span>{role.name}</span>
+                      </label>
+                    {/each}
+                  </div>
+                  {#if !newChannelAllowedRoleIds.length}
+                    <p class="text-[11px] text-white/45">
+                      No roles selected: everyone will still see this private channel until you add a role.
+                    </p>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
             {#if channelError}
               <p class="settings-status settings-status--error">{channelError}</p>
             {/if}
@@ -2484,6 +2824,19 @@ const DEFAULT_MENTION = '#f97316';
     flex-wrap: wrap;
     gap: 0.75rem;
     align-items: center;
+  }
+
+  .settings-channel-form__roles {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 0 0.25rem 0.25rem;
+  }
+
+  .settings-channel-form__roles-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
   }
 
   .settings-switch--inline {

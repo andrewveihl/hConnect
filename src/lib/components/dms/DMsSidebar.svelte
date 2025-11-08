@@ -398,9 +398,9 @@
           {@const isActive = activeThreadId === t.id}
           {@const otherPhoto = otherPhotoOf(t)}
           <li>
-            <div class={`flex items-center gap-2 px-2 py-2  ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+            <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
               <button
-                class="flex-1 flex items-center gap-3 text-left focus:outline-none"
+                class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
                 on:click={() => openExisting(t.id)}
               >
                 <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
@@ -421,7 +421,7 @@
                 {/if}
               </button>
               <button
-                class="p-2  hover:bg-white/10 text-white/70 hover:text-white transition"
+                class="p-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:bg-white/10 text-white/70 hover:text-white transition transition-opacity"
                 aria-label="Delete conversation"
                 on:click|stopPropagation={() => deleteThread(t.id)}
               >

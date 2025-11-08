@@ -96,6 +96,16 @@ export async function upsertUserMembership(
   );
 }
 
+export async function removeUserMembership(serverId: string, uid: string) {
+  const db = getDb();
+  dlog('removeUserMembership', { serverId, uid });
+  try {
+    await deleteDoc(doc(db, 'profiles', uid, 'servers', serverId));
+  } catch (err) {
+    console.warn('[servers.ts] removeUserMembership failed', err);
+  }
+}
+
 /**
  * Idempotently add a user to a server’s members subcollection.
  */
@@ -281,23 +291,53 @@ export function subscribeUserServers(
 
   let current: Record<string, { id: string; name: string; icon?: string | null }> = {};
   let serverUnsubs: Record<string, () => void> = {};
+  let membershipUnsubs: Record<string, () => void> = {};
   const emit = () => cb(Object.values(current));
 
   async function verifyAndMaybePurge(serverId: string) {
+    let membershipChecked = false;
+    let membershipExists = false;
     try {
-      const s = await getDoc(doc(db, 'servers', serverId));
-      if (s.exists()) return true;
+      const membership = await getDoc(doc(db, 'servers', serverId, 'members', uid));
+      membershipChecked = true;
+      membershipExists = membership.exists();
+      if (membershipExists) return true;
+    } catch (err) {
+      dlog('verifyAndMaybePurge membership check failed', { serverId, err });
+    }
+
+    let serverExists = false;
+    try {
+      const serverSnap = await getDoc(doc(db, 'servers', serverId));
+      serverExists = serverSnap.exists();
+    } catch (err) {
+      dlog('verifyAndMaybePurge server check failed', { serverId, err });
+    }
+
+    if (!serverExists || membershipChecked) {
+      await cleanupServerEntry(serverId);
+      return false;
+    }
+
+    return true;
+  }
+
+  async function cleanupServerEntry(serverId: string) {
+    try {
+      membershipUnsubs[serverId]?.();
+      delete membershipUnsubs[serverId];
     } catch {}
     try {
-      const m = await getDoc(doc(db, 'servers', serverId, 'members', uid));
-      if (m.exists()) return true;
+      serverUnsubs[serverId]?.();
+      delete serverUnsubs[serverId];
     } catch {}
     try {
       await deleteDoc(doc(db, 'profiles', uid, 'servers', serverId));
-    } catch {}
+    } catch (err) {
+      dlog('cleanupServerEntry delete doc failed', { serverId, err });
+    }
     delete current[serverId];
     emit();
-    return false;
   }
 
   const stop = onSnapshot(q, (snap) => {
@@ -331,12 +371,27 @@ export function subscribeUserServers(
           }
         );
         void verifyAndMaybePurge(id);
+
+        const membershipRef = doc(db, 'servers', id, 'members', uid);
+        membershipUnsubs[id] = onSnapshot(
+          membershipRef,
+          (mem) => {
+            if (!mem.exists()) {
+              void verifyAndMaybePurge(id);
+            }
+          },
+          () => {
+            void verifyAndMaybePurge(id);
+          }
+        );
       }
     }
     for (const id in serverUnsubs) {
       if (!seen[id]) {
         serverUnsubs[id]!();
         delete serverUnsubs[id];
+        membershipUnsubs[id]?.();
+        delete membershipUnsubs[id];
         delete current[id];
       }
     }
@@ -346,6 +401,7 @@ export function subscribeUserServers(
   return () => {
     stop();
     for (const k in serverUnsubs) serverUnsubs[k]!();
+    for (const k in membershipUnsubs) membershipUnsubs[k]!();
   };
 }
 

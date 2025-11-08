@@ -1099,4 +1099,5 @@ $: if (reorderMode === 'default') {
     font-size: 0.68rem;
     font-weight: 700;
   }
+
 </style>

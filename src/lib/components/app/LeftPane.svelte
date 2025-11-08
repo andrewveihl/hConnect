@@ -137,39 +137,30 @@
         <VoiceRailItem />
 
         <a
-          href="/settings"
-          class="rail-button rail-button--profile overflow-hidden"
-          aria-label="Profile"
-          title="Profile"
+          href="/dms"
+          class="rail-button rail-button--primary relative"
+          class:rail-button--active={dmsActive}
+          class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
+          aria-label="Home / DMs"
+          title="Home / DMs"
         >
-          {#if $user?.photoURL}
-            <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
-          {:else}
-            <i class="bx bx-user text-xl leading-none"></i>
+          <i class="bx bx-message-dots text-xl leading-none"></i>
+          {#if $dmUnreadCount}
+            <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
           {/if}
-        </a>
-
-        <a
-          href="/settings"
-          class="rail-button rail-button--compact"
-          aria-label="Settings"
-          title="Settings"
-        >
-          <i class="bx bx-cog text-lg leading-none"></i>
         </a>
       </div>
 
       <a
-        href="/dms"
-        class="rail-button rail-button--primary relative mt-2"
-        class:rail-button--active={dmsActive}
-        class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
-        aria-label="Home / DMs"
-        title="Home / DMs"
+        href="/settings"
+        class="rail-button rail-button--profile overflow-hidden mt-1"
+        aria-label="Profile"
+        title="Profile"
       >
-        <i class="bx bx-message-dots text-xl leading-none"></i>
-        {#if $dmUnreadCount}
-          <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
+        {#if $user?.photoURL}
+          <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
+        {:else}
+          <i class="bx bx-user text-xl leading-none"></i>
         {/if}
       </a>
     </div>
