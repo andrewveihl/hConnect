@@ -1,16 +1,35 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { afterUpdate, createEventDispatcher, onMount, tick } from 'svelte';
 
   const dispatch = createEventDispatcher();
 
   type MentionView = { uid: string; handle?: string | null; label?: string | null };
 
+  type ReplyPreview = {
+    messageId: string;
+    authorId?: string | null;
+    authorName?: string | null;
+    preview?: string | null;
+    text?: string | null;
+    type?: string | null;
+    parent?: ReplyPreview | null;
+  };
+
+  type BaseChatMessage = {
+    id: string;
+    uid?: string;
+    createdAt?: any;
+    displayName?: string;
+    mentions?: MentionView[];
+    replyTo?: ReplyPreview | null;
+  };
+
   type ChatMessage =
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; text: string; type?: 'text'; mentions?: MentionView[] }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; url: string; type: 'gif'; mentions?: MentionView[] }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; file: { name: string; size?: number; url: string; contentType?: string }; type: 'file'; mentions?: MentionView[] }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll'; mentions?: MentionView[] }
-    | { id: string; uid?: string; createdAt?: any; displayName?: string; form: { title: string; questions: string[] }; type: 'form'; mentions?: MentionView[] };
+    | (BaseChatMessage & { text: string; type?: 'text' })
+    | (BaseChatMessage & { url: string; type: 'gif' })
+    | (BaseChatMessage & { file: { name: string; size?: number; url: string; contentType?: string }; type: 'file' })
+    | (BaseChatMessage & { poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll' })
+    | (BaseChatMessage & { form: { title: string; questions: string[] }; type: 'form' });
 
   export let messages: ChatMessage[] = [];
   export let users: Record<string, any> = {};
@@ -128,6 +147,57 @@
       segments.push({ type: 'text', value: value.slice(lastIndex) });
     }
     return segments;
+  }
+
+  const PREVIEW_LIMIT = 140;
+
+  function clipPreview(value: string | null | undefined, limit = PREVIEW_LIMIT) {
+    if (!value) return '';
+    return value.length > limit ? `${value.slice(0, limit - 1)}â€¦` : value;
+  }
+
+  function flattenReplyChain(reply: ReplyPreview | null | undefined) {
+    const chain: ReplyPreview[] = [];
+    let current: ReplyPreview | null | undefined = reply;
+    while (current) {
+      chain.unshift(current);
+      current = current.parent ?? null;
+    }
+    return chain;
+  }
+
+  function replyAuthorLabel(reply: ReplyPreview | null | undefined) {
+    if (!reply) return '';
+    if (reply.authorId && reply.authorId === currentUserId) return 'You';
+    return reply.authorName || reply.authorId || 'Someone';
+  }
+
+  function replyPreviewText(reply: ReplyPreview | null | undefined) {
+    if (!reply) return '';
+    const raw = clipPreview(reply.preview ?? (reply as any).text ?? '');
+    if (raw) return raw;
+    switch (reply.type) {
+      case 'gif':
+        return 'GIF';
+      case 'file':
+        return 'File';
+      case 'poll':
+        return 'Poll';
+      case 'form':
+        return 'Form';
+      default:
+        return 'Message';
+    }
+  }
+
+  function shouldIgnoreReplyIntent(target: EventTarget | null) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest('button, a, input, textarea, select, label, [data-reply-ignore]'));
+  }
+
+  function handleReplyClick(event: MouseEvent, message: ChatMessage) {
+    if (shouldIgnoreReplyIntent(event.target)) return;
+    dispatch('reply', { message });
   }
 
   const SAME_BLOCK_MINUTES = 5;
@@ -332,6 +402,13 @@
   function chooseReaction(messageId: string, emoji: string) {
     closeReactionMenu();
     toggleReaction(messageId, emoji);
+  }
+
+  function chooseReply(messageId: string) {
+    const target = messages.find((msg) => msg?.id === messageId);
+    if (!target) return;
+    dispatch('reply', { message: target });
+    closeReactionMenu();
   }
 
   function promptReaction(messageId: string) {
@@ -592,6 +669,7 @@
       opacity: 0.8;
       transform: translateY(0);
     }
+
   }
 
   @media (hover: none), (pointer: coarse) {
@@ -642,11 +720,135 @@
     gap: 0.24rem;
     max-width: 100%;
     position: relative;
+    align-items: flex-start;
   }
 
   .message-body--continued {
     margin-top: 0.04rem;
     gap: 0.12rem;
+  }
+
+  .message-content--mine .message-body {
+    align-items: flex-end;
+  }
+
+  .reply-preview {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    padding: 0.55rem 0.95rem 0.55rem 1.25rem;
+    border-radius: 1.15rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 10px 20px rgba(6, 9, 12, 0.25);
+    max-width: min(520px, 100%);
+    align-self: flex-start;
+  }
+
+  .reply-preview--mine {
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 60%, transparent);
+    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 85%, transparent);
+    color: var(--chat-bubble-self-text);
+    align-self: flex-end;
+  }
+
+  .reply-preview--other {
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 65%, transparent);
+    border-color: color-mix(in srgb, var(--chat-bubble-other-border) 80%, transparent);
+    color: var(--chat-bubble-other-text);
+  }
+
+  .reply-preview__indicator {
+    position: absolute;
+    left: 0.65rem;
+    top: 0.45rem;
+    bottom: 0.45rem;
+    width: 2px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    pointer-events: none;
+  }
+
+  .reply-preview--mine .reply-preview__indicator {
+    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 35%);
+  }
+
+  .reply-preview--other .reply-preview__indicator {
+    background: color-mix(in srgb, var(--chat-bubble-other-border) 80%, var(--color-accent) 30%);
+  }
+
+  .reply-preview__content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.12rem;
+    min-width: 0;
+  }
+
+  .reply-preview__author {
+    font-weight: 600;
+    font-size: 0.78rem;
+    color: inherit;
+  }
+
+  .reply-preview__text {
+    font-size: 0.78rem;
+    color: color-mix(in srgb, currentColor 80%, transparent);
+    word-break: break-word;
+    font-style: italic;
+  }
+
+  .reply-thread {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+  }
+
+  .reply-thread--mine {
+    align-items: flex-end;
+  }
+
+  .reply-thread__line {
+    width: 2px;
+    height: 0.65rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    display: inline-block;
+  }
+
+  .reply-thread__line--mine {
+    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 30%);
+  }
+
+  .reply-thread__line--other {
+    background: color-mix(in srgb, var(--chat-bubble-other-border) 75%, var(--color-accent) 30%);
+  }
+
+  .reply-thread {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+  }
+
+  .reply-thread--mine {
+    align-items: flex-end;
+  }
+
+  .reply-thread__line {
+    width: 2px;
+    height: 0.65rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    display: inline-block;
+  }
+
+  .reply-thread__line--mine {
+    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 30%);
+  }
+
+  .reply-thread__line--other {
+    background: color-mix(in srgb, var(--chat-bubble-other-border) 75%, var(--color-accent) 30%);
   }
 
   .message-bubble {
@@ -876,10 +1078,48 @@
     font-size: 1.25rem;
     background: rgba(255, 255, 255, 0.08);
     color: inherit;
+    border: 0;
+    padding: 0.35rem;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+
+  .reaction-button.Custom…{
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .reaction-button:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.4);
+    outline-offset: 2px;
   }
 
   .reaction-button:hover {
     background: rgba(255, 255, 255, 0.16);
+    transform: translateY(-1px);
+  }
+
+  .reaction-menu__actions {
+    margin-top: 0.75rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .reaction-menu__action {
+    border-radius: 999px;
+    border: 0;
+    padding: 0.35rem 1rem;
+    font-weight: 600;
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    font-size: 0.85rem;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+
+  .reaction-menu__action:hover,
+  .reaction-menu__action:focus-visible {
+    background: var(--color-accent-strong);
+    transform: translateY(-1px);
+    outline: none;
   }
 </style>
 
@@ -916,6 +1156,7 @@
         )
       )}
       {@const showTimestampMobile = !hasHoverSupport && reactionMenuFor === m.id}
+      {@const replyRef = (m as any).replyTo ?? null}
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
@@ -952,7 +1193,10 @@
             {/if}
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
-              <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
+              <div
+                class={`message-body ${continued ? 'message-body--continued' : ''}`}
+                on:click={(event) => handleReplyClick(event, m)}
+              >
                 {#if currentUserId}
                   <button
                     type="button"
@@ -965,6 +1209,22 @@
                   >
                     +
                   </button>
+                {/if}
+                {#if replyRef}
+                  {@const replyChain = flattenReplyChain(replyRef)}
+                  <div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
+                    {#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
+                      {@const entryMine = currentUserId && entry.authorId === currentUserId}
+                      <div class={`reply-preview ${entryMine ? 'reply-preview--mine' : 'reply-preview--other'}`}>
+                        <div class="reply-preview__indicator" aria-hidden="true"></div>
+                        <div class="reply-preview__content">
+                          <div class="reply-preview__author">{replyAuthorLabel(entry)}</div>
+                          <div class="reply-preview__text">{replyPreviewText(entry)}</div>
+                        </div>
+                      </div>
+                      <span class={`reply-thread__line ${entryMine ? 'reply-thread__line--mine' : 'reply-thread__line--other'}`} aria-hidden="true"></span>
+                    {/each}
+                  </div>
                 {/if}
                 {#if !m.type || m.type === 'text'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
@@ -1080,12 +1340,18 @@
     bind:this={reactionMenuEl}
     style={`top: ${reactionMenuPosition.top}px; left: ${reactionMenuPosition.left}px`}
   >
-    {#each QUICK_REACTIONS as emoji}
-      <button type="button" on:click={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
-    {/each}
-    <button type="button" class="custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
+    <div class="reaction-grid">
+      {#each QUICK_REACTIONS as emoji}
+        <button type="button" class="reaction-button" on:click={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
+      {/each}
+      <button type="button" class="reaction-button custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
+    </div>
+    <div class="reaction-menu__actions">
+      <button type="button" class="reaction-menu__action" on:click={() => chooseReply(reactionMenuFor!)}>Reply</button>
+    </div>
   </div>
 {/if}
+
 
 
 

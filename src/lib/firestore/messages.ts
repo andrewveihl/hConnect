@@ -3,11 +3,22 @@ import { addDoc, collection, doc, serverTimestamp, updateDoc, runTransaction, de
 
 type Nullable<T> = T | null | undefined;
 
+export type ReplyReferenceInput = {
+  messageId: string;
+  authorId?: Nullable<string>;
+  authorName?: Nullable<string>;
+  preview?: Nullable<string>;
+  text?: Nullable<string>;
+  type?: Nullable<string>;
+  parent?: ReplyReferenceInput | null;
+};
+
 export type BaseMessageInput = {
   uid: string;
   displayName?: Nullable<string>;
   photoURL?: Nullable<string>;
   mentions?: MentionInput[];
+  replyTo?: ReplyReferenceInput;
 };
 
 export type TextMessageInput = BaseMessageInput & {
@@ -110,6 +121,25 @@ function normalizeMentionList(mentions: MentionInput[] | undefined): Array<{
   return Array.from(map.values());
 }
 
+function normalizeReplyReference(reply: ReplyReferenceInput | undefined): ReplyReferenceInput | undefined {
+  if (!reply) return undefined;
+  const messageId = trimString(reply.messageId);
+  if (!messageId) return undefined;
+  const normalizedParent = normalizeReplyReference(reply.parent ?? undefined);
+  const result = {
+    messageId,
+    authorId: trimString(reply.authorId) ?? null,
+    authorName: trimString(reply.authorName) ?? null,
+    preview: trimString(reply.preview) ?? null,
+    text: trimString(reply.text) ?? null,
+    type: trimString(reply.type) ?? null
+  };
+  if (normalizedParent) {
+    (result as ReplyReferenceInput).parent = normalizedParent;
+  }
+  return result;
+}
+
 export function buildMessageDocument(payload: MessageInput) {
   if (!payload?.uid) {
     throw new Error('Cannot write message without uid.');
@@ -119,6 +149,7 @@ export function buildMessageDocument(payload: MessageInput) {
   const base = baseAuthorFields(payload);
   let extras: Record<string, any> = {};
   const mentions = normalizeMentionList((payload as any)?.mentions);
+  const replyTo = normalizeReplyReference((payload as BaseMessageInput)?.replyTo);
 
   switch (type) {
     case 'text': {
@@ -203,6 +234,7 @@ export function buildMessageDocument(payload: MessageInput) {
   return {
     ...compactRecord(base),
     ...compactRecord(extras),
+    ...(replyTo ? { replyTo } : {}),
     createdAt: serverTimestamp()
   };
 }

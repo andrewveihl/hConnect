@@ -18,6 +18,7 @@
   import { db } from '$lib/firestore';
   import { collection, doc, onSnapshot, orderBy, query, getDocs, endBefore, limitToLast, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
+  import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
   import { markChannelRead } from '$lib/firebase/unread';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
@@ -39,6 +40,8 @@
   let activeChannel: Channel | null = null;
   let requestedChannelId: string | null = null;
   let messages: any[] = [];
+  let replyTarget: ReplyReferenceInput | null = null;
+  let lastReplyChannelId: string | null = null;
   let profiles: Record<string, any> = {};
   const profileUnsubs: Record<string, Unsubscribe> = {};
   let serverDisplayName = 'Server';
@@ -167,14 +170,8 @@
     return { title, questions, responses };
   }
 
-  function toChatMessage(id: string, raw: any) {
-    const uid = pickString(raw?.uid) ?? pickString(raw?.authorId) ?? 'unknown';
-    const displayName =
-      pickString(raw?.displayName) ?? pickString(raw?.author?.displayName);
-    const photoURL =
-      pickString(raw?.photoURL) ?? pickString(raw?.author?.photoURL);
-    const createdAt = raw?.createdAt ?? null;
-    const inferredType =
+  function inferMessageType(raw: any) {
+    return (
       raw?.type ??
       (raw?.file
         ? 'file'
@@ -184,7 +181,116 @@
             ? 'form'
             : raw?.url
               ? 'gif'
-              : 'text');
+              : 'text')
+    );
+  }
+
+  const REPLY_SNIPPET_LIMIT = 140;
+
+  function clipReply(value: string | null | undefined, limit = REPLY_SNIPPET_LIMIT) {
+    if (!value) return '';
+    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  }
+
+  function describeReplyPreview(raw: any, type: string) {
+    switch (type) {
+      case 'gif':
+        return 'GIF';
+      case 'file': {
+        const name = pickString(raw?.file?.name);
+        return name ? `File: ${name}` : 'File';
+      }
+      case 'poll': {
+        const question = pickString(raw?.poll?.question);
+        return question ? `Poll: ${question}` : 'Poll';
+      }
+      case 'form': {
+        const title = pickString(raw?.form?.title);
+        return title ? `Form: ${title}` : 'Form';
+      }
+      default: {
+        const body = pickString(raw?.text) ?? pickString(raw?.content) ?? '';
+        const clipped = clipReply(body);
+        return clipped || 'Message';
+      }
+    }
+  }
+
+  $: {
+    const channelId = activeChannel?.id ?? null;
+    if (channelId !== lastReplyChannelId) {
+      lastReplyChannelId = channelId;
+      replyTarget = null;
+    }
+  }
+
+  function buildReplyReference(message: any): ReplyReferenceInput | null {
+    const messageId = pickString(message?.id);
+    if (!messageId) return null;
+    const type = inferMessageType(message);
+    const authorId = pickString(message?.uid) ?? pickString(message?.authorId) ?? null;
+    const authorRecord = authorId ? profiles[authorId] : null;
+    const authorName =
+      pickString(message?.displayName) ??
+      pickString(authorRecord?.displayName) ??
+      (authorId === $user?.uid ? 'You' : authorId);
+    const preview = describeReplyPreview(message, type);
+    const parent = cloneReplyChain(message?.replyTo ?? null);
+    const replyRef: ReplyReferenceInput = {
+      messageId,
+      authorId,
+      authorName: authorName ?? null,
+      preview: preview || null,
+      text: preview || null,
+      type
+    };
+    if (parent) replyRef.parent = parent;
+    return replyRef;
+  }
+
+  function cloneReplyChain(raw: any): ReplyReferenceInput | null {
+    const messageId = pickString(raw?.messageId);
+    if (!messageId) return null;
+    const preview =
+      clipReply(pickString(raw?.preview) ?? pickString(raw?.text) ?? '') || null;
+    const node: ReplyReferenceInput = {
+      messageId,
+      authorId: pickString(raw?.authorId) ?? null,
+      authorName: pickString(raw?.authorName) ?? null,
+      preview,
+      text: pickString(raw?.text) ?? preview,
+      type: pickString(raw?.type) ?? null
+    };
+    const parent = cloneReplyChain(raw?.parent ?? null);
+    if (parent) node.parent = parent;
+    return node;
+  }
+
+  function consumeReply(explicit?: ReplyReferenceInput | null) {
+    const candidate =
+      explicit && explicit.messageId
+        ? explicit
+        : replyTarget && replyTarget.messageId
+          ? replyTarget
+          : null;
+    replyTarget = null;
+    return candidate && candidate.messageId ? candidate : null;
+  }
+
+  function restoreReply(ref: ReplyReferenceInput | null) {
+    if (ref?.messageId) {
+      replyTarget = ref;
+    }
+  }
+
+  function toChatMessage(id: string, raw: any) {
+    const uid = pickString(raw?.uid) ?? pickString(raw?.authorId) ?? 'unknown';
+    const displayName =
+      pickString(raw?.displayName) ?? pickString(raw?.author?.displayName);
+    const photoURL =
+      pickString(raw?.photoURL) ?? pickString(raw?.author?.photoURL);
+    const createdAt = raw?.createdAt ?? null;
+    const inferredType = inferMessageType(raw);
 
     const message: any = {
       id,
@@ -234,6 +340,11 @@
       .filter((entry) => entry.uid);
     if (mentions.length) {
       message.mentions = mentions;
+    }
+
+    const replyTree = cloneReplyChain(raw?.replyTo ?? null);
+    if (replyTree) {
+      message.replyTo = replyTree;
     }
 
     return message;
@@ -717,13 +828,14 @@
     onDestroy(() => window.removeEventListener('visibilitychange', onVis));
   }
 
-  async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[] }) {
+  async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
     const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
     const trimmed = raw?.trim?.() ?? '';
     if (!trimmed) return;
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeReply(typeof payload === 'object' ? payload?.replyTo ?? null : null);
     const mentionList: MentionSendRecord[] =
       typeof payload === 'object' && payload && Array.isArray(payload.mentions)
         ? payload.mentions.filter(
@@ -738,65 +850,82 @@
         uid: $user.uid,
         displayName: deriveCurrentDisplayName(),
         photoURL: deriveCurrentPhotoURL(),
-        mentions: mentionList
+        mentions: mentionList,
+        replyTo: replyRef ?? undefined
       });
     } catch (err) {
+      restoreReply(replyRef);
       console.error(err);
       alert(`Failed to send message: ${err}`);
     }
   }
 
-  async function handleSendGif(url: string) {
-    const trimmed = pickString(url);
+  async function handleSendGif(detail: string | { url: string; replyTo?: ReplyReferenceInput | null }) {
+    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
     if (!trimmed) return;
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeReply(typeof detail === 'object' ? detail?.replyTo ?? null : null);
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'gif',
         url: trimmed,
         uid: $user.uid,
         displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL()
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
       });
     } catch (err) {
+      restoreReply(replyRef);
       console.error(err);
       alert(`Failed to share GIF: ${err}`);
     }
   }
 
-  async function handleCreatePoll(poll: { question: string; options: string[] }) {
+  async function handleCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeReply(poll?.replyTo ?? null);
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'poll',
-        poll,
+        poll: {
+          question: poll.question,
+          options: poll.options
+        },
         uid: $user.uid,
         displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL()
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
       });
     } catch (err) {
+      restoreReply(replyRef);
       console.error(err);
       alert(`Failed to create poll: ${err}`);
     }
   }
 
-  async function handleCreateForm(form: { title: string; questions: string[] }) {
+  async function handleCreateForm(form: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) {
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeReply(form?.replyTo ?? null);
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'form',
-        form,
+        form: {
+          title: form.title,
+          questions: form.questions
+        },
         uid: $user.uid,
         displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL()
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
       });
     } catch (err) {
+      restoreReply(replyRef);
       console.error(err);
       alert(`Failed to share form: ${err}`);
     }
@@ -836,6 +965,11 @@
       console.error(err);
       alert(`Failed to toggle reaction: ${err}`);
     }
+  }
+
+  function handleReplyRequest(event: CustomEvent<{ message: any }>) {
+    const ref = buildReplyReference(event.detail?.message);
+    if (ref) replyTarget = ref;
   }
 
   $: requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
@@ -934,6 +1068,7 @@
                   {profiles}
                   currentUserId={$user?.uid ?? null}
                   {mentionOptions}
+                  {replyTarget}
                   listClass="flex-1 overflow-y-auto p-3"
                   inputWrapperClass="border-t border-subtle panel-muted p-3"
                   inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
@@ -951,6 +1086,8 @@
                   onCreatePoll={handleCreatePoll}
                   onCreateForm={handleCreateForm}
                   hideInput={hideMessageInput}
+                  on:reply={handleReplyRequest}
+                  on:cancelReply={() => (replyTarget = null)}
                 />
               </div>
             {/if}
@@ -1003,6 +1140,7 @@
             {profiles}
             currentUserId={$user?.uid ?? null}
             {mentionOptions}
+            {replyTarget}
             emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
             onVote={handleVote}
             onSubmitForm={handleFormSubmit}
@@ -1017,6 +1155,8 @@
             onCreatePoll={handleCreatePoll}
             onCreateForm={handleCreateForm}
             hideInput={hideMessageInput}
+            on:reply={handleReplyRequest}
+            on:cancelReply={() => (replyTarget = null)}
           />
         {/if}
       </div>
