@@ -210,9 +210,17 @@
       const handleResize = () => {
         if (reactionMenuFor) void positionReactionMenu();
       };
+      const handleGlobalPointerDown = (event: PointerEvent) => {
+        if (!reactionMenuFor) return;
+        const target = event.target as HTMLElement | null;
+        if (target?.closest('.reaction-menu') || target?.closest('.reaction-add')) return;
+        closeReactionMenu();
+      };
       window.addEventListener('resize', handleResize);
+      window.addEventListener('pointerdown', handleGlobalPointerDown, true);
       return () => {
         window.removeEventListener('resize', handleResize);
+        window.removeEventListener('pointerdown', handleGlobalPointerDown, true);
       };
     }
     return () => {};
@@ -296,26 +304,26 @@
     const anchorRect = anchor.getBoundingClientRect();
     await tick();
     const menuRect = reactionMenuEl?.getBoundingClientRect();
-    const menuWidth = menuRect?.width ?? 0;
-    const menuHeight = menuRect?.height ?? 0;
+    if (!menuRect) return;
+
+    const menuWidth = menuRect.width;
+    const menuHeight = menuRect.height;
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
+    const safeGap = 8;
+    const verticalOffset = 6;
 
-    let left = anchorRect.left;
-    let top = anchorRect.bottom + 8;
+    const anchorMidX = anchorRect.left + anchorRect.width / 2;
+    const maxLeft = Math.max(safeGap, viewportWidth - menuWidth - safeGap);
+    let left = anchorMidX - menuWidth / 2;
+    left = Math.min(Math.max(safeGap, left), maxLeft);
 
-    if (menuWidth) {
-      if (left + menuWidth > viewportWidth - 8) {
-        left = Math.max(8, viewportWidth - menuWidth - 8);
-      }
-      if (left < 8) left = 8;
+    let top = anchorRect.bottom + verticalOffset;
+    if (top + menuHeight > viewportHeight - safeGap) {
+      top = anchorRect.top - menuHeight - verticalOffset;
     }
-
-    if (menuHeight) {
-      if (top + menuHeight > viewportHeight - 8) {
-        top = Math.max(8, anchorRect.top - menuHeight - 8);
-      }
-      if (top < 8) top = 8;
+    if (top < safeGap) {
+      top = Math.max(safeGap, Math.min(anchorRect.bottom + verticalOffset, viewportHeight - menuHeight - safeGap));
     }
 
     reactionMenuPosition = { top, left };
@@ -542,6 +550,16 @@
     margin-bottom: 0.35rem;
   }
 
+  .message-block--other .message-heading-row {
+    margin-left: calc(2.5rem + 0.6rem);
+    margin-right: 0;
+  }
+
+  .message-block--mine .message-heading-row {
+    margin-left: 0;
+    margin-right: calc(2.5rem + 0.6rem);
+  }
+
   .message-heading-row--mine {
     justify-content: flex-end;
     text-align: right;
@@ -553,6 +571,9 @@
     padding: 0 0.35rem;
     margin-top: 0.15rem;
     line-height: 1.1;
+    min-height: 1rem;
+    display: flex;
+    align-items: center;
     transition: opacity 150ms ease, transform 150ms ease;
   }
 
@@ -568,6 +589,19 @@
 
     .message-block.is-minute-hovered .message-inline-timestamp,
     .message-block:hover .message-inline-timestamp {
+      opacity: 0.8;
+      transform: translateY(0);
+    }
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    .message-inline-timestamp {
+      opacity: 0;
+      transform: translateY(2px);
+      pointer-events: none;
+    }
+
+    .message-inline-timestamp.is-mobile-visible {
       opacity: 0.8;
       transform: translateY(0);
     }
@@ -607,6 +641,7 @@
     flex-direction: column;
     gap: 0.24rem;
     max-width: 100%;
+    position: relative;
   }
 
   .message-body--continued {
@@ -707,7 +742,7 @@
     align-items: center;
     gap: 0.35rem;
     min-height: 0;
-    padding-right: 2.25rem;
+    padding-right: 0;
   }
 
   .reaction-list {
@@ -772,10 +807,18 @@
     transform: translateY(0);
   }
 
-  .reaction-add-inline {
+  .reaction-add-floating {
     position: absolute;
-    right: -0.35rem;
-    top: calc(-100% - 0.35rem);
+    top: -0.6rem;
+    z-index: 10;
+  }
+
+  .reaction-add-floating--other {
+    right: -0.55rem;
+  }
+
+  .reaction-add-floating--mine {
+    left: -0.55rem;
   }
 
   .reaction-add:hover {
@@ -799,6 +842,7 @@
   }
 
   .reaction-menu {
+    position: fixed;
     min-width: 180px;
     max-width: min(90vw, 320px);
     background: rgba(18, 22, 28, 0.95);
@@ -871,6 +915,7 @@
           reactionMenuFor === m.id
         )
       )}
+      {@const showTimestampMobile = !hasHoverSupport && reactionMenuFor === m.id}
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
@@ -908,6 +953,19 @@
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
               <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
+                {#if currentUserId}
+                  <button
+                    type="button"
+                    class={`reaction-add reaction-add-floating ${mine ? 'reaction-add-floating--mine' : 'reaction-add-floating--other'} ${showAdd ? 'is-visible' : ''}`}
+                    disabled={!showAdd}
+                    aria-hidden={!showAdd}
+                    on:click={(event) => onAddReactionClick(event, m.id)}
+                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
+                    aria-label="Add reaction"
+                  >
+                    +
+                  </button>
+                {/if}
                 {#if !m.type || m.type === 'text'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
@@ -978,7 +1036,10 @@
                 {/if}
               </div>
               {#if (m as any).createdAt && !sameMinuteAsNext}
-                <div class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''}`}>
+                <div
+                  class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
+                  aria-hidden={!hasHoverSupport && !showTimestampMobile}
+                >
                   {formatTime((m as any).createdAt)}
                 </div>
               {/if}
@@ -1002,17 +1063,6 @@
                       </button>
                     {/each}
                   </div>
-                  <button
-                    type="button"
-                    class={`reaction-add reaction-add-inline ${showAdd ? 'is-visible' : ''}`}
-                    disabled={!showAdd}
-                    aria-hidden={!showAdd}
-                    on:click={(event) => onAddReactionClick(event, m.id)}
-                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
-                    aria-label="Add reaction"
-                  >
-                    +
-                  </button>
                 </div>
               {/if}
             </div>
