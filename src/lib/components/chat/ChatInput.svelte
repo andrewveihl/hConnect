@@ -4,6 +4,7 @@
   import EmojiPicker from './EmojiPicker.svelte';
   import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
+  import type { ReplyReferenceInput } from '$lib/firestore/messages';
 
   type MentionCandidate = {
     uid: string;
@@ -19,6 +20,8 @@
     handle: string;
     label: string;
   };
+
+  type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
 
   const canonical = (value: string) =>
     (value ?? '')
@@ -40,12 +43,13 @@
   export let placeholder: string = 'Message #channel';
   export let disabled = false;
   export let mentionOptions: MentionCandidate[] = [];
+  export let replyTarget: ReplyReferenceInput | null = null;
 
-  export let onSend: (payload: { text: string; mentions?: MentionRecord[] }) => void = () => {};
+  export let onSend: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void = () => {};
   export let onUpload: (files: File[]) => void = () => {};
-  export let onSendGif: (url: string) => void = () => {};
-  export let onCreatePoll: (poll: { question: string; options: string[] }) => void = () => {};
-  export let onCreateForm: (form: { title: string; questions: string[] }) => void = () => {};
+  export let onSendGif: (payload: ReplyablePayload<{ url: string }>) => void = () => {};
+  export let onCreatePoll: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void = () => {};
+  export let onCreateForm: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void = () => {};
 
   const dispatch = createEventDispatcher();
 
@@ -70,6 +74,42 @@
   let mentionAliasLookup = new Map<string, MentionCandidate>();
   const mentionDraft = new Map<string, MentionRecord>();
 
+  const REPLY_PREVIEW_LIMIT = 160;
+
+  function clipReply(value: string | null | undefined, limit = REPLY_PREVIEW_LIMIT) {
+    if (!value) return '';
+    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  }
+
+  function replyRecipientLabel(target: ReplyReferenceInput | null) {
+    if (!target) return '';
+    return target.authorName || target.authorId || 'Member';
+  }
+
+  function replyPreviewText(target: ReplyReferenceInput | null) {
+    if (!target) return '';
+    const value = clipReply(target.preview ?? target.text ?? '');
+    if (value) return value;
+    switch (target.type) {
+      case 'gif':
+        return 'GIF';
+      case 'file':
+        return 'File';
+      case 'poll':
+        return 'Poll';
+      case 'form':
+        return 'Form';
+      default:
+        return 'Message';
+    }
+  }
+
+  async function cancelReply() {
+    dispatch('cancelReply');
+    await tick();
+    inputEl?.focus();
+  }
+
   $: mentionLookup = new Map(
     mentionOptions.map((option) => [option.handle.toLowerCase(), option])
   );
@@ -88,7 +128,11 @@
     const trimmed = text.trim();
     if (!trimmed || disabled) return;
     const mentions = collectMentions(text);
-    const payload = { text: trimmed, mentions };
+    const payload = {
+      text: trimmed,
+      mentions,
+      replyTo: replyTarget ?? undefined
+    };
     onSend(payload);
     dispatch('send', payload);
     text = '';
@@ -281,18 +325,21 @@
   };
 
   function onGifPicked(url: string) {
-    onSendGif(url);
-    dispatch('sendGif', url);
+    const payload = { url, replyTo: replyTarget ?? undefined };
+    onSendGif(payload);
+    dispatch('sendGif', payload);
     showGif = false;
   }
   function onPollCreate(poll: { question: string; options: string[] }) {
-    onCreatePoll(poll);
-    dispatch('createPoll', poll);
+    const payload = { ...poll, replyTo: replyTarget ?? undefined };
+    onCreatePoll(payload);
+    dispatch('createPoll', payload);
     showPoll = false;
   }
   function onFormCreate(form: { title: string; questions: string[] }) {
-    onCreateForm(form);
-    dispatch('createForm', form);
+    const payload = { ...form, replyTo: replyTarget ?? undefined };
+    onCreateForm(payload);
+    dispatch('createForm', payload);
     showForm = false;
   }
 
@@ -364,143 +411,164 @@
 
 <svelte:window on:keydown={onEsc} />
 
-<form on:submit|preventDefault={submit} class="relative flex items-center gap-2">
-  <div class="relative">
-    <button
-      type="button"
-      class="rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
-      aria-haspopup="menu"
-      aria-expanded={popOpen}
-      aria-label="Add to message"
-      title="Add to message"
-      on:click={() => (popOpen = !popOpen)}
-      disabled={disabled}
-    >
-      <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
-    </button>
-
-    {#if popOpen}
-      <div class="chat-input-popover" role="menu">
-        <div class="chat-input-popover__header">Add to message</div>
-        <div class="chat-input-menu">
-          <button class="chat-input-menu__item" role="menuitem" on:click={openGif}>
-            <span class="chat-input-menu__icon">
-              <i class="bx bx-film" aria-hidden="true"></i>
-            </span>
-            <div class="chat-input-menu__content">
-              <span class="chat-input-menu__title">Add GIF</span>
-              <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
-            </div>
-          </button>
-          <button class="chat-input-menu__item" role="menuitem" on:click={pickFiles}>
-            <span class="chat-input-menu__icon">
-              <i class="bx bx-paperclip" aria-hidden="true"></i>
-            </span>
-            <div class="chat-input-menu__content">
-              <span class="chat-input-menu__title">Upload files</span>
-              <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
-            </div>
-          </button>
-          <button class="chat-input-menu__item" role="menuitem" on:click={openPoll}>
-            <span class="chat-input-menu__icon">
-              <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
-            </span>
-            <div class="chat-input-menu__content">
-              <span class="chat-input-menu__title">Create poll</span>
-              <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
-            </div>
-          </button>
-          <button class="chat-input-menu__item" role="menuitem" on:click={openForm}>
-            <span class="chat-input-menu__icon">
-              <i class="bx bx-detail" aria-hidden="true"></i>
-            </span>
-            <div class="chat-input-menu__content">
-              <span class="chat-input-menu__title">Create form</span>
-              <span class="chat-input-menu__subtitle">Collect structured responses.</span>
-            </div>
-          </button>
-        </div>
+<div class="chat-input-stack">
+  {#if replyTarget}
+    <div class="reply-banner" role="status">
+      <div class="reply-banner__indicator" aria-hidden="true"></div>
+      <div class="reply-banner__body">
+        <div class="reply-banner__label">Replying to</div>
+        <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
+        <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
       </div>
-    {/if}
+      <button
+        type="button"
+        class="reply-banner__close"
+        on:click={cancelReply}
+        aria-label="Cancel reply"
+      >
+        <i class="bx bx-x"></i>
+      </button>
+    </div>
+  {/if}
 
-    <input class="hidden" type="file" multiple bind:this={fileEl} on:change={onFilesChange} />
-  </div>
+  <form on:submit|preventDefault={submit} class="relative flex items-center gap-2">
+    <div class="relative">
+      <button
+        type="button"
+        class="rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={popOpen}
+        aria-label="Add to message"
+        title="Add to message"
+        on:click={() => (popOpen = !popOpen)}
+        disabled={disabled}
+      >
+        <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
+      </button>
 
-  <div class="flex-1 relative">
-    <textarea
-      class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-      rows="1"
-      bind:this={inputEl}
-      bind:value={text}
-      placeholder={placeholder}
-      on:keydown={onKeydown}
-      on:input={handleInput}
-      on:keyup={handleSelectionChange}
-      on:click={handleSelectionChange}
-      {disabled}
-      aria-label="Message input"
-    />
-
-    {#if mentionActive}
-      <div class="mention-menu" role="listbox">
-        <div class="mention-menu__header">Tag someone</div>
-        <div class="mention-menu__list">
-          {#each mentionFiltered as option, idx}
-            <button
-              type="button"
-              class={`mention-menu__item ${idx === mentionIndex ? 'is-active' : ''}`}
-              role="option"
-              aria-selected={idx === mentionIndex}
-              on:mousedown|preventDefault={() => insertMention(option)}
-              on:mouseenter={() => (mentionIndex = idx)}
-            >
-              <span class="mention-menu__avatar">
-                {#if option.avatar}
-                  <img src={option.avatar} alt={option.label} loading="lazy" />
-                {:else}
-                  <span>{initialsFor(option.label)}</span>
-                {/if}
+      {#if popOpen}
+        <div class="chat-input-popover" role="menu">
+          <div class="chat-input-popover__header">Add to message</div>
+          <div class="chat-input-menu">
+            <button class="chat-input-menu__item" role="menuitem" on:click={openGif}>
+              <span class="chat-input-menu__icon">
+                <i class="bx bx-film" aria-hidden="true"></i>
               </span>
-              <span class="mention-menu__meta">
-                <span class="mention-menu__label">{option.label}</span>
-                <span class="mention-menu__handle">@{option.handle}</span>
-              </span>
+              <div class="chat-input-menu__content">
+                <span class="chat-input-menu__title">Add GIF</span>
+                <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
+              </div>
             </button>
-          {/each}
+            <button class="chat-input-menu__item" role="menuitem" on:click={pickFiles}>
+              <span class="chat-input-menu__icon">
+                <i class="bx bx-paperclip" aria-hidden="true"></i>
+              </span>
+              <div class="chat-input-menu__content">
+                <span class="chat-input-menu__title">Upload files</span>
+                <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
+              </div>
+            </button>
+            <button class="chat-input-menu__item" role="menuitem" on:click={openPoll}>
+              <span class="chat-input-menu__icon">
+                <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
+              </span>
+              <div class="chat-input-menu__content">
+                <span class="chat-input-menu__title">Create poll</span>
+                <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
+              </div>
+            </button>
+            <button class="chat-input-menu__item" role="menuitem" on:click={openForm}>
+              <span class="chat-input-menu__icon">
+                <i class="bx bx-detail" aria-hidden="true"></i>
+              </span>
+              <div class="chat-input-menu__content">
+                <span class="chat-input-menu__title">Create form</span>
+                <span class="chat-input-menu__subtitle">Collect structured responses.</span>
+              </div>
+            </button>
+          </div>
         </div>
-      </div>
-    {/if}
-  </div>
+      {/if}
 
-  <div class="chat-input__actions">
-    {#if emojiSupported}
-      <div class="emoji-trigger" bind:this={emojiTriggerEl}>
-        <button
-          type="button"
-          class="emoji-button"
-          on:click={openEmoji}
-          disabled={disabled}
-          aria-label="Insert emoji"
-          title="Insert emoji"
-        >
-          <i class="bx bx-smile text-xl leading-none"></i>
-        </button>
-        {#if showEmoji}
-          <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
-        {/if}
-      </div>
-    {/if}
-    <button
-      class="chat-send-button"
-      type="submit"
-      disabled={disabled || !text.trim()}
-      aria-label="Send message"
-      title="Send"
-    >
-      Send
-    </button>
-  </div>
-</form>
+      <input class="hidden" type="file" multiple bind:this={fileEl} on:change={onFilesChange} />
+    </div>
+
+    <div class="flex-1 relative">
+      <textarea
+        class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+        rows="1"
+        bind:this={inputEl}
+        bind:value={text}
+        placeholder={placeholder}
+        on:keydown={onKeydown}
+        on:input={handleInput}
+        on:keyup={handleSelectionChange}
+        on:click={handleSelectionChange}
+        {disabled}
+        aria-label="Message input"
+      />
+
+      {#if mentionActive}
+        <div class="mention-menu" role="listbox">
+          <div class="mention-menu__header">Tag someone</div>
+          <div class="mention-menu__list">
+            {#each mentionFiltered as option, idx}
+              <button
+                type="button"
+                class={`mention-menu__item ${idx === mentionIndex ? 'is-active' : ''}`}
+                role="option"
+                aria-selected={idx === mentionIndex}
+                on:mousedown|preventDefault={() => insertMention(option)}
+                on:mouseenter={() => (mentionIndex = idx)}
+              >
+                <span class="mention-menu__avatar">
+                  {#if option.avatar}
+                    <img src={option.avatar} alt={option.label} loading="lazy" />
+                  {:else}
+                    <span>{initialsFor(option.label)}</span>
+                  {/if}
+                </span>
+                <span class="mention-menu__meta">
+                  <span class="mention-menu__label">{option.label}</span>
+                  <span class="mention-menu__handle">@{option.handle}</span>
+                </span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <div class="chat-input__actions">
+      {#if emojiSupported}
+        <div class="emoji-trigger" bind:this={emojiTriggerEl}>
+          <button
+            type="button"
+            class="emoji-button"
+            on:click={openEmoji}
+            disabled={disabled}
+            aria-label="Insert emoji"
+            title="Insert emoji"
+          >
+            <i class="bx bx-smile text-xl leading-none"></i>
+          </button>
+          {#if showEmoji}
+            <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
+          {/if}
+        </div>
+      {/if}
+      <button
+        class="chat-send-button"
+        type="submit"
+        disabled={disabled || !text.trim()}
+        aria-label="Send message"
+        title="Send"
+      >
+        Send
+      </button>
+    </div>
+  </form>
+</div>
 
 {#if showGif}
   <GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
@@ -607,6 +675,78 @@
 
   :global(:root[data-theme='light']) .chat-input-menu__icon {
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  }
+
+  .chat-input-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .reply-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.65rem 0.95rem;
+    border-radius: 1.2rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
+  }
+
+  .reply-banner__indicator {
+    width: 0.3rem;
+    align-self: stretch;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+  }
+
+  .reply-banner__body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .reply-banner__label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-55);
+  }
+
+  .reply-banner__name {
+    font-weight: 600;
+    color: var(--color-text-primary);
+    font-size: 0.85rem;
+  }
+
+  .reply-banner__preview {
+    font-size: 0.82rem;
+    color: var(--text-70);
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .reply-banner__close {
+    border: 0;
+    background: transparent;
+    color: var(--text-60);
+    padding: 0.15rem;
+    border-radius: 999px;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .reply-banner__close:hover,
+  .reply-banner__close:focus-visible {
+    color: var(--color-text-primary);
+    background: color-mix(in srgb, var(--color-border-subtle) 35%, transparent);
+    outline: none;
   }
 
   .textarea {

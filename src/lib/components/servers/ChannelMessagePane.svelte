@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { createEventDispatcher } from 'svelte';
   import MessageList from '$lib/components/chat/MessageList.svelte';
   import ChatInput from '$lib/components/chat/ChatInput.svelte';
   import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+  import type { ReplyReferenceInput } from '$lib/firestore/messages';
 
   export let hasChannel = false;
   export let channelName = '';
@@ -22,10 +24,14 @@
   export let onSubmitForm: (event: CustomEvent<any>) => void = () => {};
   export let onReact: (event: CustomEvent<any>) => void = () => {};
   export let onLoadMore: () => void = () => {};
-  export let onSend: (value: string) => void = () => {};
-  export let onSendGif: (url: string) => void = () => {};
-  export let onCreatePoll: () => void = () => {};
-  export let onCreateForm: () => void = () => {};
+  export let onSend: (value: string | { text: string; mentions?: any[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+  export let onSendGif: (payload: { url: string; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+  export let onCreatePoll: (payload: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+  export let onCreateForm: (payload: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+
+  export let replyTarget: ReplyReferenceInput | null = null;
+
+  const dispatch = createEventDispatcher();
 </script>
 
 {#if hasChannel}
@@ -38,6 +44,7 @@
       on:submitForm={onSubmitForm}
       on:react={onReact}
       on:loadMore={onLoadMore}
+      on:reply={(event) => dispatch('reply', event.detail)}
     />
   </div>
   {#if !hideInput}
@@ -45,10 +52,12 @@
       <ChatInput
         placeholder={`Message #${channelName}`}
         {mentionOptions}
+        {replyTarget}
         onSend={onSend}
         onSendGif={onSendGif}
         onCreatePoll={onCreatePoll}
         onCreateForm={onCreateForm}
+        on:cancelReply={() => dispatch('cancelReply')}
       />
     </div>
   {/if}
