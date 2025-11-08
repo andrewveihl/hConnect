@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { createEventDispatcher, tick } from 'svelte';
+  import { createEventDispatcher, onMount, tick } from 'svelte';
   import GifPicker from './GifPicker.svelte';
+  import EmojiPicker from './EmojiPicker.svelte';
   import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
 
@@ -53,6 +54,10 @@
   let showGif = false;
   let showPoll = false;
   let showForm = false;
+  let showEmoji = false;
+  let emojiSupported = false;
+  let emojiTriggerEl: HTMLDivElement | null = null;
+  let disposeEmojiOutside: (() => void) | null = null;
   let fileEl: HTMLInputElement | null = null;
   let inputEl: HTMLTextAreaElement | null = null;
 
@@ -260,6 +265,12 @@
     showGif = true;
     popOpen = false;
   };
+
+  const openEmoji = () => {
+    if (disabled || !emojiSupported) return;
+    showEmoji = !showEmoji;
+    if (showEmoji) popOpen = false;
+  };
   const openPoll = () => {
     showPoll = true;
     popOpen = false;
@@ -285,14 +296,66 @@
     showForm = false;
   }
 
+  async function insertEmoji(symbol: string) {
+    if (!inputEl) return;
+    const start = inputEl.selectionStart ?? text.length;
+    const end = inputEl.selectionEnd ?? text.length;
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    text = `${before}${symbol}${after}`;
+    await tick();
+    const nextCaret = before.length + symbol.length;
+    inputEl.focus();
+    inputEl.setSelectionRange(nextCaret, nextCaret);
+    refreshMentionDraft();
+    handleSelectionChange();
+  }
+
+  function onEmojiPicked(symbol: string) {
+    void insertEmoji(`${symbol} `);
+    showEmoji = false;
+  }
+
+  function registerEmojiOutsideWatcher() {
+    if (typeof document === 'undefined') return null;
+    const handler = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!emojiTriggerEl) return;
+      if (emojiTriggerEl.contains(target)) return;
+      showEmoji = false;
+    };
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
+  }
+
+  $: {
+    disposeEmojiOutside?.();
+    disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
+  }
+
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(min-width: 768px) and (pointer:fine)');
+    const update = () => {
+      emojiSupported = mq.matches;
+      if (!emojiSupported) showEmoji = false;
+    };
+    update();
+    mq.addEventListener('change', update);
+    return () => {
+      mq.removeEventListener('change', update);
+      disposeEmojiOutside?.();
+    };
+  });
+
   function onEsc(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (mentionActive) {
       closeMentionMenu();
       return;
     }
-    if (showGif || showPoll || showForm) {
-      showGif = showPoll = showForm = false;
+    if (showGif || showPoll || showForm || showEmoji) {
+      showGif = showPoll = showForm = showEmoji = false;
     } else {
       popOpen = false;
     }
@@ -365,7 +428,7 @@
 
   <div class="flex-1 relative">
     <textarea
-      class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[#5865f2]"
+      class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
       rows="1"
       bind:this={inputEl}
       bind:value={text}
@@ -409,15 +472,34 @@
     {/if}
   </div>
 
-  <button
-    class="rounded-full bg-[#5865f2] hover:bg-[#4752c4] px-5 py-2 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-    type="submit"
-    disabled={disabled || !text.trim()}
-    aria-label="Send message"
-    title="Send"
-  >
-    Send
-  </button>
+  <div class="chat-input__actions">
+    {#if emojiSupported}
+      <div class="emoji-trigger" bind:this={emojiTriggerEl}>
+        <button
+          type="button"
+          class="emoji-button"
+          on:click={openEmoji}
+          disabled={disabled}
+          aria-label="Insert emoji"
+          title="Insert emoji"
+        >
+          <i class="bx bx-smile text-xl leading-none"></i>
+        </button>
+        {#if showEmoji}
+          <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
+        {/if}
+      </div>
+    {/if}
+    <button
+      class="chat-send-button"
+      type="submit"
+      disabled={disabled || !text.trim()}
+      aria-label="Send message"
+      title="Send"
+    >
+      Send
+    </button>
+  </div>
 </form>
 
 {#if showGif}
@@ -621,5 +703,68 @@
   .mention-menu__handle {
     font-size: 0.7rem;
     color: var(--text-60);
+  }
+
+  .chat-input__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .emoji-trigger {
+    position: relative;
+  }
+
+  .emoji-trigger :global(.emoji-panel) {
+    position: absolute;
+    bottom: calc(100% + 0.5rem);
+    right: 0;
+    z-index: 40;
+  }
+
+  .emoji-button {
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 999px;
+    border: 1px solid var(--button-ghost-border);
+    background: var(--button-ghost-bg);
+    color: var(--button-ghost-text);
+    display: grid;
+    place-items: center;
+    transition: background 150ms ease, border 150ms ease, transform 120ms ease;
+  }
+
+  .emoji-button:hover:not(:disabled),
+  .emoji-button:focus-visible:not(:disabled) {
+    background: var(--button-ghost-hover);
+    border-color: color-mix(in srgb, var(--button-ghost-border) 65%, transparent);
+    outline: none;
+  }
+
+  .emoji-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .chat-send-button {
+    border-radius: var(--radius-pill);
+    background: var(--button-primary-bg);
+    color: var(--button-primary-text);
+    font-weight: 600;
+    padding: 0.55rem 1.4rem;
+    transition: background 150ms ease, transform 120ms ease;
+  }
+
+  .chat-send-button:hover:not(:disabled),
+  .chat-send-button:focus-visible:not(:disabled) {
+    background: var(--button-primary-hover);
+    transform: translateY(-1px);
+    outline: none;
+  }
+
+  .chat-send-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
   }
 </style>

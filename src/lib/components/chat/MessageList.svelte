@@ -143,6 +143,29 @@
     }
   }
 
+  function normalizeDate(value: any) {
+    if (!value) return null;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (value instanceof Date) return value;
+    const date = new Date(value);
+    return Number.isNaN(+date) ? null : date;
+  }
+
+  function sameMinute(prev: any, curr: any) {
+    if (!prev || !curr) return false;
+    const p = normalizeDate(prev?.createdAt);
+    const c = normalizeDate(curr?.createdAt);
+    if (!p || !c) return false;
+    return Math.floor(+p / 60000) === Math.floor(+c / 60000);
+  }
+
+  function minuteKeyFor(msg: any): string | null {
+    const date = normalizeDate(msg?.createdAt);
+    if (!date) return null;
+    const minute = Math.floor(+date / 60000);
+    return Number.isFinite(minute) ? `${minute}` : null;
+  }
+
   let lastLen = 0;
   afterUpdate(() => {
     if (messages.length !== lastLen) {
@@ -172,6 +195,7 @@
 
   let hasHoverSupport = true;
   let hoveredMessageId: string | null = null;
+  let hoveredMinuteKey: string | null = null;
   let reactionMenuFor: string | null = null;
   let reactionMenuAnchor: HTMLElement | null = null;
   let reactionMenuEl: HTMLDivElement | null = null;
@@ -310,26 +334,34 @@
     chooseReaction(messageId, emoji);
   }
 
-  function onMessagePointerEnter(messageId: string) {
+  function onMessagePointerEnter(messageId: string, minuteKey: string | null) {
     if (!hasHoverSupport) return;
     hoveredMessageId = messageId;
+    hoveredMinuteKey = minuteKey;
   }
 
-  function onMessagePointerLeave(messageId: string) {
+  function onMessagePointerLeave(messageId: string, minuteKey: string | null) {
     if (!hasHoverSupport) return;
     if (reactionMenuFor === messageId) return;
     hoveredMessageId = null;
+    if (hoveredMinuteKey === minuteKey) {
+      hoveredMinuteKey = null;
+    }
   }
 
-  function onMessageFocusIn(messageId: string) {
+  function onMessageFocusIn(messageId: string, minuteKey: string | null) {
     hoveredMessageId = messageId;
+    hoveredMinuteKey = minuteKey;
   }
 
-  function onMessageFocusOut(messageId: string, event: FocusEvent) {
+  function onMessageFocusOut(messageId: string, minuteKey: string | null, event: FocusEvent) {
     const next = event.relatedTarget as HTMLElement | null;
     if (next && next.closest?.(`[data-message-id="${messageId}"]`)) return;
     if (reactionMenuFor === messageId) return;
     hoveredMessageId = null;
+    if (hoveredMinuteKey === minuteKey) {
+      hoveredMinuteKey = null;
+    }
   }
 
   function clearLongPressTimer() {
@@ -440,6 +472,7 @@
   .message-author {
     font-weight: 600;
     color: var(--color-text-primary);
+    font-size: 0.92rem;
   }
 
   .message-author--mine {
@@ -451,29 +484,147 @@
     color: var(--text-55);
   }
 
-  .message-body {
-    margin-top: 0.45rem;
+  .message-block {
+    width: 100%;
+    max-width: min(48rem, 100%);
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.18rem;
+  }
+
+  .message-block--mine {
+    align-items: flex-end;
+    text-align: right;
+  }
+
+  .message-block--other {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .message-layout {
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+  }
+
+  .message-layout--mine {
+    flex-direction: row-reverse;
+  }
+
+  .message-layout--continued {
+    padding-left: calc(2.5rem + 0.6rem);
+  }
+
+  .message-layout--mine.message-layout--continued {
+    padding-left: 0;
+    padding-right: calc(2.5rem + 0.6rem);
+  }
+
+  .message-content {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .message-content--mine {
+    align-items: flex-end;
+    text-align: right;
+  }
+
+  .message-heading-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding: 0 0.35rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .message-heading-row--mine {
+    justify-content: flex-end;
+    text-align: right;
+  }
+
+  .message-inline-timestamp {
+    font-size: 0.75rem;
+    color: var(--text-55);
+    padding: 0 0.35rem;
+    margin-top: 0.15rem;
+    line-height: 1.1;
+    transition: opacity 150ms ease, transform 150ms ease;
+  }
+
+  .message-inline-timestamp--mine {
+    text-align: right;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .message-inline-timestamp {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+
+    .message-block.is-minute-hovered .message-inline-timestamp,
+    .message-block:hover .message-inline-timestamp {
+      opacity: 0.8;
+      transform: translateY(0);
+    }
+  }
+
+  .message-avatar {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 9999px;
+    border: 1px solid var(--chat-bubble-other-border);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 35%, transparent);
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    box-shadow: 0 8px 20px rgba(6, 9, 12, 0.25);
+  }
+
+  .message-layout--mine .message-avatar {
+    border-color: var(--chat-bubble-self-border);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 20%, transparent);
+  }
+
+  .message-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .message-avatar span {
+    font-size: 0.85rem;
+    color: var(--text-70);
+  }
+
+  .message-body {
+    margin-top: 0.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.24rem;
     max-width: 100%;
   }
 
   .message-body--continued {
-    margin-top: 0.12rem;
-    gap: 0.18rem;
+    margin-top: 0.04rem;
+    gap: 0.12rem;
   }
 
   .message-bubble {
+    position: relative;
     display: inline-block;
     max-width: min(640px, 100%);
-    padding: 0.55rem 0.95rem;
-    border-radius: var(--radius-sm);
+    padding: 0.65rem 1rem;
+    border-radius: 1.15rem;
     border: 1px solid transparent;
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
-    box-shadow: 0 6px 14px rgba(9, 12, 16, 0.18);
+    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.22);
     transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
   }
 
@@ -487,6 +638,50 @@
     background: var(--chat-bubble-other-bg);
     color: var(--chat-bubble-other-text);
     border-color: var(--chat-bubble-other-border);
+  }
+
+  .message-bubble--first-other::before,
+  .message-bubble--first-other::after {
+    content: '';
+    position: absolute;
+    width: 0.9rem;
+    height: 0.9rem;
+    bottom: 0.2rem;
+    left: -0.45rem;
+    border-bottom-right-radius: 1.2rem;
+    transform: rotate(45deg);
+  }
+
+  .message-bubble--first-other::before {
+    background: var(--chat-bubble-other-border);
+    left: -0.52rem;
+    bottom: 0.16rem;
+  }
+
+  .message-bubble--first-other::after {
+    background: var(--chat-bubble-other-bg);
+  }
+
+  .message-bubble--first-mine::before,
+  .message-bubble--first-mine::after {
+    content: '';
+    position: absolute;
+    width: 0.9rem;
+    height: 0.9rem;
+    bottom: 0.2rem;
+    right: -0.45rem;
+    border-bottom-left-radius: 1.2rem;
+    transform: rotate(-45deg);
+  }
+
+  .message-bubble--first-mine::before {
+    background: var(--chat-bubble-self-border);
+    right: -0.52rem;
+    bottom: 0.16rem;
+  }
+
+  .message-bubble--first-mine::after {
+    background: var(--chat-bubble-self-bg);
   }
 
   .chat-mention {
@@ -507,10 +702,12 @@
   }
 
   .reaction-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    min-height: 1.75rem;
+    min-height: 0;
+    padding-right: 2.25rem;
   }
 
   .reaction-list {
@@ -564,7 +761,8 @@
     pointer-events: none;
     transform: translateY(4px);
     transition: opacity 120ms ease, transform 120ms ease, border-color 120ms ease, color 120ms ease;
-    background: transparent;
+    background: rgba(5, 6, 8, 0.35);
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
   }
 
   .reaction-add.is-visible {
@@ -572,6 +770,12 @@
     visibility: visible;
     pointer-events: auto;
     transform: translateY(0);
+  }
+
+  .reaction-add-inline {
+    position: absolute;
+    right: -0.35rem;
+    top: calc(-100% - 0.35rem);
   }
 
   .reaction-add:hover {
@@ -653,7 +857,13 @@
     {#each messages as m, i (m.id)}
       {@const mine = isMine(m)}
       {@const continued = i > 0 && sameBlock(messages[i - 1], m)}
+      {@const firstInBlock = !continued}
       {@const reactions = reactionsFor(m)}
+      {@const hasReactions = reactions.length > 0}
+      {@const sameMinuteAsPrev = i > 0 && sameMinute(messages[i - 1], m)}
+      {@const sameMinuteAsNext = i < messages.length - 1 && sameMinute(m, messages[i + 1])}
+      {@const minuteKey = minuteKeyFor(m)}
+      {@const minuteHovered = minuteKey && hoveredMinuteKey === minuteKey}
       {@const showAdd = Boolean(
         currentUserId &&
         (
@@ -664,138 +874,148 @@
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
-        on:pointerenter={() => onMessagePointerEnter(m.id)}
-        on:pointerleave={() => { onMessagePointerLeave(m.id); handlePointerUp(); }}
-        on:focusin={() => onMessageFocusIn(m.id)}
-        on:focusout={(event) => onMessageFocusOut(m.id, event)}
+        on:pointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
+        on:pointerleave={() => { onMessagePointerLeave(m.id, minuteKey); handlePointerUp(); }}
+        on:focusin={() => onMessageFocusIn(m.id, minuteKey)}
+        on:focusout={(event) => onMessageFocusOut(m.id, minuteKey, event)}
         on:pointerdown={(event) => handlePointerDown(event, m.id)}
         on:pointermove={handlePointerMove}
         on:pointerup={handlePointerUp}
         on:pointercancel={handlePointerUp}
       >
         <div
-          class={`flex w-full max-w-3xl items-start ${mine ? 'flex-row-reverse text-right' : ''}`}
-          style={`padding-top: ${(continued ? 0.2 : 0.75)}rem; gap: ${(continued ? 0.35 : 0.75)}rem;`}
+          class={`message-block w-full max-w-3xl ${mine ? 'message-block--mine' : 'message-block--other'} ${minuteHovered ? 'is-minute-hovered' : ''}`}
+          style={`margin-top: ${(continued ? 0.1 : 0.6)}rem;`}
         >
-          {#if continued}
-            <div class="w-10"></div>
-          {:else}
-            <div class={`shrink-0 w-10 h-10 rounded-full border border-white/10 bg-white/10 overflow-hidden grid place-items-center ${mine ? 'ml-1' : ''}`}>
-              {#if avatarUrlFor(m)}
-                <img src={avatarUrlFor(m)} alt={nameFor(m)} class="w-full h-full object-cover" loading="lazy" />
-              {:else}
-                <span class="text-sm text-soft">{initialsFor(nameFor(m))}</span>
-              {/if}
+          {#if firstInBlock}
+            <div class={`message-heading-row ${mine ? 'message-heading-row--mine' : ''}`}>
+              <span class={`message-author ${mine ? 'message-author--mine' : ''}`}>{mine ? 'You' : nameFor(m)}</span>
             </div>
           {/if}
 
-          <div class={`min-w-0 flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
-            {#if !continued}
-              <div class={`flex flex-wrap items-baseline gap-x-2 ${mine ? 'justify-end text-right' : ''}`}>
-                <span class={`message-author ${mine ? 'message-author--mine' : ''}`}>{mine ? 'You' : nameFor(m)}</span>
-                <span class="message-timestamp">{formatTime((m as any).createdAt)}</span>
+          <div
+            class={`message-layout ${mine ? 'message-layout--mine' : ''} ${continued ? 'message-layout--continued' : ''}`}
+          >
+            {#if firstInBlock}
+              <div class="message-avatar">
+                {#if avatarUrlFor(m)}
+                  <img src={avatarUrlFor(m)} alt={nameFor(m)} loading="lazy" />
+                {:else}
+                  <span>{initialsFor(nameFor(m))}</span>
+                {/if}
               </div>
             {/if}
 
-            <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
-              {#if !m.type || m.type === 'text'}
-                <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'}`}>
-                  {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
-                    {#if segment.type === 'mention'}
-                      <span class="chat-mention">{segment.value}</span>
-                    {:else}
-                      {segment.value}
-                    {/if}
-                  {/each}
-                </div>
-              {:else if m.type === 'gif' && (m as any).url}
-                <img
-                  class={`chat-gif ${mine ? 'mine' : ''}`}
-                  src={(m as any).url}
-                  alt="GIF"
-                  loading="lazy"
-                />
-              {:else if m.type === 'file' && (m as any).file}
-                <a
-                  class={`inline-flex items-center gap-2 underline hover:no-underline text-sm ${mine ? 'justify-end ml-auto' : ''}`}
-                  href={(m as any).file.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <span>[file]</span>
-                  <span>{(m as any).file.name}</span>
-                  {#if (m as any).file.size}
-                    <span class="text-soft">({Math.round(((m as any).file.size || 0) / 1024)} KB)</span>
-                  {/if}
-                </a>
-              {:else if m.type === 'poll' && (m as any).poll}
-                {#await Promise.resolve((m as any).poll) then poll}
-                  <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
-                    <div class="font-medium mb-2">Poll: {poll.question}</div>
-                    {#each poll.options as opt, idx}
-                      <div class="rounded-lg border border-white/10 p-2 bg-white/5 mb-2">
-                        <div class="flex items-center justify-between gap-2">
-                          <div>{opt}</div>
-                          <div class="text-sm text-soft">{pct(poll.votes, idx)}%</div>
-                        </div>
-                        <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
-                        <div class="mt-2 text-right">
-                          <button class="rounded-full px-3 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
-                        </div>
-                      </div>
+            <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
+              <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
+                {#if !m.type || m.type === 'text'}
+                  <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
+                    {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
+                      {#if segment.type === 'mention'}
+                        <span class="chat-mention">{segment.value}</span>
+                      {:else}
+                        {segment.value}
+                      {/if}
                     {/each}
-                    <div class="text-xs text-soft mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
                   </div>
-                {/await}
-              {:else if m.type === 'form' && (m as any).form}
-                <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
-                  <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
-                  {#each (m as any).form.questions as q, qi}
-                    {#key `${m.id}-${qi}`}
-                      <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
-                      <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
-                    {/key}
-                  {/each}
-                  <div class="flex justify-end">
-                    <button
-                      class="rounded-full px-4 py-2 accent-button"
-                      on:click={() => submitForm(m)}
-                    >
-                      Submit
-                    </button>
+                {:else if m.type === 'gif' && (m as any).url}
+                  <img
+                    class={`chat-gif ${mine ? 'mine' : ''}`}
+                    src={(m as any).url}
+                    alt="GIF"
+                    loading="lazy"
+                  />
+                {:else if m.type === 'file' && (m as any).file}
+                  <a
+                    class={`inline-flex items-center gap-2 underline hover:no-underline text-sm ${mine ? 'justify-end ml-auto' : ''}`}
+                    href={(m as any).file.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span>[file]</span>
+                    <span>{(m as any).file.name}</span>
+                    {#if (m as any).file.size}
+                      <span class="text-soft">({Math.round(((m as any).file.size || 0) / 1024)} KB)</span>
+                    {/if}
+                  </a>
+                {:else if m.type === 'poll' && (m as any).poll}
+                  {#await Promise.resolve((m as any).poll) then poll}
+                    <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                      <div class="font-medium mb-2">Poll: {poll.question}</div>
+                      {#each poll.options as opt, idx}
+                        <div class="rounded-lg border border-white/10 p-2 bg-white/5 mb-2">
+                          <div class="flex items-center justify-between gap-2">
+                            <div>{opt}</div>
+                            <div class="text-sm text-soft">{pct(poll.votes, idx)}%</div>
+                          </div>
+                          <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
+                          <div class="mt-2 text-right">
+                            <button class="rounded-full px-3 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
+                          </div>
+                        </div>
+                      {/each}
+                      <div class="text-xs text-soft mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
+                    </div>
+                  {/await}
+                {:else if m.type === 'form' && (m as any).form}
+                  <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                    <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
+                    {#each (m as any).form.questions as q, qi}
+                      {#key `${m.id}-${qi}`}
+                        <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
+                        <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                      {/key}
+                    {/each}
+                    <div class="flex justify-end">
+                      <button
+                        class="rounded-full px-4 py-2 accent-button"
+                        on:click={() => submitForm(m)}
+                      >
+                        Submit
+                      </button>
+                    </div>
                   </div>
+                {/if}
+              </div>
+              {#if (m as any).createdAt && !sameMinuteAsNext}
+                <div class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''}`}>
+                  {formatTime((m as any).createdAt)}
+                </div>
+              {/if}
+
+              {#if reactions.length || currentUserId}
+                <div
+                  class="reaction-row"
+                  style={`margin-top: ${hasReactions ? (continued ? 0.15 : 0.4) : 0}rem;`}
+                >
+                  <div class="reaction-list">
+                    {#each reactions as reaction (reaction.key)}
+                      <button
+                        type="button"
+                        class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
+                        on:click={() => toggleReaction(m.id, reaction.emoji)}
+                        disabled={!currentUserId}
+                        title={reaction.users.join(', ')}
+                      >
+                        <span>{reaction.emoji}</span>
+                        <span class="count">{reaction.count}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <button
+                    type="button"
+                    class={`reaction-add reaction-add-inline ${showAdd ? 'is-visible' : ''}`}
+                    disabled={!showAdd}
+                    aria-hidden={!showAdd}
+                    on:click={(event) => onAddReactionClick(event, m.id)}
+                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
+                    aria-label="Add reaction"
+                  >
+                    +
+                  </button>
                 </div>
               {/if}
             </div>
-            {#if reactions.length || currentUserId}
-              <div class={`reaction-row ${continued ? 'mt-0.5' : 'mt-1'}`}>
-                <div class="reaction-list">
-                  {#each reactions as reaction (reaction.key)}
-                    <button
-                      type="button"
-                      class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
-                      on:click={() => toggleReaction(m.id, reaction.emoji)}
-                      disabled={!currentUserId}
-                      title={reaction.users.join(', ')}
-                    >
-                      <span>{reaction.emoji}</span>
-                      <span class="count">{reaction.count}</span>
-                    </button>
-                  {/each}
-                </div>
-                <button
-                  type="button"
-                  class={`reaction-add reaction-add-inline ${showAdd ? 'is-visible' : ''}`}
-                  disabled={!showAdd}
-                  aria-hidden={!showAdd}
-                  on:click={(event) => onAddReactionClick(event, m.id)}
-                  on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
-                  aria-label="Add reaction"
-                >
-                  +
-                </button>
-              </div>
-            {/if}
           </div>
         </div>
       </div>
