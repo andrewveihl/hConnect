@@ -5,8 +5,9 @@
   import { startAuthListener } from '$lib/firebase';
   import { startPresenceService } from '$lib/firebase/presence';
   import { browser } from '$app/environment';
-  import { afterNavigate } from '$app/navigation';
+  import { afterNavigate, goto } from '$app/navigation';
   import { registerFirebaseMessagingSW } from '$lib/notify/push';
+  import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import MobileDock from '$lib/components/app/MobileDock.svelte';
   import { voiceSession } from '$lib/stores/voice';
@@ -20,9 +21,67 @@
     activeVoice = value;
   });
 
-  // Re-assert after every route change (overrides page-level titles)
-  afterNavigate(() => {
+  let hasAttemptedRestore = false;
+  let pendingInitialUrl: URL | null = null;
+
+  const persistLastLocation = (url: URL | null | undefined) => {
+    if (!browser || !url) return;
+    try {
+      const payload = {
+        pathname: url.pathname,
+        search: url.search,
+        hash: url.hash ?? '',
+        timestamp: Date.now()
+      };
+      localStorage.setItem(LAST_LOCATION_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage errors (privacy / safari)
+    }
+  };
+
+  const readStoredLocation = () => {
+    if (!browser) return null;
+    try {
+      const raw = localStorage.getItem(LAST_LOCATION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return typeof parsed?.pathname === 'string' ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const fullPath = (loc: { pathname: string; search?: string; hash?: string }) =>
+    `${loc.pathname}${loc.search ?? ''}${loc.hash ?? ''}`;
+
+  async function resumeLastLocation() {
+    if (!browser) return;
+    const stored = readStoredLocation();
+    if (!stored?.pathname) return;
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const target = fullPath(stored);
+    if (window.location.pathname !== '/' || !target || target === current) {
+      sessionStorage.removeItem(RESUME_DM_SCROLL_KEY);
+      return;
+    }
+    const isDm = stored.pathname.startsWith('/dms/');
+    if (isDm) {
+      sessionStorage.setItem(RESUME_DM_SCROLL_KEY, '1');
+    } else {
+      sessionStorage.removeItem(RESUME_DM_SCROLL_KEY);
+    }
+    await goto(target, { replaceState: true, noScroll: true, keepfocus: true });
+  }
+
+  // Re-assert after every route change (overrides page-level titles) and persist location
+  afterNavigate(({ to }) => {
     if (typeof document !== 'undefined') document.title = APP_TITLE;
+    if (!browser || !to?.url) return;
+    if (!hasAttemptedRestore) {
+      pendingInitialUrl = to.url;
+      return;
+    }
+    persistLastLocation(to.url);
   });
 
   onMount(() => {
@@ -35,6 +94,17 @@
       document.title = APP_TITLE;
       // Best-effort register SW for push/notifications (no permission prompt here)
       registerFirebaseMessagingSW().catch(() => {});
+      resumeLastLocation()
+        .catch(() => {})
+        .finally(() => {
+          hasAttemptedRestore = true;
+          if (pendingInitialUrl) {
+            persistLastLocation(pendingInitialUrl);
+            pendingInitialUrl = null;
+          }
+        });
+    } else {
+      hasAttemptedRestore = true;
     }
 
     return () => {

@@ -34,9 +34,16 @@
   export let messages: ChatMessage[] = [];
   export let users: Record<string, any> = {};
   export let currentUserId: string | null = null;
+  export let scrollToBottomSignal = 0;
 
   let scroller: HTMLDivElement;
   let isRequestingMore = false;
+  let lastScrollSignal = 0;
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (!scroller) return;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+  };
 
   function formatTime(ts: any) {
     try {
@@ -240,12 +247,17 @@
   afterUpdate(() => {
     if (messages.length !== lastLen) {
       lastLen = messages.length;
-      scroller?.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+      scrollToBottom('smooth');
     }
     if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
       reactionMenuFor = null;
     }
   });
+
+  $: if (scrollToBottomSignal && scrollToBottomSignal !== lastScrollSignal) {
+    lastScrollSignal = scrollToBottomSignal;
+    tick().then(() => scrollToBottom('auto'));
+  }
 
   function totalVotes(votes?: Record<number, number>) {
     if (!votes) return 0;

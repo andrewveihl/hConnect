@@ -12,6 +12,7 @@
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
+  import VoiceLobby from '$lib/components/voice/VoiceLobby.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
 
@@ -373,6 +374,12 @@
   }
   let showCreate = false;
   let voiceState: VoiceSession | null = null;
+  let isVoiceChannelView = false;
+  let isViewingActiveVoiceChannel = false;
+  let showVoiceLobby = false;
+  let voiceInviteUrl: string | null = null;
+  let currentUserDisplayName = '';
+  let currentUserPhotoURL: string | null = null;
   const unsubscribeVoice = voiceSession.subscribe((value) => {
     voiceState = value;
   });
@@ -386,6 +393,32 @@
       }
     }
   }
+
+  $: isVoiceChannelView = activeChannel?.type === 'voice';
+  $: isViewingActiveVoiceChannel =
+    Boolean(
+      isVoiceChannelView &&
+        voiceState &&
+        serverId &&
+        voiceState.serverId === serverId &&
+        voiceState.channelId === activeChannel?.id
+    );
+  $: showVoiceLobby = Boolean(isVoiceChannelView && !isViewingActiveVoiceChannel);
+  $: voiceInviteUrl = (() => {
+    if (!serverId || !activeChannel || activeChannel.type !== 'voice') return null;
+    try {
+      const url = new URL($page.url.href);
+      url.searchParams.set('channel', activeChannel.id);
+      return url.toString();
+    } catch {
+      return `${$page.url.pathname}?channel=${encodeURIComponent(activeChannel.id)}`;
+    }
+  })();
+  $: if (isViewingActiveVoiceChannel && voiceState && !voiceState.visible) {
+    voiceSession.setVisible(true);
+  }
+  $: currentUserDisplayName = deriveCurrentDisplayName();
+  $: currentUserPhotoURL = deriveCurrentPhotoURL();
 
   $: if (isMobile !== lastIsMobile) {
     lastIsMobile = isMobile;
@@ -507,8 +540,11 @@
       clearMessagesUnsub();
       cleanupProfileSubscriptions();
       profiles = {};
-      voiceSession.join(serverId, id, next.name ?? 'Voice channel', serverDisplayName);
-      voiceSession.setVisible(true);
+      if (voiceState && voiceState.serverId === serverId && voiceState.channelId === next.id) {
+        voiceSession.setVisible(true);
+      } else if (voiceState) {
+        voiceSession.setVisible(false);
+      }
     } else {
       subscribeMessages(serverId, id);
       voiceSession.setVisible(false);
@@ -538,6 +574,20 @@
         }
       } catch {}
     }
+  }
+
+  function joinSelectedVoiceChannel() {
+    if (!serverId || !activeChannel || activeChannel.type !== 'voice') return;
+    if (
+      voiceState &&
+      voiceState.serverId === serverId &&
+      voiceState.channelId === activeChannel.id
+    ) {
+      voiceSession.setVisible(true);
+      return;
+    }
+    voiceSession.join(serverId, activeChannel.id, activeChannel.name ?? 'Voice channel', serverDisplayName);
+    voiceSession.setVisible(true);
   }
 
   /* ===========================
@@ -1093,6 +1143,27 @@
             {/if}
           </div>
         {:else}
+          {#if showVoiceLobby}
+            <div class="voice-lobby-container">
+              <VoiceLobby
+                serverId={serverId}
+                channelId={activeChannel?.id ?? null}
+                channelName={activeChannel?.name ?? 'Voice channel'}
+                serverName={serverDisplayName}
+                inviteUrl={voiceInviteUrl}
+                currentUserAvatar={currentUserPhotoURL}
+                currentUserName={currentUserDisplayName}
+                connectedChannelId={voiceState?.channelId ?? null}
+                connectedChannelName={voiceState?.channelName ?? null}
+                connectedServerId={voiceState?.serverId ?? null}
+                connectedServerName={voiceState?.serverName ?? voiceState?.serverId ?? null}
+                on:joinVoice={() => joinSelectedVoiceChannel()}
+                on:startStreaming={() => joinSelectedVoiceChannel()}
+                on:returnToSession={() => voiceSession.setVisible(true)}
+              />
+            </div>
+          {/if}
+
           {#if voiceState && voiceState.visible}
             <div class="flex-none mb-4 md:mb-5">
               <VideoChat layout="embedded" on:openMobileChat={() => setMobileVoicePane('chat')} />
@@ -1290,6 +1361,11 @@
     border: none !important;
   }
 
+  .voice-lobby-container {
+    padding: 1.25rem 1.5rem 0;
+  }
+
+
   .mobile-call-wrapper {
     display: flex;
     flex-direction: column;
@@ -1387,6 +1463,17 @@
   @media (min-width: 768px) {
     .mobile-call-wrapper {
       display: none;
+    }
+    .voice-lobby-container {
+      padding: 0 1.5rem 0;
+      margin-bottom: 1.5rem;
+    }
+
+  }
+
+  @media (max-width: 767px) {
+    .voice-lobby-container {
+      padding: 0.75rem 0.9rem 0;
     }
   }
 </style>

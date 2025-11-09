@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
@@ -12,6 +13,7 @@
   import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
 
   export let data: { threadID: string };
   $: threadID = data.threadID;
@@ -25,6 +27,19 @@ const profileUnsubs: Record<string, Unsubscribe> = {};
 let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
 let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
 type MentionSendRecord = { uid: string; handle: string | null; label: string | null };
+let resumeDmScroll = false;
+let scrollResumeSignal = 0;
+
+if (browser) {
+  try {
+    resumeDmScroll = sessionStorage.getItem(RESUME_DM_SCROLL_KEY) === '1';
+    if (resumeDmScroll) {
+      sessionStorage.removeItem(RESUME_DM_SCROLL_KEY);
+    }
+  } catch {
+    resumeDmScroll = false;
+  }
+}
 
   function updateMessageUserCache(uid: string, patch: any) {
     if (!uid) return;
@@ -371,6 +386,11 @@ $: {
     lastThreadID = threadID;
     showInfo = false;
     pendingReply = null;
+  }
+
+  $: if (resumeDmScroll && messages.length > 0) {
+    scrollResumeSignal = Date.now();
+    resumeDmScroll = false;
   }
 
   $: {
@@ -735,6 +755,7 @@ $: {
             {messages}
             users={messageUsers}
             currentUserId={me?.uid ?? null}
+            scrollToBottomSignal={scrollResumeSignal}
             on:vote={handleVote}
             on:submitForm={handleFormSubmit}
             on:react={handleReaction}

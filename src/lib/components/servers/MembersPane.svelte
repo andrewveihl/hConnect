@@ -279,7 +279,7 @@
       case 'online':
         return 'presence-dot--online';
       case 'idle':
-        return 'presence-dot--away';
+        return 'presence-dot--idle';
       default:
         return 'presence-dot--offline';
     }
