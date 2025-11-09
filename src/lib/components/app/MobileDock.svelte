@@ -126,7 +126,7 @@
   }
 
   .mobile-dock__icon {
-    font-size: 1.375rem;
+    font-size: 1.55rem;
     line-height: 1;
   }
 
@@ -164,8 +164,8 @@
   }
 
   .mobile-dock__avatar {
-    width: 1.75rem;
-    height: 1.75rem;
+    width: 2rem;
+    height: 2rem;
     border-radius: 999px;
     object-fit: cover;
     box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);

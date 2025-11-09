@@ -4,7 +4,13 @@
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
-  import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
+  import {
+    appendVoiceDebugEvent,
+    removeVoiceDebugSection,
+    setVoiceDebugSection,
+    formatVoiceDebugContext
+  } from '$lib/utils/voiceDebugContext';
+  import { copyTextToClipboard } from '$lib/utils/clipboard';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
@@ -289,6 +295,7 @@
   let usingFallbackTurnServers = false;
   let forceRelayIceTransport = false;
   let consecutiveIceErrors = 0;
+  let connectionFailureCount = 0;
   let lastIceErrorTimestamp = 0;
   let lastTurnConfigSignature: string | null = null;
   let debugLoggingEnabled = true;
@@ -1049,17 +1056,19 @@
     const logCountCaptured = Math.min(voiceLogs.length, includeLogs);
 
     try {
-      if (navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(bundle);
+      const copyResult = await copyTextToClipboard(bundle);
+      const durationMs = Math.round(now() - startedAt);
+
+      if (copyResult.success) {
         statusMessage = 'Debug info copied to clipboard.';
-        const durationMs = Math.round(now() - startedAt);
         appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle success', {
           includeLogs,
           includeEvents,
           bundleLength: bundle.length,
           lineCount,
           logCountCaptured,
-          durationMs
+          durationMs,
+          method: copyResult.method
         });
         return {
           status: 'copied',
@@ -1070,10 +1079,11 @@
           logCountCaptured,
           durationMs
         };
-      } else {
+      }
+
+      if (copyResult.reason === 'unsupported') {
         console.info('[voice] debug bundle\n', bundle);
         statusMessage = 'Clipboard unavailable; bundle logged to console.';
-        const durationMs = Math.round(now() - startedAt);
         appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle fallback', {
           reason: 'clipboard-unavailable',
           includeLogs,
@@ -1081,7 +1091,8 @@
           bundleLength: bundle.length,
           lineCount,
           logCountCaptured,
-          durationMs
+          durationMs,
+          error: copyResult.error ?? null
         });
         return {
           status: 'logged',
@@ -1093,6 +1104,28 @@
           durationMs
         };
       }
+
+      console.warn('Failed to copy debug bundle', copyResult.error);
+      statusMessage = 'Unable to copy debug info; check console output.';
+      console.info('[voice] debug bundle\n', bundle);
+      appendVoiceDebugEvent('video-call', 'copyVoiceDebugBundle failure', {
+        includeLogs,
+        includeEvents,
+        bundleLength: bundle.length,
+        lineCount,
+        logCountCaptured,
+        durationMs,
+        error: copyResult.error ?? 'unknown-error'
+      });
+      return {
+        status: 'failed',
+        length: bundle.length,
+        includeLogs,
+        includeEvents,
+        lineCount,
+        logCountCaptured,
+        durationMs
+      };
     } catch (err) {
       console.warn('Failed to copy debug bundle', err);
       statusMessage = 'Unable to copy debug info; check console output.';
@@ -1777,6 +1810,8 @@
 
     return tiles;
   })();
+  $: selfIdentity = computeSelfIdentity();
+
   $: participantTiles = participantMedia.map((media) => {
     const base = participants.find((p) => p.uid === media.uid);
     const controls = media.isSelf
@@ -1790,12 +1825,14 @@
       ? localHasAudio || streamAudioActive
       : media.hasAudio || streamAudioActive;
     const resolvedHasVideo = media.isSelf ? localHasVideo || streamVideoActive : media.hasVideo || streamVideoActive;
+    const basePhotoURL = base?.photoURL ?? null;
+    const selfPhotoURL = selfIdentity?.photoURL ?? selfIdentity?.authPhotoURL ?? null;
     return {
       ...media,
       hasAudio: resolvedHasAudio,
       hasVideo: resolvedHasVideo,
       displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
-      photoURL: base?.photoURL ?? null,
+      photoURL: media.isSelf ? selfPhotoURL ?? basePhotoURL : basePhotoURL,
       controls,
       screenSharing: base?.screenSharing ?? false,
       isSpeaking: speakingParticipants.has(media.uid)
@@ -3288,6 +3325,7 @@
           clearReconnectTimer();
           consecutiveIceErrors = 0;
           lastIceErrorTimestamp = 0;
+          connectionFailureCount = 0;
           break;
         case 'disconnected':
           statusMessage = 'Connection interrupted. Reconnecting...';
@@ -3297,10 +3335,16 @@
           } catch (err) {
             console.warn('ICE restart failed', err);
           }
+          if (maybeActivateFallbackTurnFromConnection('connection-disconnected')) {
+            break;
+          }
           scheduleReconnect('Rejoining call...', false);
           break;
         case 'failed':
           statusMessage = 'Connection failed. Rejoining...';
+          if (maybeActivateFallbackTurnFromConnection('connection-failed')) {
+            break;
+          }
           scheduleReconnect('Rejoining call...', true);
           break;
         case 'closed':
@@ -3371,15 +3415,7 @@
       };
 
       if (event.errorCode === 701) {
-        if (!hasTurnServers && allowTurnFallback && !fallbackTurnActivated && consecutiveIceErrors >= 2) {
-          fallbackTurnActivated = true;
-          fallbackTurnActivationReason = 'stun-host-error';
-          lastTurnConfigSignature = null;
-          voiceDebug('Activating fallback TURN relay', {
-            provider: 'openrelay.metered.ca',
-            consecutiveIceErrors,
-            allowTurnFallback
-          });
+        if (consecutiveIceErrors >= 2 && tryActivateFallbackTurn('stun-host-error', { consecutiveIceErrors })) {
           reconnectWithMessage('Reconnecting with fallback relay...');
           return;
         }
@@ -3399,6 +3435,41 @@
     connection.addEventListener('icecandidateerror', handleIceCandidateError);
 
     return connection;
+  }
+
+  function canUseFallbackTurn(): boolean {
+    return allowTurnFallback && !hasTurnServers && !fallbackTurnActivated;
+  }
+
+  function activateFallbackTurn(reason: string, context: Record<string, unknown> = {}): void {
+    fallbackTurnActivated = true;
+    fallbackTurnActivationReason = reason;
+    connectionFailureCount = 0;
+    lastTurnConfigSignature = null;
+    voiceDebug('Activating fallback TURN relay', {
+      provider: 'openrelay.metered.ca',
+      reason,
+      allowTurnFallback,
+      ...context
+    });
+  }
+
+  function tryActivateFallbackTurn(reason: string, context: Record<string, unknown> = {}): boolean {
+    if (!canUseFallbackTurn()) return false;
+    activateFallbackTurn(reason, context);
+    return true;
+  }
+
+  function maybeActivateFallbackTurnFromConnection(reason: string): boolean {
+    if (!canUseFallbackTurn()) return false;
+    connectionFailureCount += 1;
+    voiceDebug('Connection failure recorded', { reason, connectionFailureCount });
+    if (connectionFailureCount < 2) {
+      return false;
+    }
+    activateFallbackTurn(reason, { connectionFailureCount });
+    scheduleReconnect('Rejoining with fallback relay...', true);
+    return true;
   }
 
   async function renegotiateOffer() {
@@ -4251,6 +4322,7 @@
   async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean } = {}) {
     voiceDebug('hangUp start', options);
     reconnectAttemptCount = 0;
+    connectionFailureCount = 0;
     const { cleanupDoc = true, resetError = true } = options;
 
     clearReconnectTimer();
@@ -4863,6 +4935,7 @@
     fallbackTurnActivationReason = null;
     consecutiveIceErrors = 0;
     lastIceErrorTimestamp = 0;
+    connectionFailureCount = 0;
     lastTurnConfigSignature = null;
     voiceDebug('ICE strategy manually reset', { wasForced, allowTurnFallback });
     if (isJoined) {
@@ -5143,16 +5216,6 @@
             </article>
           {/each}
         </div>
-      {:else if isJoined}
-        <div class="call-empty">
-          <div class="call-empty__card">
-            <div class="call-empty__icon">
-              <i class="bx bx-group"></i>
-            </div>
-            <h3>Waiting for others</h3>
-            <p>Share this channel so teammates can hop in.</p>
-          </div>
-        </div>
       {:else}
         <div class="call-empty">
           <div class="call-empty__card">
@@ -5169,7 +5232,7 @@
     <footer
       class="call-controls"
       class:call-controls--embedded={isEmbedded}
-      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 1rem)"
+      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 1rem)"
     >
       {#if !isJoined}
         <div class="call-controls__row call-controls__row--join">
@@ -5219,17 +5282,19 @@
               </button>
               <span>{isCameraOff || isScreenSharing ? 'Camera off' : 'Camera'}</span>
             </div>
-            <div class="call-controls__item">
-              <button
-                class={controlClasses({ active: isScreenSharing, disabled: isScreenSharePending })}
-                on:click={toggleScreenShare}
-                aria-label={screenShareButtonLabel}
-                disabled={isScreenSharePending}
-              >
-                <i class="bx bx-desktop"></i>
-              </button>
-              <span>{isScreenSharing ? 'Stop share' : 'Share'}</span>
-            </div>
+            {#if !compactMatch}
+              <div class="call-controls__item">
+                <button
+                  class={controlClasses({ active: isScreenSharing, disabled: isScreenSharePending })}
+                  on:click={toggleScreenShare}
+                  aria-label={screenShareButtonLabel}
+                  disabled={isScreenSharePending}
+                >
+                  <i class="bx bx-desktop"></i>
+                </button>
+                <span>{isScreenSharing ? 'Stop share' : 'Share'}</span>
+              </div>
+            {/if}
             <div class="call-controls__item">
               <button
                 class={controlClasses({ active: !isPlaybackMuted })}
@@ -5240,30 +5305,46 @@
               </button>
               <span>{playbackButtonText}</span>
             </div>
-            <div class="call-controls__item call-controls__item--mobile-chat">
-              <button
-                type="button"
-                class={controlClasses()}
-                on:click={openMobileChatPanel}
-                aria-label="Open message thread"
-              >
-                <i class="bx bx-message-dots"></i>
-              </button>
-              <span>Messages</span>
-            </div>
+            {#if compactMatch}
+              <div class="call-controls__item call-controls__item--leave call-controls__item--leave-inline">
+                <button class={controlClasses({ danger: true })} on:click={handleLeave} aria-label="Leave call">
+                  <i class="bx bx-phone-off"></i>
+                </button>
+                <span>Leave</span>
+              </div>
+            {/if}
+            {#if !compactMatch}
+              <div class="call-controls__item call-controls__item--collapse">
+                <button class={controlClasses()} type="button" on:click={handleMinimize} aria-label="Minimize call">
+                  <i class="bx bx-window-alt"></i>
+                </button>
+                <span>Collapse</span>
+              </div>
+            {/if}
+            {#if !compactMatch}
+              <div class="call-controls__item call-controls__item--messages">
+                <button
+                  type="button"
+                  class={controlClasses()}
+                  on:click={openMobileChatPanel}
+                  aria-label="Open message thread"
+                >
+                  <i class="bx bx-message-dots"></i>
+                </button>
+                <span>Messages</span>
+              </div>
+            {/if}
           </div>
-          <div class="call-controls__group call-controls__group--exit">
-            <button class="call-button" type="button" on:click={handleMinimize} aria-label="Minimize call">
-              <i class="bx bx-window-alt"></i>
-              <span>Collapse</span>
-            </button>
-            <div class="call-controls__item call-controls__item--leave">
-              <button class={controlClasses({ danger: true })} on:click={handleLeave} aria-label="Leave call">
-                <i class="bx bx-phone-off"></i>
-              </button>
-              <span>Leave</span>
+          {#if !compactMatch}
+            <div class="call-controls__group call-controls__group--exit">
+              <div class="call-controls__item call-controls__item--leave">
+                <button class={controlClasses({ danger: true })} on:click={handleLeave} aria-label="Leave call">
+                  <i class="bx bx-phone-off"></i>
+                </button>
+                <span>Leave</span>
+              </div>
             </div>
-          </div>
+          {/if}
         </div>
       {/if}
     </footer>
@@ -5564,12 +5645,17 @@
 
 <style>
 .voice-root {
+    --voice-root-padding: clamp(0.75rem, 2vw, 1.5rem);
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     min-height: 100%;
-    padding: clamp(0.75rem, 2vw, 1.5rem);
+    padding: var(--voice-root-padding);
     color: var(--text-100);
+}
+
+.voice-root--compact {
+  padding-bottom: calc(var(--voice-root-padding) + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
 }
 
   .voice-root--compact .call-shell {
@@ -5582,8 +5668,10 @@
   padding: 0.3rem;
   border: none;
   background: transparent;
-  height: clamp(140px, 40vh, 260px);
-  overflow-y: auto;
+  height: clamp(200px, 55vh, 360px);
+  overflow: hidden;
+  justify-content: center;
+  align-items: center;
 }
 
 .voice-root--compact .call-stage--embedded {
@@ -5598,10 +5686,14 @@
 .voice-root--compact .call-grid {
   grid-template-columns: 1fr;
   gap: 0.3rem;
+  justify-items: center;
+  width: 100%;
+  max-width: min(480px, 100%);
 }
 
 .voice-root--compact .call-tile {
-  min-height: 125px;
+  min-height: clamp(200px, 55vh, 360px);
+  width: min(420px, 100%);
 }
 
   .voice-root--compact .call-controls {
@@ -6860,9 +6952,9 @@
   }
 
   .call-avatar__image {
-    width: 4.5rem;
-    height: 4.5rem;
-    border-radius: 0.75rem;
+    width: clamp(4.5rem, 24vw, 6.5rem);
+    height: clamp(4.5rem, 24vw, 6.5rem);
+    border-radius: 999px;
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.12);
     display: grid;
@@ -7206,10 +7298,6 @@
     color: var(--text-55);
   }
 
-  .call-controls__item--mobile-chat {
-    display: none;
-  }
-
   .call-controls__item span {
     max-width: 6rem;
     text-align: center;
@@ -7217,6 +7305,10 @@
 
   .call-controls__item--leave span {
     color: color-mix(in srgb, var(--color-danger) 85%, white);
+  }
+
+  .voice-root--compact .call-controls__item--leave-inline {
+    flex: 0 0 auto;
   }
 
   .call-control-button {
@@ -7270,6 +7362,34 @@
     font-size: 0.9rem;
   }
 
+  .voice-root--compact .call-controls__group--main,
+  .voice-root--compact .call-controls__group--exit {
+    width: 100%;
+    justify-content: space-between;
+    gap: 0.65rem;
+    flex-wrap: nowrap;
+  }
+
+  .voice-root--compact .call-controls__group--main .call-controls__item,
+  .voice-root--compact .call-controls__group--exit .call-controls__item {
+    flex: 1 1 auto;
+  }
+
+  .voice-root--compact .call-control-button {
+    width: clamp(3.2rem, 18vw, 4rem);
+    height: clamp(3.2rem, 18vw, 4rem);
+  }
+
+  .call-controls__item--messages {
+    display: flex;
+  }
+
+  @media (max-width: 768px) {
+    .call-controls__item--messages {
+      display: none;
+    }
+  }
+
   @media (max-width: 768px) {
     .voice-root {
       padding: 0.75rem;
@@ -7283,32 +7403,26 @@
       padding: 0.75rem;
     }
 
-    .call-controls__group--main {
-      justify-content: center;
-      gap: 0.9rem;
-    }
-
     .call-controls__row--connected {
       flex-direction: column;
-      align-items: stretch;
+      gap: 0.75rem;
     }
 
-    .call-controls__group--main {
+    .call-controls__group--main,
+    .call-controls__group--exit {
       order: 2;
+      justify-content: space-between;
+      gap: 0.6rem;
+    }
+
+    .call-controls__group--main .call-controls__item,
+    .call-controls__group--exit .call-controls__item {
+      flex: 1 1 auto;
     }
 
     .call-controls__status {
       order: 1;
       text-align: center;
-    }
-
-    .call-controls__group--exit {
-      order: 3;
-      justify-content: center;
-    }
-
-    .call-controls__item--mobile-chat {
-      display: flex;
     }
   }
 
@@ -7330,9 +7444,6 @@
       letter-spacing: 0.04em;
     }
 
-    .call-controls__item--mobile-chat span {
-      font-size: 0.58rem;
-    }
   }
 </style>
 

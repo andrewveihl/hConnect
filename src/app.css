@@ -834,7 +834,11 @@ body {
   background-color: #22c55e;
 }
 
-.presence-dot--away,
+.presence-dot--idle,
+.presence-dot--away {
+  background-color: #facc15;
+}
+
 .presence-dot--offline {
   background-color: #6b7280;
 }

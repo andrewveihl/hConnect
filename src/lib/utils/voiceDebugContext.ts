@@ -1,3 +1,5 @@
+import { copyTextToClipboard } from './clipboard';
+
 type VoiceDebugSeverity = 'info' | 'warn' | 'error';
 
 export type VoiceDebugEvent = {
@@ -214,21 +216,31 @@ export async function copyVoiceDebugAggregate(options: {
   includeEvents?: number;
 } = {}): Promise<boolean> {
   const aggregate = await buildVoiceDebugAggregate(options);
-  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
-  if (clipboard?.writeText) {
-    try {
-      await clipboard.writeText(aggregate);
-      appendVoiceDebugEvent('debug', 'copyVoiceDebugAggregate success', {
-        includeLogs: options.includeLogs ?? null,
-        includeEvents: options.includeEvents ?? null
-      });
-      return true;
-    } catch (err) {
-      appendVoiceDebugEvent('debug', 'copyVoiceDebugAggregate clipboard failure', {
-        error: err instanceof Error ? err.message : String(err)
-      });
-    }
+  const copyResult = await copyTextToClipboard(aggregate);
+
+  if (copyResult.success) {
+    appendVoiceDebugEvent('debug', 'copyVoiceDebugAggregate success', {
+      includeLogs: options.includeLogs ?? null,
+      includeEvents: options.includeEvents ?? null,
+      method: copyResult.method
+    });
+    return true;
   }
+
+  if (copyResult.reason === 'unsupported') {
+    appendVoiceDebugEvent('debug', 'copyVoiceDebugAggregate fallback', {
+      includeLogs: options.includeLogs ?? null,
+      includeEvents: options.includeEvents ?? null,
+      reason: 'clipboard-unavailable',
+      error: copyResult.error ?? null
+    });
+  } else {
+    console.warn('[voice] Failed to copy debug aggregate', copyResult.error);
+    appendVoiceDebugEvent('debug', 'copyVoiceDebugAggregate clipboard failure', {
+      error: copyResult.error ?? 'unknown-error'
+    });
+  }
+
   console.info('[voice] debug aggregate\n', aggregate);
   return false;
 }
