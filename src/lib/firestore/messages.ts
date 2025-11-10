@@ -57,6 +57,8 @@ export type MentionInput = {
   uid: string;
   handle?: Nullable<string>;
   label?: Nullable<string>;
+  color?: Nullable<string>;
+  kind?: 'member' | 'role';
 };
 
 function trimString(value: Nullable<string>): string | undefined {
@@ -108,15 +110,22 @@ function normalizeMentionList(mentions: MentionInput[] | undefined): Array<{
   uid: string;
   handle: string | null;
   label: string | null;
+  color: string | null;
+  kind?: 'member' | 'role';
 }> {
   if (!Array.isArray(mentions)) return [];
-  const map = new Map<string, { uid: string; handle: string | null; label: string | null }>();
+  const map = new Map<
+    string,
+    { uid: string; handle: string | null; label: string | null; color: string | null; kind?: 'member' | 'role' }
+  >();
   for (const entry of mentions) {
     const uid = trimString(entry?.uid);
     if (!uid) continue;
     const handle = trimString(entry?.handle) ?? null;
     const label = trimString(entry?.label) ?? null;
-    map.set(uid, { uid, handle, label });
+    const color = trimString(entry?.color) ?? null;
+    const kind = entry?.kind === 'role' ? 'role' : entry?.kind === 'member' ? 'member' : undefined;
+    map.set(uid, { uid, handle, label, color, kind });
   }
   return Array.from(map.values());
 }
@@ -218,11 +227,15 @@ export function buildMessageDocument(payload: MessageInput) {
     extras = {
       ...extras,
       mentions,
-      mentionsMap: mentions.reduce<Record<string, { handle: string | null; label: string | null }>>(
+      mentionsMap: mentions.reduce<
+        Record<string, { handle: string | null; label: string | null; color?: string | null; kind?: 'member' | 'role' }>
+      >(
         (acc, entry) => {
           acc[entry.uid] = {
             handle: entry.handle ?? null,
-            label: entry.label ?? null
+            label: entry.label ?? null,
+            color: entry.color ?? null,
+            kind: entry.kind
           };
           return acc;
         },

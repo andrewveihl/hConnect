@@ -13,12 +13,16 @@
     avatar: string | null;
     search: string;
     aliases: string[];
+    kind?: 'member' | 'role';
+    color?: string | null;
   };
 
   type MentionRecord = {
     uid: string;
     handle: string;
     label: string;
+    color?: string | null;
+    kind?: 'member' | 'role';
   };
 
   type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
@@ -39,6 +43,24 @@
     if (!words.length) return '?';
     return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
   };
+
+  function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
+    if (!rawQuery) return 0;
+    const lower = rawQuery.toLowerCase();
+    let score = 0;
+    const handle = option.handle.toLowerCase();
+    if (handle.startsWith(lower)) score += 5;
+    else if (handle.includes(lower)) score += 2;
+    const label = option.label.toLowerCase();
+    if (label.startsWith(lower)) score += 4;
+    else if (label.includes(lower)) score += 1;
+    if (canonicalQuery) {
+      const aliasHit = option.aliases.some((alias) => alias.startsWith(canonicalQuery));
+      if (aliasHit) score += 3;
+    }
+    if (option.kind === 'member') score += 0.1;
+    return score;
+  }
 
   export let placeholder: string = 'Message #channel';
   export let disabled = false;
@@ -213,7 +235,9 @@
         const record: MentionRecord = {
           uid: candidate.uid,
           handle: `@${candidate.handle}`,
-          label: candidate.label
+          label: candidate.label,
+          color: candidate.color ?? null,
+          kind: candidate.kind
         };
         collected.set(candidate.uid, record);
       }
@@ -262,17 +286,31 @@
     mentionQuery = fragment.toLowerCase();
     const canonicalQuery = canonical(fragment);
 
-    const filtered = mentionOptions.filter((option) => {
-      if (!mentionQuery) return true;
-      const handleMatch = option.handle.toLowerCase().startsWith(mentionQuery);
-      const labelMatch = option.label.toLowerCase().includes(mentionQuery);
-      const aliasMatch = canonicalQuery
-        ? option.aliases.some((alias) => alias.startsWith(canonicalQuery))
-        : false;
-      return handleMatch || labelMatch || aliasMatch;
-    });
+    let filtered: MentionCandidate[] = [];
+    if (!mentionOptions.length) {
+      filtered = [];
+    } else if (!mentionQuery) {
+      filtered = mentionOptions
+        .slice()
+        .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+        .slice(0, 3);
+    } else {
+      filtered = mentionOptions
+        .map((option) => ({
+          option,
+          score: mentionScore(option, mentionQuery, canonicalQuery)
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) =>
+          b.score !== a.score
+            ? b.score - a.score
+            : a.option.label.localeCompare(b.option.label, undefined, { sensitivity: 'base' })
+        )
+        .slice(0, 3)
+        .map((entry) => entry.option);
+    }
 
-    mentionFiltered = filtered.slice(0, 8);
+    mentionFiltered = filtered;
     if (!mentionFiltered.length) {
       closeMentionMenu();
       return;
@@ -289,7 +327,13 @@
     const after = text.slice(caret);
     const handleText = `@${option.handle}`;
     text = `${before}${handleText} `;
-    mentionDraft.set(option.uid, { uid: option.uid, handle: handleText, label: option.label });
+    mentionDraft.set(option.uid, {
+      uid: option.uid,
+      handle: handleText,
+      label: option.label,
+      color: option.color ?? null,
+      kind: option.kind
+    });
     await tick();
     const nextCaret = before.length + handleText.length + 1;
     inputEl?.setSelectionRange(nextCaret, nextCaret);
@@ -510,27 +554,41 @@
 
       {#if mentionActive}
         <div class="mention-menu" role="listbox">
-          <div class="mention-menu__header">Tag someone</div>
+          <div class="mention-menu__header">Tag someone or a role</div>
           <div class="mention-menu__list">
             {#each mentionFiltered as option, idx}
               <button
                 type="button"
-                class={`mention-menu__item ${idx === mentionIndex ? 'is-active' : ''}`}
+                class={`mention-menu__item ${option.kind === 'role' ? 'mention-menu__item--role' : ''} ${idx === mentionIndex ? 'is-active' : ''}`}
                 role="option"
                 aria-selected={idx === mentionIndex}
                 on:mousedown|preventDefault={() => insertMention(option)}
                 on:mouseenter={() => (mentionIndex = idx)}
               >
-                <span class="mention-menu__avatar">
-                  {#if option.avatar}
+                <span class={`mention-menu__avatar ${option.kind === 'role' ? 'mention-menu__avatar--role' : ''}`}>
+                  {#if option.kind === 'role'}
+                    <span
+                      class="mention-menu__role-swatch"
+                      style={`background:${option.color ?? 'var(--color-accent)'}`}
+                    ></span>
+                  {:else if option.avatar}
                     <img src={option.avatar} alt={option.label} loading="lazy" />
                   {:else}
                     <span>{initialsFor(option.label)}</span>
                   {/if}
                 </span>
                 <span class="mention-menu__meta">
-                  <span class="mention-menu__label">{option.label}</span>
-                  <span class="mention-menu__handle">@{option.handle}</span>
+                  <span class="mention-menu__label">
+                    {option.label}
+                    {#if option.kind === 'role'}
+                      <span
+                        class="mention-menu__pill"
+                        style={`color:${option.color ?? 'var(--color-accent)'}`}
+                      >
+                        Role
+                      </span>
+                    {/if}
+                  </span>
                 </span>
               </button>
             {/each}
@@ -762,7 +820,9 @@
     position: absolute;
     z-index: 70;
     left: 0;
-    top: calc(100% + 0.5rem);
+    right: auto;
+    top: auto;
+    bottom: calc(100% + 0.6rem);
     width: min(22rem, 100%);
     border-radius: var(--radius-lg);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
@@ -825,6 +885,17 @@
     object-fit: cover;
   }
 
+  .mention-menu__avatar--role {
+    padding: 0.2rem;
+  }
+
+  .mention-menu__role-swatch {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+  }
+
   .mention-menu__meta {
     display: flex;
     flex-direction: column;
@@ -840,9 +911,11 @@
     text-overflow: ellipsis;
   }
 
-  .mention-menu__handle {
-    font-size: 0.7rem;
-    color: var(--text-60);
+  .mention-menu__pill {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-left: 0.35rem;
   }
 
   .chat-input__actions {
