@@ -47,11 +47,23 @@ export type FormMessageInput = BaseMessageInput & {
   };
 };
 
+export type FileMessageInput = BaseMessageInput & {
+  type: 'file';
+  file: {
+    name: string;
+    url: string;
+    size?: number;
+    contentType?: string | null;
+    storagePath?: string | null;
+  };
+};
+
 export type MessageInput =
   | TextMessageInput
   | GifMessageInput
   | PollMessageInput
-  | FormMessageInput;
+  | FormMessageInput
+  | FileMessageInput;
 
 export type MentionInput = {
   uid: string;
@@ -177,6 +189,29 @@ export function buildMessageDocument(payload: MessageInput) {
       extras = {
         type: 'gif',
         url
+      };
+      break;
+    }
+    case 'file': {
+      const filePayload = (payload as FileMessageInput).file;
+      const url = trimString(filePayload?.url);
+      if (!url) throw new Error('File message requires a download URL.');
+      const name = trimString(filePayload?.name) ?? 'File';
+      const size =
+        typeof filePayload?.size === 'number' && Number.isFinite(filePayload.size)
+          ? Math.max(0, filePayload.size)
+          : undefined;
+      const contentType = trimString(filePayload?.contentType) ?? null;
+      const storagePath = trimString(filePayload?.storagePath) ?? null;
+      extras = {
+        type: 'file',
+        file: compactRecord({
+          name,
+          url,
+          size,
+          contentType,
+          storagePath
+        })
       };
       break;
     }

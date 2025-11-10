@@ -26,6 +26,7 @@
   };
 
   type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
+  type UploadRequest = { files: File[]; replyTo?: ReplyReferenceInput | null };
 
   const canonical = (value: string) =>
     (value ?? '')
@@ -68,7 +69,7 @@
   export let replyTarget: ReplyReferenceInput | null = null;
 
   export let onSend: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void = () => {};
-  export let onUpload: (files: File[]) => void = () => {};
+  export let onUpload: (payload: UploadRequest) => void = () => {};
   export let onSendGif: (payload: ReplyablePayload<{ url: string }>) => void = () => {};
   export let onCreatePoll: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void = () => {};
   export let onCreateForm: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void = () => {};
@@ -200,16 +201,17 @@
   }
 
   function pickFiles() {
-    fileEl?.click();
     popOpen = false;
+    fileEl?.click();
   }
 
   function onFilesChange(e: Event) {
     const input = e.target as HTMLInputElement;
     const files = Array.from(input.files ?? []);
     if (!files.length) return;
-    onUpload(files);
-    dispatch('upload', files);
+    const payload: UploadRequest = { files, replyTo: replyTarget ?? null };
+    onUpload(payload);
+    dispatch('upload', payload);
     input.value = '';
   }
 

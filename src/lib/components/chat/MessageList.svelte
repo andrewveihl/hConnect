@@ -1,5 +1,7 @@
-﻿<script lang="ts">
+<script lang="ts">
   import { afterUpdate, createEventDispatcher, onMount, tick } from 'svelte';
+  import type { PendingUploadPreview } from './types';
+  import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
 
   const dispatch = createEventDispatcher();
 
@@ -41,6 +43,7 @@
   export let users: Record<string, any> = {};
   export let currentUserId: string | null = null;
   export let scrollToBottomSignal = 0;
+  export let pendingUploads: PendingUploadPreview[] = [];
 
   let scroller: HTMLDivElement;
   let isRequestingMore = false;
@@ -166,7 +169,7 @@
 
   function clipPreview(value: string | null | undefined, limit = PREVIEW_LIMIT) {
     if (!value) return '';
-    return value.length > limit ? `${value.slice(0, limit - 1)}â€¦` : value;
+    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
   }
 
   function flattenReplyChain(reply: ReplyPreview | null | undefined) {
@@ -971,6 +974,169 @@
     border-color: var(--chat-bubble-self-border);
   }
 
+  .chat-file {
+    max-width: min(520px, 100%);
+  }
+
+  .chat-file__card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--chat-bubble-other-border) 70%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 85%, transparent);
+    padding: 0.95rem;
+    text-decoration: none;
+    color: inherit;
+    transition: transform 120ms ease, border 140ms ease, background 140ms ease;
+  }
+
+  .chat-file__card:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--chat-bubble-other-border) 35%, transparent);
+  }
+
+  .chat-file__card--image {
+    padding: 0.5rem;
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 65%, transparent);
+  }
+
+  .chat-file__card--generic {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.85rem;
+  }
+
+  .chat-file__preview {
+    position: relative;
+    border-radius: 0.9rem;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--chat-bubble-other-border) 70%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 60%, transparent);
+  }
+
+  .chat-file__preview img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+
+  .chat-file__preview-overlay {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, #000 35%, transparent);
+    display: grid;
+    place-items: center;
+    gap: 0.35rem;
+    color: #fff;
+    font-weight: 600;
+    text-shadow: 0 2px 6px #0009;
+  }
+
+  .chat-file__icon {
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.85rem;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    color: var(--color-accent);
+    font-size: 1.35rem;
+  }
+
+  .chat-file__details {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-file__name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chat-file__subtext {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    color: var(--color-text-muted, color-mix(in srgb, #ffffff 65%, transparent));
+    font-size: 0.8rem;
+  }
+
+  .chat-file__cta {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-accent);
+    margin-left: auto;
+  }
+
+  .chat-file--mine .chat-file__card {
+    border-color: var(--chat-bubble-self-border);
+    background: var(--chat-bubble-self-bg);
+  }
+
+  .chat-file--mine .chat-file__preview {
+    border-color: var(--chat-bubble-self-border);
+  }
+
+  .chat-file--upload .chat-file__card {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 45%, transparent);
+  }
+  .message-block--pending {
+    opacity: 0.9;
+  }
+
+  .chat-upload-status {
+    font-size: 0.8rem;
+    color: var(--color-text-muted, color-mix(in srgb, #ffffff 60%, transparent));
+  }
+
+  .chat-upload-bar {
+    width: 100%;
+    height: 0.35rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
+    overflow: hidden;
+  }
+
+  .chat-upload-bar span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 70%, #fff));
+    animation: chat-upload-glow 1.2s linear infinite;
+  }
+
+  .chat-upload-spinner {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 999px;
+    border: 3px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    animation: spin 1s linear infinite;
+  }
+
+  .chat-upload-percent {
+    font-size: 0.9rem;
+  }
+
+  @keyframes chat-upload-glow {
+    0% { opacity: 0.65; }
+    50% { opacity: 1; }
+    100% { opacity: 0.65; }
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
   .reaction-row {
     position: relative;
     display: flex;
@@ -1116,7 +1282,7 @@
     transition: background 120ms ease, transform 120ms ease;
   }
 
-  .reaction-button.Custom…{
+  .reaction-button.Custom�{
     font-size: 0.85rem;
     font-weight: 600;
   }
@@ -1284,19 +1450,42 @@
                     alt="GIF"
                     loading="lazy"
                   />
-                {:else if m.type === 'file' && (m as any).file}
-                  <a
-                    class={`inline-flex items-center gap-2 underline hover:no-underline text-sm ${mine ? 'justify-end ml-auto' : ''}`}
-                    href={(m as any).file.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <span>[file]</span>
-                    <span>{(m as any).file.name}</span>
-                    {#if (m as any).file.size}
-                      <span class="text-soft">({Math.round(((m as any).file.size || 0) / 1024)} KB)</span>
-                    {/if}
-                  </a>
+                {:else if m.type === 'file' && (m as any).file?.url}
+                  {@const file = (m as any).file}
+                  {@const isImageFile = looksLikeImage({ name: file.name, type: file.contentType })}
+                  <div class={`chat-file ${mine ? 'chat-file--mine' : ''} ${isImageFile ? 'chat-file--image' : 'chat-file--document'}`}>
+                    <a
+                      class={`chat-file__card ${isImageFile ? 'chat-file__card--image' : 'chat-file__card--generic'}`}
+                      href={file.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      download={file.name ?? undefined}
+                    >
+                      {#if isImageFile}
+                        <div class="chat-file__preview">
+                          <img src={file.url} alt={file.name ?? 'Image attachment'} loading="lazy" />
+                        </div>
+                      {:else}
+                        <div class="chat-file__icon" aria-hidden="true">
+                          <i class="bx bx-paperclip"></i>
+                        </div>
+                      {/if}
+                      <div class="chat-file__details">
+                        <div class="chat-file__name">{file.name ?? 'Download file'}</div>
+                        <div class="chat-file__subtext">
+                          {#if file.contentType}<span>{file.contentType}</span>{/if}
+                          {#if file.contentType && file.size}
+                            <span aria-hidden="true">&bull;</span>
+                          {/if}
+                          {#if file.size}
+                            {@const label = formatBytes(file.size)}
+                            {#if label}<span>{label}</span>{/if}
+                          {/if}
+                        </div>
+                      </div>
+                      <span class="chat-file__cta">{isImageFile ? 'Open' : 'Download'}</span>
+                    </a>
+                  </div>
                 {:else if m.type === 'poll' && (m as any).poll}
                   {#await Promise.resolve((m as any).poll) then poll}
                     <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
@@ -1372,6 +1561,70 @@
       </div>
     {/each}
   {/if}
+  {#if pendingUploads.length}
+    {#each pendingUploads as upload (upload.id)}
+      {@const uploadMessage = { uid: upload.uid ?? currentUserId ?? 'upload' }}
+      {@const uploadAvatar = avatarUrlFor(uploadMessage)}
+      {@const uploadName = nameFor(uploadMessage)}
+      {@const uploadPercent = Math.round((upload.progress ?? 0) * 100)}
+      <div class="flex w-full justify-end" data-message-id={`pending-${upload.id}`}>
+        <div class="message-block w-full max-w-3xl message-block--mine message-block--pending">
+          <div class="message-heading-row message-heading-row--mine">
+            <span class="message-author message-author--mine">{uploadName}</span>
+          </div>
+          <div class="message-layout message-layout--mine">
+            <div class="message-avatar">
+              {#if uploadAvatar}
+                <img src={uploadAvatar} alt={uploadName} loading="lazy" />
+              {:else}
+                <span>{initialsFor(uploadName)}</span>
+              {/if}
+            </div>
+            <div class="message-content message-content--mine">
+              <div class="message-body">
+                <div class={`chat-file chat-file--mine chat-file--upload ${upload.isImage ? 'chat-file--image' : 'chat-file--document'}`}>
+                  <div class={`chat-file__card chat-file__card--upload ${upload.isImage ? 'chat-file__card--image' : 'chat-file__card--generic'}`}>
+                    {#if upload.isImage && upload.previewUrl}
+                      <div class="chat-file__preview">
+                        <img src={upload.previewUrl} alt={upload.name} loading="lazy" />
+                        <div class="chat-file__preview-overlay">
+                          <div class="chat-upload-spinner" aria-hidden="true"></div>
+                          <div class="chat-upload-percent">{uploadPercent}%</div>
+                        </div>
+                      </div>
+                    {:else}
+                      <div class="chat-file__icon" aria-hidden="true">
+                        <i class="bx bx-paperclip"></i>
+                      </div>
+                    {/if}
+                    <div class="chat-file__details">
+                      <div class="chat-file__name">{upload.name}</div>
+                      <div class="chat-file__subtext">
+                        {#if upload.contentType}<span>{upload.contentType}</span>{/if}
+                        {#if upload.contentType && upload.size}
+                          <span aria-hidden="true">&bull;</span>
+                        {/if}
+                        {#if upload.size}
+                          {@const uploadSize = formatBytes(upload.size)}
+                          {#if uploadSize}<span>{uploadSize}</span>{/if}
+                        {/if}
+                      </div>
+                    </div>
+                    <div class="chat-upload-status">
+                      Uploading� {uploadPercent}%
+                    </div>
+                    <div class="chat-upload-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={uploadPercent}>
+                      <span style={`width: ${Math.max(8, uploadPercent)}%`}></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/each}
+  {/if}
 </div>
 
 {#if reactionMenuFor && currentUserId}
@@ -1385,13 +1638,38 @@
       {#each QUICK_REACTIONS as emoji}
         <button type="button" class="reaction-button" on:click={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
       {/each}
-      <button type="button" class="reaction-button custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom…</button>
+      <button type="button" class="reaction-button custom" on:click={() => promptReaction(reactionMenuFor!)}>Custom�</button>
     </div>
     <div class="reaction-menu__actions">
       <button type="button" class="reaction-menu__action" on:click={() => chooseReply(reactionMenuFor!)}>Reply</button>
     </div>
   </div>
 {/if}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

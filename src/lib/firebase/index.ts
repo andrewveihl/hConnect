@@ -18,6 +18,7 @@ import {
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel, type Firestore
 } from 'firebase/firestore';
+import { getStorage, type FirebaseStorage } from 'firebase/storage';
 
 import { user as userStore } from '$lib/stores/user';
 
@@ -28,6 +29,16 @@ if (import.meta.env.DEV) {
 /* ------------------------------------------------------------------ */
 /* Config resolution (LOCAL/CI -> Hosting script -> Hosting JSON)      */
 /* ------------------------------------------------------------------ */
+const storageBucketRaw = dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET ?? '';
+const storageBucketUrl =
+  dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET_URL ??
+  (storageBucketRaw
+    ? storageBucketRaw.startsWith('gs://')
+      ? storageBucketRaw
+      : `gs://${storageBucketRaw}`
+    : null);
+const storageBucketName = storageBucketUrl?.replace(/^gs:\/\//, '') ?? undefined;
+
 async function resolveFirebaseConfig(): Promise<Record<string, any>> {
   // 1) Local/CI via PUBLIC_* (runtime)
   if (dynamicPublic.PUBLIC_FIREBASE_API_KEY) {
@@ -37,7 +48,7 @@ async function resolveFirebaseConfig(): Promise<Record<string, any>> {
       projectId: dynamicPublic.PUBLIC_FIREBASE_PROJECT_ID,
       appId: dynamicPublic.PUBLIC_FIREBASE_APP_ID,
       messagingSenderId: dynamicPublic.PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-      storageBucket: dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET
+      ...(storageBucketName ? { storageBucket: storageBucketName } : {})
     };
   }
 
@@ -70,6 +81,7 @@ async function resolveFirebaseConfig(): Promise<Record<string, any>> {
 let app: FirebaseApp | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
+let storage: FirebaseStorage | undefined;
 
 // Promise to ensure we only resolve config once per session
 let configPromise: Promise<Record<string, any>> | null = null;
@@ -89,7 +101,7 @@ async function ensureApp(): Promise<FirebaseApp> {
 /* Public getters ---------------------------------------------------- */
 export function getFirebase() {
   // returns lazy placeholders; real init happens in ensureReady()
-  return { app, auth, db };
+  return { app, auth, db, storage };
 }
 
 /** Call this at app start (e.g., in +layout.svelte onMount) */
@@ -115,7 +127,10 @@ export async function ensureFirebaseReady() {
   if (!db) {
     db = getFirestore(_app);
   }
-  return { app: _app, auth: auth!, db: db! };
+  if (!storage) {
+    storage = storageBucketUrl ? getStorage(_app, storageBucketUrl) : getStorage(_app);
+  }
+  return { app: _app, auth: auth!, db: db!, storage: storage! };
 }
 
 // ---- Firestore getter -------------------------------------------------
@@ -127,6 +142,13 @@ export function getDb(): Firestore {
     throw new Error('Firestore not initialized. Call ensureFirebaseReady() early (e.g., in +layout onMount).');
   }
   return db!;
+}
+
+export function getStorageInstance(): FirebaseStorage {
+  if (!storage) {
+    throw new Error('Storage not initialized. Call ensureFirebaseReady() early (e.g., in +layout onMount).');
+  }
+  return storage;
 }
 
 // (Optional) keep compatibility with code that does `import getDb from '$lib/firebase'`
