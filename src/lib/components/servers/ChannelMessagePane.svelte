@@ -4,6 +4,7 @@
   import ChatInput from '$lib/components/chat/ChatInput.svelte';
   import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
+  import type { PendingUploadPreview } from '$lib/components/chat/types';
 
   export let hasChannel = false;
   export let channelName = '';
@@ -28,6 +29,8 @@
   export let onSendGif: (payload: { url: string; replyTo?: ReplyReferenceInput | null }) => void = () => {};
   export let onCreatePoll: (payload: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
   export let onCreateForm: (payload: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+  export let onUploadFiles: (payload: { files: File[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
+  export let pendingUploads: PendingUploadPreview[] = [];
 
   export let replyTarget: ReplyReferenceInput | null = null;
 
@@ -40,6 +43,7 @@
       {messages}
       users={profiles}
       {currentUserId}
+      {pendingUploads}
       on:vote={onVote}
       on:submitForm={onSubmitForm}
       on:react={onReact}
@@ -57,6 +61,7 @@
         onSendGif={onSendGif}
         onCreatePoll={onCreatePoll}
         onCreateForm={onCreateForm}
+        onUpload={onUploadFiles}
         on:cancelReply={() => dispatch('cancelReply')}
       />
     </div>

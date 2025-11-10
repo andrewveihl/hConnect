@@ -21,7 +21,10 @@
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
-  import { markChannelRead } from '$lib/firebase/unread';
+import { markChannelRead } from '$lib/firebase/unread';
+import { uploadChannelFile } from '$lib/firebase/storage';
+import { looksLikeImage } from '$lib/utils/fileType';
+import type { PendingUploadPreview } from '$lib/components/chat/types';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   // Comes from +page.ts
@@ -46,10 +49,12 @@
   let channels: Channel[] = [];
   let activeChannel: Channel | null = null;
   let requestedChannelId: string | null = null;
-  let messages: any[] = [];
-  let replyTarget: ReplyReferenceInput | null = null;
-  let lastReplyChannelId: string | null = null;
-  let profiles: Record<string, any> = {};
+let messages: any[] = [];
+let replyTarget: ReplyReferenceInput | null = null;
+let lastReplyChannelId: string | null = null;
+let profiles: Record<string, any> = {};
+let pendingUploads: PendingUploadPreview[] = [];
+let lastPendingChannelId: string | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   let serverDisplayName = 'Server';
   let serverMetaUnsub: Unsubscribe | null = null;
@@ -295,6 +300,10 @@
       lastReplyChannelId = channelId;
       replyTarget = null;
     }
+    if (channelId !== lastPendingChannelId) {
+      lastPendingChannelId = channelId;
+      pendingUploads = [];
+    }
   }
 
   function buildReplyReference(message: any): ReplyReferenceInput | null {
@@ -447,6 +456,87 @@
       return resolveProfilePhotoURL(profile, authPhoto);
     }
     return authPhoto ?? null;
+  }
+
+  const makeUploadId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return Math.random().toString(36).slice(2);
+  };
+
+  function registerPendingUpload(file: File): {
+    id: string;
+    update(progress: number): void;
+    finish(success: boolean): void;
+  } {
+    const id = makeUploadId();
+    const isImage = looksLikeImage({ name: file?.name, type: file?.type });
+    const previewUrl =
+      isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+        ? URL.createObjectURL(file)
+        : null;
+    let currentProgress = 0;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+
+    const entry: PendingUploadPreview = {
+      id,
+      uid: $user?.uid ?? null,
+      name: file?.name || 'Upload',
+      size: file?.size,
+      contentType: file?.type ?? null,
+      isImage,
+      progress: currentProgress,
+      previewUrl
+    };
+    pendingUploads = [...pendingUploads, entry];
+
+    const commitProgress = (value: number) => {
+      if (!Number.isFinite(value)) return;
+      currentProgress = Math.min(1, Math.max(currentProgress, value));
+      pendingUploads = pendingUploads.map((item) =>
+        item.id === id ? { ...item, progress: currentProgress } : item
+      );
+      if (currentProgress >= 0.99 && fallbackTimer) {
+        clearInterval(fallbackTimer);
+        fallbackTimer = null;
+      }
+    };
+
+    const ensureFallback = () => {
+      if (fallbackTimer) return;
+      fallbackTimer = setInterval(() => {
+        if (currentProgress >= 0.95) return;
+        commitProgress(currentProgress + 0.01);
+      }, 1200);
+    };
+
+    ensureFallback();
+
+    return {
+      id,
+      update(progress: number) {
+        ensureFallback();
+        commitProgress(progress);
+      },
+      finish(success: boolean) {
+        if (fallbackTimer) {
+          clearInterval(fallbackTimer);
+          fallbackTimer = null;
+        }
+        if (success) {
+          commitProgress(1);
+        }
+        pendingUploads = pendingUploads.filter((item) => item.id !== id);
+        if (previewUrl) {
+          try {
+            URL.revokeObjectURL(previewUrl);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
   }
   let showCreate = false;
   let voiceState: VoiceSession | null = null;
@@ -1017,6 +1107,57 @@
     }
   }
 
+  async function handleUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
+    const selection = Array.from(request?.files ?? []).filter((file): file is File => file instanceof File);
+    if (!selection.length) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeReply(request?.replyTo ?? null);
+    let replyUsed = false;
+    const identity = {
+      uid: $user.uid,
+      displayName: deriveCurrentDisplayName(),
+      photoURL: deriveCurrentPhotoURL()
+    };
+    for (const file of selection) {
+      const pending = registerPendingUpload(file);
+      try {
+        const uploaded = await uploadChannelFile({
+          serverId,
+          channelId: activeChannel.id,
+          uid: $user.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendChannelMessage(serverId, activeChannel.id, {
+          type: 'file',
+          file: {
+            name: file.name || uploaded.name,
+            url: uploaded.url,
+            size: file.size ?? uploaded.size,
+            contentType: file.type || uploaded.contentType,
+            storagePath: uploaded.storagePath
+          },
+          ...identity,
+          replyTo: !replyUsed && replyRef ? replyRef : undefined
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+      } catch (err) {
+        pending.finish(false);
+        if (replyRef && !replyUsed) {
+          restoreReply(replyRef);
+        }
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
+  }
+
   async function handleCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
@@ -1203,6 +1344,7 @@
                   currentUserId={$user?.uid ?? null}
                   {mentionOptions}
                   {replyTarget}
+                  {pendingUploads}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
                   inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
                   inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
@@ -1219,6 +1361,7 @@
                   onSendGif={handleSendGif}
                   onCreatePoll={handleCreatePoll}
                   onCreateForm={handleCreateForm}
+                  onUploadFiles={handleUploadFiles}
                   hideInput={hideMessageInput}
                   on:reply={handleReplyRequest}
                   on:cancelReply={() => (replyTarget = null)}
@@ -1296,6 +1439,7 @@
             currentUserId={$user?.uid ?? null}
             {mentionOptions}
             {replyTarget}
+            {pendingUploads}
             emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
             onVote={handleVote}
             onSubmitForm={handleFormSubmit}
@@ -1309,6 +1453,7 @@
             onSendGif={handleSendGif}
             onCreatePoll={handleCreatePoll}
             onCreateForm={handleCreateForm}
+            onUploadFiles={handleUploadFiles}
             hideInput={hideMessageInput}
             on:reply={handleReplyRequest}
             on:cancelReply={() => (replyTarget = null)}

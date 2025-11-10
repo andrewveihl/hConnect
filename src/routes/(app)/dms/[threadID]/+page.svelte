@@ -10,10 +10,13 @@
   import MessageList from '$lib/components/chat/MessageList.svelte';
   import ChatInput from '$lib/components/chat/ChatInput.svelte';
 
-  import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
-  import type { ReplyReferenceInput } from '$lib/firestore/messages';
-  import { resolveProfilePhotoURL } from '$lib/utils/profile';
-  import { RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
+import type { ReplyReferenceInput } from '$lib/firestore/messages';
+import { resolveProfilePhotoURL } from '$lib/utils/profile';
+import { RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+import { uploadDMFile } from '$lib/firebase/storage';
+import type { PendingUploadPreview } from '$lib/components/chat/types';
+import { looksLikeImage } from '$lib/utils/fileType';
 
   export let data: { threadID: string };
   $: threadID = data.threadID;
@@ -23,6 +26,7 @@
 
 let messages: any[] = [];
 let messageUsers: Record<string, any> = {};
+let pendingUploads: PendingUploadPreview[] = [];
 const profileUnsubs: Record<string, Unsubscribe> = {};
 let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
 let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
@@ -46,6 +50,7 @@ type MentionSendRecord = {
 let mentionOptions: MentionOption[] = [];
 let resumeDmScroll = false;
 let scrollResumeSignal = 0;
+let lastPendingThreadId: string | null = null;
 
 if (browser) {
   try {
@@ -57,6 +62,11 @@ if (browser) {
     resumeDmScroll = false;
   }
 }
+
+  $: if (threadID !== lastPendingThreadId) {
+    lastPendingThreadId = threadID;
+    pendingUploads = [];
+  }
 
   function updateMessageUserCache(uid: string, patch: any) {
     if (!uid) return;
@@ -114,6 +124,87 @@ if (browser) {
     if (typeof value !== 'string') return undefined;
     const trimmed = value.trim();
     return trimmed.length ? trimmed : undefined;
+  }
+
+  const makeUploadId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return Math.random().toString(36).slice(2);
+  };
+
+  function registerPendingUpload(file: File): {
+    id: string;
+    update(progress: number): void;
+    finish(success: boolean): void;
+  } {
+    const id = makeUploadId();
+    const isImage = looksLikeImage({ name: file?.name, type: file?.type });
+    const previewUrl =
+      isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+        ? URL.createObjectURL(file)
+        : null;
+    let currentProgress = 0;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+
+    const entry: PendingUploadPreview = {
+      id,
+      uid: me?.uid ?? null,
+      name: file?.name || 'Upload',
+      size: file?.size,
+      contentType: file?.type ?? null,
+      isImage,
+      progress: currentProgress,
+      previewUrl
+    };
+    pendingUploads = [...pendingUploads, entry];
+
+    const commitProgress = (value: number) => {
+      if (!Number.isFinite(value)) return;
+      currentProgress = Math.min(1, Math.max(currentProgress, value));
+      pendingUploads = pendingUploads.map((item) =>
+        item.id === id ? { ...item, progress: currentProgress } : item
+      );
+      if (currentProgress >= 0.99 && fallbackTimer) {
+        clearInterval(fallbackTimer);
+        fallbackTimer = null;
+      }
+    };
+
+    const ensureFallback = () => {
+      if (fallbackTimer) return;
+      fallbackTimer = setInterval(() => {
+        if (currentProgress >= 0.95) return;
+        commitProgress(currentProgress + 0.01);
+      }, 1200);
+    };
+
+    ensureFallback();
+
+    return {
+      id,
+      update(progress: number) {
+        ensureFallback();
+        commitProgress(progress);
+      },
+      finish(success: boolean) {
+        if (fallbackTimer) {
+          clearInterval(fallbackTimer);
+          fallbackTimer = null;
+        }
+        if (success) {
+          commitProgress(1);
+        }
+        pendingUploads = pendingUploads.filter((item) => item.id !== id);
+        if (previewUrl) {
+          try {
+            URL.revokeObjectURL(previewUrl);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
   }
   function markThreadAsSeen(opts?: { at?: any; lastMessageId?: string | null }) {
     if (!threadID || !me?.uid) return;
@@ -705,6 +796,51 @@ $: {
     }
   }
 
+  async function handleUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
+    const selection = Array.from(request?.files ?? []).filter((file): file is File => file instanceof File);
+    if (!selection.length || !me?.uid) return;
+    const replyRef = consumeReply(request?.replyTo ?? null);
+    let replyUsed = false;
+    for (const file of selection) {
+      const pending = registerPendingUpload(file);
+      try {
+        const uploaded = await uploadDMFile({
+          threadId: threadID,
+          uid: me.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendDMMessage(threadID, {
+          type: 'file',
+          file: {
+            name: file.name || uploaded.name,
+            url: uploaded.url,
+            size: file.size ?? uploaded.size,
+            contentType: file.type || uploaded.contentType,
+            storagePath: uploaded.storagePath
+          },
+          uid: me.uid,
+          displayName: deriveMeDisplayName(),
+          photoURL: deriveMePhotoURL(),
+          replyTo: !replyUsed && replyRef ? replyRef : undefined
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+        markThreadAsSeen();
+      } catch (err) {
+        pending.finish(false);
+        if (replyRef && !replyUsed) {
+          restoreReply(replyRef);
+        }
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
+  }
+
   async function handleCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
     if (!me?.uid) return;
     const replyRef = consumeReply(poll?.replyTo ?? null);
@@ -869,6 +1005,7 @@ $: {
             {messages}
             users={messageUsers}
             currentUserId={me?.uid ?? null}
+            {pendingUploads}
             scrollToBottomSignal={scrollResumeSignal}
             on:vote={handleVote}
             on:submitForm={handleFormSubmit}
@@ -890,6 +1027,7 @@ $: {
         on:send={onSend}
         on:submit={onSend}
         on:sendGif={(e) => handleSendGif(e.detail)}
+        on:upload={(e) => handleUploadFiles(e.detail)}
         on:createPoll={(e) => handleCreatePoll(e.detail)}
         on:createForm={(e) => handleCreateForm(e.detail)}
         on:cancelReply={() => (pendingReply = null)}

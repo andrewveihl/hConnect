@@ -324,6 +324,11 @@ function summarizeMessageForThread(payload: MessageInput): string {
     return 'sent a GIF';
   }
 
+  if (type === 'file' && 'file' in payload) {
+    const name = trimValue(payload.file?.name ?? payload.file?.url);
+    return name ? `shared a file: ${name}` : 'shared a file';
+  }
+
   if (type === 'poll' && 'poll' in payload) {
     const question = trimValue(payload.poll?.question);
     return question ? `created a poll: ${question}` : 'created a poll';
