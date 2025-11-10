@@ -35,7 +35,13 @@
     null;
 
   type Channel = { id: string; name: string; type: 'text' | 'voice'; position?: number };
-  type MentionSendRecord = { uid: string; handle: string; label: string };
+  type MentionSendRecord = {
+    uid: string;
+    handle: string | null;
+    label: string | null;
+    color?: string | null;
+    kind?: 'member' | 'role';
+  };
 
   let channels: Channel[] = [];
   let activeChannel: Channel | null = null;
@@ -48,21 +54,87 @@
   let serverDisplayName = 'Server';
   let serverMetaUnsub: Unsubscribe | null = null;
   let mentionOptions: MentionDirectoryEntry[] = [];
+  let memberMentionOptions: MentionDirectoryEntry[] = [];
+  let roleMentionOptions: MentionDirectoryEntry[] = [];
   let mentionDirectoryStop: Unsubscribe | null = null;
+  let mentionRolesStop: Unsubscribe | null = null;
   let lastMentionServer: string | null = null;
+
+  const canonicalHandle = (value: string) =>
+    (value ?? '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+  function updateMentionOptionList() {
+    mentionOptions = [...memberMentionOptions, ...roleMentionOptions];
+  }
+
+  function buildRoleMentionEntry(roleId: string, data: any): MentionDirectoryEntry {
+    const label = pickString(data?.name) ?? 'Role';
+    const color = pickString(data?.color) ?? null;
+    const base = canonicalHandle(label) || 'role';
+    const suffix = roleId.slice(-4).toLowerCase();
+    const handle = `${base}${suffix}`;
+    const aliases = new Set<string>();
+    aliases.add(base);
+    label
+      .split(/\s+/)
+      .filter(Boolean)
+      .forEach((part) => aliases.add(canonicalHandle(part)));
+    aliases.add((label ?? '').replace(/\s+/g, '').toLowerCase());
+    return {
+      uid: `role:${roleId}`,
+      label,
+      handle,
+      avatar: null,
+      search: `${label}`.toLowerCase(),
+      aliases: Array.from(aliases).filter(Boolean),
+      kind: 'role',
+      color,
+      roleId
+    };
+  }
+
+  function startRoleMentionWatch(serverId: string) {
+    mentionRolesStop?.();
+    roleMentionOptions = [];
+    const database = db();
+    const roleQuery = query(collection(database, 'servers', serverId, 'roles'), orderBy('position'));
+    mentionRolesStop = onSnapshot(
+      roleQuery,
+      (snap) => {
+        roleMentionOptions = snap.docs.map((docSnap) =>
+          buildRoleMentionEntry(docSnap.id, docSnap.data())
+        );
+        updateMentionOptionList();
+      },
+      () => {
+        roleMentionOptions = [];
+        updateMentionOptionList();
+      }
+    );
+  }
 
   $: {
     const currentMentionServer = serverId ?? null;
     if (currentMentionServer !== lastMentionServer) {
       mentionDirectoryStop?.();
+      mentionRolesStop?.();
+      memberMentionOptions = [];
+      roleMentionOptions = [];
       mentionOptions = [];
       lastMentionServer = currentMentionServer;
       if (currentMentionServer) {
         mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
-          mentionOptions = entries;
+          memberMentionOptions = entries;
+          updateMentionOptionList();
         });
+        startRoleMentionWatch(currentMentionServer);
       } else {
         mentionDirectoryStop = null;
+        mentionRolesStop = null;
       }
     }
   }
@@ -329,14 +401,18 @@
         ? Object.entries(raw.mentionsMap).map(([key, value]) => ({
             uid: pickString(key) ?? '',
             handle: pickString((value as any)?.handle) ?? null,
-            label: pickString((value as any)?.label) ?? null
+            label: pickString((value as any)?.label) ?? null,
+            color: pickString((value as any)?.color) ?? null,
+            kind: (value as any)?.kind === 'role' ? 'role' : (value as any)?.kind === 'member' ? 'member' : undefined
           }))
         : [];
     const mentions = mentionArray
       .map((entry) => ({
         uid: pickString(entry?.uid) ?? '',
         handle: pickString((entry as any)?.handle) ?? null,
-        label: pickString((entry as any)?.label) ?? null
+        label: pickString((entry as any)?.label) ?? null,
+        color: pickString((entry as any)?.color) ?? null,
+        kind: (entry as any)?.kind === 'role' ? 'role' : (entry as any)?.kind === 'member' ? 'member' : undefined
       }))
       .filter((entry) => entry.uid);
     if (mentions.length) {
@@ -860,7 +936,11 @@
     serverMetaUnsub = null;
     mentionDirectoryStop?.();
     mentionDirectoryStop = null;
+    mentionRolesStop?.();
+    mentionRolesStop = null;
     lastMentionServer = null;
+    memberMentionOptions = [];
+    roleMentionOptions = [];
     mentionOptions = [];
   });
 
@@ -886,13 +966,17 @@
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
     const replyRef = consumeReply(typeof payload === 'object' ? payload?.replyTo ?? null : null);
-    const mentionList: MentionSendRecord[] =
+    let mentionList: MentionSendRecord[] =
       typeof payload === 'object' && payload && Array.isArray(payload.mentions)
         ? payload.mentions.filter(
             (item): item is MentionSendRecord =>
               !!item?.uid && (!!item?.handle || !!item?.label)
           )
         : [];
+    if (mentionList.length && mentionOptions.length) {
+      const allowed = new Set(mentionOptions.map((entry) => entry.uid));
+      mentionList = mentionList.filter((item) => allowed.has(item.uid));
+    }
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'text',

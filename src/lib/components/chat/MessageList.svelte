@@ -3,7 +3,13 @@
 
   const dispatch = createEventDispatcher();
 
-  type MentionView = { uid: string; handle?: string | null; label?: string | null };
+  type MentionView = {
+    uid: string;
+    handle?: string | null;
+    label?: string | null;
+    color?: string | null;
+    kind?: 'member' | 'role';
+  };
 
   type ReplyPreview = {
     messageId: string;
@@ -934,8 +940,21 @@
   }
 
   .chat-mention {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
     color: var(--color-accent);
     font-weight: 600;
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+    line-height: 1.2;
+  }
+
+  .chat-mention--role {
+    font-weight: 700;
+    border-color: currentColor;
   }
 
   .chat-gif {
@@ -1242,7 +1261,15 @@
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                       {#if segment.type === 'mention'}
-                        <span class="chat-mention">{segment.value}</span>
+                        {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
+                        <span
+                          class={`chat-mention ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
+                          style={segment.data?.kind === 'role' && segment.data?.color
+                            ? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
+                            : undefined}
+                        >
+                          {label}
+                        </span>
                       {:else}
                         {segment.value}
                       {/if}

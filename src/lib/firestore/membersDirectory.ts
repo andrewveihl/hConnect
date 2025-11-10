@@ -9,6 +9,9 @@ export type MentionDirectoryEntry = {
   avatar: string | null;
   search: string;
   aliases: string[];
+  kind?: 'member' | 'role';
+  color?: string | null;
+  roleId?: string | null;
 };
 
 type GenericRecord = Record<string, unknown>;
@@ -108,7 +111,10 @@ export function subscribeServerDirectory(
         handle,
         avatar,
         search: searchParts.join(' ').toLowerCase(),
-        aliases
+        aliases,
+        kind: 'member',
+        color: null,
+        roleId: null
       });
     });
     list.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));

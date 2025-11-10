@@ -26,7 +26,24 @@ let messageUsers: Record<string, any> = {};
 const profileUnsubs: Record<string, Unsubscribe> = {};
 let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
 let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
-type MentionSendRecord = { uid: string; handle: string | null; label: string | null };
+type MentionOption = {
+  uid: string;
+  label: string;
+  handle: string;
+  avatar: string | null;
+  search: string;
+  aliases: string[];
+  kind?: 'member' | 'role';
+  color?: string | null;
+};
+type MentionSendRecord = {
+  uid: string;
+  handle: string | null;
+  label: string | null;
+  color?: string | null;
+  kind?: 'member' | 'role';
+};
+let mentionOptions: MentionOption[] = [];
 let resumeDmScroll = false;
 let scrollResumeSignal = 0;
 
@@ -97,6 +114,61 @@ if (browser) {
     if (typeof value !== 'string') return undefined;
     const trimmed = value.trim();
     return trimmed.length ? trimmed : undefined;
+  }
+  function markThreadAsSeen(opts?: { at?: any; lastMessageId?: string | null }) {
+    if (!threadID || !me?.uid) return;
+    const payload = {
+      at: opts?.at ?? new Date(),
+      lastMessageId: opts?.lastMessageId ?? null
+    };
+    markThreadRead(threadID, me.uid, payload).catch(() => {});
+  }
+
+  function canonical(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    return value
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+  }
+
+  function normalizeUid(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+  }
+
+  function buildMentionOption(uid: string, source: any = {}): MentionOption {
+    const label =
+      pickString(source?.displayName) ??
+      pickString(source?.name) ??
+      pickString(source?.email) ??
+      'Member';
+    const handleBase = canonical(label) || 'member';
+    const handle = `${handleBase}${uid.slice(-4).toLowerCase()}`;
+    const avatar = resolveProfilePhotoURL(source);
+    const aliases = new Set<string>();
+    const register = (value: unknown) => {
+      const canon = canonical(value);
+      if (canon) aliases.add(canon);
+    };
+    register(handleBase);
+    register(label);
+    label.split(/\s+/).forEach(register);
+    if (source?.email) {
+      register(String(source.email).split('@')[0]);
+    }
+    return {
+      uid,
+      label,
+      handle,
+      avatar: avatar ?? pickString(source?.photoURL) ?? null,
+      search: [label, source?.email].filter(Boolean).join(' ').toLowerCase(),
+      aliases: Array.from(aliases),
+      kind: 'member',
+      color: null
+    };
   }
 
   function normalizePoll(raw: any) {
@@ -276,14 +348,18 @@ if (browser) {
         ? Object.entries(raw.mentionsMap).map(([key, value]) => ({
             uid: pickString(key) ?? '',
             handle: pickString((value as any)?.handle) ?? null,
-            label: pickString((value as any)?.label) ?? null
+            label: pickString((value as any)?.label) ?? null,
+            color: pickString((value as any)?.color) ?? null,
+            kind: (value as any)?.kind === 'role' ? 'role' : (value as any)?.kind === 'member' ? 'member' : undefined
           }))
         : [];
     const mentions = mentionArray
       .map((entry) => ({
         uid: pickString(entry?.uid) ?? '',
         handle: pickString((entry as any)?.handle) ?? null,
-        label: pickString((entry as any)?.label) ?? null
+        label: pickString((entry as any)?.label) ?? null,
+        color: pickString((entry as any)?.color) ?? null,
+        kind: (entry as any)?.kind === 'role' ? 'role' : (entry as any)?.kind === 'member' ? 'member' : undefined
       }))
       .filter((entry) => entry.uid);
     if (mentions.length) {
@@ -428,6 +504,35 @@ $: {
     messageUsers = next;
   }
 
+  $: {
+    const map = new Map<string, MentionOption>();
+    const addCandidate = (uid: unknown, data: any) => {
+      const clean = normalizeUid(uid);
+      if (!clean) return;
+      try {
+        map.set(clean, buildMentionOption(clean, data ?? {}));
+      } catch {
+        // ignore malformed entries
+      }
+    };
+
+    if (me?.uid) {
+      addCandidate(me.uid, {
+        displayName: deriveMeDisplayName(),
+        photoURL: deriveMePhotoURL(),
+        email: pickString(me?.email) ?? null
+      });
+    }
+    if (otherProfile?.uid) {
+      addCandidate(otherProfile.uid, otherProfile);
+    }
+    Object.values(messageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
+
+    mentionOptions = Array.from(map.values()).sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+    );
+  }
+
   function setupGestures() {
     if (typeof window === 'undefined') return () => {};
 
@@ -540,7 +645,7 @@ $: {
         const last = messages[messages.length - 1];
         const at = last?.createdAt ?? null;
         const lastId = last?.id ?? null;
-        await markThreadRead(threadID, me.uid, { at, lastMessageId: lastId });
+        markThreadAsSeen({ at, lastMessageId: lastId });
       }
     });
   }
@@ -550,6 +655,17 @@ $: {
     const trimmed = raw?.trim?.() ?? '';
     if (!trimmed || !me?.uid) return;
     const replyRef = consumeReply(typeof payload === 'object' ? payload?.replyTo ?? null : null);
+    let mentionList: MentionSendRecord[] =
+      typeof payload === 'object' && payload && Array.isArray(payload.mentions)
+        ? payload.mentions.filter(
+            (item): item is MentionSendRecord =>
+              !!item?.uid && (!!item?.handle || !!item?.label)
+          )
+        : [];
+    if (mentionList.length && mentionOptions.length) {
+      const allowed = new Set(mentionOptions.map((entry) => entry.uid));
+      mentionList = mentionList.filter((item) => allowed.has(item.uid));
+    }
     try {
       await sendDMMessage(threadID, {
         type: 'text',
@@ -557,15 +673,10 @@ $: {
         uid: me.uid,
         displayName: deriveMeDisplayName(),
         photoURL: deriveMePhotoURL(),
-        mentions:
-          typeof payload === 'object' && payload && Array.isArray(payload.mentions)
-            ? payload.mentions.filter(
-                (item): item is MentionSendRecord =>
-                  !!item?.uid && (!!item?.handle || !!item?.label)
-              )
-            : undefined,
+        mentions: mentionList.length ? mentionList : undefined,
         replyTo: replyRef ?? undefined
       });
+      markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
       console.error(err);
@@ -586,6 +697,7 @@ $: {
         photoURL: deriveMePhotoURL(),
         replyTo: replyRef ?? undefined
       });
+      markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
       console.error(err);
@@ -608,6 +720,7 @@ $: {
         photoURL: deriveMePhotoURL(),
         replyTo: replyRef ?? undefined
       });
+      markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
       console.error(err);
@@ -630,6 +743,7 @@ $: {
         photoURL: deriveMePhotoURL(),
         replyTo: replyRef ?? undefined
       });
+      markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
       console.error(err);
@@ -771,6 +885,7 @@ $: {
     >
       <ChatInput
         placeholder={`Message`}
+        {mentionOptions}
         replyTarget={pendingReply}
         on:send={onSend}
         on:submit={onSend}
