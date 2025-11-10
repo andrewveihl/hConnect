@@ -1203,8 +1203,8 @@
                   currentUserId={$user?.uid ?? null}
                   {mentionOptions}
                   {replyTarget}
-                  listClass="flex-1 overflow-y-auto p-3"
-                  inputWrapperClass="border-t border-subtle panel-muted p-3"
+                  listClass="message-scroll-region flex-1 overflow-y-auto p-3"
+                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
                   inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
                   emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
                   onVote={handleVote}
