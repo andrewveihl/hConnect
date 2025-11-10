@@ -4,7 +4,8 @@
   import { user } from '$lib/stores/user';
   import {
     searchUsersByName, getOrCreateDMThread, streamMyDMs,
-    streamUnreadCount, streamProfiles, getProfile, deleteThreadForUser
+    streamUnreadCount, streamProfiles, getProfile, deleteThreadForUser,
+    streamThreadMeta
   } from '$lib/firestore/dms';
 
   const dispatch = createEventDispatcher();
@@ -94,6 +95,10 @@
   /* ---------------- Threads ---------------- */
   let threads: any[] = [];
   let unsubThreads: (() => void) | null = null;
+  let threadMeta: Record<string, { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }> = {};
+  let metaUnsubs: Record<string, () => void> = {};
+  let decoratedThreads: any[] = [];
+  let sortedThreads: any[] = [];
 
   $: if (me?.uid) {
     unsubThreads?.();
@@ -102,6 +107,10 @@
     });
   }
   onDestroy(() => unsubThreads?.());
+  onDestroy(() => {
+    Object.values(metaUnsubs).forEach((stop) => stop());
+    metaUnsubs = {};
+  });
 
   // Resolve names for "other" participant so the list shows names, not UIDs.
   let nameCache: Record<string, string> = {};
@@ -210,6 +219,89 @@
       null
     );
   }
+
+  function timestampValue(value: any): number {
+    if (!value) return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value?.toMillis === 'function') {
+      try {
+        return value.toMillis();
+      } catch {
+        return 0;
+      }
+    }
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    if (typeof value?.seconds === 'number') {
+      const base = value.seconds * 1000;
+      const extra = typeof value.nanoseconds === 'number' ? value.nanoseconds / 1e6 : 0;
+      return base + extra;
+    }
+    if (value instanceof Date) return value.getTime();
+    return 0;
+  }
+
+  function previewTextFor(thread: any) {
+    const summary = thread?.lastMessage;
+    if (!summary) return 'No messages yet';
+    if (thread?.lastSender && me?.uid && thread.lastSender === me.uid) {
+      return `You: ${summary}`;
+    }
+    return summary;
+  }
+
+  $: manageThreadMetaSubscriptions(threads);
+
+  function manageThreadMetaSubscriptions(currentThreads: any[]) {
+    if (!Array.isArray(currentThreads)) return;
+    const ids = new Set(
+      currentThreads
+        .map((t) => t?.id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    );
+    ids.forEach((id) => {
+      if (!metaUnsubs[id]) {
+        metaUnsubs[id] = streamThreadMeta(id, (meta) => {
+          threadMeta = { ...threadMeta, [id]: meta };
+        });
+      }
+    });
+    for (const id of Object.keys(metaUnsubs)) {
+      if (!ids.has(id)) {
+        metaUnsubs[id]?.();
+        delete metaUnsubs[id];
+        if (threadMeta[id]) {
+          const next = { ...threadMeta };
+          delete next[id];
+          threadMeta = next;
+        }
+      }
+    }
+  }
+
+  $: decoratedThreads = threads.map((thread) => {
+    const meta = threadMeta[thread.id] ?? null;
+    const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
+    const lastSender = meta?.lastSender ?? thread.lastSender ?? null;
+    const updatedAt = meta?.updatedAt ?? thread.updatedAt ?? null;
+    return {
+      ...thread,
+      lastMessage,
+      lastSender,
+      updatedAt,
+      _sortValue: timestampValue(updatedAt)
+    };
+  });
+
+  $: sortedThreads = decoratedThreads
+    .slice()
+    .sort((a, b) => {
+      const diff = (b._sortValue ?? 0) - (a._sortValue ?? 0);
+      if (diff !== 0) return diff;
+      return (a.id || '').localeCompare(b.id || '');
+    });
 
   /* ---------------- Unread badges ---------------- */
   let unreadMap: Record<string, number> = {};
@@ -394,7 +486,7 @@
     <section>
       <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Messages</div>
       <ul class="space-y-0.5 pr-1">
-        {#each threads as t}
+        {#each sortedThreads as t}
           {@const isActive = activeThreadId === t.id}
           {@const otherPhoto = otherPhotoOf(t)}
           <li>
@@ -412,7 +504,7 @@
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
-                  <div class="text-xs text-white/50 truncate">{t.lastMessage || 'No messages yet'}</div>
+                  <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
                 </div>
                 {#if (unreadMap[t.id] ?? 0) > 0}
                   <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
@@ -430,7 +522,7 @@
             </div>
           </li>
         {/each}
-        {#if threads.length === 0}
+        {#if sortedThreads.length === 0}
           <li class="px-2 py-2 text-sm text-white/60">No conversations yet.</li>
         {/if}
       </ul>

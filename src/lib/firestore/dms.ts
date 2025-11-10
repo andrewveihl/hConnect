@@ -632,6 +632,26 @@ export function streamMyDMs(uid: string, cb: (rows: Array<{ id: string; particip
   });
 }
 
+export function streamThreadMeta(
+  threadId: string,
+  cb: (meta: { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }) => void
+): Unsubscribe {
+  const db = getDb();
+  const ref = doc(db, COL_DMS, threadId);
+  return onSnapshot(ref, (snap) => {
+    if (!snap.exists()) {
+      cb({ lastMessage: null, lastSender: null, updatedAt: null });
+      return;
+    }
+    const data: any = snap.data() ?? {};
+    cb({
+      lastMessage: data.lastMessage ?? null,
+      lastSender: data.lastSender ?? null,
+      updatedAt: data.updatedAt ?? null
+    });
+  });
+}
+
 /** Best-effort backfill to ensure existing threads appear in the rail. */
 export async function seedDMRailFromThreads(uid: string, { limitTo = 50 } = {}) {
   const db = getDb();

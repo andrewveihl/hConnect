@@ -86,6 +86,9 @@
   let disposeEmojiOutside: (() => void) | null = null;
   let fileEl: HTMLInputElement | null = null;
   let inputEl: HTMLTextAreaElement | null = null;
+  let inputFocused = false;
+  let keyboardInsetFrame: number | null = null;
+  let syncKeyboardInset: (() => void) | null = null;
 
   let mentionActive = false;
   let mentionFiltered: MentionCandidate[] = [];
@@ -97,6 +100,9 @@
   const mentionDraft = new Map<string, MentionRecord>();
 
   const REPLY_PREVIEW_LIMIT = 160;
+  const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
+  const KEYBOARD_MOBILE_MAX_WIDTH = 900;
+  const KEYBOARD_ACTIVATION_THRESHOLD = 80;
 
   function clipReply(value: string | null | undefined, limit = REPLY_PREVIEW_LIMIT) {
     if (!value) return '';
@@ -216,6 +222,16 @@
   function handleSelectionChange() {
     if (!mentionOptions.length) return;
     requestAnimationFrame(() => updateMentionState());
+  }
+
+  function handleTextareaFocus() {
+    inputFocused = true;
+    syncKeyboardInset?.();
+  }
+
+  function handleTextareaBlur() {
+    inputFocused = false;
+    syncKeyboardInset?.();
   }
 
   function collectMentions(value: string): MentionRecord[] {
@@ -439,6 +455,43 @@
     };
   });
 
+  onMount(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const root = document.documentElement;
+
+    const applyKeyboardInset = () => {
+      if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
+      keyboardInsetFrame = requestAnimationFrame(() => {
+        keyboardInsetFrame = null;
+        if (!inputFocused || window.innerWidth > KEYBOARD_MOBILE_MAX_WIDTH) {
+          root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
+          return;
+        }
+        const diff = Math.max(0, Math.round(window.innerHeight - viewport.height));
+        const offset = diff > KEYBOARD_ACTIVATION_THRESHOLD ? diff : 0;
+        root.style.setProperty(KEYBOARD_OFFSET_VAR, offset ? `${offset}px` : '0px');
+      });
+    };
+
+    const handleViewportChange = () => applyKeyboardInset();
+    viewport.addEventListener('resize', handleViewportChange);
+    viewport.addEventListener('scroll', handleViewportChange);
+    window.addEventListener('orientationchange', handleViewportChange);
+    syncKeyboardInset = applyKeyboardInset;
+    applyKeyboardInset();
+
+    return () => {
+      viewport.removeEventListener('resize', handleViewportChange);
+      viewport.removeEventListener('scroll', handleViewportChange);
+      window.removeEventListener('orientationchange', handleViewportChange);
+      if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
+      root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
+      syncKeyboardInset = null;
+    };
+  });
+
   function onEsc(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (mentionActive) {
@@ -548,6 +601,8 @@
         on:input={handleInput}
         on:keyup={handleSelectionChange}
         on:click={handleSelectionChange}
+        on:focus={handleTextareaFocus}
+        on:blur={handleTextareaBlur}
         {disabled}
         aria-label="Message input"
       />

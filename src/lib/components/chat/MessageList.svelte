@@ -706,6 +706,7 @@
   .message-avatar {
     width: 2.5rem;
     height: 2.5rem;
+    min-width: 2.5rem;
     border-radius: 9999px;
     border: 1px solid var(--chat-bubble-other-border);
     background: color-mix(in srgb, var(--chat-bubble-other-bg) 35%, transparent);
@@ -713,6 +714,7 @@
     place-items: center;
     overflow: hidden;
     box-shadow: 0 8px 20px rgba(6, 9, 12, 0.25);
+    flex: 0 0 auto;
   }
 
   .message-layout--mine .message-avatar {
