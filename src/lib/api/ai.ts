@@ -16,24 +16,44 @@ export type PredictionInput = {
   platform?: 'desktop' | 'mobile';
 };
 
-async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-  const response = await fetch('/api/ai', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal
-  });
-  if (!response.ok) {
-    let detail: string | undefined;
-    try {
-      const payload = await response.json();
-      detail = payload?.error;
-    } catch {
-      detail = await response.text();
-    }
-    throw new Error(detail || `AI request failed (${response.status})`);
+const LOCAL_ENDPOINT = '/api/ai';
+const FALLBACK_ENDPOINT = 'https://hconnectbackend-118576002113.us-east5.run.app/api/ai';
+const ENDPOINTS = [LOCAL_ENDPOINT, FALLBACK_ENDPOINT].filter(
+  (endpoint, index, list) => endpoint && list.indexOf(endpoint) === index
+);
+
+async function readErrorDetail(response: Response) {
+  try {
+    const payload = await response.clone().json();
+    if (payload && typeof payload.error === 'string') return payload.error;
+  } catch {}
+  try {
+    return await response.clone().text();
+  } catch {
+    return null;
   }
-  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  let lastError: Error | null = null;
+  for (const endpoint of ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal
+      });
+      if (!response.ok) {
+        const detail = await readErrorDetail(response);
+        throw new Error(detail || `AI request failed (${response.status})`);
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('AI request failed');
+    }
+  }
+  throw lastError ?? new Error('AI request failed');
 }
 
 export async function requestReplySuggestion(input: ReplySuggestionInput, signal?: AbortSignal) {
