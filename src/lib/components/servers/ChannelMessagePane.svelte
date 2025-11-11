@@ -30,6 +30,7 @@
     onCreateForm?: (payload: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) => void;
     onUploadFiles?: (payload: { files: File[]; replyTo?: ReplyReferenceInput | null }) => void;
     pendingUploads?: PendingUploadPreview[];
+    scrollToBottomSignal?: number;
     replyTarget?: ReplyReferenceInput | null;
     empty?: import('svelte').Snippet;
   }
@@ -56,6 +57,7 @@
     onCreateForm = () => {},
     onUploadFiles = () => {},
     pendingUploads = [],
+    scrollToBottomSignal = 0,
     replyTarget = null,
     empty
   }: Props = $props();
@@ -70,6 +72,7 @@
       users={profiles}
       {currentUserId}
       {pendingUploads}
+      {scrollToBottomSignal}
       on:vote={onVote}
       on:submitForm={onSubmitForm}
       on:react={onReact}
