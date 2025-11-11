@@ -45,15 +45,20 @@ export type ThreadSummaryItem = {
   messageId?: string | null;
 };
 
-const LOCAL_ENDPOINT = '/api/ai';
-const FALLBACK_ENDPOINT = 'https://hconnectbackend-118576002113.us-east5.run.app/api/ai';
+const rawBase = typeof import.meta !== 'undefined' ? import.meta.env?.VITE_AI_API_BASE ?? '' : '';
+const apiBase = rawBase.trim().replace(/\/+$/, '');
+const REMOTE_ENDPOINT =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_AI_FALLBACK) ||
+  'https://hconnectbackend-118576002113.us-east5.run.app/api/ai';
 const isBrowser = typeof window !== 'undefined';
+const currentOrigin = isBrowser ? window.location.origin : '';
+const isLocalDev = /^http:\/\/localhost(?::\d+)?$/i.test(currentOrigin);
+const LOCAL_ENDPOINT = apiBase ? `${apiBase}/api/ai` : isLocalDev ? REMOTE_ENDPOINT : '/api/ai';
 const fallbackPref =
   typeof import.meta !== 'undefined' ? import.meta.env?.VITE_AI_REMOTE_FALLBACK : undefined;
-const remoteFallbackEnabled =
-  fallbackPref === '1' ||
-  (fallbackPref !== '0' && (!isBrowser || (typeof import.meta !== 'undefined' && import.meta.env?.MODE === 'production')));
-const ENDPOINTS = [LOCAL_ENDPOINT, ...(remoteFallbackEnabled ? [FALLBACK_ENDPOINT] : [])].filter(
+const remoteFallbackEnabled = fallbackPref !== '0';
+const FALLBACK_ENDPOINT = !apiBase && remoteFallbackEnabled ? REMOTE_ENDPOINT : '';
+const ENDPOINTS = [LOCAL_ENDPOINT, ...(FALLBACK_ENDPOINT ? [FALLBACK_ENDPOINT] : [])].filter(
   (endpoint, index, list) => endpoint && list.indexOf(endpoint) === index
 );
 
@@ -107,6 +112,9 @@ async function postJson<T>(body: Record<string, unknown>, options: PostOptions =
         continue;
       }
       errors.push(`${endpoint}: ${message}`);
+      if (typeof console !== 'undefined') {
+        console.error('[ai] request error', { endpoint, body, message });
+      }
     }
   }
   if (errors.length) {

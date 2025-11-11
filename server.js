@@ -15,12 +15,18 @@ const allowedOrigins = allowedOriginsEnv
   .map((entry) => entry.trim())
   .filter(Boolean);
 
+const DEV_CORS_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+const allowedOriginSet = new Set(
+  [...allowedOrigins, ...DEV_CORS_ORIGINS].map((entry) => entry.toLowerCase())
+);
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  const normalizedOrigin = origin?.toLowerCase();
   const allowOrigin =
-    allowedOrigins.length === 0
+    allowedOriginSet.size === 0
       ? origin ?? '*'
-      : origin && allowedOrigins.some((allowed) => allowed === origin)
+      : normalizedOrigin && allowedOriginSet.has(normalizedOrigin)
       ? origin
       : null;
 
