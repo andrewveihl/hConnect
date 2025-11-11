@@ -3,6 +3,35 @@ import express from 'express';
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
+const allowedOriginsEnv = process.env.CORS_ALLOWED_ORIGINS ?? '';
+const allowedOrigins = allowedOriginsEnv
+  .split(',')
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowOrigin =
+    allowedOrigins.length === 0
+      ? origin ?? '*'
+      : origin && allowedOrigins.some((allowed) => allowed === origin)
+      ? origin
+      : null;
+
+  if (allowOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  return next();
+});
+
 const OPENAI_KEY =
   process.env.OPENAI_API_KEY ||
   process.env.OPENAI_KEY ||
