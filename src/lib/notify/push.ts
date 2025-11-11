@@ -1,6 +1,6 @@
 // src/lib/notify/push.ts
 import { browser } from '$app/environment';
-import { env as dynamicPublic } from '$env/dynamic/public';
+import { PUBLIC_FCM_VAPID_KEY } from '$env/static/public';
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
 import { collection, doc, serverTimestamp, setDoc, deleteDoc } from 'firebase/firestore';
 
@@ -61,7 +61,7 @@ export async function enablePushForUser(uid: string): Promise<string | null> {
   if (!sw) return null;
 
   const { app } = await ensureFirebaseReady();
-  const vapid = dynamicPublic.PUBLIC_FCM_VAPID_KEY ?? '';
+  const vapid = PUBLIC_FCM_VAPID_KEY ?? '';
   if (!vapid) {
     console.warn('No PUBLIC_FCM_VAPID_KEY set; push will be limited to foreground notifications.');
   }
