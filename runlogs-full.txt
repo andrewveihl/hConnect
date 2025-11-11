@@ -1,0 +1,219 @@
+2025-11-11 05:46:29 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:46:31 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:46:41 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:48:17 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:49:57 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:49:58 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:49:58 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:50:01 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:50:02 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:50:02 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:50:03 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:50:18 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:51:55 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:51:55 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:51:56 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 05:53:38 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:54:05 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:23 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:24 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:24 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:25 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:25 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:25 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 05:59:25 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:01:35 GET 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 06:01:35 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/css/support_parent.css
+2025-11-11 06:01:35 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/js/twint_ch.js
+2025-11-11 06:01:35 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/js/lkk_ch.js
+2025-11-11 06:08:57 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:09:24 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:10:31 GET 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:14:06 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:14:06 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:14:12 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:14:12 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:20:10 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:20:14 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:20:47 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 06:20:47 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:21:18 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:22:17 POST 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:24:57 GET 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 06:24:58 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/favicon.ico
+2025-11-11 06:27:36 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:27:36 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:27:37 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 06:42:45 ?ELIFECYCLE? Command failed.
+2025-11-11 07:59:37 GET 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 07:59:39 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 07:59:39 > node server.js
+2025-11-11 07:59:39 listening on 8080
+2025-11-11 07:59:40 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/robots.txt
+2025-11-11 07:59:40 GET 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 08:12:14 HEAD 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 08:12:15 HEAD 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 08:12:25 GET 200 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/
+2025-11-11 08:12:25 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/favicon.ico
+2025-11-11 08:27:35 ?ELIFECYCLE? Command failed.
+2025-11-11 09:27:49 GET 404 https://t-1982474277---hconnectbackend-xpac7ukbha-ul.a.run.app/.env
+2025-11-11 09:27:51 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 09:27:51 > node server.js
+2025-11-11 09:27:51 listening on 8080
+2025-11-11 09:42:55 ?ELIFECYCLE? Command failed.
+2025-11-11 15:17:30 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:17:31 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 15:17:31 > node server.js
+2025-11-11 15:17:31 listening on 8080
+2025-11-11 15:17:32 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:20:14 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:20:14 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:21:47 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:21:47 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:30:20 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:30:21 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:37:21 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 15:37:26 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:37:48 POST 400 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:37:49 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:92:19)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+2025-11-11 15:38:15 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:38:23 POST 400 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:38:25 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:92:19)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+2025-11-11 15:42:53 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:42:54 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:43:00 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:43:00 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:43:04 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:43:05 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:43:34 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 15:43:39 POST 400 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:43:40 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:92:19)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+2025-11-11 15:44:23 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 15:47:08 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 15:47:18 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:47:18 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:47:20 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:47:20 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:47:21 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:47:21 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:48:38 GET 200 https://hconnectbackend-118576002113.us-east5.run.app/
+2025-11-11 15:48:38 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/favicon.ico
+2025-11-11 15:49:02 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:49:02 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 15:49:22 POST 400 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 15:49:23 SyntaxError: Unexpected token ''', "'{intent:r"... is not valid JSON
+    at JSON.parse (<anonymous>)
+    at createStrictSyntaxError (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:169:10)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:86:15)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+2025-11-11 16:03:17 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 16:03:31 POST 400 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:03:32 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:92:19)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+2025-11-11 16:05:31 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:05:32 GET 304 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:05:33 GET 304 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:05:43 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:05:43 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 16:09:26 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:09:26 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 16:11:05 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:11:08 GET 304 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:19:49 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:19:54 GET 304 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:20:03 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:20:03 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 16:22:07 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:22:26 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 16:25:10 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 16:25:18 POST 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 16:40:25 ?ELIFECYCLE? Command failed.
+2025-11-11 16:58:50 GET 200 https://hconnectbackend-118576002113.us-east5.run.app/
+2025-11-11 16:58:52 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 16:58:52 > node server.js
+2025-11-11 16:58:52 listening on 8080
+2025-11-11 17:13:55 ?ELIFECYCLE? Command failed.
+2025-11-11 17:29:08 GET 200 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/hello
+2025-11-11 17:29:10 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 17:29:10 > node server.js
+2025-11-11 17:29:11 listening on 8080
+2025-11-11 17:29:53 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 17:29:53 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 17:30:04 GET 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 17:42:49 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 17:42:49 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 17:51:18 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 17:51:19 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 17:53:25 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 17:53:25 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 17:53:44 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:03:36 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:18:45 ?ELIFECYCLE? Command failed.
+2025-11-11 18:22:49 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:22:50 > hconnect-6212b@0.0.1 start /workspace
+2025-11-11 18:22:50 > node server.js
+2025-11-11 18:22:51 listening on 8080
+2025-11-11 18:23:03 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 18:35:15 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:35:20 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 18:41:17 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 18:41:17 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:44:52 OPTIONS 404 https://hconnectbackend-118576002113.us-east5.run.app/api/ai
+2025-11-11 18:45:05 POST 400 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
+2025-11-11 18:45:06 SyntaxError: Unexpected non-whitespace character after JSON at position 45 (line 1 column 46)
+    at JSON.parse (<anonymous>)
+    at parse (/workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/types/json.js:92:19)
+    at /workspace/node_modules/.pnpm/body-parser@1.20.3/node_modules/body-parser/lib/read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+    at invokeCallback (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:238:16)
+    at done (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:227:7)
+    at IncomingMessage.onEnd (/workspace/node_modules/.pnpm/raw-body@2.5.2/node_modules/raw-body/index.js:287:7)
+    at IncomingMessage.emit (node:events:508:28)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+2025-11-11 18:46:19 POST 404 https://hconnectbackend-xpac7ukbha-ul.a.run.app/api/ai
