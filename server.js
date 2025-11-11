@@ -232,6 +232,7 @@ aiRouter.post('/', async (req, res) => {
 
 aiRouter.all('*', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
+console.log('[ai] registering /api/ai routes');
 app.use('/api/ai', aiRouter);
 
 const describeRoutes = () =>
