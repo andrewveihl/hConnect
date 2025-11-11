@@ -124,6 +124,9 @@ let showThreads = $state(false);
 let showInfo = $state(false);
 let lastThreadID: string | null = null;
 let pendingReply: ReplyReferenceInput | null = $state(null);
+let replySourceMessage: any = $state(null);
+let latestInboundMessage: any = $state(null);
+let aiAssistEnabled = $state(true);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -972,6 +975,37 @@ run(() => {
     otherMessageUser = otherUid ? messageUsers[otherUid] ?? null : null;
   });
 
+  run(() => {
+    if (!me?.uid) {
+      aiAssistEnabled = true;
+      return;
+    }
+    const profile = messageUsers[me.uid] ?? null;
+    const prefs = (profile?.settings ?? {}) as any;
+    aiAssistEnabled = prefs.aiAssist?.enabled !== false;
+  });
+
+  run(() => {
+    const targetId = pendingReply?.messageId ?? null;
+    if (targetId) {
+      const source = messages.find((row) => row?.id === targetId);
+      replySourceMessage = source ?? null;
+    } else {
+      replySourceMessage = null;
+    }
+  });
+
+  run(() => {
+    if (!messages.length) {
+      latestInboundMessage = null;
+      return;
+    }
+    const fallback = [...messages]
+      .reverse()
+      .find((msg) => msg?.uid && me?.uid && msg.uid !== me.uid);
+    latestInboundMessage = fallback ?? null;
+  });
+
   let displayName =
     $derived(pickString(otherProfile?.displayName) ??
     pickString(otherProfile?.name) ??
@@ -1068,6 +1102,10 @@ run(() => {
         placeholder={`Message`}
         {mentionOptions}
         replyTarget={pendingReply}
+        replySource={replySourceMessage}
+        defaultSuggestionSource={latestInboundMessage}
+        aiAssistEnabled={aiAssistEnabled}
+        threadLabel={displayName}
         on:send={onSend}
         on:submit={onSend}
         on:sendGif={(e) => handleSendGif(e.detail)}

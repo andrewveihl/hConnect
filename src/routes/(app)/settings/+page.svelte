@@ -55,6 +55,14 @@ let avatarError: string | null = $state(null);
     allMessages: false
   };
 
+  type AiAssistPrefs = {
+    enabled: boolean;
+  };
+
+  let aiAssist: AiAssistPrefs = $state({
+    enabled: true
+  });
+
   run(() => {
     previewPhotoURL =
       pickString(photoURL) ??
@@ -127,6 +135,11 @@ let avatarError: string | null = $state(null);
       allMessages: !!prefs.allMessages
     };
 
+    const aiPrefs = (settings.aiAssist ?? {}) as any;
+    aiAssist = {
+      enabled: aiPrefs.enabled !== false
+    };
+
     const themePref = settings.theme as ThemeMode | undefined;
     if (themePref === 'light' || themePref === 'dark') {
       setTheme(themePref, { persist: true });
@@ -167,7 +180,8 @@ let avatarError: string | null = $state(null);
       authPhotoURL: normalizedAuthPhoto,
       lastActiveAt: serverTimestamp(),
       'settings.notificationPrefs': notif,
-      'settings.theme': themeMode
+      'settings.theme': themeMode,
+      'settings.aiAssist': aiAssist
     });
     alert('Saved.');
   }
@@ -415,6 +429,35 @@ let avatarError: string | null = $state(null);
             </footer>
           </section>
 
+          <section class="settings-card settings-card--ai">
+            <header>
+              <h2>AI typing assist</h2>
+              <p>Let OpenAI draft starter replies, next words, and mobile quick-type chips.</p>
+            </header>
+            <div class="settings-ai-toggle">
+              <label class="settings-switch">
+                <input
+                  type="checkbox"
+                  bind:checked={aiAssist.enabled}
+                  aria-label="Enable AI typing assistant"
+                />
+                <span class="settings-switch__track">
+                  <span class="settings-switch__thumb"></span>
+                </span>
+              </label>
+              <div class="settings-ai-copy">
+                <h3>Smart compose</h3>
+                <p>
+                  On desktop, replying to a message offers an OpenAI suggestion and inline next-word predictions.
+                  Mobile keyboards show three quick-type options inspired by Apple's autofill bar. Disable it anytime if you prefer manual typing.
+                </p>
+              </div>
+            </div>
+            <footer class="settings-actions settings-actions--inline">
+              <button class="btn btn-primary" onclick={save}>Save AI settings</button>
+            </footer>
+          </section>
+
           <section class="settings-card settings-card--appearance">
             <header>
               <h2>Appearance</h2>
@@ -506,6 +549,7 @@ let avatarError: string | null = $state(null);
     grid-template-areas:
       'profile'
       'notifications'
+      'ai'
       'appearance'
       'invite';
   }
@@ -518,6 +562,10 @@ let avatarError: string | null = $state(null);
     grid-area: notifications;
   }
 
+  .settings-card--ai {
+    grid-area: ai;
+  }
+
   .settings-card--appearance {
     grid-area: appearance;
   }
@@ -526,12 +574,74 @@ let avatarError: string | null = $state(null);
     grid-area: invite;
   }
 
+  .settings-ai-toggle {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .settings-switch {
+    position: relative;
+    width: 3.1rem;
+    height: 1.6rem;
+    flex-shrink: 0;
+  }
+
+  .settings-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .settings-switch__track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    transition: background 0.2s ease;
+    cursor: pointer;
+    padding: 0.2rem;
+  }
+
+  .settings-switch__thumb {
+    display: block;
+    width: 1.2rem;
+    height: 1.2rem;
+    border-radius: 50%;
+    background: var(--color-panel);
+    box-shadow: var(--shadow-soft);
+    transition: transform 0.2s ease;
+  }
+
+  .settings-switch input:checked + .settings-switch__track {
+    background: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  }
+
+  .settings-switch input:checked + .settings-switch__track .settings-switch__thumb {
+    transform: translateX(1.45rem);
+    background: var(--color-accent);
+  }
+
+  .settings-ai-copy h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .settings-ai-copy p {
+    margin: 0.25rem 0 0;
+    color: var(--text-60);
+    font-size: 0.88rem;
+    line-height: 1.35;
+  }
+
   @media (min-width: 1024px) {
     .settings-grid {
       grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
       grid-template-areas:
         'profile profile'
         'notifications invite'
+        'ai invite'
         'appearance invite';
       align-items: start;
     }
@@ -811,6 +921,7 @@ let avatarError: string | null = $state(null);
       grid-template-areas:
         'profile'
         'notifications'
+        'ai'
         'appearance'
         'invite';
     }
@@ -872,6 +983,11 @@ let avatarError: string | null = $state(null);
     .settings-chip {
       padding: 0.4rem 0.75rem;
       font-size: 0.82rem;
+    }
+
+    .settings-ai-toggle {
+      flex-direction: column;
+      align-items: flex-start;
     }
 
     .appearance-option {
