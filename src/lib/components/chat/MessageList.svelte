@@ -272,6 +272,7 @@
   }
 
   let lastLen = 0;
+  let lastPendingLen = 0;
 
   function totalVotes(votes?: Record<number, number>) {
     if (!votes) return 0;
@@ -313,6 +314,13 @@
   run(() => {
     if (scrollToBottomSignal && scrollToBottomSignal !== lastScrollSignal) {
       lastScrollSignal = scrollToBottomSignal;
+      tick().then(() => scrollToBottom('auto'));
+    }
+  });
+
+  run(() => {
+    if (pendingUploads.length !== lastPendingLen) {
+      lastPendingLen = pendingUploads.length;
       tick().then(() => scrollToBottom('auto'));
     }
   });
@@ -1675,7 +1683,6 @@
     </div>
   </div>
 {/if}
-
 
 
 

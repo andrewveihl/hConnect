@@ -1,12 +1,13 @@
 <script lang="ts">
   import { run, preventDefault } from 'svelte/legacy';
 
-  import { createEventDispatcher, onMount, tick } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
   import GifPicker from './GifPicker.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
+  import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
 
   type MentionCandidate = {
     uid: string;
@@ -29,6 +30,15 @@
 
   type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
   type UploadRequest = { files: File[]; replyTo?: ReplyReferenceInput | null };
+  type AttachmentDraft = {
+    id: string;
+    file: File;
+    name: string;
+    size?: number;
+    contentType?: string | null;
+    isImage: boolean;
+    previewUrl: string | null;
+  };
 
   const canonical = (value: string) =>
     (value ?? '')
@@ -103,6 +113,7 @@
   let disposeEmojiOutside: (() => void) | null = $state(null);
   let fileEl: HTMLInputElement | null = $state(null);
   let inputEl: HTMLTextAreaElement | null = $state(null);
+  let attachments: AttachmentDraft[] = $state([]);
   let inputFocused = false;
   let keyboardInsetFrame: number | null = null;
   let syncKeyboardInset: (() => void) | null = null;
@@ -120,6 +131,59 @@
   const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
   const KEYBOARD_MOBILE_MAX_WIDTH = 900;
   const KEYBOARD_ACTIVATION_THRESHOLD = 80;
+  const createAttachmentId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `draft-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6)
+      .toString(36)
+      .padStart(4, '0')}`;
+  };
+
+  const buildAttachmentDraft = (file: File): AttachmentDraft => {
+    const isImage = looksLikeImage({ name: file?.name, type: file?.type });
+    const previewUrl =
+      isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+        ? URL.createObjectURL(file)
+        : null;
+    return {
+      id: createAttachmentId(),
+      file,
+      name: file?.name || 'Attachment',
+      size: file?.size,
+      contentType: file?.type ?? null,
+      isImage,
+      previewUrl
+    };
+  };
+
+  const revokeAttachmentPreview = (entry: AttachmentDraft | null | undefined) => {
+    if (entry?.previewUrl) {
+      try {
+        URL.revokeObjectURL(entry.previewUrl);
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  function queueAttachments(files: File[]) {
+    const selection = files.filter((file): file is File => file instanceof File);
+    if (!selection.length) return;
+    const drafts = selection.map((file) => buildAttachmentDraft(file));
+    attachments = [...attachments, ...drafts];
+  }
+
+  function removeAttachment(id: string) {
+    const target = attachments.find((item) => item.id === id);
+    if (target) revokeAttachmentPreview(target);
+    attachments = attachments.filter((item) => item.id !== id);
+  }
+
+  function clearAttachments() {
+    attachments.forEach((entry) => revokeAttachmentPreview(entry));
+    attachments = [];
+  }
 
   function clipReply(value: string | null | undefined, limit = REPLY_PREVIEW_LIMIT) {
     if (!value) return '';
@@ -158,19 +222,44 @@
 
   function submit(e?: Event) {
     e?.preventDefault();
+    if (disabled) return;
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    const mentions = collectMentions(text);
-    const payload = {
-      text: trimmed,
-      mentions,
-      replyTo: replyTarget ?? undefined
-    };
-    onSend(payload);
-    dispatch('send', payload);
-    text = '';
-    mentionDraft.clear();
-    closeMentionMenu();
+    const hasText = Boolean(trimmed);
+    const hasAttachments = attachments.length > 0;
+    if (!hasText && !hasAttachments) return;
+    const replyRef = replyTarget ?? null;
+
+    if (hasText) {
+      const mentions = collectMentions(text);
+      const payload = {
+        text: trimmed,
+        mentions,
+        replyTo: replyRef ?? undefined
+      };
+      onSend(payload);
+      dispatch('send', payload);
+      text = '';
+      mentionDraft.clear();
+      closeMentionMenu();
+    }
+
+    if (hasAttachments) {
+      const payload: UploadRequest = {
+        files: attachments.map((item) => item.file),
+        replyTo: replyRef
+      };
+      onUpload(payload);
+      dispatch('upload', payload);
+      clearAttachments();
+    }
+
+    if (typeof queueMicrotask === 'function') {
+      queueMicrotask(() => {
+        inputEl?.focus();
+      });
+    } else {
+      setTimeout(() => inputEl?.focus(), 0);
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -210,13 +299,33 @@
   }
 
   function onFilesChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const files = Array.from(input.files ?? []);
+    const input = e.target as HTMLInputElement | null;
+    const files = Array.from(input?.files ?? []);
     if (!files.length) return;
-    const payload: UploadRequest = { files, replyTo: replyTarget ?? null };
-    onUpload(payload);
-    dispatch('upload', payload);
-    input.value = '';
+    if (disabled) {
+      if (input) input.value = '';
+      return;
+    }
+    queueAttachments(files);
+    if (input) {
+      input.value = '';
+    }
+  }
+
+  function handlePaste(event: ClipboardEvent) {
+    if (disabled) return;
+    const data = event.clipboardData;
+    if (!data) return;
+    const directFiles = Array.from(data.files ?? []);
+    const itemFiles = Array.from(data.items ?? [])
+      .map((item) => (item.kind === 'file' ? item.getAsFile() : null))
+      .filter((file): file is File => file instanceof File);
+    const merged: File[] = [];
+    for (const file of [...directFiles, ...itemFiles]) {
+      if (file && !merged.includes(file)) merged.push(file);
+    }
+    if (!merged.length) return;
+    queueAttachments(merged);
   }
 
   function handleInput() {
@@ -494,6 +603,10 @@
     };
   });
 
+  onDestroy(() => {
+    clearAttachments();
+  });
+
   function onEsc(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (mentionActive) {
@@ -549,6 +662,43 @@
       >
         <i class="bx bx-x"></i>
       </button>
+    </div>
+  {/if}
+
+  {#if attachments.length}
+    <div class="chat-attachments" role="list">
+      {#each attachments as attachment}
+        {@const attachmentSize = formatBytes(attachment.size)}
+        <div class="chat-attachment" role="listitem">
+          {#if attachment.isImage && attachment.previewUrl}
+            <div class="chat-attachment__thumb">
+              <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
+            </div>
+          {:else}
+            <div class="chat-attachment__icon" aria-hidden="true">
+              <i class="bx bx-paperclip"></i>
+            </div>
+          {/if}
+          <div class="chat-attachment__meta">
+            <div class="chat-attachment__name" title={attachment.name}>{attachment.name}</div>
+            <div class="chat-attachment__info">
+              <span>{attachment.contentType ?? (attachment.isImage ? 'Image' : 'File')}</span>
+              {#if attachmentSize}
+                <span aria-hidden="true">&bull;</span>
+                <span>{attachmentSize}</span>
+              {/if}
+            </div>
+          </div>
+          <button
+            type="button"
+            class="chat-attachment__remove"
+            aria-label={`Remove ${attachment.name}`}
+            onclick={() => removeAttachment(attachment.id)}
+          >
+            <i class="bx bx-x"></i>
+          </button>
+        </div>
+      {/each}
     </div>
   {/if}
 
@@ -623,6 +773,7 @@
         placeholder={placeholder}
         onkeydown={onKeydown}
         oninput={handleInput}
+        onpaste={handlePaste}
         onkeyup={handleSelectionChange}
         onclick={handleSelectionChange}
         onfocus={handleTextareaFocus}
@@ -697,7 +848,7 @@
       <button
         class="chat-send-button"
         type="submit"
-        disabled={disabled || !text.trim()}
+        disabled={disabled || (!text.trim() && attachments.length === 0)}
         aria-label="Send message"
         title="Send"
       >
@@ -718,6 +869,94 @@
 {/if}
 
 <style>
+  .chat-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    border-radius: var(--radius-xl);
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+  }
+
+  .chat-attachment {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    max-width: 15rem;
+    padding: 0.35rem 0.5rem 0.35rem 0.35rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+  }
+
+  .chat-attachment__thumb,
+  .chat-attachment__icon {
+    width: 3rem;
+    height: 3rem;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    flex-shrink: 0;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+    display: grid;
+    place-items: center;
+  }
+
+  .chat-attachment__thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .chat-attachment__icon i {
+    font-size: 1.3rem;
+    color: var(--text-70);
+  }
+
+  .chat-attachment__meta {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .chat-attachment__name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chat-attachment__info {
+    font-size: 0.75rem;
+    color: var(--text-60);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+
+  .chat-attachment__remove {
+    border: none;
+    background: transparent;
+    color: var(--text-60);
+    border-radius: 999px;
+    width: 1.75rem;
+    height: 1.75rem;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    transition: color 120ms ease, background 120ms ease;
+  }
+
+  .chat-attachment__remove:hover,
+  .chat-attachment__remove:focus-visible {
+    color: var(--color-text-primary);
+    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
+    outline: none;
+  }
+
   .chat-input-popover {
     position: absolute;
     bottom: 100%;

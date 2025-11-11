@@ -3,6 +3,8 @@
 
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
+  import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+  import { db } from '$lib/firestore';
   import { user } from '$lib/stores/user';
   import {
     searchUsersByName, getOrCreateDMThread, streamMyDMs,
@@ -16,6 +18,39 @@
   interface Props {
     activeThreadId?: string | null;
   }
+
+  type PresenceState = 'online' | 'idle' | 'offline';
+
+  type PresenceDoc = {
+    state?: string | null;
+    status?: string | null;
+    online?: boolean | null;
+    isOnline?: boolean | null;
+    active?: boolean | null;
+    lastActive?: any;
+    lastSeen?: any;
+    updatedAt?: any;
+    timestamp?: any;
+  };
+
+  const presenceLabels: Record<PresenceState, string> = {
+    online: 'Online',
+    idle: 'Idle',
+    offline: 'Offline'
+  };
+
+  const presenceClassMap: Record<PresenceState, string> = {
+    online: 'presence-dot--online',
+    idle: 'presence-dot--idle',
+    offline: 'presence-dot--offline'
+  };
+
+  const THREAD_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+  const THREAD_DATE_WITH_YEAR_FORMAT = new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
 
   let { activeThreadId = $bindable(null) }: Props = $props();
 
@@ -113,6 +148,7 @@
     Object.values(metaUnsubs).forEach((stop) => stop());
     metaUnsubs = {};
   });
+  onDestroy(() => cleanupPresence());
 
   // Resolve names for "other" participant so the list shows names, not UIDs.
   let nameCache: Record<string, string> = $state({});
@@ -138,6 +174,37 @@
     }
     return null;
   }
+
+  function pickString(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length) return trimmed;
+    }
+    return undefined;
+  }
+
+  const isRecent = (value: unknown, ms = 5 * 60 * 1000) => {
+    if (!value) return false;
+    try {
+      if (typeof value === 'number') {
+        return Date.now() - value <= ms;
+      }
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) && Date.now() - parsed <= ms;
+      }
+      if (value instanceof Date) {
+        return Date.now() - value.getTime() <= ms;
+      }
+      if (typeof (value as any)?.toMillis === 'function') {
+        const ts = (value as any).toMillis();
+        return Number.isFinite(ts) && Date.now() - ts <= ms;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
 
 
 
@@ -204,6 +271,28 @@
     return 0;
   }
 
+  function formatThreadTimestamp(value: any): string | null {
+    const ts = timestampValue(value);
+    if (!ts) return null;
+    const now = Date.now();
+    const diff = now - ts;
+    if (diff < 60 * 1000) return 'Now';
+    if (diff < 60 * 60 * 1000) {
+      const mins = Math.max(1, Math.round(diff / 60000));
+      return `${mins}m`;
+    }
+    if (diff < 24 * 60 * 60 * 1000) {
+      const hours = Math.max(1, Math.round(diff / 3600000));
+      return `${hours}h`;
+    }
+    const date = new Date(ts);
+    const nowDate = new Date();
+    if (date.getFullYear() === nowDate.getFullYear()) {
+      return THREAD_DATE_FORMAT.format(date);
+    }
+    return THREAD_DATE_WITH_YEAR_FORMAT.format(date);
+  }
+
   function previewTextFor(thread: any) {
     const summary = thread?.lastMessage;
     if (!summary) return 'No messages yet';
@@ -241,6 +330,142 @@
     }
   }
 
+
+  /* ---------------- Presence tracking ---------------- */
+  let presenceDocs: Record<string, PresenceDoc> = $state({});
+  const presenceUnsubs: Record<string, Unsubscribe> = {};
+  let presenceDb: ReturnType<typeof db> | null = null;
+
+  function ensurePresenceDb() {
+    if (typeof window === 'undefined') return null;
+    if (!presenceDb) {
+      try {
+        presenceDb = db();
+      } catch (err) {
+        console.warn('Failed to init Firestore for presence', err);
+        return null;
+      }
+    }
+    return presenceDb;
+  }
+
+  function unsubscribePresence(uid: string) {
+    if (!uid || !presenceUnsubs[uid]) return;
+    presenceUnsubs[uid]!();
+    delete presenceUnsubs[uid];
+    if (presenceDocs[uid]) {
+      const next = { ...presenceDocs };
+      delete next[uid];
+      presenceDocs = next;
+    }
+  }
+
+  function subscribePresence(uid: string) {
+    if (!uid || presenceUnsubs[uid]) return;
+    const database = ensurePresenceDb();
+    if (!database) return;
+    try {
+      const ref = doc(database, 'profiles', uid, 'presence', 'status');
+      presenceUnsubs[uid] = onSnapshot(
+        ref,
+        (snap) => {
+          presenceDocs = { ...presenceDocs, [uid]: (snap.data() as PresenceDoc) ?? {} };
+        },
+        () => {
+          unsubscribePresence(uid);
+        }
+      );
+    } catch (err) {
+      console.warn('Failed to subscribe to presence', err);
+    }
+  }
+
+  function cleanupPresence() {
+    for (const uid in presenceUnsubs) {
+      presenceUnsubs[uid]!();
+      delete presenceUnsubs[uid];
+    }
+    presenceDocs = {};
+    presenceDb = null;
+  }
+
+  function syncPresenceSubscriptions() {
+    if (typeof window === 'undefined') return;
+    const partnerUids = new Set(
+      threads
+        .map((t) => resolveOtherUid(t))
+        .filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
+    );
+    partnerUids.forEach((uid) => subscribePresence(uid));
+    Object.keys(presenceUnsubs).forEach((uid) => {
+      if (!partnerUids.has(uid)) {
+        unsubscribePresence(uid);
+      }
+    });
+  }
+
+  function booleanPresenceFrom(source: any): boolean | null {
+    if (!source || typeof source !== 'object') return null;
+    if (typeof source.online === 'boolean') return source.online;
+    if (typeof source.isOnline === 'boolean') return source.isOnline;
+    if (typeof source.active === 'boolean') return source.active;
+    return null;
+  }
+
+  function statusFromSource(source: any): string | undefined {
+    if (!source || typeof source !== 'object') return undefined;
+    return (
+      pickString(source.status) ??
+      pickString(source.state) ??
+      pickString(source.presenceState) ??
+      pickString((source.presence as any)?.state)
+    );
+  }
+
+  function recentActivityFrom(source: any) {
+    if (!source || typeof source !== 'object') return null;
+    return source.lastActive ?? source.lastSeen ?? source.updatedAt ?? source.timestamp ?? null;
+  }
+
+  function presenceStateFor(uid: string | null, thread?: any): PresenceState {
+    if (!uid) return 'offline';
+    const sources = [
+      thread?.presence ?? null,
+      thread?.profile ?? null,
+      thread ?? null,
+      peopleMap[uid] ?? null,
+      presenceDocs[uid] ?? null
+    ];
+
+    for (const source of sources) {
+      const bool = booleanPresenceFrom(source);
+      if (bool !== null) {
+        return bool ? 'online' : 'offline';
+      }
+    }
+
+    for (const source of sources) {
+      const raw = statusFromSource(source);
+      if (!raw) continue;
+      const normalized = raw.toLowerCase();
+      if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
+      if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
+      if (['dnd', 'busy', 'offline', 'invisible', 'do not disturb', 'off'].includes(normalized)) return 'offline';
+    }
+
+    for (const source of sources) {
+      const recent = recentActivityFrom(source);
+      if (!recent) continue;
+      if (isRecent(recent, 5 * 60 * 1000)) return 'online';
+      if (isRecent(recent, 30 * 60 * 1000)) return 'idle';
+      return 'offline';
+    }
+
+    return 'offline';
+  }
+
+  const presenceClassFromState = (state: PresenceState) =>
+    presenceClassMap[state] ?? presenceClassMap.offline;
 
 
   /* ---------------- Unread badges ---------------- */
@@ -417,6 +642,9 @@
     manageThreadMetaSubscriptions(threads);
   });
   run(() => {
+    syncPresenceSubscriptions();
+  });
+  run(() => {
     decoratedThreads = threads.map((thread) => {
       const meta = threadMeta[thread.id] ?? null;
       const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
@@ -555,21 +783,38 @@
           {#each sortedThreads as t}
             {@const isActive = activeThreadId === t.id}
             {@const otherPhoto = otherPhotoOf(t)}
+            {@const otherUid = resolveOtherUid(t)}
+            {@const presenceState = presenceStateFor(otherUid, t)}
+            {@const timestampLabel = formatThreadTimestamp(t.updatedAt)}
             <li>
               <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
                 <button
                   class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
                   onclick={() => openExisting(t.id)}
                 >
-                  <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
-                    {#if otherPhoto}
-                      <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
-                    {:else}
-                      <i class="bx bx-user text-lg"></i>
+                  <div class="dm-thread__avatar">
+                    <div class="dm-thread__avatar-img">
+                      {#if otherPhoto}
+                        <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
+                      {:else}
+                        <i class="bx bx-user text-lg text-white/80"></i>
+                      {/if}
+                    </div>
+                    {#if otherUid}
+                      <span
+                        class={`presence-dot ${presenceClassFromState(presenceState)}`}
+                        aria-label={presenceLabels[presenceState]}
+                        title={presenceLabels[presenceState]}
+                      ></span>
                     {/if}
                   </div>
                   <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
+                    <div class="flex items-center gap-2 min-w-0">
+                      <div class="text-sm font-medium leading-5 truncate flex-1 min-w-0">{otherOf(t)}</div>
+                      {#if timestampLabel}
+                        <span class="dm-thread__timestamp">{timestampLabel}</span>
+                      {/if}
+                    </div>
                     <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
                   </div>
                   {#if (unreadMap[t.id] ?? 0) > 0}
@@ -721,6 +966,46 @@
 
 
 <style>
+  .dm-thread__timestamp {
+    font-size: 0.7rem;
+    color: var(--color-text-tertiary, rgba(255, 255, 255, 0.6));
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .dm-thread__avatar {
+    position: relative;
+    width: 2.25rem;
+    height: 2.25rem;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+  }
+
+  .dm-thread__avatar-img {
+    width: 100%;
+    height: 100%;
+    border-radius: 9999px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--color-sidebar, #0f172a) 70%, rgba(255, 255, 255, 0.08));
+  }
+
+  .dm-thread__avatar-img img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+  }
+
+  .dm-thread__avatar .presence-dot {
+    pointer-events: none;
+    z-index: 1;
+    transform: translate(15%, 15%);
+    border-color: color-mix(in srgb, var(--color-sidebar, #0f172a) 70%, rgba(0, 0, 0, 0.6));
+  }
+
   .people-picker {
     background: color-mix(in srgb, var(--color-sidebar) 92%, var(--color-app-overlay) 45%);
     backdrop-filter: blur(14px);

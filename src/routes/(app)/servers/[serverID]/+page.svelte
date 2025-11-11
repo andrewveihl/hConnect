@@ -67,6 +67,7 @@ let replyTarget: ReplyReferenceInput | null = $state(null);
 let lastReplyChannelId: string | null = $state(null);
 let profiles: Record<string, any> = $state({});
 let pendingUploads: PendingUploadPreview[] = $state([]);
+let scrollToBottomSignal = $state(0);
 let lastPendingChannelId: string | null = $state(null);
   const profileUnsubs: Record<string, Unsubscribe> = {};
   let serverDisplayName = $state('Server');
@@ -548,6 +549,10 @@ let lastPendingChannelId: string | null = $state(null);
     return found ?? { id, name: id, type: 'text' };
   }
 
+  const triggerScrollToBottom = () => {
+    scrollToBottomSignal = Date.now();
+  };
+
   const PAGE_SIZE = 50;
   let earliestLoaded: any = null; // Firestore Timestamp or Date
 
@@ -610,6 +615,7 @@ let lastPendingChannelId: string | null = $state(null);
       }
 
       messages = nextMessages;
+      triggerScrollToBottom();
       if (messages.length) {
         earliestLoaded = messages[0]?.createdAt ?? null;
       }
@@ -1390,6 +1396,7 @@ let lastPendingChannelId: string | null = $state(null);
                   {mentionOptions}
                   {replyTarget}
                   {pendingUploads}
+                  {scrollToBottomSignal}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
                   inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
                   inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
@@ -1485,6 +1492,7 @@ let lastPendingChannelId: string | null = $state(null);
             {mentionOptions}
             {replyTarget}
             {pendingUploads}
+            {scrollToBottomSignal}
             emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
             onVote={handleVote}
             onSubmitForm={handleFormSubmit}

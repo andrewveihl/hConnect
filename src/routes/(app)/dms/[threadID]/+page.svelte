@@ -124,7 +124,6 @@ let showThreads = $state(false);
 let showInfo = $state(false);
 let lastThreadID: string | null = null;
 let pendingReply: ReplyReferenceInput | null = $state(null);
-let forceScrollToBottom = true;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -570,7 +569,6 @@ run(() => {
       lastThreadID = threadID;
       showInfo = false;
       pendingReply = null;
-      forceScrollToBottom = true;
       messages = [];
       messagesLoading = true;
     }
@@ -760,9 +758,8 @@ run(() => {
       unsub = streamDMMessages(threadID, async (msgs) => {
         messages = msgs.map((row: any) => toChatMessage(row.id, row));
         messagesLoading = false;
-        if (forceScrollToBottom && messages.length > 0) {
+        if (messages.length > 0) {
           scrollResumeSignal = Date.now();
-          forceScrollToBottom = false;
         }
         if (me?.uid) {
           const last = messages[messages.length - 1];
