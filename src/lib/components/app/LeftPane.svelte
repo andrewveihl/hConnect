@@ -2,6 +2,7 @@
   import { run } from 'svelte/legacy';
 
   import { onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
   import { subscribeUserServers } from '$lib/firestore/servers';
@@ -153,6 +154,10 @@
 
         <a
           href="/dms"
+          onclick={(event) => {
+            event.preventDefault();
+            goto('/dms');
+          }}
           class="rail-button rail-button--primary relative"
           class:rail-button--active={dmsActive}
           class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}

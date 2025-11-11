@@ -38,6 +38,8 @@
   /* ---------------- Search ---------------- */
   const SEARCH_PAGE_SIZE = 20;
   const PEOPLE_PAGE_SIZE = 40;
+  const THREAD_PLACEHOLDERS = Array.from({ length: 4 }, (_, i) => i);
+  const PEOPLE_PLACEHOLDERS = Array.from({ length: 5 }, (_, i) => i);
 
   let term = $state('');
   let searching = $state(false);
@@ -99,6 +101,7 @@
 
   /* ---------------- Threads ---------------- */
   let threads: any[] = $state([]);
+  let threadsLoading = $state(true);
   let unsubThreads: (() => void) | null = $state(null);
   let threadMeta: Record<string, { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }> = $state({});
   let metaUnsubs: Record<string, () => void> = {};
@@ -148,9 +151,7 @@
     if (nameCache[o]) return nameCache[o];
     const fromPeople = peopleMap[o];
     if (fromPeople) {
-      const resolved = fromPeople.displayName || fromPeople.name || fromPeople.email || o;
-      nameCache = { ...nameCache, [o]: resolved };
-      return resolved;
+      return fromPeople.displayName || fromPeople.name || fromPeople.email || o;
     }
     const fallback =
       t.otherName ??
@@ -160,11 +161,7 @@
       t.name ??
       (t.profile && (t.profile.name ?? t.profile.displayName ?? t.profile.email)) ??
       null;
-    if (fallback) {
-      nameCache = { ...nameCache, [o]: fallback };
-      return fallback;
-    }
-    return o;
+    return fallback ?? o;
   }
 
   function otherPhotoOf(t: any) {
@@ -254,6 +251,7 @@
 
   /* ---------------- Everyone (profiles) ---------------- */
   let people: any[] = $state([]);
+  let peopleLoading = $state(true);
   let peopleMap: Record<string, any> = $state({});
   let unsubPeople: (() => void) | null = $state(null);
 
@@ -364,11 +362,16 @@
     me = $user;
   });
   run(() => {
+    unsubThreads?.();
     if (me?.uid) {
-      unsubThreads?.();
+      threadsLoading = true;
       unsubThreads = streamMyDMs(me.uid, (t) => {
         threads = t;
+        threadsLoading = false;
       });
+    } else {
+      threads = [];
+      threadsLoading = false;
     }
   });
   run(() => {
@@ -450,6 +453,7 @@
     }
   });
   run(() => {
+    peopleLoading = true;
     unsubPeople?.();
     unsubPeople = streamProfiles((list) => {
       const filtered = (me?.uid) ? list.filter((p) => p.uid !== me.uid) : list;
@@ -457,6 +461,29 @@
       const map: Record<string, any> = {};
       for (const p of list) map[p.uid] = p;
       peopleMap = map;
+
+      if (filtered.length) {
+        const next = { ...nameCache };
+        let updated = false;
+        for (const person of filtered) {
+          const uid = person?.uid;
+          if (!uid) continue;
+          const resolved =
+            person?.displayName ??
+            person?.name ??
+            person?.email ??
+            null;
+          if (resolved && next[uid] !== resolved) {
+            next[uid] = resolved;
+            updated = true;
+          }
+        }
+        if (updated) {
+          nameCache = next;
+        }
+      }
+
+      peopleLoading = false;
     }, { limitTo: 500 });
   });
   run(() => {
@@ -510,44 +537,60 @@
     <section>
       <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Messages</div>
       <ul class="space-y-0.5 pr-1">
-        {#each sortedThreads as t}
-          {@const isActive = activeThreadId === t.id}
-          {@const otherPhoto = otherPhotoOf(t)}
-          <li>
-            <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
-              <button
-                class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
-                onclick={() => openExisting(t.id)}
-              >
-                <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
-                  {#if otherPhoto}
-                    <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
-                  {:else}
-                    <i class="bx bx-user text-lg"></i>
+        {#if threadsLoading}
+          {#each THREAD_PLACEHOLDERS as idx}
+            <li>
+              <div class="flex items-center gap-3 px-2 py-2 animate-pulse">
+                <div class="w-9 h-9 rounded-full bg-white/10"></div>
+                <div class="flex-1 min-w-0 space-y-1">
+                  <div class="h-3 rounded bg-white/15 w-1/2"></div>
+                  <div class="h-3 rounded bg-white/10 w-1/3"></div>
+                </div>
+                <div class="w-6 h-6 rounded-full bg-white/10"></div>
+              </div>
+            </li>
+          {/each}
+          <li class="sr-only" aria-live="polite">Loading conversations...</li>
+        {:else}
+          {#each sortedThreads as t}
+            {@const isActive = activeThreadId === t.id}
+            {@const otherPhoto = otherPhotoOf(t)}
+            <li>
+              <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+                <button
+                  class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
+                  onclick={() => openExisting(t.id)}
+                >
+                  <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
+                    {#if otherPhoto}
+                      <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
+                    {:else}
+                      <i class="bx bx-user text-lg"></i>
+                    {/if}
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
+                    <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
+                  </div>
+                  {#if (unreadMap[t.id] ?? 0) > 0}
+                    <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
+                      {unreadMap[t.id]}
+                    </span>
                   {/if}
-                </div>
-                <div class="flex-1 min-w-0">
-                  <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
-                  <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
-                </div>
-                {#if (unreadMap[t.id] ?? 0) > 0}
-                  <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
-                    {unreadMap[t.id]}
-                  </span>
-                {/if}
-              </button>
-              <button
-                class="p-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:bg-white/10 text-white/70 hover:text-white transition transition-opacity"
-                aria-label="Delete conversation"
-                onclick={stopPropagation(() => deleteThread(t.id))}
-              >
-                <i class="bx bx-trash"></i>
-              </button>
-            </div>
-          </li>
-        {/each}
-        {#if sortedThreads.length === 0}
-          <li class="px-2 py-2 text-sm text-white/60">No conversations yet.</li>
+                </button>
+                <button
+                  class="p-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:bg-white/10 text-white/70 hover:text-white transition transition-opacity"
+                  aria-label="Delete conversation"
+                  onclick={stopPropagation(() => deleteThread(t.id))}
+                >
+                  <i class="bx bx-trash"></i>
+                </button>
+              </div>
+            </li>
+          {/each}
+          {#if sortedThreads.length === 0}
+            <li class="px-2 py-2 text-sm text-white/60">No conversations yet.</li>
+          {/if}
         {/if}
       </ul>
     </section>
@@ -626,7 +669,22 @@
 
         <section>
           <div class="people-picker__section-label px-2">All people</div>
-          {#if visiblePeopleList.length > 0}
+          {#if peopleLoading}
+            <ul class="space-y-1 pr-1" aria-hidden="true">
+              {#each PEOPLE_PLACEHOLDERS as idx}
+                <li>
+                  <div class="people-picker__option animate-pulse cursor-default select-none">
+                    <div class="w-8 h-8 rounded-full bg-white/10"></div>
+                    <div class="flex-1 space-y-1">
+                      <div class="h-3 w-2/3 rounded bg-white/10"></div>
+                      <div class="h-3 w-1/2 rounded bg-white/5"></div>
+                    </div>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+            <p class="sr-only" aria-live="polite">Loading people...</p>
+          {:else if visiblePeopleList.length > 0}
             <ul class="space-y-1 pr-1">
               {#each visiblePeopleList as p}
                 <li>
