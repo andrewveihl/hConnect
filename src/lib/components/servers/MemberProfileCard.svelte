@@ -30,16 +30,31 @@
     offline: 'Offline'
   };
 
-  export let open = false;
-  export let member: MemberRow | null = null;
-  export let profile: ProfileDoc | null = null;
-  export let statusClassName = 'presence-dot--offline';
-  export let isMobile = false;
-  export let anchorTop = 0;
-  export let anchorLeft = 0;
-  export let loading = false;
-  export let canMessage = true;
-  export let error: string | null = null;
+  interface Props {
+    open?: boolean;
+    member?: MemberRow | null;
+    profile?: ProfileDoc | null;
+    statusClassName?: string;
+    isMobile?: boolean;
+    anchorTop?: number;
+    anchorLeft?: number;
+    loading?: boolean;
+    canMessage?: boolean;
+    error?: string | null;
+  }
+
+  let {
+    open = false,
+    member = null,
+    profile = null,
+    statusClassName = 'presence-dot--offline',
+    isMobile = false,
+    anchorTop = 0,
+    anchorLeft = 0,
+    loading = false,
+    canMessage = true,
+    error = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ close: void; dm: void }>();
 
@@ -109,11 +124,11 @@
   <div
     class={`member-profile-overlay ${isMobile ? 'member-profile-overlay--mobile' : 'member-profile-overlay--popover'}`}
     role="presentation"
-    on:click={handleBackdropClick}
-    on:touchstart={handleTouchStart}
-    on:touchmove={handleTouchMove}
-    on:touchend={resetTouch}
-    on:touchcancel={resetTouch}
+    onclick={handleBackdropClick}
+    ontouchstart={handleTouchStart}
+    ontouchmove={handleTouchMove}
+    ontouchend={resetTouch}
+    ontouchcancel={resetTouch}
   >
     <div
       class={`member-profile ${isMobile ? 'member-profile--mobile' : 'member-profile--popover'}`}
@@ -122,7 +137,7 @@
       aria-label={`${member.label} profile`}
       style={inlineStyle()}
     >
-      <button class="member-profile__close" aria-label="Close profile" on:click={() => dispatch('close')}>
+      <button class="member-profile__close" aria-label="Close profile" onclick={() => dispatch('close')}>
         <i class="bx bx-x"></i>
       </button>
       <div class="member-profile__header">
@@ -178,7 +193,7 @@
       <div class="member-profile__actions">
         <button
           class="member-profile__action member-profile__action--primary"
-          on:click={() => dispatch('dm')}
+          onclick={() => dispatch('dm')}
           disabled={!canMessage || loading}
         >
           {#if loading}
@@ -187,7 +202,7 @@
             Start DM
           {/if}
         </button>
-        <button class="member-profile__action member-profile__action--secondary" on:click={() => dispatch('close')}>
+        <button class="member-profile__action member-profile__action--secondary" onclick={() => dispatch('close')}>
           Close
         </button>
         {#if !canMessage}

@@ -1,4 +1,6 @@
 ﻿<script lang="ts">
+  import { preventDefault } from 'svelte/legacy';
+
   import { createEventDispatcher } from 'svelte';
   import { browser } from '$app/environment';
   import { env as publicEnv } from '$env/dynamic/public';
@@ -6,11 +8,11 @@
   const dispatch = createEventDispatcher();
   const tenorApiKey = publicEnv.PUBLIC_TENOR_API_KEY;
 
-  let q = '';
-  let gifs: Array<{ url: string; preview: string }> = [];
-  let loading = false;
-  let errorMsg = '';
-  let urlPaste = '';
+  let q = $state('');
+  let gifs: Array<{ url: string; preview: string }> = $state([]);
+  let loading = $state(false);
+  let errorMsg = $state('');
+  let urlPaste = $state('');
 
   async function searchTenor(query: string) {
     if (!browser) return;
@@ -60,12 +62,12 @@
   <div class="gif-panel">
     <div class="gif-header">
       <h3 class="gif-title">Add a GIF</h3>
-      <button type="button" class="gif-close" on:click={() => dispatch('close')} aria-label="Close picker">
+      <button type="button" class="gif-close" onclick={() => dispatch('close')} aria-label="Close picker">
         <i class="bx bx-x" aria-hidden="true"></i>
       </button>
     </div>
 
-    <form class="gif-search" on:submit|preventDefault={() => searchTenor(q)}>
+    <form class="gif-search" onsubmit={preventDefault(() => searchTenor(q))}>
       <input
         class="input flex-1 min-w-[200px]"
         placeholder="Search Tenor…"
@@ -95,7 +97,7 @@
             <button
               type="button"
               class="gif-item"
-              on:click={() => dispatch('pick', g.url)}
+              onclick={() => dispatch('pick', g.url)}
               title="Use this GIF"
             >
               <img src={g.preview} alt="GIF preview" loading="lazy" />
@@ -123,7 +125,7 @@
         <button
           type="button"
           class="btn btn-primary btn-sm min-w-[110px]"
-          on:click={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
+          onclick={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
           disabled={!urlPaste.trim()}
         >
           Add GIF

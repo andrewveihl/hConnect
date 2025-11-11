@@ -31,7 +31,7 @@
     }
   ];
 
-  $: currentPath = $page?.url?.pathname ?? '/';
+  let currentPath = $derived($page?.url?.pathname ?? '/');
 
   const formatBadge = (value: number): string => {
     if (!Number.isFinite(value)) return '';

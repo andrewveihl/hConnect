@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy, onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
@@ -10,8 +12,12 @@
   import InvitePanel from '$lib/components/app/InvitePanel.svelte';
   import MemberProfileCard from './MemberProfileCard.svelte';
 
-  export let serverId: string;
-  export let showHeader = true;
+  interface Props {
+    serverId: string;
+    showHeader?: boolean;
+  }
+
+  let { serverId, showHeader = true }: Props = $props();
 
   type MemberDoc = {
     uid: string;
@@ -68,65 +74,81 @@
     [key: string]: unknown;
   };
 
-  let members: Record<string, MemberDoc> = {};
-  let profiles: Record<string, ProfileDoc> = {};
+  let members: Record<string, MemberDoc> = $state({});
+  let profiles: Record<string, ProfileDoc> = $state({});
   let presenceDocs: Record<string, PresenceDoc> = {};
-  let roles: Record<string, RoleDoc> = {};
-  let rows: MemberRow[] = [];
-  let groupedRows: MemberGroup[] = [];
-  let selectedUid: string | null = null;
-  let selectedMember: MemberRow | null = null;
-  let selectedProfile: ProfileDoc | null = null;
-  let popoverPos = { top: 0, left: 0 };
-  let cardLoading = false;
-  let cardError: string | null = null;
-  let isMobileView = false;
-  let canMessageSelected = false;
+  let roles: Record<string, RoleDoc> = $state({});
+  let rows: MemberRow[] = $state([]);
+  let groupedRows: MemberGroup[] = $state([]);
+  let selectedUid: string | null = $state(null);
+  let selectedMember: MemberRow | null = $state(null);
+  let selectedProfile: ProfileDoc | null = $state(null);
+  let popoverPos = $state({ top: 0, left: 0 });
+  let cardLoading = $state(false);
+  let cardError: string | null = $state(null);
+  let isMobileView = $state(false);
+  let canMessageSelected = $state(false);
   let mediaQuery: MediaQueryList | null = null;
-  let me: any = null;
-  let myMember: MemberDoc | null = null;
-  let myBaseRole: 'owner' | 'admin' | 'member' | null = null;
-  let canInviteMembers = false;
+  let me: any = $state(null);
+  let myMember: MemberDoc | null = $state(null);
+  let myBaseRole: 'owner' | 'admin' | 'member' | null = $state(null);
+  let canInviteMembers = $state(false);
   const INITIAL_MEMBER_BATCH = 60;
   const MEMBER_BATCH_SIZE = 40;
-  let visibleMemberCount = INITIAL_MEMBER_BATCH;
-  let visibleRows: MemberRow[] = [];
-  let visibleGroupMap: Record<PresenceState, MemberRow[]> = {
+  let visibleMemberCount = $state(INITIAL_MEMBER_BATCH);
+  let visibleRows: MemberRow[] = $state([]);
+  let visibleGroupMap: Record<PresenceState, MemberRow[]> = $state({
     online: [],
     idle: [],
     offline: []
-  };
-  let allMembersVisible = true;
-  let loadMoreSentinel: HTMLDivElement | null = null;
-  let memberScrollContainer: HTMLDivElement | null = null;
+  });
+  let allMembersVisible = $state(true);
+  let loadMoreSentinel: HTMLDivElement | null = $state(null);
+  let memberScrollContainer: HTMLDivElement | null = $state(null);
   let loadObserver: IntersectionObserver | null = null;
-  let showInviteDialog = false;
-  $: me = $user;
+  let showInviteDialog = $state(false);
+  run(() => {
+    me = $user;
+  });
 
-  let membersUnsub: Unsubscribe | null = null;
-  let rolesUnsub: Unsubscribe | null = null;
+  let membersUnsub: Unsubscribe | null = $state(null);
+  let rolesUnsub: Unsubscribe | null = $state(null);
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
-  let currentServer: string | null = null;
+  let currentServer: string | null = $state(null);
   const statusOrder: PresenceState[] = ['online', 'idle', 'offline'];
   const statusLabels: Record<PresenceState, string> = {
     online: 'Online',
     idle: 'Idle',
     offline: 'Offline'
   };
-  $: selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
-  $: selectedProfile = selectedUid ? profiles[selectedUid] ?? null : null;
-  $: canMessageSelected = Boolean(selectedMember && me?.uid && selectedMember.uid !== me.uid);
-  $: myMember = me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null;
-  $: myBaseRole =
-    typeof (myMember as any)?.role === 'string'
-      ? ((myMember as any).role as 'owner' | 'admin' | 'member')
-      : null;
-  $: canInviteMembers = myBaseRole === 'owner' || myBaseRole === 'admin';
-  $: if (!canInviteMembers && showInviteDialog) {
-    showInviteDialog = false;
-  }
-  $: {
+  run(() => {
+    selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
+  });
+  run(() => {
+    selectedProfile = selectedUid ? profiles[selectedUid] ?? null : null;
+  });
+  run(() => {
+    canMessageSelected = Boolean(selectedMember && me?.uid && selectedMember.uid !== me.uid);
+  });
+  run(() => {
+    myMember = me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null;
+  });
+  run(() => {
+    myBaseRole =
+      typeof (myMember as any)?.role === 'string'
+        ? ((myMember as any).role as 'owner' | 'admin' | 'member')
+        : null;
+  });
+  run(() => {
+    canInviteMembers = myBaseRole === 'owner' || myBaseRole === 'admin';
+  });
+  run(() => {
+    if (!canInviteMembers && showInviteDialog) {
+      showInviteDialog = false;
+    }
+  });
+  run(() => {
     const total = rows.length;
     if (total === 0) {
       if (visibleMemberCount !== INITIAL_MEMBER_BATCH) {
@@ -141,15 +163,19 @@
       }
       allMembersVisible = visibleMemberCount >= total;
     }
-  }
-  $: visibleRows = rows.slice(0, visibleMemberCount);
-  $: visibleGroupMap = statusOrder.reduce(
-    (acc, status) => {
-      acc[status] = visibleRows.filter((row) => row.status === status);
-      return acc;
-    },
-    { online: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
-  );
+  });
+  run(() => {
+    visibleRows = rows.slice(0, visibleMemberCount);
+  });
+  run(() => {
+    visibleGroupMap = statusOrder.reduce(
+      (acc, status) => {
+        acc[status] = visibleRows.filter((row) => row.status === status);
+        return acc;
+      },
+      { online: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
+    );
+  });
 
   function pickString(value: unknown): string | undefined {
     if (typeof value === 'string') {
@@ -330,11 +356,13 @@
     };
   });
 
-  $: groupedRows = statusOrder.map((status) => ({
-    id: status,
-    label: statusLabels[status],
-    members: rows.filter((row) => row.status === status)
-  }));
+  run(() => {
+    groupedRows = statusOrder.map((status) => ({
+      id: status,
+      label: statusLabels[status],
+      members: rows.filter((row) => row.status === status)
+    }));
+  });
 
   function unsubscribePresence(uid: string) {
     if (presenceUnsubs[uid]) {
@@ -464,11 +492,11 @@
     }
   }
 
-  $: {
+  run(() => {
     loadMoreSentinel;
     memberScrollContainer;
     refreshLoadObserver();
-  }
+  });
 
   function subscribePresence(database: ReturnType<typeof db>, uid: string) {
     if (presenceUnsubs[uid]) return;
@@ -559,18 +587,20 @@
     });
   }
 
-  $: if (serverId) {
-    subscribeMembers(serverId);
-  } else {
-    membersUnsub?.();
-    membersUnsub = null;
-    rolesUnsub?.();
-    rolesUnsub = null;
-    roles = {};
-    cleanupProfiles();
-    currentServer = null;
-    visibleMemberCount = INITIAL_MEMBER_BATCH;
-  }
+  run(() => {
+    if (serverId) {
+      subscribeMembers(serverId);
+    } else {
+      membersUnsub?.();
+      membersUnsub = null;
+      rolesUnsub?.();
+      rolesUnsub = null;
+      roles = {};
+      cleanupProfiles();
+      currentServer = null;
+      visibleMemberCount = INITIAL_MEMBER_BATCH;
+    }
+  });
 
   onDestroy(() => {
     membersUnsub?.();
@@ -580,7 +610,7 @@
   });
 </script>
 
-<svelte:window on:keydown={handleWindowKeydown} />
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <div class="flex flex-col h-full w-full panel text-primary relative">
   {#if showHeader}
@@ -591,7 +621,7 @@
           <button
             type="button"
             class="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-white/60 focus-visible:ring-offset-transparent sm:text-sm"
-            on:click={openInviteDialog}
+            onclick={openInviteDialog}
             aria-label="Invite members"
           >
             <i class="bx bx-plus text-sm"></i>
@@ -625,7 +655,7 @@
                       <button
                         type="button"
                         class="member-row"
-                        on:click={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
+                        onclick={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
                       >
                         <div class="member-row__avatar">
                           {#if member.avatar}
@@ -697,7 +727,12 @@
 
 {#if showInviteDialog && canInviteMembers}
   <div class="members-pane__invite-overlay" role="dialog" aria-modal="true" aria-label="Invite members">
-    <div class="members-pane__invite-backdrop" on:click={closeInviteDialog}></div>
+    <button
+      type="button"
+      class="members-pane__invite-backdrop"
+      aria-label="Close invite dialog"
+      onclick={closeInviteDialog}
+    ></button>
     <div class="members-pane__invite-card" role="document">
       <div class="members-pane__invite-header">
         <div>
@@ -708,7 +743,7 @@
           type="button"
           class="members-pane__invite-close"
           aria-label="Close invite dialog"
-          on:click={closeInviteDialog}
+          onclick={closeInviteDialog}
         >
           <i class="bx bx-x text-xl"></i>
         </button>

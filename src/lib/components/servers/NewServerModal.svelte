@@ -4,12 +4,16 @@
   import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
 
-  export let open = false;
-  export let onClose: () => void = () => {};
+  interface Props {
+    open?: boolean;
+    onClose?: () => void;
+  }
 
-  let name = '';
-  let isPublic = true;
-  let busy = false;
+  let { open = $bindable(false), onClose = () => {} }: Props = $props();
+
+  let name = $state('');
+  let isPublic = $state(true);
+  let busy = $state(false);
 
   function close() {
     // keep your onClose behavior; also reflect local state
@@ -59,7 +63,7 @@
       type="button"
       class="absolute inset-0 w-full h-full bg-black/60"
       aria-label="Close modal"
-      on:click={close}
+      onclick={close}
     ></button>
 
     <!-- Centered modal panel -->
@@ -77,26 +81,26 @@
             class="input"
             placeholder="Server name"
             bind:value={name}
-            on:keydown={(e) => (e.key === 'Enter' ? submit() : null)}
+            onkeydown={(e) => (e.key === 'Enter' ? submit() : null)}
           />
 
           <div class="flex items-center gap-4 text-sm">
             <label class="flex items-center gap-2">
-              <input type="radio" name="vis" checked={isPublic} on:change={() => (isPublic = true)} />
+              <input type="radio" name="vis" checked={isPublic} onchange={() => (isPublic = true)} />
               <span>Public</span>
             </label>
             <label class="flex items-center gap-2">
-              <input type="radio" name="vis" checked={!isPublic} on:change={() => (isPublic = false)} />
+              <input type="radio" name="vis" checked={!isPublic} onchange={() => (isPublic = false)} />
               <span>Private (invite only)</span>
             </label>
           </div>
 
           <div class="flex gap-2">
-            <button type="button" class="btn btn-ghost flex-1" on:click={close} disabled={busy}>Cancel</button>
+            <button type="button" class="btn btn-ghost flex-1" onclick={close} disabled={busy}>Cancel</button>
             <button
               type="button"
               class="btn btn-primary flex-1 disabled:opacity-50"
-              on:click={submit}
+              onclick={submit}
               disabled={busy || !name.trim() || !$user}
             >
               {#if busy}Creatingâ€¦{:else}Create{/if}

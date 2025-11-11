@@ -1,15 +1,26 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy } from 'svelte';
   import { browser } from '$app/environment';
   import { getDb } from '$lib/firebase';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
-  import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
+  import {
+    appendVoiceDebugEvent,
+    copyVoiceDebugAggregate,
+    removeVoiceDebugSection,
+    setVoiceDebugSection
+  } from '$lib/utils/voiceDebugContext';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
-  export let serverId: string | null = null;
-  export let session: VoiceSession | null = null;
+  interface Props {
+    serverId?: string | null;
+    session?: VoiceSession | null;
+  }
+
+  let { serverId = null, session = null }: Props = $props();
 
   const CALL_DOC_ID = 'live';
 
@@ -22,12 +33,12 @@
     status?: 'active' | 'left';
   };
 
-  let participants: VoiceParticipant[] = [];
-  let unsub: Unsubscribe | null = null;
-  let copyStatus = '';
+  let participants: VoiceParticipant[] = $state([]);
+  let unsub: Unsubscribe | null = $state(null);
+  let copyStatus = $state('');
   let copyTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  $: {
+  run(() => {
     unsub?.();
     participants = [];
     if (!session?.serverId || !session?.channelId) {
@@ -65,7 +76,7 @@
         }
       });
     }
-  }
+  });
 
   onDestroy(() => {
     unsub?.();
@@ -106,23 +117,25 @@
     return name.trim().charAt(0).toUpperCase() || '?';
   }
 
-  $: namesLine = participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', ');
-  $: serverLabel = session?.serverName ?? session?.serverId ?? 'Server';
-  $: connectedElsewhere = !!session && !!serverId && session.serverId !== serverId;
-  $: if (browser) {
-    setVoiceDebugSection('miniPanel.snapshot', {
-      serverId: session?.serverId ?? null,
-      channelId: session?.channelId ?? null,
-      channelName: session?.channelName ?? null,
-      participantCount: participants.length,
-      connectedElsewhere,
-      participants: participants.slice(0, 8).map((p) => ({
-        uid: p.uid,
-        hasAudio: p.hasAudio ?? true,
-        hasVideo: p.hasVideo ?? false
-      }))
-    });
-  }
+  let namesLine = $derived(participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', '));
+  let serverLabel = $derived(session?.serverName ?? session?.serverId ?? 'Server');
+  let connectedElsewhere = $derived(!!session && !!serverId && session.serverId !== serverId);
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('miniPanel.snapshot', {
+        serverId: session?.serverId ?? null,
+        channelId: session?.channelId ?? null,
+        channelName: session?.channelName ?? null,
+        participantCount: participants.length,
+        connectedElsewhere,
+        participants: participants.slice(0, 8).map((p) => ({
+          uid: p.uid,
+          hasAudio: p.hasAudio ?? true,
+          hasVideo: p.hasVideo ?? false
+        }))
+      });
+    }
+  });
 </script>
 
 {#if session}
@@ -145,10 +158,10 @@
         {/if}
       </div>
       <div class="voice-mini__actions">
-        <button class="voice-mini__button" type="button" title="Open call" aria-label="Open call" on:click={openVoice}>
+        <button class="voice-mini__button" type="button" title="Open call" aria-label="Open call" onclick={openVoice}>
           <i class="bx bx-window-open text-lg"></i>
         </button>
-        <button class="voice-mini__button voice-mini__button--danger" type="button" title="Leave call" aria-label="Leave call" on:click={leaveCall}>
+        <button class="voice-mini__button voice-mini__button--danger" type="button" title="Leave call" aria-label="Leave call" onclick={leaveCall}>
           <i class="bx bx-phone-off text-lg"></i>
         </button>
       </div>
@@ -188,10 +201,10 @@
           </span>
           {participants.length} connected
         </span>
-        <button class="voice-mini__pill" type="button" on:click={openVoice}>
+        <button class="voice-mini__pill" type="button" onclick={openVoice}>
           Manage
         </button>
-        <button class="voice-mini__pill" type="button" on:click={copyDebug} aria-label="Copy voice debug info">
+        <button class="voice-mini__pill" type="button" onclick={copyDebug} aria-label="Copy voice debug info">
           Copy debug
         </button>
         {#if copyStatus}

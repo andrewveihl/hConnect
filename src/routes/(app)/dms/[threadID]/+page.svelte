@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
@@ -18,18 +20,24 @@ import { uploadDMFile } from '$lib/firebase/storage';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
 import { looksLikeImage } from '$lib/utils/fileType';
 
-  export let data: { threadID: string };
-  $: threadID = data.threadID;
+  interface Props {
+    data: { threadID: string };
+  }
 
-  let me: any = null;
-  $: me = $user;
+  let { data }: Props = $props();
+  let threadID = $derived(data.threadID);
 
-let messages: any[] = [];
-let messageUsers: Record<string, any> = {};
-let pendingUploads: PendingUploadPreview[] = [];
+  let me: any = $state(null);
+  run(() => {
+    me = $user;
+  });
+
+let messages: any[] = $state([]);
+let messageUsers: Record<string, any> = $state({});
+let pendingUploads: PendingUploadPreview[] = $state([]);
 const profileUnsubs: Record<string, Unsubscribe> = {};
-let sidebarRef: InstanceType<typeof DMsSidebar> | null = null;
-let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = null;
+let sidebarRef: InstanceType<typeof DMsSidebar> | null = $state(null);
+let sidebarRefMobile: InstanceType<typeof DMsSidebar> | null = $state(null);
 type MentionOption = {
   uid: string;
   label: string;
@@ -47,26 +55,30 @@ type MentionSendRecord = {
   color?: string | null;
   kind?: 'member' | 'role';
 };
-let mentionOptions: MentionOption[] = [];
-let resumeDmScroll = false;
-let scrollResumeSignal = 0;
-let lastPendingThreadId: string | null = null;
+let mentionOptions: MentionOption[] = $state([]);
+let resumeDmScroll = $state(false);
+let scrollResumeSignal = $state(0);
+let lastPendingThreadId: string | null = $state(null);
 
-if (browser) {
+onMount(() => {
+  if (!browser) return;
   try {
-    resumeDmScroll = sessionStorage.getItem(RESUME_DM_SCROLL_KEY) === '1';
-    if (resumeDmScroll) {
+    const storedResume = sessionStorage.getItem(RESUME_DM_SCROLL_KEY) === '1';
+    resumeDmScroll = storedResume;
+    if (storedResume) {
       sessionStorage.removeItem(RESUME_DM_SCROLL_KEY);
     }
   } catch {
     resumeDmScroll = false;
   }
-}
+});
 
-  $: if (threadID !== lastPendingThreadId) {
-    lastPendingThreadId = threadID;
-    pendingUploads = [];
-  }
+  run(() => {
+    if (threadID !== lastPendingThreadId) {
+      lastPendingThreadId = threadID;
+      pendingUploads = [];
+    }
+  });
 
   function updateMessageUserCache(uid: string, patch: any) {
     if (!uid) return;
@@ -99,18 +111,18 @@ if (browser) {
       }
     );
   }
-  let unsub: (() => void) | null = null;
-  let mounted = false;
+  let unsub: (() => void) | null = $state(null);
+  let mounted = $state(false);
 
-  let otherUid: string | null = null;
-  let otherProfile: any = null;
-  let otherMessageUser: any = null;
-  let metaLoading = true;
+  let otherUid: string | null = $state(null);
+  let otherProfile: any = $state(null);
+  let otherMessageUser: any = $state(null);
+  let metaLoading = $state(true);
 
-  let showThreads = false;
-  let showInfo = false;
-  let lastThreadID: string | null = null;
-  let pendingReply: ReplyReferenceInput | null = null;
+  let showThreads = $state(false);
+  let showInfo = $state(false);
+  let lastThreadID: string | null = $state(null);
+  let pendingReply: ReplyReferenceInput | null = $state(null);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -532,7 +544,7 @@ if (browser) {
     }
   }
 
-$: {
+run(() => {
   if (otherProfile?.uid) {
     const meta = {
       uid: otherProfile.uid,
@@ -543,24 +555,30 @@ $: {
     sidebarRef?.updatePartnerMeta(meta);
     sidebarRefMobile?.updatePartnerMeta(meta);
   }
-}
+});
 
-  $: if (threadID) {
-    loadThreadMeta();
-  }
+  run(() => {
+    if (threadID) {
+      loadThreadMeta();
+    }
+  });
 
-  $: if (threadID && threadID !== lastThreadID) {
-    lastThreadID = threadID;
-    showInfo = false;
-    pendingReply = null;
-  }
+  run(() => {
+    if (threadID && threadID !== lastThreadID) {
+      lastThreadID = threadID;
+      showInfo = false;
+      pendingReply = null;
+    }
+  });
 
-  $: if (resumeDmScroll && messages.length > 0) {
-    scrollResumeSignal = Date.now();
-    resumeDmScroll = false;
-  }
+  run(() => {
+    if (resumeDmScroll && messages.length > 0) {
+      scrollResumeSignal = Date.now();
+      resumeDmScroll = false;
+    }
+  });
 
-  $: {
+  run(() => {
     const next: Record<string, any> = {};
     if (me?.uid) {
       next[me.uid] = normalizeUserRecord(me.uid, {
@@ -593,9 +611,9 @@ $: {
       };
     }
     messageUsers = next;
-  }
+  });
 
-  $: {
+  run(() => {
     const map = new Map<string, MentionOption>();
     const addCandidate = (uid: unknown, data: any) => {
       const clean = normalizeUid(uid);
@@ -622,7 +640,7 @@ $: {
     mentionOptions = Array.from(map.values()).sort((a, b) =>
       a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
     );
-  }
+  });
 
   function setupGestures() {
     if (typeof window === 'undefined') return () => {};
@@ -721,25 +739,29 @@ $: {
   });
 
   // After computing messageUsers map, ensure we subscribe to each author's profile
-  $: if (Object.keys(messageUsers).length > 0) {
-    try {
-      const database = getDb();
-      for (const uid in messageUsers) ensureProfileSubscription(database, uid);
-    } catch {}
-  }
+  run(() => {
+    if (Object.keys(messageUsers).length > 0) {
+      try {
+        const database = getDb();
+        for (const uid in messageUsers) ensureProfileSubscription(database, uid);
+      } catch {}
+    }
+  });
 
-  $: if (mounted && threadID) {
-    unsub?.();
-    unsub = streamDMMessages(threadID, async (msgs) => {
-      messages = msgs.map((row: any) => toChatMessage(row.id, row));
-      if (me?.uid) {
-        const last = messages[messages.length - 1];
-        const at = last?.createdAt ?? null;
-        const lastId = last?.id ?? null;
-        markThreadAsSeen({ at, lastMessageId: lastId });
-      }
-    });
-  }
+  run(() => {
+    if (mounted && threadID) {
+      unsub?.();
+      unsub = streamDMMessages(threadID, async (msgs) => {
+        messages = msgs.map((row: any) => toChatMessage(row.id, row));
+        if (me?.uid) {
+          const last = messages[messages.length - 1];
+          const at = last?.createdAt ?? null;
+          const lastId = last?.id ?? null;
+          markThreadAsSeen({ at, lastMessageId: lastId });
+        }
+      });
+    }
+  });
 
   async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
     const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
@@ -933,16 +955,18 @@ $: {
     handleSend(e.detail ?? '');
   }
 
-  $: otherMessageUser = otherUid ? messageUsers[otherUid] ?? null : null;
+  run(() => {
+    otherMessageUser = otherUid ? messageUsers[otherUid] ?? null : null;
+  });
 
-  $: displayName =
-    pickString(otherProfile?.displayName) ??
+  let displayName =
+    $derived(pickString(otherProfile?.displayName) ??
     pickString(otherProfile?.name) ??
     pickString(otherMessageUser?.displayName) ??
     pickString(otherMessageUser?.name) ??
     pickString(otherProfile?.email) ??
     pickString(otherMessageUser?.email) ??
-    (otherProfile || otherMessageUser ? otherUid ?? 'Member' : 'Direct Message');
+    (otherProfile || otherMessageUser ? otherUid ?? 'Member' : 'Direct Message'));
 </script>
 
 <div class="flex flex-1 overflow-hidden panel-muted">
@@ -966,7 +990,7 @@ $: {
         <button
           class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
           aria-label="Open conversations"
-          on:click={() => (showThreads = true)}
+          onclick={() => (showThreads = true)}
         >
           <i class="bx bx-menu text-2xl"></i>
         </button>
@@ -974,7 +998,7 @@ $: {
           class="flex items-center gap-3 min-w-0 flex-1 text-left px-1 py-1 rounded hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 transition"
           type="button"
           aria-label="View participant profile"
-          on:click={() => (showInfo = true)}
+          onclick={() => (showInfo = true)}
         >
           <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
             {#if otherProfile?.photoURL}
@@ -992,7 +1016,7 @@ $: {
       <button
         class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
         aria-label="View profile"
-        on:click={() => (showInfo = true)}
+        onclick={() => (showInfo = true)}
       >
         <i class="bx bx-user-circle text-2xl"></i>
       </button>
@@ -1044,7 +1068,7 @@ $: {
             class="p-2 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition"
             type="button"
             aria-label="Close profile panel"
-            on:click={() => (showInfo = false)}
+            onclick={() => (showInfo = false)}
           >
             <i class="bx bx-x text-2xl"></i>
           </button>
@@ -1095,7 +1119,7 @@ $: {
   aria-label="Conversations"
 >
   <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showThreads = false)}>
+    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
     <div class="mobile-panel__title">Conversations</div>
@@ -1121,7 +1145,7 @@ $: {
   aria-label="Profile"
 >
   <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showInfo = false)}>
+    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showInfo = false)}>
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
     <div class="mobile-panel__title">Profile</div>

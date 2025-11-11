@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { afterUpdate, createEventDispatcher, onMount, tick } from 'svelte';
+  import { run } from 'svelte/legacy';
+
+  import { createEventDispatcher, onMount, tick } from 'svelte';
   import type { PendingUploadPreview } from './types';
   import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
 
@@ -13,6 +15,8 @@
     kind?: 'member' | 'role';
   };
 
+  type MentionSegment = { type: 'mention'; value: string; data?: MentionView };
+  type TextSegment = { type: 'text'; value: string };
   type ReplyPreview = {
     messageId: string;
     authorId?: string | null;
@@ -39,19 +43,28 @@
     | (BaseChatMessage & { poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll' })
     | (BaseChatMessage & { form: { title: string; questions: string[] }; type: 'form' });
 
-  export let messages: ChatMessage[] = [];
-  export let users: Record<string, any> = {};
-  export let currentUserId: string | null = null;
-  export let scrollToBottomSignal = 0;
-  export let pendingUploads: PendingUploadPreview[] = [];
+  interface Props {
+    messages?: ChatMessage[];
+    users?: Record<string, any>;
+    currentUserId?: string | null;
+    scrollToBottomSignal?: number;
+    pendingUploads?: PendingUploadPreview[];
+  }
 
-  let scroller: HTMLDivElement;
+  let {
+    messages = [],
+    users = {},
+    currentUserId = null,
+    scrollToBottomSignal = 0,
+    pendingUploads = []
+  }: Props = $props();
+
+  let scroller = $state<HTMLDivElement | null>(null);
   let isRequestingMore = false;
-  let lastScrollSignal = 0;
+  let lastScrollSignal = $state(0);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-    if (!scroller) return;
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+    scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
   function formatTime(ts: any) {
@@ -110,7 +123,7 @@
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
 
-  function mentionSegments(text: string, mentions?: MentionView[]) {
+  function mentionSegments(text: string, mentions?: MentionView[]): Array<MentionSegment | TextSegment> {
     const value = typeof text === 'string' ? text : '';
     if (!value) return [{ type: 'text', value: '' }];
     if (!mentions?.length) return [{ type: 'text', value }];
@@ -138,7 +151,7 @@
       }
     });
 
-    const segments: Array<{ type: 'text' | 'mention'; value: string; data?: MentionView }> = [];
+    const segments: Array<MentionSegment | TextSegment> = [];
     const regex = /@[\p{L}\p{N}._-]+/gu;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -163,6 +176,12 @@
       segments.push({ type: 'text', value: value.slice(lastIndex) });
     }
     return segments;
+  }
+
+  function isMentionSegment(
+    segment: MentionSegment | TextSegment
+  ): segment is MentionSegment {
+    return segment.type === 'mention';
   }
 
   const PREVIEW_LIMIT = 140;
@@ -211,8 +230,8 @@
     return Boolean(target.closest('button, a, input, textarea, select, label, [data-reply-ignore]'));
   }
 
-  function handleReplyClick(event: MouseEvent, message: ChatMessage) {
-    if (shouldIgnoreReplyIntent(event.target)) return;
+  function handleReplyClick(event: MouseEvent | KeyboardEvent, message: ChatMessage) {
+    if (shouldIgnoreReplyIntent(event.target as EventTarget | null)) return;
     dispatch('reply', { message });
   }
 
@@ -253,20 +272,6 @@
   }
 
   let lastLen = 0;
-  afterUpdate(() => {
-    if (messages.length !== lastLen) {
-      lastLen = messages.length;
-      scrollToBottom('smooth');
-    }
-    if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
-      reactionMenuFor = null;
-    }
-  });
-
-  $: if (scrollToBottomSignal && scrollToBottomSignal !== lastScrollSignal) {
-    lastScrollSignal = scrollToBottomSignal;
-    tick().then(() => scrollToBottom('auto'));
-  }
 
   function totalVotes(votes?: Record<number, number>) {
     if (!votes) return 0;
@@ -284,16 +289,33 @@
   const LONG_PRESS_MS = 450;
   const LONG_PRESS_MOVE_THRESHOLD = 10;
 
-  let hasHoverSupport = true;
-  let hoveredMessageId: string | null = null;
-  let hoveredMinuteKey: string | null = null;
-  let reactionMenuFor: string | null = null;
+  let hasHoverSupport = $state(true);
+  let hoveredMessageId: string | null = $state(null);
+  let hoveredMinuteKey: string | null = $state(null);
+  let reactionMenuFor: string | null = $state(null);
   let reactionMenuAnchor: HTMLElement | null = null;
-  let reactionMenuEl: HTMLDivElement | null = null;
-  let reactionMenuPosition = { top: 0, left: 0 };
+  let reactionMenuEl: HTMLDivElement | null = $state(null);
+  let reactionMenuPosition = $state({ top: 0, left: 0 });
   let longPressTimer: number | null = null;
   let longPressStart: { x: number; y: number } | null = null;
   let longPressTarget: HTMLElement | null = null;
+
+  run(() => {
+    if (messages.length !== lastLen) {
+      lastLen = messages.length;
+      scrollToBottom('smooth');
+    }
+    if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
+      reactionMenuFor = null;
+    }
+  });
+
+  run(() => {
+    if (scrollToBottomSignal && scrollToBottomSignal !== lastScrollSignal) {
+      lastScrollSignal = scrollToBottomSignal;
+      tick().then(() => scrollToBottom('auto'));
+    }
+  });
 
   onMount(() => {
     if (typeof window !== 'undefined') {
@@ -520,9 +542,9 @@
     }
   }
 
-  let formDrafts: Record<string, string[]> = {};
+  let formDrafts: Record<string, string[]> = $state({});
 
-  $: {
+  run(() => {
     for (const m of messages) {
       if (m && (m as any).type === 'form' && (m as any).form?.questions) {
         const len = (m as any).form.questions.length;
@@ -531,7 +553,7 @@
         }
       }
     }
-  }
+  });
 
   function submitForm(m: any) {
     const answers = (formDrafts[m.id] ?? []).map((a: string) => a.trim());
@@ -1326,7 +1348,7 @@
   bind:this={scroller}
   class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-2 chat-scroll"
   style:padding-bottom="var(--chat-scroll-padding, calc(env(safe-area-inset-bottom, 0px) + 1rem))"
-  on:scroll={handleScroll}
+  onscroll={handleScroll}
 >
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">
@@ -1359,14 +1381,14 @@
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
-        on:pointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
-        on:pointerleave={() => { onMessagePointerLeave(m.id, minuteKey); handlePointerUp(); }}
-        on:focusin={() => onMessageFocusIn(m.id, minuteKey)}
-        on:focusout={(event) => onMessageFocusOut(m.id, minuteKey, event)}
-        on:pointerdown={(event) => handlePointerDown(event, m.id)}
-        on:pointermove={handlePointerMove}
-        on:pointerup={handlePointerUp}
-        on:pointercancel={handlePointerUp}
+        onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
+        onpointerleave={() => { onMessagePointerLeave(m.id, minuteKey); handlePointerUp(); }}
+        onfocusin={() => onMessageFocusIn(m.id, minuteKey)}
+        onfocusout={(event) => onMessageFocusOut(m.id, minuteKey, event)}
+        onpointerdown={(event) => handlePointerDown(event, m.id)}
+        onpointermove={handlePointerMove}
+        onpointerup={handlePointerUp}
+        onpointercancel={handlePointerUp}
       >
         <div
           class={`message-block w-full max-w-3xl ${mine ? 'message-block--mine' : 'message-block--other'} ${minuteHovered ? 'is-minute-hovered' : ''}`}
@@ -1394,7 +1416,15 @@
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
               <div
                 class={`message-body ${continued ? 'message-body--continued' : ''}`}
-                on:click={(event) => handleReplyClick(event, m)}
+                role="button"
+                tabindex="0"
+                onclick={(event) => handleReplyClick(event, m)}
+                onkeydown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    handleReplyClick(event, m);
+                  }
+                }}
               >
                 {#if currentUserId}
                   <button
@@ -1402,8 +1432,8 @@
                     class={`reaction-add reaction-add-floating ${mine ? 'reaction-add-floating--mine' : 'reaction-add-floating--other'} ${showAdd ? 'is-visible' : ''}`}
                     disabled={!showAdd}
                     aria-hidden={!showAdd}
-                    on:click={(event) => onAddReactionClick(event, m.id)}
-                    on:pointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
+                    onclick={(event) => onAddReactionClick(event, m.id)}
+                    onpointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
                     aria-label="Add reaction"
                   >
                     +
@@ -1428,7 +1458,7 @@
                 {#if !m.type || m.type === 'text'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
-                      {#if segment.type === 'mention'}
+                      {#if isMentionSegment(segment)}
                         {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
                         <span
                           class={`chat-mention ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
@@ -1498,7 +1528,7 @@
                           </div>
                           <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
                           <div class="mt-2 text-right">
-                            <button class="rounded-full px-3 py-1 hover:bg-white/10" on:click={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
+                            <button class="rounded-full px-3 py-1 hover:bg-white/10" onclick={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
                           </div>
                         </div>
                       {/each}
@@ -1517,7 +1547,7 @@
                     <div class="flex justify-end">
                       <button
                         class="rounded-full px-4 py-2 accent-button"
-                        on:click={() => submitForm(m)}
+                        onclick={() => submitForm(m)}
                       >
                         Submit
                       </button>
@@ -1544,7 +1574,7 @@
                       <button
                         type="button"
                         class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
-                        on:click={() => toggleReaction(m.id, reaction.emoji)}
+                        onclick={() => toggleReaction(m.id, reaction.emoji)}
                         disabled={!currentUserId}
                         title={reaction.users.join(', ')}
                       >
@@ -1611,7 +1641,7 @@
                       </div>
                     </div>
                     <div class="chat-upload-status">
-                      Uploading… {uploadPercent}%
+                      Uploadingï¿½ {uploadPercent}%
                     </div>
                     <div class="chat-upload-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={uploadPercent}>
                       <span style={`width: ${Math.max(8, uploadPercent)}%`}></span>
@@ -1628,7 +1658,7 @@
 </div>
 
 {#if reactionMenuFor && currentUserId}
-  <button type="button" class="reaction-menu-backdrop" aria-label="Close reactions" on:click={closeReactionMenu}></button>
+  <button type="button" class="reaction-menu-backdrop" aria-label="Close reactions" onclick={closeReactionMenu}></button>
   <div
     class="reaction-menu"
     bind:this={reactionMenuEl}
@@ -1636,21 +1666,15 @@
   >
     <div class="reaction-grid">
       {#each QUICK_REACTIONS as emoji}
-        <button type="button" class="reaction-button" on:click={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
+        <button type="button" class="reaction-button" onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
       {/each}
-      <button type="button" class="reaction-button custom" on:click={() => promptReaction(reactionMenuFor!)}>Customï¿½</button>
+      <button type="button" class="reaction-button custom" onclick={() => promptReaction(reactionMenuFor!)}>Customï¿½</button>
     </div>
     <div class="reaction-menu__actions">
-      <button type="button" class="reaction-menu__action" on:click={() => chooseReply(reactionMenuFor!)}>Reply</button>
+      <button type="button" class="reaction-menu__action" onclick={() => chooseReply(reactionMenuFor!)}>Reply</button>
     </div>
   </div>
 {/if}
-
-
-
-
-
-
 
 
 

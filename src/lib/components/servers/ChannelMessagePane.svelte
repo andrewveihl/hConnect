@@ -6,33 +6,59 @@
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import type { PendingUploadPreview } from '$lib/components/chat/types';
 
-  export let hasChannel = false;
-  export let channelName = '';
-  export let messages: any[] = [];
-  export let profiles: Record<string, any> = {};
-  export let currentUserId: string | null = null;
-  export let mentionOptions: MentionDirectoryEntry[] = [];
-  export let listClass =
-    'message-scroll-region flex-1 overflow-hidden p-3 sm:p-4';
-  export let inputWrapperClass =
-    'chat-input-region shrink-0 border-t border-subtle panel-muted p-3';
-  export let inputPaddingBottom =
-    'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)';
-  export let emptyMessage = 'Pick a channel to start chatting.';
-  export let hideInput = false;
 
-  export let onVote: (event: CustomEvent<any>) => void = () => {};
-  export let onSubmitForm: (event: CustomEvent<any>) => void = () => {};
-  export let onReact: (event: CustomEvent<any>) => void = () => {};
-  export let onLoadMore: () => void = () => {};
-  export let onSend: (value: string | { text: string; mentions?: any[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
-  export let onSendGif: (payload: { url: string; replyTo?: ReplyReferenceInput | null }) => void = () => {};
-  export let onCreatePoll: (payload: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
-  export let onCreateForm: (payload: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
-  export let onUploadFiles: (payload: { files: File[]; replyTo?: ReplyReferenceInput | null }) => void = () => {};
-  export let pendingUploads: PendingUploadPreview[] = [];
 
-  export let replyTarget: ReplyReferenceInput | null = null;
+  interface Props {
+    hasChannel?: boolean;
+    channelName?: string;
+    messages?: any[];
+    profiles?: Record<string, any>;
+    currentUserId?: string | null;
+    mentionOptions?: MentionDirectoryEntry[];
+    listClass?: string;
+    inputWrapperClass?: string;
+    inputPaddingBottom?: string;
+    emptyMessage?: string;
+    hideInput?: boolean;
+    onVote?: (event: CustomEvent<any>) => void;
+    onSubmitForm?: (event: CustomEvent<any>) => void;
+    onReact?: (event: CustomEvent<any>) => void;
+    onLoadMore?: () => void;
+    onSend?: (value: string | { text: string; mentions?: any[]; replyTo?: ReplyReferenceInput | null }) => void;
+    onSendGif?: (payload: { url: string; replyTo?: ReplyReferenceInput | null }) => void;
+    onCreatePoll?: (payload: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) => void;
+    onCreateForm?: (payload: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) => void;
+    onUploadFiles?: (payload: { files: File[]; replyTo?: ReplyReferenceInput | null }) => void;
+    pendingUploads?: PendingUploadPreview[];
+    replyTarget?: ReplyReferenceInput | null;
+    empty?: import('svelte').Snippet;
+  }
+
+  let {
+    hasChannel = false,
+    channelName = '',
+    messages = [],
+    profiles = {},
+    currentUserId = null,
+    mentionOptions = [],
+    listClass = 'message-scroll-region flex-1 overflow-hidden p-3 sm:p-4',
+    inputWrapperClass = 'chat-input-region shrink-0 border-t border-subtle panel-muted p-3',
+    inputPaddingBottom = 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
+    emptyMessage = 'Pick a channel to start chatting.',
+    hideInput = false,
+    onVote = () => {},
+    onSubmitForm = () => {},
+    onReact = () => {},
+    onLoadMore = () => {},
+    onSend = () => {},
+    onSendGif = () => {},
+    onCreatePoll = () => {},
+    onCreateForm = () => {},
+    onUploadFiles = () => {},
+    pendingUploads = [],
+    replyTarget = null,
+    empty
+  }: Props = $props();
 
   const dispatch = createEventDispatcher();
 </script>
@@ -68,8 +94,8 @@
   {/if}
 {:else}
   <div class="flex-1 grid place-items-center text-soft">
-    <slot name="empty">
+    {#if empty}{@render empty()}{:else}
       <div>{emptyMessage}</div>
-    </slot>
+    {/if}
   </div>
 {/if}

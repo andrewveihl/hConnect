@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
@@ -9,21 +11,32 @@
   import { dmUnreadCount, notifications } from '$lib/stores/notifications';
   import type { NotificationItem } from '$lib/stores/notifications';
 
-  export let activeServerId: string | null = null;
-  export let onCreateServer: (() => void) | null = null;
-  export let padForDock = true;
-  export let showBottomActions = true;
-
-  let servers: { id: string; name: string; icon?: string | null }[] = [];
-  let unsub: (() => void) | undefined;
-  let localCreateOpen = false;
-
-  $: if ($user) {
-    unsub?.();
-    unsub = subscribeUserServers($user.uid, (rows) => {
-      servers = rows ?? [];
-    });
+  interface Props {
+    activeServerId?: string | null;
+    onCreateServer?: (() => void) | null;
+    padForDock?: boolean;
+    showBottomActions?: boolean;
   }
+
+  let {
+    activeServerId = null,
+    onCreateServer = null,
+    padForDock = true,
+    showBottomActions = true
+  }: Props = $props();
+
+  let servers: { id: string; name: string; icon?: string | null }[] = $state([]);
+  let unsub: (() => void) | undefined = $state();
+  let localCreateOpen = $state(false);
+
+  run(() => {
+    if ($user) {
+      unsub?.();
+      unsub = subscribeUserServers($user.uid, (rows) => {
+        servers = rows ?? [];
+      });
+    }
+  });
 
   onDestroy(() => unsub?.());
 
@@ -38,15 +51,17 @@
     return value.toString();
   };
 
-  $: currentPath = $page?.url?.pathname ?? '/';
-  $: dmsActive = currentPath === '/dms' || currentPath.startsWith('/dms/');
-  $: activeDmThreadId =
-    currentPath.startsWith('/dms/') && currentPath.length > 5
+  let currentPath = $derived($page?.url?.pathname ?? '/');
+  let dmsActive = $derived(currentPath === '/dms' || currentPath.startsWith('/dms/'));
+  let activeDmThreadId =
+    $derived(currentPath.startsWith('/dms/') && currentPath.length > 5
       ? currentPath.slice(5).split('/')[0] || null
-      : null;
+      : null);
 
-  let unreadDMs: NotificationItem[] = [];
-  $: unreadDMs = ($notifications ?? []).filter((item) => item?.kind === 'dm' && item.unread > 0);
+  let unreadDMs: NotificationItem[] = $state([]);
+  run(() => {
+    unreadDMs = ($notifications ?? []).filter((item) => item?.kind === 'dm' && item.unread > 0);
+  });
 </script>
 
 <aside
@@ -90,7 +105,7 @@
       <button
         type="button"
         class="rail-button rail-button--create"
-        on:click={handleCreateClick}
+        onclick={handleCreateClick}
         aria-label="Create server"
         title="Create server"
       >

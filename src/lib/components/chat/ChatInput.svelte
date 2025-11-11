@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, preventDefault } from 'svelte/legacy';
+
   import { createEventDispatcher, onMount, tick } from 'svelte';
   import GifPicker from './GifPicker.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
@@ -63,41 +65,55 @@
     return score;
   }
 
-  export let placeholder: string = 'Message #channel';
-  export let disabled = false;
-  export let mentionOptions: MentionCandidate[] = [];
-  export let replyTarget: ReplyReferenceInput | null = null;
 
-  export let onSend: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void = () => {};
-  export let onUpload: (payload: UploadRequest) => void = () => {};
-  export let onSendGif: (payload: ReplyablePayload<{ url: string }>) => void = () => {};
-  export let onCreatePoll: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void = () => {};
-  export let onCreateForm: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void = () => {};
+  interface Props {
+    placeholder?: string;
+    disabled?: boolean;
+    mentionOptions?: MentionCandidate[];
+    replyTarget?: ReplyReferenceInput | null;
+    onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
+    onUpload?: (payload: UploadRequest) => void;
+    onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
+    onCreatePoll?: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void;
+    onCreateForm?: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void;
+  }
+
+  let {
+    placeholder = 'Message #channel',
+    disabled = false,
+    mentionOptions = [],
+    replyTarget = null,
+    onSend = () => {},
+    onUpload = () => {},
+    onSendGif = () => {},
+    onCreatePoll = () => {},
+    onCreateForm = () => {}
+  }: Props = $props();
 
   const dispatch = createEventDispatcher();
 
-  let text = '';
-  let popOpen = false;
-  let showGif = false;
-  let showPoll = false;
-  let showForm = false;
-  let showEmoji = false;
-  let emojiSupported = false;
-  let emojiTriggerEl: HTMLDivElement | null = null;
-  let disposeEmojiOutside: (() => void) | null = null;
-  let fileEl: HTMLInputElement | null = null;
-  let inputEl: HTMLTextAreaElement | null = null;
+  let text = $state('');
+  let popOpen = $state(false);
+  let showGif = $state(false);
+  let showPoll = $state(false);
+  let showForm = $state(false);
+  let showEmoji = $state(false);
+  let emojiSupported = $state(false);
+  let emojiTriggerEl: HTMLDivElement | null = $state(null);
+  let disposeEmojiOutside: (() => void) | null = $state(null);
+  let fileEl: HTMLInputElement | null = $state(null);
+  let inputEl: HTMLTextAreaElement | null = $state(null);
   let inputFocused = false;
   let keyboardInsetFrame: number | null = null;
   let syncKeyboardInset: (() => void) | null = null;
 
-  let mentionActive = false;
-  let mentionFiltered: MentionCandidate[] = [];
-  let mentionIndex = 0;
+  let mentionActive = $state(false);
+  let mentionFiltered: MentionCandidate[] = $state([]);
+  let mentionIndex = $state(0);
   let mentionQuery = '';
   let mentionStart = -1;
-  let mentionLookup = new Map<string, MentionCandidate>();
-  let mentionAliasLookup = new Map<string, MentionCandidate>();
+  let mentionLookup = $state(new Map<string, MentionCandidate>());
+  let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
 
   const REPLY_PREVIEW_LIMIT = 160;
@@ -139,18 +155,6 @@
     inputEl?.focus();
   }
 
-  $: mentionLookup = new Map(
-    mentionOptions.map((option) => [option.handle.toLowerCase(), option])
-  );
-  $: mentionAliasLookup = new Map(
-    mentionOptions.flatMap((option) =>
-      option.aliases.map((alias) => [alias, option] as [string, MentionCandidate])
-    )
-  );
-  $: if (!mentionOptions.length) {
-    mentionDraft.clear();
-    closeMentionMenu();
-  }
 
   function submit(e?: Event) {
     e?.preventDefault();
@@ -437,10 +441,6 @@
     return () => document.removeEventListener('pointerdown', handler);
   }
 
-  $: {
-    disposeEmojiOutside?.();
-    disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
-  }
 
   onMount(() => {
     if (typeof window === 'undefined') return;
@@ -506,9 +506,31 @@
       popOpen = false;
     }
   }
+  run(() => {
+    mentionLookup = new Map(
+      mentionOptions.map((option) => [option.handle.toLowerCase(), option])
+    );
+  });
+  run(() => {
+    mentionAliasLookup = new Map(
+      mentionOptions.flatMap((option) =>
+        option.aliases.map((alias) => [alias, option] as [string, MentionCandidate])
+      )
+    );
+  });
+  run(() => {
+    if (!mentionOptions.length) {
+      mentionDraft.clear();
+      closeMentionMenu();
+    }
+  });
+  run(() => {
+    disposeEmojiOutside?.();
+    disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
+  });
 </script>
 
-<svelte:window on:keydown={onEsc} />
+<svelte:window onkeydown={onEsc} />
 
 <div class="chat-input-stack">
   {#if replyTarget}
@@ -522,7 +544,7 @@
       <button
         type="button"
         class="reply-banner__close"
-        on:click={cancelReply}
+        onclick={cancelReply}
         aria-label="Cancel reply"
       >
         <i class="bx bx-x"></i>
@@ -530,7 +552,7 @@
     </div>
   {/if}
 
-  <form on:submit|preventDefault={submit} class="relative flex items-center gap-2">
+  <form onsubmit={preventDefault(submit)} class="relative flex items-center gap-2">
     <div class="relative">
       <button
         type="button"
@@ -539,7 +561,7 @@
         aria-expanded={popOpen}
         aria-label="Add to message"
         title="Add to message"
-        on:click={() => (popOpen = !popOpen)}
+        onclick={() => (popOpen = !popOpen)}
         disabled={disabled}
       >
         <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
@@ -549,7 +571,7 @@
         <div class="chat-input-popover" role="menu">
           <div class="chat-input-popover__header">Add to message</div>
           <div class="chat-input-menu">
-            <button class="chat-input-menu__item" role="menuitem" on:click={openGif}>
+            <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
               <span class="chat-input-menu__icon">
                 <i class="bx bx-film" aria-hidden="true"></i>
               </span>
@@ -558,7 +580,7 @@
                 <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
               </div>
             </button>
-            <button class="chat-input-menu__item" role="menuitem" on:click={pickFiles}>
+            <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
               <span class="chat-input-menu__icon">
                 <i class="bx bx-paperclip" aria-hidden="true"></i>
               </span>
@@ -567,7 +589,7 @@
                 <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
               </div>
             </button>
-            <button class="chat-input-menu__item" role="menuitem" on:click={openPoll}>
+            <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
               <span class="chat-input-menu__icon">
                 <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
               </span>
@@ -576,7 +598,7 @@
                 <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
               </div>
             </button>
-            <button class="chat-input-menu__item" role="menuitem" on:click={openForm}>
+            <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
               <span class="chat-input-menu__icon">
                 <i class="bx bx-detail" aria-hidden="true"></i>
               </span>
@@ -589,7 +611,7 @@
         </div>
       {/if}
 
-      <input class="hidden" type="file" multiple bind:this={fileEl} on:change={onFilesChange} />
+      <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
     </div>
 
     <div class="flex-1 relative">
@@ -599,15 +621,15 @@
         bind:this={inputEl}
         bind:value={text}
         placeholder={placeholder}
-        on:keydown={onKeydown}
-        on:input={handleInput}
-        on:keyup={handleSelectionChange}
-        on:click={handleSelectionChange}
-        on:focus={handleTextareaFocus}
-        on:blur={handleTextareaBlur}
+        onkeydown={onKeydown}
+        oninput={handleInput}
+        onkeyup={handleSelectionChange}
+        onclick={handleSelectionChange}
+        onfocus={handleTextareaFocus}
+        onblur={handleTextareaBlur}
         {disabled}
         aria-label="Message input"
-      />
+></textarea>
 
       {#if mentionActive}
         <div class="mention-menu" role="listbox">
@@ -619,8 +641,8 @@
                 class={`mention-menu__item ${option.kind === 'role' ? 'mention-menu__item--role' : ''} ${idx === mentionIndex ? 'is-active' : ''}`}
                 role="option"
                 aria-selected={idx === mentionIndex}
-                on:mousedown|preventDefault={() => insertMention(option)}
-                on:mouseenter={() => (mentionIndex = idx)}
+                onmousedown={preventDefault(() => insertMention(option))}
+                onmouseenter={() => (mentionIndex = idx)}
               >
                 <span class={`mention-menu__avatar ${option.kind === 'role' ? 'mention-menu__avatar--role' : ''}`}>
                   {#if option.kind === 'role'}
@@ -660,7 +682,7 @@
           <button
             type="button"
             class="emoji-button"
-            on:click={openEmoji}
+            onclick={openEmoji}
             disabled={disabled}
             aria-label="Insert emoji"
             title="Insert emoji"

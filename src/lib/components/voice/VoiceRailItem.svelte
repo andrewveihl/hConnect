@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
   import { voiceSession } from '$lib/stores/voice';
@@ -8,13 +10,13 @@
   // Desktop-only rail item that appears when a voice session is active
 
   const CALL_DOC_ID = 'live';
-  let session: VoiceSession | null = null;
+  let session: VoiceSession | null = $state(null);
   const stopSession = voiceSession.subscribe((s) => (session = s));
 
-  let participants = 0;
-  let unsub: Unsubscribe | null = null;
+  let participants = $state(0);
+  let unsub: Unsubscribe | null = $state(null);
 
-  $: {
+  run(() => {
     unsub?.();
     participants = 0;
     if (session?.serverId && session?.channelId) {
@@ -30,7 +32,7 @@
         participants = count;
       });
     }
-  }
+  });
 
   onDestroy(() => {
     unsub?.();
@@ -52,7 +54,7 @@
       class="relative my-1 w-12 h-12 grid place-items-center bg-[#243042] ring-2 ring-emerald-400/40 hover:bg-[#2c3a50] transition-all select-none"
       aria-label="Voice connected. Click to return. Shift+Click to leave."
       title={`Voice: ${session.channelName}`}
-      on:click={(e) => (e.shiftKey ? leave() : openVoice())}
+      onclick={(e) => (e.shiftKey ? leave() : openVoice())}
     >
       <i class="bx bx-headphone text-xl text-emerald-300"></i>
       {#if participants > 0}

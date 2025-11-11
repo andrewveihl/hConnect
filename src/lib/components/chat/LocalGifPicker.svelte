@@ -13,14 +13,14 @@
     'https://media.tenor.com/y1b4c0n4n0EAAAAC/loading-wait.gif'
   ];
 
-  let urlPaste = '';
+  let urlPaste = $state('');
 </script>
 
 <div class="gif-backdrop" role="dialog" aria-modal="true" aria-label="GIF picker">
   <div class="gif-panel">
     <div class="gif-header">
       <h3 class="gif-title">Add a GIF</h3>
-      <button type="button" class="gif-close" on:click={() => dispatch('close')} aria-label="Close picker">
+      <button type="button" class="gif-close" onclick={() => dispatch('close')} aria-label="Close picker">
         <i class="bx bx-x" aria-hidden="true"></i>
       </button>
     </div>
@@ -33,7 +33,7 @@
           <button
             type="button"
             class="gif-item"
-            on:click={() => dispatch('pick', src)}
+            onclick={() => dispatch('pick', src)}
             title="Use this GIF"
           >
             <img src={src} alt="GIF preview" loading="lazy" />
@@ -56,7 +56,7 @@
         <button
           type="button"
           class="btn btn-primary btn-sm min-w-[110px]"
-          on:click={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
+          onclick={() => urlPaste.trim() && dispatch('pick', urlPaste.trim())}
           disabled={!urlPaste.trim()}
         >
           Add GIF

@@ -1,5 +1,9 @@
 <script lang="ts">
-  export let serverName = 'Select a server';
+  interface Props {
+    serverName?: string;
+  }
+
+  let { serverName = 'Select a server' }: Props = $props();
 </script>
 
 <aside class="h-full w-64 shrink-0 bg-slate-950/70 backdrop-blur-xl border-r border-white/10 flex flex-col">

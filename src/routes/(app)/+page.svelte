@@ -52,7 +52,7 @@
   };
 
   const goTo = (href: string) => {
-    goto(href, { keepfocus: true, noScroll: true });
+    goto(href, { keepFocus: true, noScroll: true });
   };
 </script>
 
@@ -95,7 +95,7 @@
               <button
                 type="button"
                 class="notification-card"
-                on:click={() => goTo(item.href)}
+                onclick={() => goTo(item.href)}
                 aria-label={`Open ${item.kind === 'dm' ? 'direct message' : 'channel'} ${item.title}`}
               >
                 <div

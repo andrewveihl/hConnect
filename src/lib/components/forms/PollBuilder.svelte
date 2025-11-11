@@ -1,11 +1,13 @@
 ﻿<script lang="ts">
+  import { preventDefault } from 'svelte/legacy';
+
   import { createEventDispatcher, onMount } from 'svelte';
   const dispatch = createEventDispatcher();
 
-  let question = '';
-  let options: string[] = ['Option 1', 'Option 2'];
+  let question = $state('');
+  let options: string[] = $state(['Option 1', 'Option 2']);
 
-  let qInput: HTMLInputElement | null = null;
+  let qInput: HTMLInputElement | null = $state(null);
   onMount(() => qInput?.focus());
 
   const add = () => (options = [...options, `Option ${options.length + 1}`]);
@@ -36,13 +38,13 @@
   aria-modal="true"
   aria-label="Create poll"
   tabindex="-1"
-  on:keydown={onKeydown}
+  onkeydown={onKeydown}
 >
   <div class="poll-panel">
-    <form on:submit|preventDefault={create} class="poll-form">
+    <form onsubmit={preventDefault(create)} class="poll-form">
       <div class="poll-header">
         <h3 class="poll-title">Create a poll</h3>
-        <button type="button" class="poll-close" on:click={() => dispatch('close')} aria-label="Close">
+        <button type="button" class="poll-close" onclick={() => dispatch('close')} aria-label="Close">
           <i class="bx bx-x" aria-hidden="true"></i>
         </button>
       </div>
@@ -72,7 +74,7 @@
                 <button
                   type="button"
                   class="poll-option-remove"
-                  on:click={() => remove(i)}
+                  onclick={() => remove(i)}
                   aria-label={`Remove option ${i + 1}`}
                   aria-controls="{uid}-opt-{i}"
                   title="Remove option"
@@ -86,13 +88,13 @@
       </fieldset>
 
       <div class="poll-footer">
-        <button type="button" class="btn btn-ghost btn-sm" on:click={add}>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={add}>
           <i class="bx bx-plus" aria-hidden="true"></i>
           Add option
         </button>
 
         <div class="poll-actions">
-          <button type="button" class="btn btn-ghost btn-sm" on:click={() => dispatch('close')}>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={() => dispatch('close')}>
             Cancel
           </button>
           <button

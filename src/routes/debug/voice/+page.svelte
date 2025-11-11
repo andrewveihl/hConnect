@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, preventDefault } from 'svelte/legacy';
+
   import { browser } from '$app/environment';
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -23,16 +25,16 @@
 
   type CallRole = 'offerer' | 'answerer';
 
-  let sessionId = 'debug-room';
-  let joining = false;
-  let joined = false;
-  let callRole: CallRole | null = null;
+  let sessionId = $state('debug-room');
+  let joining = $state(false);
+  let joined = $state(false);
+  let callRole: CallRole | null = $state(null);
 
-  let localVideoEl: HTMLVideoElement | null = null;
-  let remoteVideoEl: HTMLVideoElement | null = null;
+  let localVideoEl: HTMLVideoElement | null = $state(null);
+  let remoteVideoEl: HTMLVideoElement | null = $state(null);
 
-  let localStream: MediaStream | null = null;
-  let remoteStream: MediaStream | null = null;
+  let localStream: MediaStream | null = $state(null);
+  let remoteStream: MediaStream | null = $state(null);
   let pc: RTCPeerConnection | null = null;
 
   let callRef: DocumentReference | null = null;
@@ -42,27 +44,27 @@
   let offerCandidatesUnsub: Unsubscribe | null = null;
   let answerCandidatesUnsub: Unsubscribe | null = null;
 
-  let callDocData: Record<string, unknown> | null = null;
+  let callDocData: Record<string, unknown> | null = $state(null);
   let callSnapshotHasData = false;
 
-  let signalingState = 'closed';
-  let connectionState = 'new';
-  let iceConnectionState = 'new';
-  let iceGatheringState = 'new';
+  let signalingState = $state('closed');
+  let connectionState = $state('new');
+  let iceConnectionState = $state('new');
+  let iceGatheringState = $state('new');
 
-  let publishedCandidateCount = 0;
-  let appliedCandidateCount = 0;
+  let publishedCandidateCount = $state(0);
+  let appliedCandidateCount = $state(0);
 
-  let micMuted = false;
-  let cameraOff = false;
+  let micMuted = $state(false);
+  let cameraOff = $state(false);
 
   const remoteCandidateKeys = new Set<string>();
 
-  let currentUser: User | null = null;
-  let authReady = false;
+  let currentUser: User | null = $state(null);
+  let authReady = $state(false);
 
   type LogEntry = { id: string; timestamp: string; message: string; details?: string };
-  let logEntries: LogEntry[] = [];
+  let logEntries: LogEntry[] = $state([]);
   let logSequence = 0;
 
   function log(message: string, details?: unknown) {
@@ -179,11 +181,12 @@
 
     pc.addEventListener('icecandidateerror', (event) => {
       const iceError = event as RTCPeerConnectionIceErrorEvent;
+      const iceErrorAny = iceError as any;
       log('icecandidateerror', {
         errorCode: iceError.errorCode,
         errorText: iceError.errorText,
-        hostCandidate: iceError.hostCandidate,
-        url: iceError.url
+        hostCandidate: iceErrorAny?.hostCandidate ?? null,
+        url: iceErrorAny?.url ?? null
       });
     });
 
@@ -619,19 +622,7 @@
     log('Camera toggled', { enabled: nextState });
   }
 
-  $: if (localVideoEl) {
-    if (localStream && hasVideoTracks(localStream)) {
-      localVideoEl.srcObject = localStream;
-      localVideoEl.muted = true;
-      localVideoEl.play().catch(() => {});
-    } else {
-      localVideoEl.srcObject = null;
-    }
-  }
 
-  $: if (remoteVideoEl && remoteStream) {
-    remoteVideoEl.srcObject = remoteStream;
-  }
 
   const localTrackInfo = () =>
     localStream
@@ -661,6 +652,22 @@
   onDestroy(() => {
     cleanupCall();
   });
+  run(() => {
+    if (localVideoEl) {
+      if (localStream && hasVideoTracks(localStream)) {
+        localVideoEl.srcObject = localStream;
+        localVideoEl.muted = true;
+        localVideoEl.play().catch(() => {});
+      } else {
+        localVideoEl.srcObject = null;
+      }
+    }
+  });
+  run(() => {
+    if (remoteVideoEl && remoteStream) {
+      remoteVideoEl.srcObject = remoteStream;
+    }
+  });
 </script>
 
 <svelte:head>
@@ -684,13 +691,13 @@
     </div>
 
     <div class="buttons">
-      <button class="primary" on:click|preventDefault={joinCall} disabled={joining || joined}>
+      <button class="primary" onclick={preventDefault(joinCall)} disabled={joining || joined}>
         {joining ? 'Joining…' : joined ? 'Connected' : 'Join Session'}
       </button>
-      <button on:click|preventDefault={leaveCall} disabled={!joined}>
+      <button onclick={preventDefault(leaveCall)} disabled={!joined}>
         Leave Session
       </button>
-      <button class="danger" on:click|preventDefault={resetSession}>
+      <button class="danger" onclick={preventDefault(resetSession)}>
         Reset Session
       </button>
     </div>
@@ -737,11 +744,11 @@
     </div>
 
     <div class="media-controls">
-      <button on:click|preventDefault={toggleMic} disabled={!localStream}>
+      <button onclick={preventDefault(toggleMic)} disabled={!localStream}>
         {micMuted ? 'Unmute Mic' : 'Mute Mic'}
       </button>
       <button
-        on:click|preventDefault={toggleCamera}
+        onclick={preventDefault(toggleCamera)}
         disabled={!localStream || !hasVideoTracks(localStream)}
       >
         {cameraOff ? 'Enable Camera' : 'Disable Camera'}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, stopPropagation } from 'svelte/legacy';
+
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
@@ -9,10 +11,13 @@
   } from '$lib/firestore/dms';
 
   const dispatch = createEventDispatcher();
-  let me: any = null;
-  $: me = $user;
+  let me: any = $state(null);
 
-  export let activeThreadId: string | null = null;
+  interface Props {
+    activeThreadId?: string | null;
+  }
+
+  let { activeThreadId = $bindable(null) }: Props = $props();
 
   export function updatePartnerMeta(meta: { uid: string; displayName?: string | null; name?: string | null; email?: string | null }) {
     const partner = meta?.uid?.trim?.();
@@ -34,16 +39,16 @@
   const SEARCH_PAGE_SIZE = 20;
   const PEOPLE_PAGE_SIZE = 40;
 
-  let term = '';
-  let searching = false;
-  let results: any[] = [];
-  let error: string | null = null;
+  let term = $state('');
+  let searching = $state(false);
+  let results: any[] = $state([]);
+  let error: string | null = $state(null);
   let searchTimer: any;
-  let showPeoplePicker = false;
-  let searchVisibleCount = SEARCH_PAGE_SIZE;
-  let peopleVisibleCount = PEOPLE_PAGE_SIZE;
-  let visibleSearchResults: any[] = [];
-  let visiblePeopleList: any[] = [];
+  let showPeoplePicker = $state(false);
+  let searchVisibleCount = $state(SEARCH_PAGE_SIZE);
+  let peopleVisibleCount = $state(PEOPLE_PAGE_SIZE);
+  let visibleSearchResults: any[] = $state([]);
+  let visiblePeopleList: any[] = $state([]);
 
   function resetSearchState() {
     clearTimeout(searchTimer);
@@ -93,19 +98,13 @@
   }
 
   /* ---------------- Threads ---------------- */
-  let threads: any[] = [];
-  let unsubThreads: (() => void) | null = null;
-  let threadMeta: Record<string, { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }> = {};
+  let threads: any[] = $state([]);
+  let unsubThreads: (() => void) | null = $state(null);
+  let threadMeta: Record<string, { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }> = $state({});
   let metaUnsubs: Record<string, () => void> = {};
-  let decoratedThreads: any[] = [];
-  let sortedThreads: any[] = [];
+  let decoratedThreads: any[] = $state([]);
+  let sortedThreads: any[] = $state([]);
 
-  $: if (me?.uid) {
-    unsubThreads?.();
-    unsubThreads = streamMyDMs(me.uid, (t) => {
-      threads = t;
-    });
-  }
   onDestroy(() => unsubThreads?.());
   onDestroy(() => {
     Object.values(metaUnsubs).forEach((stop) => stop());
@@ -113,7 +112,7 @@
   });
 
   // Resolve names for "other" participant so the list shows names, not UIDs.
-  let nameCache: Record<string, string> = {};
+  let nameCache: Record<string, string> = $state({});
 
   function pickDisplayCandidate(source: any): string | null {
     if (!source) return null;
@@ -137,42 +136,7 @@
     return null;
   }
 
-  $: if (threads?.length) {
-    let updated = false;
-    const nextCache = { ...nameCache };
-    for (const t of threads) {
-      const other = resolveOtherUid(t);
-      if (!other) continue;
-      const seeded = pickDisplayCandidate(t);
-      if (seeded && nextCache[other] !== seeded) {
-        nextCache[other] = seeded;
-        updated = true;
-      }
-    }
-    if (updated) {
-      nameCache = nextCache;
-    }
-  }
 
-  $: (async () => {
-    if (!threads?.length) return;
-    for (const t of threads) {
-      const other = resolveOtherUid(t);
-      if (other && !nameCache[other]) {
-        try {
-          const prof = await getProfile(other);
-          const resolved =
-            prof?.displayName ??
-            prof?.name ??
-            prof?.email ??
-            null;
-          if (resolved) {
-            nameCache = { ...nameCache, [other]: resolved };
-          }
-        } catch {}
-      }
-    }
-  })();
 
   function resolveOtherUid(t: any) {
     return t.otherUid || (t.participants || []).find((p: string) => p !== me?.uid) || null;
@@ -252,7 +216,6 @@
     return summary;
   }
 
-  $: manageThreadMetaSubscriptions(threads);
 
   function manageThreadMetaSubscriptions(currentThreads: any[]) {
     if (!Array.isArray(currentThreads)) return;
@@ -281,65 +244,21 @@
     }
   }
 
-  $: decoratedThreads = threads.map((thread) => {
-    const meta = threadMeta[thread.id] ?? null;
-    const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
-    const lastSender = meta?.lastSender ?? thread.lastSender ?? null;
-    const updatedAt = meta?.updatedAt ?? thread.updatedAt ?? null;
-    return {
-      ...thread,
-      lastMessage,
-      lastSender,
-      updatedAt,
-      _sortValue: timestampValue(updatedAt)
-    };
-  });
 
-  $: sortedThreads = decoratedThreads
-    .slice()
-    .sort((a, b) => {
-      const diff = (b._sortValue ?? 0) - (a._sortValue ?? 0);
-      if (diff !== 0) return diff;
-      return (a.id || '').localeCompare(b.id || '');
-    });
 
   /* ---------------- Unread badges ---------------- */
-  let unreadMap: Record<string, number> = {};
-  let unsubsUnread: Array<() => void> = [];
+  let unreadMap: Record<string, number> = $state({});
+  let unsubsUnread: Array<() => void> = $state([]);
 
-  $: {
-    unsubsUnread.forEach((u) => u());
-    unsubsUnread = [];
-    if (me?.uid) {
-      for (const t of threads) {
-        const stop = streamUnreadCount(t.id, me.uid, (n) => {
-          unreadMap = { ...unreadMap, [t.id]: n };
-        });
-        unsubsUnread.push(stop);
-      }
-    }
-  }
   onDestroy(() => unsubsUnread.forEach((u) => u()));
 
   /* ---------------- Everyone (profiles) ---------------- */
-  let people: any[] = [];
-  let peopleMap: Record<string, any> = {};
-  let unsubPeople: (() => void) | null = null;
+  let people: any[] = $state([]);
+  let peopleMap: Record<string, any> = $state({});
+  let unsubPeople: (() => void) | null = $state(null);
 
-  $: {
-    unsubPeople?.();
-    unsubPeople = streamProfiles((list) => {
-      const filtered = (me?.uid) ? list.filter((p) => p.uid !== me.uid) : list;
-      people = filtered;
-      const map: Record<string, any> = {};
-      for (const p of list) map[p.uid] = p;
-      peopleMap = map;
-    }, { limitTo: 500 });
-  }
   onDestroy(() => unsubPeople?.());
 
-  $: visibleSearchResults = results.slice(0, Math.min(searchVisibleCount, results.length));
-  $: visiblePeopleList = people.slice(0, Math.min(peopleVisibleCount, people.length));
 
   function loadMoreSearchResults() {
     if (!showPeoplePicker) return;
@@ -441,6 +360,111 @@
       console.error('Failed to delete DM thread', err);
     }
   }
+  run(() => {
+    me = $user;
+  });
+  run(() => {
+    if (me?.uid) {
+      unsubThreads?.();
+      unsubThreads = streamMyDMs(me.uid, (t) => {
+        threads = t;
+      });
+    }
+  });
+  run(() => {
+    if (threads?.length) {
+      let updated = false;
+      const nextCache = { ...nameCache };
+      for (const t of threads) {
+        const other = resolveOtherUid(t);
+        if (!other) continue;
+        const seeded = pickDisplayCandidate(t);
+        if (seeded && nextCache[other] !== seeded) {
+          nextCache[other] = seeded;
+          updated = true;
+        }
+      }
+      if (updated) {
+        nameCache = nextCache;
+      }
+    }
+  });
+  run(() => {
+    (async () => {
+      if (!threads?.length) return;
+      for (const t of threads) {
+        const other = resolveOtherUid(t);
+        if (other && !nameCache[other]) {
+          try {
+            const prof = await getProfile(other);
+            const resolved =
+              prof?.displayName ??
+              prof?.name ??
+              prof?.email ??
+              null;
+            if (resolved) {
+              nameCache = { ...nameCache, [other]: resolved };
+            }
+          } catch {}
+        }
+      }
+    })();
+  });
+  run(() => {
+    manageThreadMetaSubscriptions(threads);
+  });
+  run(() => {
+    decoratedThreads = threads.map((thread) => {
+      const meta = threadMeta[thread.id] ?? null;
+      const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
+      const lastSender = meta?.lastSender ?? thread.lastSender ?? null;
+      const updatedAt = meta?.updatedAt ?? thread.updatedAt ?? null;
+      return {
+        ...thread,
+        lastMessage,
+        lastSender,
+        updatedAt,
+        _sortValue: timestampValue(updatedAt)
+      };
+    });
+  });
+  run(() => {
+    sortedThreads = decoratedThreads
+      .slice()
+      .sort((a, b) => {
+        const diff = (b._sortValue ?? 0) - (a._sortValue ?? 0);
+        if (diff !== 0) return diff;
+        return (a.id || '').localeCompare(b.id || '');
+      });
+  });
+  run(() => {
+    unsubsUnread.forEach((u) => u());
+    unsubsUnread = [];
+    if (me?.uid) {
+      for (const t of threads) {
+        const stop = streamUnreadCount(t.id, me.uid, (n) => {
+          unreadMap = { ...unreadMap, [t.id]: n };
+        });
+        unsubsUnread.push(stop);
+      }
+    }
+  });
+  run(() => {
+    unsubPeople?.();
+    unsubPeople = streamProfiles((list) => {
+      const filtered = (me?.uid) ? list.filter((p) => p.uid !== me.uid) : list;
+      people = filtered;
+      const map: Record<string, any> = {};
+      for (const p of list) map[p.uid] = p;
+      peopleMap = map;
+    }, { limitTo: 500 });
+  });
+  run(() => {
+    visibleSearchResults = results.slice(0, Math.min(searchVisibleCount, results.length));
+  });
+  run(() => {
+    visiblePeopleList = people.slice(0, Math.min(peopleVisibleCount, people.length));
+  });
 </script>
 
 <aside class="relative w-80 shrink-0 sidebar-surface border-r border-subtle h-[100dvh] flex flex-col text-primary">
@@ -452,7 +476,7 @@
         class="p-2 rounded-full bg-white/5 text-white/80 hover:text-white hover:bg-white/10 transition disabled:opacity-50 disabled:cursor-not-allowed"
         type="button"
         aria-label="Start a conversation"
-        on:click={openPeoplePicker}
+        onclick={openPeoplePicker}
         disabled={showPeoplePicker}
       >
         <i class="bx bx-plus text-xl"></i>
@@ -469,7 +493,7 @@
           <a
             href="/dms/notes"
             class={`channel-row ${activeThreadId === '__notes' ? 'channel-row--active' : ''}`}
-            on:click={() => dispatch('select', { id: '__notes' })}
+            onclick={() => dispatch('select', { id: '__notes' })}
           >
             <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
               <i class="bx bx-notepad text-lg"></i>
@@ -493,7 +517,7 @@
             <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
               <button
                 class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
-                on:click={() => openExisting(t.id)}
+                onclick={() => openExisting(t.id)}
               >
                 <div class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center overflow-hidden">
                   {#if otherPhoto}
@@ -515,7 +539,7 @@
               <button
                 class="p-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:bg-white/10 text-white/70 hover:text-white transition transition-opacity"
                 aria-label="Delete conversation"
-                on:click|stopPropagation={() => deleteThread(t.id)}
+                onclick={stopPropagation(() => deleteThread(t.id))}
               >
                 <i class="bx bx-trash"></i>
               </button>
@@ -541,7 +565,7 @@
           class="btn btn-ghost btn-sm rounded-full people-picker__close"
           type="button"
           aria-label="Close people picker"
-          on:click={closePeoplePicker}
+          onclick={closePeoplePicker}
         >
           <i class="bx bx-x text-xl"></i>
         </button>
@@ -554,7 +578,7 @@
             class="input input--compact pl-9 pr-3 people-picker__field"
             placeholder="Search people by name"
             bind:value={term}
-            on:input={onSearchInput}
+            oninput={onSearchInput}
           />
         </div>
         {#if error}
@@ -575,7 +599,7 @@
                 <li>
                   <button
                     class="people-picker__option"
-                    on:click={() => openOrStartDM(u.uid)}
+                    onclick={() => openOrStartDM(u.uid)}
                   >
                     <img class="w-8 h-8 rounded-full object-cover" src={u.photoURL || u.authPhotoURL || '/static/demo-cursor.png'} alt="" />
                     <div class="text-sm text-left">
@@ -608,7 +632,7 @@
                 <li>
                   <button
                     class="people-picker__option"
-                    on:click={() => openOrStartDM(p.uid)}
+                    onclick={() => openOrStartDM(p.uid)}
                   >
                     <img class="w-8 h-8 rounded-full object-cover" src={p.photoURL || p.authPhotoURL || '/static/demo-cursor.png'} alt="" />
                     <div class="text-sm text-left">

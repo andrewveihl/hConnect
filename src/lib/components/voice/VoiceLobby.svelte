@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
@@ -14,17 +16,33 @@
     status: 'active' | 'left';
   };
 
-  export let serverId: string | null = null;
-  export let channelId: string | null = null;
-  export let channelName = 'Voice channel';
-  export let serverName = 'Server';
-  export let inviteUrl: string | null = null;
-  export let connectedChannelId: string | null = null;
-  export let connectedChannelName: string | null = null;
-  export let connectedServerId: string | null = null;
-  export let connectedServerName: string | null = null;
-  export let currentUserAvatar: string | null = null;
-  export let currentUserName: string | null = null;
+  interface Props {
+    serverId?: string | null;
+    channelId?: string | null;
+    channelName?: string;
+    serverName?: string;
+    inviteUrl?: string | null;
+    connectedChannelId?: string | null;
+    connectedChannelName?: string | null;
+    connectedServerId?: string | null;
+    connectedServerName?: string | null;
+    currentUserAvatar?: string | null;
+    currentUserName?: string | null;
+  }
+
+  let {
+    serverId = null,
+    channelId = null,
+    channelName = 'Voice channel',
+    serverName = 'Server',
+    inviteUrl = null,
+    connectedChannelId = null,
+    connectedChannelName = null,
+    connectedServerId = null,
+    connectedServerName = null,
+    currentUserAvatar = null,
+    currentUserName = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{
     joinVoice: void;
@@ -32,45 +50,13 @@
     returnToSession: void;
   }>();
 
-  let participants: ParticipantPreview[] = [];
-  let unsub: Unsubscribe | null = null;
+  let participants: ParticipantPreview[] = $state([]);
+  let unsub: Unsubscribe | null = $state(null);
   let copyStatus = '';
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  $: connectedElsewhere =
-    Boolean(connectedChannelId) &&
-    (connectedChannelId !== channelId || (connectedServerId && connectedServerId !== serverId));
 
-  $: participantCount = participants.length;
-  $: displayedParticipants = participants.slice(0, 5);
-  $: overflowCount = Math.max(participantCount - displayedParticipants.length, 0);
-  $: previewAvatarUrl = currentUserAvatar ?? displayedParticipants[0]?.photoURL ?? null;
-  $: previewInitial = initials(currentUserName ?? displayedParticipants[0]?.displayName ?? channelName);
 
-  $: {
-    unsub?.();
-    participants = [];
-    if (!serverId || !channelId) {
-      unsub = null;
-    } else {
-      const database = getDb();
-      const callDoc = doc(database, 'servers', serverId, 'channels', channelId, 'calls', CALL_DOC_ID);
-      const ref = collection(callDoc, 'participants');
-      unsub = onSnapshot(ref, (snap) => {
-        participants = snap.docs
-          .map((entry) => {
-            const data = entry.data() as any;
-            return {
-              uid: data.uid ?? entry.id,
-              displayName: data.displayName ?? 'Member',
-              photoURL: resolveProfilePhotoURL(data),
-              status: (data.status ?? 'active') as 'active' | 'left'
-            };
-          })
-          .filter((participant) => participant.status === 'active');
-      });
-    }
-  }
 
   onDestroy(() => {
     unsub?.();
@@ -109,6 +95,38 @@
   function handleStartStreaming() {
     dispatch('startStreaming');
   }
+  let connectedElsewhere =
+    $derived(Boolean(connectedChannelId) &&
+    (connectedChannelId !== channelId || (connectedServerId && connectedServerId !== serverId)));
+  run(() => {
+    unsub?.();
+    participants = [];
+    if (!serverId || !channelId) {
+      unsub = null;
+    } else {
+      const database = getDb();
+      const callDoc = doc(database, 'servers', serverId, 'channels', channelId, 'calls', CALL_DOC_ID);
+      const ref = collection(callDoc, 'participants');
+      unsub = onSnapshot(ref, (snap) => {
+        participants = snap.docs
+          .map((entry) => {
+            const data = entry.data() as any;
+            return {
+              uid: data.uid ?? entry.id,
+              displayName: data.displayName ?? 'Member',
+              photoURL: resolveProfilePhotoURL(data),
+              status: (data.status ?? 'active') as 'active' | 'left'
+            };
+          })
+          .filter((participant) => participant.status === 'active');
+      });
+    }
+  });
+  let participantCount = $derived(participants.length);
+  let displayedParticipants = $derived(participants.slice(0, 5));
+  let overflowCount = $derived(Math.max(participantCount - displayedParticipants.length, 0));
+  let previewAvatarUrl = $derived(currentUserAvatar ?? displayedParticipants[0]?.photoURL ?? null);
+  let previewInitial = $derived(initials(currentUserName ?? displayedParticipants[0]?.displayName ?? channelName));
 </script>
 
 <section class="voice-lobby" aria-live="polite">
@@ -126,7 +144,7 @@
           {/if}
           . Joining here will switch you over.
         </p>
-        <button type="button" class="voice-lobby__pill" on:click={handleReturnToSession}>
+        <button type="button" class="voice-lobby__pill" onclick={handleReturnToSession}>
           Return to current call
         </button>
       </div>
@@ -175,12 +193,12 @@
 
     <div class="voice-lobby__actions">
       <div class="voice-lobby__primary">
-        <button type="button" class="voice-lobby__btn voice-lobby__btn--accent" on:click={handleStartStreaming}>
+        <button type="button" class="voice-lobby__btn voice-lobby__btn--accent" onclick={handleStartStreaming}>
           <i class="bx bx-broadcast"></i>
           <span>Start streaming</span>
           <i class="bx bx-chevron-down caret"></i>
         </button>
-        <button type="button" class="voice-lobby__btn voice-lobby__btn--outline" on:click={handleJoin}>
+        <button type="button" class="voice-lobby__btn voice-lobby__btn--outline" onclick={handleJoin}>
           <i class="bx bx-headphone"></i>
           <span>Join voice</span>
         </button>

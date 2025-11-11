@@ -100,7 +100,9 @@ export function subscribeServerDirectory(
       const profile = profiles.get(uid);
       const label = labelFor(member, profile);
       const handle = buildHandle(label, uid);
-      const avatar = resolveProfilePhotoURL(profile, member?.photoURL ?? null);
+      const rawMemberPhoto = member?.photoURL;
+      const memberPhoto = typeof rawMemberPhoto === 'string' ? rawMemberPhoto : undefined;
+      const avatar = resolveProfilePhotoURL(profile, memberPhoto);
       const aliases = buildAliases({ label, handle, member, profile });
       const searchParts = [label, handle, member?.email, profile?.email]
         .map((part) => (typeof part === 'string' ? part : ''))

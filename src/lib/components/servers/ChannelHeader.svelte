@@ -1,9 +1,19 @@
 <script lang="ts">
-  export let channel: { id: string; type: 'text' | 'voice'; name: string } | null = null;
-  export let channelsVisible = false;
-  export let membersVisible = false;
-  export let onToggleChannels: (() => void) | null = null;
-  export let onToggleMembers: (() => void) | null = null;
+  interface Props {
+    channel?: { id: string; type: 'text' | 'voice'; name: string } | null;
+    channelsVisible?: boolean;
+    membersVisible?: boolean;
+    onToggleChannels?: (() => void) | null;
+    onToggleMembers?: (() => void) | null;
+  }
+
+  let {
+    channel = null,
+    channelsVisible = false,
+    membersVisible = false,
+    onToggleChannels = null,
+    onToggleMembers = null
+  }: Props = $props();
 </script>
 
 <header class="channel-header">
@@ -13,7 +23,7 @@
         class="channel-header__toggle md:hidden"
         type="button"
         aria-label="Show servers"
-        on:click={() => onToggleChannels?.()}
+        onclick={() => onToggleChannels?.()}
       >
         <i class="bx bx-chevron-left text-xl"></i>
       </button>
@@ -43,7 +53,7 @@
         class="channel-header__toggle md:hidden"
         type="button"
         aria-label="Show members"
-        on:click={() => onToggleMembers?.()}
+        onclick={() => onToggleMembers?.()}
       >
         <i class="bx bx-chevron-right text-xl"></i>
       </button>
