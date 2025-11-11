@@ -48,6 +48,49 @@ const OPENAI_BASE = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1')
 
 const MAX_CONTEXT_CHARS = 1200;
 const MAX_TYPED_CHARS = 400;
+const MAX_CONTEXT_MESSAGES = 10;
+const MAX_REWRITE_CHARS = 800;
+const MAX_THREAD_SUMMARY_MESSAGES = 20;
+const MAX_THREAD_SUMMARY_POINTS = 4;
+const DEFAULT_THREAD_IDLE_HOURS = 6;
+
+const REWRITE_MODE_CONFIG = {
+  rephrase: {
+    label: 'Rephrase',
+    description: 'Say the same thing with new wording while keeping the tone neutral.',
+    count: 2
+  },
+  shorten: {
+    label: 'Shorten',
+    description: 'Cut the text roughly in half while preserving the core meaning.',
+    count: 1
+  },
+  elaborate: {
+    label: 'Elaborate',
+    description: 'Add one or two helpful sentences of context.',
+    count: 1
+  },
+  formal: {
+    label: 'More formal',
+    description: 'Sound polished and professional without being stiff.',
+    count: 1
+  },
+  casual: {
+    label: 'More casual',
+    description: 'Loosen the tone so it feels like a friendly Discord DM.',
+    count: 1
+  },
+  bulletize: {
+    label: 'Bulletize',
+    description: 'Convert the message into 3-5 short bullet points using "- " prefixes.',
+    count: 1
+  },
+  summarize: {
+    label: 'Summarize',
+    description: 'Summarize the draft into 2 concise sentences highlighting key points.',
+    count: 1
+  }
+};
 
 app.get('/healthz', (_req, res) => res.send('ok'));
 app.get('/', (_req, res) => res.send('backend up'));
@@ -127,17 +170,99 @@ function describeMessageForPrompt(message) {
   }
 }
 
+function normalizeConversationContext(rawContext, limit = MAX_CONTEXT_MESSAGES) {
+  if (!Array.isArray(rawContext) || !rawContext.length) return [];
+  const normalized = rawContext
+    .map((entry) => {
+      const summary = describeMessageForPrompt(entry);
+      if (!summary) return null;
+      const author =
+        clampText(
+          entry?.author ??
+            entry?.authorName ??
+            entry?.from ??
+            entry?.displayName ??
+            entry?.name ??
+            '',
+          60
+        ) || 'Someone';
+      const condensed = summary.replace(/\s+/g, ' ').replace(/["“”]/g, '"').trim();
+      if (!condensed) return null;
+      return { author, text: clampText(condensed, MAX_CONTEXT_CHARS) };
+    })
+    .filter(Boolean);
+  if (!normalized.length) return [];
+  return normalized.slice(-limit);
+}
+
+function formatContextLines(entries) {
+  if (!entries.length) return '';
+  return entries
+    .map((entry, index) => `${index + 1}. ${entry.author}: "${entry.text}"`)
+    .join('\n');
+}
+
+function millisFromDate(value) {
+  if (!value) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber)) return asNumber;
+  try {
+    const parsed = new Date(value);
+    const time = parsed.getTime();
+    return Number.isFinite(time) ? time : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSummaryResponse(raw, fallback = []) {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return [];
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    try {
+      const candidate = text.replace(/^```json/i, '').replace(/```$/, '');
+      parsed = JSON.parse(candidate);
+    } catch {
+      parsed = null;
+    }
+  }
+  const base = Array.isArray(parsed?.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
+  if (!Array.isArray(base)) return [];
+  return base
+    .map((entry, index) => {
+      const title = clampText(entry?.title ?? entry?.headline ?? '', 140);
+      const details = clampText(entry?.details ?? entry?.summary ?? entry?.note ?? '', 360);
+      const messageId =
+        clampText(entry?.messageId ?? entry?.id ?? entry?.message ?? '', 120) ||
+        clampText(fallback[index]?.id ?? '', 120) ||
+        null;
+      if (!title || !details) return null;
+      return { title, details, messageId };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_THREAD_SUMMARY_POINTS);
+}
+
 async function generateReplySuggestion(body) {
   const author = clampText(body.message?.author ?? '', 120) || 'the other person';
   const text = describeMessageForPrompt(body.message);
   const threadLabel = clampText(body.threadLabel ?? '', 120);
+  const recentContext = normalizeConversationContext(body.context);
   if (!text) {
     throw new Error('Missing message text.');
   }
   const systemPrompt =
-    'You are a concise but friendly assistant that helps craft direct message replies. Keep answers under 45 words, stay casual-professional, and never add markdown, emojis, or extra salutations. Reply with only the suggested response.';
+    'You help teammates craft quick Discord-style replies. Keep answers under 45 words, plain text (no markdown/emojis), first-person, and sound like a thoughtful human without extra salutations.';
   const contextLines = [
     threadLabel ? `Conversation notes: ${threadLabel}` : null,
+    recentContext.length
+      ? `Recent chat (${recentContext.length}):\n${formatContextLines(recentContext)}`
+      : null,
     `Message from ${author}: """${text}"""`,
     'Task: Suggest a thoughtful reply in first person.'
   ]
@@ -183,8 +308,8 @@ async function generatePredictions(body) {
   const text = clampText(body.text ?? '', MAX_TYPED_CHARS);
   if (!text) return [];
   const count = Math.min(Math.max(Number(body.count) || (body.platform === 'mobile' ? 3 : 1), 1), 5);
-  const systemPrompt = `You autocomplete casual chat messages one word or very short phrase at a time. Return ${count} likely continuations for the next ${count === 1 ? 'word or short phrase' : 'words'} as a JSON array of plain strings. No commentary. Keep each option under four words.`;
-  const userPrompt = `Typed so far: """${text}"""\nReturn the ${count} most likely next tokens.`;
+  const systemPrompt = `You autocomplete Discord-style chat messages one word or short phrase at a time. Return ${count} likely continuations as a JSON array of plain strings. Keep each option under four words, no emojis or markdown, and keep the tone conversational.`;
+  const userPrompt = `Channel draft so far: """${text}"""\nReturn the ${count} most likely next tokens.`;
   const raw = await callOpenAI(
     [
       { role: 'system', content: systemPrompt },
@@ -193,6 +318,99 @@ async function generatePredictions(body) {
     { max_completion_tokens: 40, temperature: 0.3 }
   );
   return normalizePredictionArray(raw, count);
+}
+
+async function generateRewriteSuggestions(body) {
+  const text = clampText(body.text ?? '', MAX_REWRITE_CHARS);
+  if (!text) {
+    throw new Error('Missing draft text to rewrite.');
+  }
+  const mode = clampText(body.mode ?? '', 40).toLowerCase() || 'rephrase';
+  const config = REWRITE_MODE_CONFIG[mode] ?? REWRITE_MODE_CONFIG.rephrase;
+  const count = Math.min(Math.max(Number(body.count) || config.count || 1, 1), 3);
+  const threadLabel = clampText(body.threadLabel ?? '', 120);
+  const recentContext = normalizeConversationContext(body.context);
+  const systemPrompt =
+    'You are an assistant helping teammates polish Discord messages. Keep outputs under 80 words, plain text (no markdown/emojis), and stay true to the author\'s intent.';
+  const guidance = [
+    `Mode: ${config.label}`,
+    config.description,
+    'Do not invent facts or names.'
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const userPrompt = [
+    threadLabel ? `Channel: ${threadLabel}` : null,
+    recentContext.length
+      ? `Recent chat (${recentContext.length}):\n${formatContextLines(recentContext)}`
+      : null,
+    `Original draft:\n"""${text}"""`,
+    `Guidelines: ${guidance}`,
+    `Return ${count} option${count > 1 ? 's' : ''} as a JSON array of plain strings.`
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const raw = await callOpenAI(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    { max_completion_tokens: 220, temperature: 0.65 }
+  );
+  return normalizePredictionArray(raw, count);
+}
+
+async function generateThreadSummary(body) {
+  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+  const cleaned = rawMessages
+    .map((entry) => {
+      const id = clampText(entry?.id ?? entry?.messageId ?? '', 120);
+      const author = clampText(entry?.author ?? entry?.displayName ?? entry?.name ?? '', 80) || 'Someone';
+      const text = clampText(entry?.text ?? entry?.content ?? entry?.preview ?? '', MAX_CONTEXT_CHARS);
+      if (!text) return null;
+      return {
+        id: id || null,
+        author,
+        text,
+        createdAt: millisFromDate(entry?.createdAt) ?? null
+      };
+    })
+    .filter(Boolean);
+  const subset = cleaned.slice(-MAX_THREAD_SUMMARY_MESSAGES);
+  if (!subset.length) {
+    throw new Error('No messages provided for summary.');
+  }
+  const idleHours = Math.max(Number(body.idleHours) || DEFAULT_THREAD_IDLE_HOURS, 0);
+  const idleNote = idleHours > 0 ? `The thread has been idle for about ${idleHours.toFixed(1)} hours.` : '';
+  const instructions = [
+    idleNote,
+    'Summaries should feel like a Discord thread recap, covering decisions, blockers, and next steps.',
+    'Each bullet must reference one concrete messageId from the thread.',
+    'Respond as JSON array of up to 4 objects: [{"title":"","details":"","messageId":""}].',
+    'Tone should be neutral and action-oriented, plain text only.'
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const transcript = subset
+    .map((entry, index) => {
+      const timestamp = entry.createdAt ? new Date(entry.createdAt).toISOString() : 'recent';
+      const ref = entry.id ? `(${entry.id})` : `(msg${index + 1})`;
+      return `${index + 1}. ${entry.author} ${ref} @ ${timestamp}: ${entry.text}`;
+    })
+    .join('\n');
+  const systemPrompt =
+    'You are a chief of staff summarizing async chat threads for the morning shift. Extract 2-4 punchy highlights with owners and outcomes.';
+  const raw = await callOpenAI(
+    [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: `${instructions}\n\nThread transcript:\n${transcript}`
+      }
+    ],
+    { max_completion_tokens: 300, temperature: 0.35 }
+  );
+  return normalizeSummaryResponse(raw, subset);
 }
 
 const aiRouter = express.Router();
@@ -221,6 +439,14 @@ aiRouter.post('/', async (req, res) => {
     if (body.intent === 'predict') {
       const suggestions = await generatePredictions(body);
       return res.json({ suggestions });
+    }
+    if (body.intent === 'rewrite') {
+      const options = await generateRewriteSuggestions(body);
+      return res.json({ options });
+    }
+    if (body.intent === 'thread-summary') {
+      const summary = await generateThreadSummary(body);
+      return res.json({ summary });
     }
     return res.status(400).json({ error: 'Unsupported intent.' });
   } catch (error) {

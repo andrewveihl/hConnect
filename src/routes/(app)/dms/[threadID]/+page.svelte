@@ -126,6 +126,7 @@ let lastThreadID: string | null = null;
 let pendingReply: ReplyReferenceInput | null = $state(null);
 let replySourceMessage: any = $state(null);
 let latestInboundMessage: any = $state(null);
+let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
 
   const LEFT_RAIL = 72;
@@ -1006,6 +1007,10 @@ run(() => {
     latestInboundMessage = fallback ?? null;
   });
 
+  run(() => {
+    aiConversationContext = messages.slice(-10);
+  });
+
   let displayName =
     $derived(pickString(otherProfile?.displayName) ??
     pickString(otherProfile?.name) ??
@@ -1104,14 +1109,15 @@ run(() => {
         replyTarget={pendingReply}
         replySource={replySourceMessage}
         defaultSuggestionSource={latestInboundMessage}
+        conversationContext={aiConversationContext}
         aiAssistEnabled={aiAssistEnabled}
         threadLabel={displayName}
         on:send={onSend}
         on:submit={onSend}
-        on:sendGif={(e) => handleSendGif(e.detail)}
-        on:upload={(e) => handleUploadFiles(e.detail)}
-        on:createPoll={(e) => handleCreatePoll(e.detail)}
-        on:createForm={(e) => handleCreateForm(e.detail)}
+        on:sendGif={(e: CustomEvent<any>) => handleSendGif(e.detail)}
+        on:upload={(e: CustomEvent<any>) => handleUploadFiles(e.detail)}
+        on:createPoll={(e: CustomEvent<any>) => handleCreatePoll(e.detail)}
+        on:createForm={(e: CustomEvent<any>) => handleCreateForm(e.detail)}
         on:cancelReply={() => (pendingReply = null)}
       />
     </div>

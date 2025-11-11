@@ -13,6 +13,7 @@
   import MembersPane from '$lib/components/servers/MembersPane.svelte';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
+  import ThreadDrawer from '$lib/components/chat/ThreadDrawer.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
   import VoiceLobby from '$lib/components/voice/VoiceLobby.svelte';
   import { voiceSession } from '$lib/stores/voice';
@@ -60,9 +61,19 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
   };
 
 let channels: Channel[] = $state([]);
-  let activeChannel: Channel | null = $state(null);
-  let requestedChannelId: string | null = $state(null);
+let activeChannel: Channel | null = $state(null);
+let requestedChannelId: string | null = $state(null);
 let messages: any[] = $state([]);
+let threadStats: Record<string, { count: number; lastAt: number }> = $state({});
+let activeThreadRoot: any = $state(null);
+let threadMessages: any[] = $state([]);
+let threadDrawerOpen = $state(false);
+let threadReplyTarget: ReplyReferenceInput | null = $state(null);
+let threadConversationContext: any[] = $state([]);
+let threadDefaultSuggestionSource: any = $state(null);
+let latestInboundMessage: any = $state(null);
+let aiConversationContext: any[] = $state([]);
+let aiAssistEnabled = $state(true);
 let replyTarget: ReplyReferenceInput | null = $state(null);
 let lastReplyChannelId: string | null = $state(null);
 let profiles: Record<string, any> = $state({});
@@ -329,6 +340,40 @@ let lastPendingChannelId: string | null = $state(null);
     const parent = cloneReplyChain(raw?.parent ?? null);
     if (parent) node.parent = parent;
     return node;
+  }
+
+  function resolveThreadRootId(reply: ReplyReferenceInput | null | undefined) {
+    if (!reply) return null;
+    let current: ReplyReferenceInput | null | undefined = reply;
+    let candidate: string | null = null;
+    while (current) {
+      candidate = pickString(current.messageId) || candidate;
+      current = current.parent;
+    }
+    return candidate;
+  }
+
+  function messageBelongsToThread(message: any, rootId: string | null) {
+    if (!rootId) return false;
+    const replyRef = message?.replyTo ?? null;
+    if (!replyRef) return false;
+    const resolved = resolveThreadRootId(replyRef) ?? pickString(replyRef.messageId);
+    return resolved === rootId;
+  }
+
+  function toMillis(value: any) {
+    if (!value) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === 'function') {
+      try {
+        return value.toMillis();
+      } catch {
+        // ignore
+      }
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   function consumeReply(explicit?: ReplyReferenceInput | null) {
@@ -879,6 +924,17 @@ let lastPendingChannelId: string | null = $state(null);
     onDestroy(() => window.removeEventListener('visibilitychange', onVis));
   }
 
+  function normalizeMentionSendList(list: MentionSendRecord[] | undefined) {
+    if (!Array.isArray(list) || !list.length) return [];
+    const cleaned = list.filter(
+      (item): item is MentionSendRecord =>
+        !!item?.uid && (!!item?.handle || !!item?.label)
+    );
+    if (!cleaned.length || !mentionOptions.length) return cleaned;
+    const allowed = new Set(mentionOptions.map((entry) => entry.uid));
+    return cleaned.filter((item) => allowed.has(item.uid));
+  }
+
   async function handleSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
     const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
     const trimmed = raw?.trim?.() ?? '';
@@ -887,17 +943,9 @@ let lastPendingChannelId: string | null = $state(null);
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
     const replyRef = consumeReply(typeof payload === 'object' ? payload?.replyTo ?? null : null);
-    let mentionList: MentionSendRecord[] =
-      typeof payload === 'object' && payload && Array.isArray(payload.mentions)
-        ? payload.mentions.filter(
-            (item): item is MentionSendRecord =>
-              !!item?.uid && (!!item?.handle || !!item?.label)
-          )
-        : [];
-    if (mentionList.length && mentionOptions.length) {
-      const allowed = new Set(mentionOptions.map((entry) => entry.uid));
-      mentionList = mentionList.filter((item) => allowed.has(item.uid));
-    }
+    const mentionList = normalizeMentionSendList(
+      typeof payload === 'object' ? payload?.mentions ?? [] : []
+    );
     try {
       await sendChannelMessage(serverId, activeChannel.id, {
         type: 'text',
@@ -1037,6 +1085,154 @@ let lastPendingChannelId: string | null = $state(null);
     }
   }
 
+  async function handleThreadSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
+    const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
+    const trimmed = raw?.trim?.() ?? '';
+    if (!trimmed) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = ensureThreadReplyReference(typeof payload === 'object' ? payload?.replyTo ?? null : null);
+    const mentions = normalizeMentionSendList(
+      typeof payload === 'object' ? payload?.mentions ?? [] : []
+    );
+    try {
+      await sendChannelMessage(serverId, activeChannel.id, {
+        type: 'text',
+        text: trimmed,
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        mentions,
+        replyTo: replyRef ?? undefined
+      });
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to send thread reply: ${err}`);
+    }
+  }
+
+  async function handleThreadSendGif(detail: string | { url: string; replyTo?: ReplyReferenceInput | null }) {
+    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
+    if (!trimmed) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = ensureThreadReplyReference(typeof detail === 'object' ? detail?.replyTo ?? null : null);
+    try {
+      await sendChannelMessage(serverId, activeChannel.id, {
+        type: 'gif',
+        url: trimmed,
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to share GIF: ${err}`);
+    }
+  }
+
+  async function handleThreadUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
+    const selection = Array.from(request?.files ?? []).filter((file): file is File => file instanceof File);
+    if (!selection.length) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = ensureThreadReplyReference(request?.replyTo ?? null);
+    let replyUsed = false;
+    const identity = {
+      uid: $user.uid,
+      displayName: deriveCurrentDisplayName(),
+      photoURL: deriveCurrentPhotoURL()
+    };
+    for (const file of selection) {
+      const pending = registerPendingUpload(file);
+      try {
+        const uploaded = await uploadChannelFile({
+          serverId,
+          channelId: activeChannel.id,
+          uid: $user.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendChannelMessage(serverId, activeChannel.id, {
+          type: 'file',
+          file: {
+            name: file.name || uploaded.name,
+            url: uploaded.url,
+            size: file.size ?? uploaded.size,
+            contentType: file.type || uploaded.contentType,
+            storagePath: uploaded.storagePath
+          },
+          ...identity,
+          replyTo: !replyUsed && replyRef ? replyRef : undefined
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+      } catch (err) {
+        pending.finish(false);
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
+    threadReplyTarget = buildReplyReference(activeThreadRoot);
+  }
+
+  async function handleThreadCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = ensureThreadReplyReference(poll?.replyTo ?? null);
+    try {
+      await sendChannelMessage(serverId, activeChannel.id, {
+        type: 'poll',
+        poll: {
+          question: poll.question,
+          options: poll.options
+        },
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to create poll: ${err}`);
+    }
+  }
+
+  async function handleThreadCreateForm(form: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) {
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = ensureThreadReplyReference(form?.replyTo ?? null);
+    try {
+      await sendChannelMessage(serverId, activeChannel.id, {
+        type: 'form',
+        form: {
+          title: form.title,
+          questions: form.questions
+        },
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to share form: ${err}`);
+    }
+  }
+
   async function handleVote(event: CustomEvent<{ messageId: string; optionIndex: number }>) {
     if (!serverId || !activeChannel?.id || !$user) return;
     const { messageId, optionIndex } = event.detail ?? {};
@@ -1076,6 +1272,42 @@ let lastPendingChannelId: string | null = $state(null);
   function handleReplyRequest(event: CustomEvent<{ message: any }>) {
     const ref = buildReplyReference(event.detail?.message);
     if (ref) replyTarget = ref;
+  }
+
+  function openThreadFromMessage(message: any) {
+    if (!message) return;
+    activeThreadRoot = message;
+    threadDrawerOpen = true;
+    threadReplyTarget = buildReplyReference(message);
+  }
+
+  function closeThreadDrawer() {
+    threadDrawerOpen = false;
+    activeThreadRoot = null;
+    threadReplyTarget = null;
+    threadMessages = [];
+    threadConversationContext = [];
+    threadDefaultSuggestionSource = null;
+  }
+
+  function ensureThreadReplyReference(explicit?: ReplyReferenceInput | null) {
+    if (explicit?.messageId) return explicit;
+    if (threadReplyTarget?.messageId) return threadReplyTarget;
+    if (activeThreadRoot) return buildReplyReference(activeThreadRoot);
+    return null;
+  }
+
+  function handleThreadReplySelect(event: CustomEvent<{ message: any }>) {
+    const ref = buildReplyReference(event.detail?.message) ?? buildReplyReference(activeThreadRoot);
+    threadReplyTarget = ref;
+  }
+
+  function resetThreadReplyTarget() {
+    if (activeThreadRoot) {
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    } else {
+      threadReplyTarget = null;
+    }
   }
   run(() => {
     const currentMentionServer = serverId ?? null;
@@ -1274,6 +1506,74 @@ let lastPendingChannelId: string | null = $state(null);
     hideMessageInput = isMobile && showChannels;
   });
   run(() => {
+    const aggregates: Record<string, { count: number; lastAt: number }> = {};
+    for (const message of messages) {
+      const rootId = resolveThreadRootId(message?.replyTo ?? null);
+      if (!rootId) continue;
+      const createdAt = toMillis(message?.createdAt) ?? Date.now();
+      const entry = aggregates[rootId] ?? { count: 0, lastAt: 0 };
+      entry.count += 1;
+      if (createdAt > entry.lastAt) entry.lastAt = createdAt;
+      aggregates[rootId] = entry;
+    }
+    threadStats = aggregates;
+  });
+  run(() => {
+    if (!activeThreadRoot) {
+      threadMessages = [];
+      threadConversationContext = [];
+      threadDefaultSuggestionSource = null;
+      return;
+    }
+    const rootId = pickString(activeThreadRoot?.id);
+    if (!rootId) {
+      threadMessages = [];
+      threadConversationContext = [];
+      threadDefaultSuggestionSource = null;
+      return;
+    }
+    const replies = messages.filter((message) => messageBelongsToThread(message, rootId));
+    threadMessages = replies;
+    const contextSources = [activeThreadRoot, ...replies].filter(Boolean).slice(-10);
+    threadConversationContext = contextSources;
+    const inbound =
+      [...replies]
+        .reverse()
+        .find((msg) => msg?.uid && $user?.uid && msg.uid !== $user.uid) ?? null;
+    threadDefaultSuggestionSource = inbound ?? activeThreadRoot;
+  });
+  run(() => {
+    if (!threadDrawerOpen) {
+      threadReplyTarget = null;
+      return;
+    }
+    if (!threadReplyTarget && activeThreadRoot) {
+      threadReplyTarget = buildReplyReference(activeThreadRoot);
+    }
+  });
+  run(() => {
+    aiConversationContext = messages.slice(-10);
+  });
+  run(() => {
+    if (!messages.length || !$user?.uid) {
+      latestInboundMessage = null;
+      return;
+    }
+    const fallback = [...messages]
+      .reverse()
+      .find((msg) => msg?.uid && msg.uid !== $user.uid);
+    latestInboundMessage = fallback ?? null;
+  });
+  run(() => {
+    if (!$user?.uid) {
+      aiAssistEnabled = true;
+      return;
+    }
+    const me = profiles[$user.uid] ?? null;
+    const prefs = (me?.settings ?? {}) as any;
+    aiAssistEnabled = prefs?.aiAssist?.enabled !== false;
+  });
+  run(() => {
     if (serverId) {
       serverMetaUnsub?.();
       const database = db();
@@ -1395,6 +1695,11 @@ let lastPendingChannelId: string | null = $state(null);
                   currentUserId={$user?.uid ?? null}
                   {mentionOptions}
                   {replyTarget}
+                  threadStats={threadStats}
+                  defaultSuggestionSource={latestInboundMessage}
+                  conversationContext={aiConversationContext}
+                  aiAssistEnabled={aiAssistEnabled}
+                  threadLabel={activeChannel?.name ?? ''}
                   {pendingUploads}
                   {scrollToBottomSignal}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
@@ -1416,6 +1721,7 @@ let lastPendingChannelId: string | null = $state(null);
                   onUploadFiles={handleUploadFiles}
                   hideInput={hideMessageInput}
                   on:reply={handleReplyRequest}
+                  on:thread={(event) => openThreadFromMessage(event.detail?.message)}
                   on:cancelReply={() => (replyTarget = null)}
                 />
               </div>
@@ -1491,6 +1797,11 @@ let lastPendingChannelId: string | null = $state(null);
             currentUserId={$user?.uid ?? null}
             {mentionOptions}
             {replyTarget}
+            threadStats={threadStats}
+            defaultSuggestionSource={latestInboundMessage}
+            conversationContext={aiConversationContext}
+            aiAssistEnabled={aiAssistEnabled}
+            threadLabel={activeChannel?.name ?? ''}
             {pendingUploads}
             {scrollToBottomSignal}
             emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
@@ -1509,6 +1820,7 @@ let lastPendingChannelId: string | null = $state(null);
             onUploadFiles={handleUploadFiles}
             hideInput={hideMessageInput}
             on:reply={handleReplyRequest}
+            on:thread={(event) => openThreadFromMessage(event.detail?.message)}
             on:cancelReply={() => (replyTarget = null)}
           />
         {/if}
@@ -1524,6 +1836,29 @@ let lastPendingChannelId: string | null = $state(null);
     </div>
   </div>
 </div>
+
+<ThreadDrawer
+  open={threadDrawerOpen}
+  root={activeThreadRoot}
+  messages={threadMessages}
+  users={profiles}
+  currentUserId={$user?.uid ?? null}
+  mentionOptions={mentionOptions}
+  pendingUploads={[]}
+  aiAssistEnabled={aiAssistEnabled}
+  threadLabel={activeChannel?.name ?? ''}
+  conversationContext={threadConversationContext}
+  replyTarget={threadReplyTarget}
+  defaultSuggestionSource={threadDefaultSuggestionSource}
+  on:close={closeThreadDrawer}
+  on:send={(event) => handleThreadSend(event.detail)}
+  on:sendGif={(event) => handleThreadSendGif(event.detail)}
+  on:upload={(event) => handleThreadUploadFiles(event.detail)}
+  on:createPoll={(event) => handleThreadCreatePoll(event.detail)}
+  on:createForm={(event) => handleThreadCreateForm(event.detail)}
+  on:reply={handleThreadReplySelect}
+  on:cancelReply={resetThreadReplyTarget}
+/>
 
 <!-- ======= MOBILE FULL-SCREEN PANELS (leave 72px rail visible) ======= -->
 

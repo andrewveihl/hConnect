@@ -49,6 +49,8 @@
     currentUserId?: string | null;
     scrollToBottomSignal?: number;
     pendingUploads?: PendingUploadPreview[];
+    threadStats?: Record<string, { count?: number; lastAt?: number }>;
+    hideReplyPreview?: boolean;
   }
 
   let {
@@ -56,7 +58,9 @@
     users = {},
     currentUserId = null,
     scrollToBottomSignal = 0,
-    pendingUploads = []
+    pendingUploads = [],
+    threadStats = {},
+    hideReplyPreview = false
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -402,6 +406,10 @@
     reactionMenuFor = null;
     reactionMenuAnchor = null;
     clearLongPressTimer();
+  }
+
+  function openThread(message: ChatMessage) {
+    dispatch('thread', { message });
   }
 
   async function openReactionMenu(messageId: string, anchor?: HTMLElement | null) {
@@ -1350,6 +1358,83 @@
     transform: translateY(-1px);
     outline: none;
   }
+
+  .message-thread-meta {
+    margin-top: 0.4rem;
+    display: flex;
+    justify-content: flex-start;
+  }
+
+  .thread-preview-card {
+    width: 100%;
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    padding: 0.55rem 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    text-align: left;
+    transition: border 140ms ease, transform 140ms ease;
+  }
+
+  .thread-preview-card:hover,
+  .thread-preview-card:focus-visible {
+    border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    transform: translateY(-1px);
+    outline: none;
+  }
+
+  .thread-preview__icon {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.9rem;
+    background: color-mix(in srgb, var(--color-panel) 60%, transparent);
+    display: grid;
+    place-items: center;
+    color: var(--color-accent);
+  }
+
+  .thread-preview__body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .thread-preview__title {
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--color-text-primary);
+  }
+
+  .thread-preview__subtitle {
+    font-size: 0.78rem;
+    color: var(--text-60);
+  }
+
+  .thread-preview__chevron {
+    color: var(--text-50);
+  }
+
+  .thread-start-link {
+    border: none;
+    background: transparent;
+    color: var(--text-55);
+    font-size: 0.82rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-weight: 600;
+    padding: 0.25rem 0.3rem;
+  }
+
+  .thread-start-link:hover,
+  .thread-start-link:focus-visible {
+    color: var(--color-text-primary);
+    outline: none;
+  }
 </style>
 
 <div
@@ -1419,6 +1504,44 @@
                   <span>{initialsFor(nameFor(m))}</span>
                 {/if}
               </div>
+              {@const threadInfo = threadStats[m.id] ?? null}
+              <div class="message-thread-meta">
+                {#if threadInfo?.count}
+                  <button
+                    type="button"
+                    class="thread-preview-card"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      openThread(m);
+                    }}
+                  >
+                    <div class="thread-preview__icon">
+                      <i class="bx bx-git-branch" aria-hidden="true"></i>
+                    </div>
+                    <div class="thread-preview__body">
+                      <div class="thread-preview__title">
+                        {threadInfo.count} {threadInfo.count === 1 ? 'reply' : 'replies'} in thread
+                      </div>
+                      <div class="thread-preview__subtitle">Open thread to catch up</div>
+                    </div>
+                    <i class="bx bx-chevron-right thread-preview__chevron" aria-hidden="true"></i>
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    class="thread-start-link"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      openThread(m);
+                    }}
+                  >
+                    <i class="bx bx-git-branch" aria-hidden="true"></i>
+                    <span>Start thread</span>
+                  </button>
+                {/if}
+              </div>
             {/if}
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
@@ -1447,7 +1570,7 @@
                     +
                   </button>
                 {/if}
-                {#if replyRef}
+                {#if replyRef && !hideReplyPreview}
                   {@const replyChain = flattenReplyChain(replyRef)}
                   <div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
                     {#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
@@ -1683,13 +1806,6 @@
     </div>
   </div>
 {/if}
-
-
-
-
-
-
-
 
 
 
