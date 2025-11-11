@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
   import { user } from '$lib/stores/user';
 
@@ -52,6 +53,10 @@
             : 0}
       <a
         href={link.href}
+        onclick={(event) => {
+          event.preventDefault();
+          goto(link.href);
+        }}
         class={`mobile-dock__item ${active ? 'is-active' : ''}`}
         class:mobile-dock__item--alert={!active && badge > 0}
         aria-label={link.label}
@@ -66,6 +71,10 @@
     {/each}
     <a
       href="/settings"
+      onclick={(event) => {
+        event.preventDefault();
+        goto('/settings');
+      }}
       class={`mobile-dock__item mobile-dock__item--profile ${currentPath.startsWith('/settings') ? 'is-active' : ''}`}
       aria-label="Profile"
       aria-current={currentPath.startsWith('/settings') ? 'page' : undefined}

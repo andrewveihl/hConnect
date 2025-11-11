@@ -33,6 +33,7 @@ import { looksLikeImage } from '$lib/utils/fileType';
   });
 
 let messages: any[] = $state([]);
+let messagesLoading = $state(true);
 let messageUsers: Record<string, any> = $state({});
 let pendingUploads: PendingUploadPreview[] = $state([]);
 const profileUnsubs: Record<string, Unsubscribe> = {};
@@ -56,9 +57,9 @@ type MentionSendRecord = {
   kind?: 'member' | 'role';
 };
 let mentionOptions: MentionOption[] = $state([]);
-let resumeDmScroll = $state(false);
+let resumeDmScroll = false;
 let scrollResumeSignal = $state(0);
-let lastPendingThreadId: string | null = $state(null);
+let lastPendingThreadId: string | null = null;
 
 onMount(() => {
   if (!browser) return;
@@ -119,10 +120,11 @@ onMount(() => {
   let otherMessageUser: any = $state(null);
   let metaLoading = $state(true);
 
-  let showThreads = $state(false);
-  let showInfo = $state(false);
-  let lastThreadID: string | null = $state(null);
-  let pendingReply: ReplyReferenceInput | null = $state(null);
+let showThreads = $state(false);
+let showInfo = $state(false);
+let lastThreadID: string | null = null;
+let pendingReply: ReplyReferenceInput | null = $state(null);
+let forceScrollToBottom = true;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -568,6 +570,9 @@ run(() => {
       lastThreadID = threadID;
       showInfo = false;
       pendingReply = null;
+      forceScrollToBottom = true;
+      messages = [];
+      messagesLoading = true;
     }
   });
 
@@ -750,9 +755,15 @@ run(() => {
 
   run(() => {
     if (mounted && threadID) {
+      messagesLoading = true;
       unsub?.();
       unsub = streamDMMessages(threadID, async (msgs) => {
         messages = msgs.map((row: any) => toChatMessage(row.id, row));
+        messagesLoading = false;
+        if (forceScrollToBottom && messages.length > 0) {
+          scrollResumeSignal = Date.now();
+          forceScrollToBottom = false;
+        }
         if (me?.uid) {
           const last = messages[messages.length - 1];
           const at = last?.createdAt ?? null;
@@ -760,6 +771,11 @@ run(() => {
           markThreadAsSeen({ at, lastMessageId: lastId });
         }
       });
+    } else if (!threadID) {
+      unsub?.();
+      unsub = null;
+      messages = [];
+      messagesLoading = false;
     }
   });
 
@@ -1024,7 +1040,14 @@ run(() => {
 
     <main class="flex-1 overflow-hidden panel-muted">
       <div class="h-full flex flex-col">
-        <div class="message-scroll-region flex-1 overflow-hidden p-3 sm:p-4">
+        <div class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4">
+          {#if messagesLoading}
+            <div class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/40 backdrop-blur-sm text-soft">
+              <div class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin" aria-hidden="true"></div>
+              <div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+              <span class="sr-only" aria-live="polite">Loading messages...</span>
+            </div>
+          {/if}
           <MessageList
             {messages}
             users={messageUsers}
