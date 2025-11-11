@@ -1,6 +1,14 @@
 // src/lib/firebase/index.ts
 import { browser } from '$app/environment';
-import { env as dynamicPublic } from '$env/dynamic/public';
+import {
+  PUBLIC_FIREBASE_API_KEY,
+  PUBLIC_FIREBASE_AUTH_DOMAIN,
+  PUBLIC_FIREBASE_PROJECT_ID,
+  PUBLIC_FIREBASE_APP_ID,
+  PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  PUBLIC_FIREBASE_STORAGE_BUCKET,
+  PUBLIC_FIREBASE_STORAGE_BUCKET_URL
+} from '$env/static/public';
 
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import {
@@ -29,9 +37,9 @@ if (import.meta.env.DEV) {
 /* ------------------------------------------------------------------ */
 /* Config resolution (LOCAL/CI -> Hosting script -> Hosting JSON)      */
 /* ------------------------------------------------------------------ */
-const storageBucketRaw = dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET ?? '';
+const storageBucketRaw = PUBLIC_FIREBASE_STORAGE_BUCKET ?? '';
 const storageBucketUrl =
-  dynamicPublic.PUBLIC_FIREBASE_STORAGE_BUCKET_URL ??
+  PUBLIC_FIREBASE_STORAGE_BUCKET_URL ??
   (storageBucketRaw
     ? storageBucketRaw.startsWith('gs://')
       ? storageBucketRaw
@@ -41,13 +49,13 @@ const storageBucketName = storageBucketUrl?.replace(/^gs:\/\//, '') ?? undefined
 
 async function resolveFirebaseConfig(): Promise<Record<string, any>> {
   // 1) Local/CI via PUBLIC_* (runtime)
-  if (dynamicPublic.PUBLIC_FIREBASE_API_KEY) {
+  if (PUBLIC_FIREBASE_API_KEY) {
     return {
-      apiKey: dynamicPublic.PUBLIC_FIREBASE_API_KEY,
-      authDomain: dynamicPublic.PUBLIC_FIREBASE_AUTH_DOMAIN,
-      projectId: dynamicPublic.PUBLIC_FIREBASE_PROJECT_ID,
-      appId: dynamicPublic.PUBLIC_FIREBASE_APP_ID,
-      messagingSenderId: dynamicPublic.PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+      apiKey: PUBLIC_FIREBASE_API_KEY,
+      authDomain: PUBLIC_FIREBASE_AUTH_DOMAIN,
+      projectId: PUBLIC_FIREBASE_PROJECT_ID,
+      appId: PUBLIC_FIREBASE_APP_ID,
+      messagingSenderId: PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
       ...(storageBucketName ? { storageBucket: storageBucketName } : {})
     };
   }

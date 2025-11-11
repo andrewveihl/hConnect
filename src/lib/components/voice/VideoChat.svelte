@@ -13,10 +13,15 @@
     formatVoiceDebugContext
   } from '$lib/utils/voiceDebugContext';
   import { copyTextToClipboard } from '$lib/utils/clipboard';
-  import { resolveProfilePhotoURL } from '$lib/utils/profile';
-  import { voiceSession } from '$lib/stores/voice';
-  import type { VoiceSession } from '$lib/stores/voice';
-  import { env as publicEnv } from '$env/dynamic/public';
+import { resolveProfilePhotoURL } from '$lib/utils/profile';
+import { voiceSession } from '$lib/stores/voice';
+import type { VoiceSession } from '$lib/stores/voice';
+import {
+  PUBLIC_ENABLE_TURN_FALLBACK,
+  PUBLIC_TURN_URLS,
+  PUBLIC_TURN_USERNAME,
+  PUBLIC_TURN_CREDENTIAL
+} from '$env/static/public';
   import {
     addDoc,
     collection,
@@ -294,7 +299,7 @@
     return defaultValue;
   }
 
-  const allowTurnFallback = parseBooleanFlag(publicEnv.PUBLIC_ENABLE_TURN_FALLBACK, true);
+const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   let fallbackTurnActivated = $state(false);
   let fallbackTurnActivationReason: string | null = null;
   let hasTurnServers = false;
@@ -625,7 +630,7 @@
       { urls: DEFAULT_STUN_SERVERS.slice(0, 2) },
       { urls: DEFAULT_STUN_SERVERS.slice(2) }
     ];
-    const rawTurnUrls = publicEnv.PUBLIC_TURN_URLS ?? '';
+    const rawTurnUrls = PUBLIC_TURN_URLS ?? '';
     const configuredTurn =
       rawTurnUrls
         .split(',')
@@ -641,8 +646,8 @@
       }
     } else {
       turnServer = { urls: configuredTurn };
-      const turnUsername = publicEnv.PUBLIC_TURN_USERNAME ?? '';
-      const turnCredential = publicEnv.PUBLIC_TURN_CREDENTIAL ?? '';
+      const turnUsername = PUBLIC_TURN_USERNAME ?? '';
+      const turnCredential = PUBLIC_TURN_CREDENTIAL ?? '';
       if (turnUsername) {
         turnServer.username = turnUsername;
       }

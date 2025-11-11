@@ -1,12 +1,12 @@
 ﻿<script lang="ts">
   import { preventDefault } from 'svelte/legacy';
 
-  import { createEventDispatcher } from 'svelte';
-  import { browser } from '$app/environment';
-  import { env as publicEnv } from '$env/dynamic/public';
+import { createEventDispatcher } from 'svelte';
+import { browser } from '$app/environment';
+import { PUBLIC_TENOR_API_KEY } from '$env/static/public';
 
-  const dispatch = createEventDispatcher();
-  const tenorApiKey = publicEnv.PUBLIC_TENOR_API_KEY;
+const dispatch = createEventDispatcher();
+const tenorApiKey = PUBLIC_TENOR_API_KEY;
 
   let q = $state('');
   let gifs: Array<{ url: string; preview: string }> = $state([]);
