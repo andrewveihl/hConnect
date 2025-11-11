@@ -40,3 +40,7 @@ You can preview the production build with `npm run preview`.
 ## GIF search configuration
 
 To enable in-app GIF search, create a [Tenor API key](https://developers.google.com/tenor/guides/quickstart) and add it to your `.env` file as `PUBLIC_TENOR_API_KEY`. The picker falls back to manual URL pasting if the key is missing.
+
+## AI typing assistant
+
+Desktop reply coaching, predictive typing, and the mobile quick-type bar rely on OpenAI. Add an `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`, defaulting to `gpt-4o-mini`) to your `.env` so the `/api/ai` route can proxy requests securely. When the key is absent the UI will hide the AI helpers automatically.

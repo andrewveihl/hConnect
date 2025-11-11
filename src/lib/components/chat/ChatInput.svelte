@@ -8,6 +8,8 @@
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
+  import { requestReplySuggestion, requestPredictions } from '$lib/api/ai';
+  import type { ReplyMessageContext } from '$lib/api/ai';
 
   type MentionCandidate = {
     uid: string;
@@ -57,6 +59,12 @@
     return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
   };
 
+  const pickString = (value: unknown) => {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : '';
+  };
+
   function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
     if (!rawQuery) return 0;
     const lower = rawQuery.toLowerCase();
@@ -81,6 +89,10 @@
     disabled?: boolean;
     mentionOptions?: MentionCandidate[];
     replyTarget?: ReplyReferenceInput | null;
+    replySource?: any | null;
+    defaultSuggestionSource?: any | null;
+    aiAssistEnabled?: boolean;
+    threadLabel?: string | null;
     onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
     onUpload?: (payload: UploadRequest) => void;
     onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
@@ -93,6 +105,10 @@
     disabled = false,
     mentionOptions = [],
     replyTarget = null,
+    replySource = null,
+    defaultSuggestionSource = null,
+    aiAssistEnabled = false,
+    threadLabel = '',
     onSend = () => {},
     onUpload = () => {},
     onSendGif = () => {},
@@ -126,6 +142,33 @@
   let mentionLookup = $state(new Map<string, MentionCandidate>());
   let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
+
+  let platform: 'desktop' | 'mobile' = 'desktop';
+  let aiServiceAvailable = $state(true);
+  let aiReplySuggestion = $state<string | null>(null);
+  let aiReplyLoading = $state(false);
+  let aiReplyError: string | null = $state(null);
+  let replySuggestionAbort: AbortController | null = null;
+  let lastReplySuggestionId: string | null = null;
+
+  let aiGeneralSuggestion = $state<string | null>(null);
+  let aiGeneralLoading = $state(false);
+  let aiGeneralError: string | null = $state(null);
+  let generalSuggestionAbort: AbortController | null = null;
+  let lastGeneralSuggestionId: string | null = null;
+
+  let aiInlineSuggestion = $state('');
+  let aiPredictionLoading = $state(false);
+  let aiPredictionError: string | null = $state(null);
+  let predictionAbort: AbortController | null = null;
+  let predictionTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPredictionSeed = '';
+
+  const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
+  const isDesktop = $derived(platform === 'desktop');
+  const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && replyTarget?.messageId));
+  const showGeneralCoach = $derived(Boolean(aiAssistAllowed && !replyTarget && defaultSuggestionSource && !text.trim()));
+  const showDesktopPrediction = $derived(Boolean(aiAssistAllowed && isDesktop));
 
   const REPLY_PREVIEW_LIMIT = 160;
   const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
@@ -173,6 +216,19 @@
     const drafts = selection.map((file) => buildAttachmentDraft(file));
     attachments = [...attachments, ...drafts];
   }
+
+  const dedupeFiles = (list: File[]) => {
+    const result: File[] = [];
+    const seen = new Set<string>();
+    for (const file of list) {
+      if (!(file instanceof File)) continue;
+      const key = `${file.name ?? 'unknown'}|${file.size ?? 0}|${file.lastModified ?? 0}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(file);
+    }
+    return result;
+  };
 
   function removeAttachment(id: string) {
     const target = attachments.find((item) => item.id === id);
@@ -239,6 +295,8 @@
       onSend(payload);
       dispatch('send', payload);
       text = '';
+      clearPredictions();
+      lastPredictionSeed = '';
       mentionDraft.clear();
       closeMentionMenu();
     }
@@ -263,6 +321,12 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (!mentionActive && showDesktopPrediction && aiInlineSuggestion && e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      acceptInlineSuggestion();
+      return;
+    }
+
     if (mentionActive) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -320,18 +384,16 @@
     const itemFiles = Array.from(data.items ?? [])
       .map((item) => (item.kind === 'file' ? item.getAsFile() : null))
       .filter((file): file is File => file instanceof File);
-    const merged: File[] = [];
-    for (const file of [...directFiles, ...itemFiles]) {
-      if (file && !merged.includes(file)) merged.push(file);
-    }
+    const merged = dedupeFiles([...directFiles, ...itemFiles]);
     if (!merged.length) return;
     queueAttachments(merged);
   }
 
   function handleInput() {
     refreshMentionDraft();
-    if (!mentionOptions.length) return;
-    updateMentionState();
+    if (mentionOptions.length) {
+      updateMentionState();
+    }
   }
 
   function handleSelectionChange() {
@@ -375,6 +437,253 @@
     }
 
     return Array.from(collected.values());
+  }
+
+  function contextIdOf(source: any): string | null {
+    const raw = source?.id ?? source?.messageId ?? null;
+    if (typeof raw === 'string' && raw.trim().length) return raw.trim();
+    return null;
+  }
+
+  function buildMessagePayload(source: any): ReplyMessageContext | null {
+    if (!source) return null;
+    const text =
+      pickString(source?.text) ??
+      pickString(source?.content) ??
+      pickString(source?.preview ?? '');
+    const preview =
+      pickString(source?.preview ?? '') ??
+      pickString(source?.text ?? '') ??
+      pickString(source?.content ?? '') ??
+      '';
+    const type = pickString(source?.type ?? '');
+    const author =
+      pickString(source?.displayName) ??
+      pickString(source?.authorName) ??
+      pickString(source?.author?.displayName) ??
+      pickString(source?.name) ??
+      null;
+    if (!text && !preview && !type) return null;
+    return {
+      text: text || null,
+      preview: preview || null,
+      author,
+      type: type || null
+    };
+  }
+
+  function cancelReplySuggestion(clear = true) {
+    replySuggestionAbort?.abort();
+    replySuggestionAbort = null;
+    if (clear) {
+      aiReplyLoading = false;
+      aiReplySuggestion = null;
+      aiReplyError = null;
+      lastReplySuggestionId = null;
+    }
+  }
+
+  async function fetchReplyCoach(force = false) {
+    if (!showReplyCoach) return;
+    const contextSource = replySource ?? replyTarget ?? null;
+    const messageId = contextIdOf(contextSource);
+    if (!messageId) return;
+    if (!force && messageId === lastReplySuggestionId && aiReplySuggestion) return;
+    const payload = buildMessagePayload(contextSource);
+    if (!payload) return;
+    replySuggestionAbort?.abort();
+    const controller = new AbortController();
+    replySuggestionAbort = controller;
+    aiReplyLoading = true;
+    aiReplyError = null;
+    try {
+      const suggestion = await requestReplySuggestion(
+        {
+          message: payload,
+          threadLabel: pickString(threadLabel) || null
+        },
+        controller.signal
+      );
+      if (replySuggestionAbort !== controller) return;
+      aiReplySuggestion = suggestion || null;
+      lastReplySuggestionId = messageId;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const message = error instanceof Error ? error.message : String(error);
+      aiReplyError = message;
+      if (/openai api key missing/i.test(message)) {
+        aiServiceAvailable = false;
+      }
+    } finally {
+      if (replySuggestionAbort === controller) {
+        aiReplyLoading = false;
+      }
+    }
+  }
+
+  function cancelGeneralSuggestion(clear = true) {
+    generalSuggestionAbort?.abort();
+    generalSuggestionAbort = null;
+    if (clear) {
+      aiGeneralLoading = false;
+      aiGeneralSuggestion = null;
+      aiGeneralError = null;
+      lastGeneralSuggestionId = null;
+    }
+  }
+
+  async function fetchGeneralSuggestion(force = false) {
+    if (!showGeneralCoach) return;
+    const source = defaultSuggestionSource;
+    const messageId = contextIdOf(source);
+    if (!messageId) return;
+    if (!force && messageId === lastGeneralSuggestionId && aiGeneralSuggestion) return;
+    const payload = buildMessagePayload(source);
+    if (!payload) return;
+    generalSuggestionAbort?.abort();
+    const controller = new AbortController();
+    generalSuggestionAbort = controller;
+    aiGeneralLoading = true;
+    aiGeneralError = null;
+    try {
+      const suggestion = await requestReplySuggestion(
+        {
+          message: payload,
+          threadLabel: pickString(threadLabel) || null
+        },
+        controller.signal
+      );
+      if (generalSuggestionAbort !== controller) return;
+      aiGeneralSuggestion = suggestion || null;
+      lastGeneralSuggestionId = messageId;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const message = error instanceof Error ? error.message : String(error);
+      aiGeneralError = message;
+      if (/openai api key missing/i.test(message)) {
+        aiServiceAvailable = false;
+      }
+    } finally {
+      if (generalSuggestionAbort === controller) {
+        aiGeneralLoading = false;
+      }
+    }
+  }
+
+  function clearPredictions() {
+    predictionAbort?.abort();
+    predictionAbort = null;
+    aiInlineSuggestion = '';
+    aiPredictionError = null;
+    aiPredictionLoading = false;
+  }
+
+  function queuePrediction() {
+    if (!aiAssistAllowed || !showDesktopPrediction) return;
+    if (predictionTimer) {
+      clearTimeout(predictionTimer);
+      predictionTimer = null;
+    }
+    if (!text.trim()) {
+      clearPredictions();
+      lastPredictionSeed = '';
+      return;
+    }
+    predictionTimer = setTimeout(() => {
+      predictionTimer = null;
+      void fetchPrediction();
+    }, 280);
+  }
+
+  async function fetchPrediction(force = false) {
+    if (!aiAssistAllowed || !showDesktopPrediction) return;
+    const seed = text;
+    if (!seed.trim()) {
+      clearPredictions();
+      lastPredictionSeed = '';
+      return;
+    }
+    if (!force && seed === lastPredictionSeed && aiInlineSuggestion) {
+      return;
+    }
+    predictionAbort?.abort();
+    const controller = new AbortController();
+    predictionAbort = controller;
+    aiPredictionLoading = true;
+    aiPredictionError = null;
+    try {
+      const suggestions = await requestPredictions(
+        {
+          text: seed,
+          platform
+        },
+        controller.signal
+      );
+      if (predictionAbort !== controller) return;
+      lastPredictionSeed = seed;
+      aiInlineSuggestion = showDesktopPrediction ? suggestions[0] ?? '' : '';
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const message = error instanceof Error ? error.message : String(error);
+      aiPredictionError = message;
+      if (/openai api key missing/i.test(message)) {
+        aiServiceAvailable = false;
+      }
+    } finally {
+      if (predictionAbort === controller) {
+        aiPredictionLoading = false;
+      }
+    }
+  }
+
+  function appendSuggestion(next: string) {
+    const value = pickString(next);
+    if (!value) return;
+    const needsSpace = text.length > 0 && !/\s$/.test(text);
+    const base = needsSpace ? `${text} ${value}` : `${text}${value}`;
+    text = `${base} `;
+    lastPredictionSeed = '';
+    queuePrediction();
+    requestAnimationFrame(() => inputEl?.focus());
+  }
+
+  function acceptInlineSuggestion() {
+    if (!aiInlineSuggestion) return;
+    appendSuggestion(aiInlineSuggestion);
+    aiInlineSuggestion = '';
+  }
+
+  function insertSuggestionText(source: string | null) {
+    const suggestion = pickString(source);
+    if (!suggestion) return false;
+    if (!text.trim()) {
+      text = `${suggestion} `;
+    } else {
+      const needsBreak = !text.endsWith('\n\n');
+      text = `${text}${needsBreak ? '\n\n' : ''}${suggestion} `;
+    }
+    lastPredictionSeed = '';
+    queuePrediction();
+    requestAnimationFrame(() => inputEl?.focus());
+    return true;
+  }
+
+  function applyReplySuggestion() {
+    void insertSuggestionText(aiReplySuggestion);
+  }
+
+  function regenerateReplySuggestion() {
+    lastReplySuggestionId = null;
+    void fetchReplyCoach(true);
+  }
+
+  function applyGeneralSuggestion() {
+    void insertSuggestionText(aiGeneralSuggestion);
+  }
+
+  function regenerateGeneralSuggestion() {
+    lastGeneralSuggestionId = null;
+    void fetchGeneralSuggestion(true);
   }
 
   function refreshMentionDraft() {
@@ -531,6 +840,7 @@
     inputEl.setSelectionRange(nextCaret, nextCaret);
     refreshMentionDraft();
     handleSelectionChange();
+    queuePrediction();
   }
 
   function onEmojiPicked(symbol: string) {
@@ -603,8 +913,32 @@
     };
   });
 
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    const coarse = window.matchMedia('(pointer:coarse)');
+    const update = () => {
+      const prefersCoarse = coarse.matches;
+      const narrow = window.innerWidth <= 768;
+      platform = prefersCoarse || narrow ? 'mobile' : 'desktop';
+    };
+    update();
+    window.addEventListener('resize', update);
+    coarse.addEventListener('change', update);
+    return () => {
+      window.removeEventListener('resize', update);
+      coarse.removeEventListener('change', update);
+    };
+  });
+
   onDestroy(() => {
     clearAttachments();
+    cancelReplySuggestion();
+    cancelGeneralSuggestion();
+    clearPredictions();
+    if (predictionTimer) {
+      clearTimeout(predictionTimer);
+      predictionTimer = null;
+    }
   });
 
   function onEsc(e: KeyboardEvent) {
@@ -641,6 +975,39 @@
     disposeEmojiOutside?.();
     disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
   });
+
+  run(() => {
+    if (showReplyCoach) {
+      void fetchReplyCoach();
+    } else {
+      cancelReplySuggestion();
+    }
+  });
+
+  run(() => {
+    if (showGeneralCoach) {
+      void fetchGeneralSuggestion();
+    } else {
+      cancelGeneralSuggestion();
+    }
+  });
+
+  run(() => {
+    if (!aiAssistAllowed) {
+      cancelReplySuggestion();
+      cancelGeneralSuggestion();
+      clearPredictions();
+      return;
+    }
+    if (!text.trim()) {
+      clearPredictions();
+      lastPredictionSeed = '';
+      return;
+    }
+    if (showDesktopPrediction) {
+      queuePrediction();
+    }
+  });
 </script>
 
 <svelte:window onkeydown={onEsc} />
@@ -653,6 +1020,30 @@
         <div class="reply-banner__label">Replying to</div>
         <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
         <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
+        {#if showReplyCoach}
+          <div class="ai-reply-card">
+            {#if aiReplyLoading}
+              <div class="ai-reply-card__status">Drafting a suggestion...</div>
+            {:else if aiReplyError}
+              <div class="ai-reply-card__status ai-reply-card__status--error">{aiReplyError}</div>
+              <button type="button" class="ai-reply-card__button" onclick={regenerateReplySuggestion}>
+                Try again
+              </button>
+            {:else if aiReplySuggestion}
+              <p class="ai-reply-card__text">{aiReplySuggestion}</p>
+              <div class="ai-reply-card__actions">
+                <button type="button" class="ai-reply-card__button ai-reply-card__button--primary" onclick={applyReplySuggestion}>
+                  Insert suggestion
+                </button>
+                <button type="button" class="ai-reply-card__button" onclick={regenerateReplySuggestion}>
+                  Regenerate
+                </button>
+              </div>
+            {:else}
+              <div class="ai-reply-card__status">No suggestion yet. Tap regenerate.</div>
+            {/if}
+          </div>
+        {/if}
       </div>
       <button
         type="button"
@@ -662,6 +1053,35 @@
       >
         <i class="bx bx-x"></i>
       </button>
+    </div>
+  {/if}
+
+  {#if showGeneralCoach}
+    <div class="ai-reply-card ai-reply-card--standalone" role="status">
+      {#if aiGeneralLoading}
+        <div class="ai-reply-card__status">Thinking of something to say...</div>
+      {:else if aiGeneralError}
+        <div class="ai-reply-card__status ai-reply-card__status--error">{aiGeneralError}</div>
+        <button type="button" class="ai-reply-card__button" onclick={regenerateGeneralSuggestion}>
+          Try again
+        </button>
+      {:else if aiGeneralSuggestion}
+        <p class="ai-reply-card__text">{aiGeneralSuggestion}</p>
+        <div class="ai-reply-card__actions">
+          <button
+            type="button"
+            class="ai-reply-card__button ai-reply-card__button--primary"
+            onclick={applyGeneralSuggestion}
+          >
+            Use suggestion
+          </button>
+          <button type="button" class="ai-reply-card__button" onclick={regenerateGeneralSuggestion}>
+            New idea
+          </button>
+        </div>
+      {:else}
+        <div class="ai-reply-card__status">No suggestion yet. Tap refresh.</div>
+      {/if}
     </div>
   {/if}
 
@@ -764,7 +1184,26 @@
       <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
     </div>
 
-    <div class="flex-1 relative">
+    <div class="flex-1 relative chat-input__field">
+      {#if showDesktopPrediction && (aiInlineSuggestion || aiPredictionLoading || aiPredictionError)}
+        <button
+          type="button"
+          class={`ai-inline-hint ${aiPredictionLoading && !aiInlineSuggestion ? 'is-loading' : ''}`}
+          onclick={acceptInlineSuggestion}
+          disabled={!aiInlineSuggestion}
+        >
+          {#if aiInlineSuggestion}
+            <span class="ai-inline-hint__label">Next</span>
+            <span class="ai-inline-hint__text">{aiInlineSuggestion}</span>
+            <span class="ai-inline-hint__meta">Press Tab</span>
+          {:else if aiPredictionError}
+            <span class="ai-inline-hint__status ai-inline-hint__status--error">AI paused</span>
+          {:else}
+            <span class="ai-inline-hint__status">Predicting...</span>
+          {/if}
+        </button>
+      {/if}
+
       <textarea
         class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
         rows="1"
@@ -825,6 +1264,7 @@
           </div>
         </div>
       {/if}
+
     </div>
 
     <div class="chat-input__actions">
@@ -1107,6 +1547,52 @@
     text-overflow: ellipsis;
   }
 
+  .ai-reply-card {
+    margin-top: 0.65rem;
+    border-radius: var(--radius-md);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
+    padding: 0.65rem 0.75rem;
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .ai-reply-card__text {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.35;
+  }
+
+  .ai-reply-card__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .ai-reply-card__button {
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: transparent;
+    color: var(--text-70);
+    font-size: 0.78rem;
+    padding: 0.25rem 0.85rem;
+  }
+
+  .ai-reply-card__button--primary {
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    color: var(--color-panel);
+    border-color: transparent;
+  }
+
+  .ai-reply-card__status {
+    font-size: 0.8rem;
+    color: var(--text-60);
+  }
+
+  .ai-reply-card__status--error {
+    color: var(--color-danger, #ffb4b4);
+  }
+
   .reply-banner__close {
     border: 0;
     background: transparent;
@@ -1235,6 +1721,63 @@
     text-transform: uppercase;
     margin-left: 0.35rem;
   }
+
+  .chat-input__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .ai-inline-hint {
+    align-self: flex-start;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    color: var(--text-70);
+    font-size: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.75rem;
+    pointer-events: auto;
+    z-index: 15;
+  }
+
+  .ai-inline-hint:disabled {
+    opacity: 0.75;
+    cursor: default;
+  }
+
+  .ai-inline-hint__label {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    color: var(--text-55);
+  }
+
+  .ai-inline-hint__text {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .ai-inline-hint__meta {
+    color: var(--text-50);
+    font-size: 0.68rem;
+  }
+
+  .ai-inline-hint__status {
+    font-size: 0.75rem;
+    color: var(--text-55);
+  }
+
+  .ai-inline-hint__status--error {
+    color: var(--color-danger, #ffb4b4);
+  }
+
+  .ai-reply-card--standalone {
+    margin-bottom: 0.85rem;
+  }
+
 
   .chat-input__actions {
     display: flex;
