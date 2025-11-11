@@ -1,17 +1,29 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { run } from 'svelte/legacy';
+
+  import { createEventDispatcher, onMount } from 'svelte';
   import { EMOJI, searchEmoji, type EmojiEntry } from '$lib/data/emoji';
 
   const dispatch = createEventDispatcher();
   const MAX_RESULTS = 160;
 
-  let search = '';
-  let filtered: EmojiEntry[] = EMOJI;
-  let visible: EmojiEntry[] = EMOJI.slice(0, MAX_RESULTS);
+  let search = $state('');
+  let filtered: EmojiEntry[] = $state(EMOJI);
+  let visible: EmojiEntry[] = $state(EMOJI.slice(0, MAX_RESULTS));
+  let searchInput: HTMLInputElement | null = $state(null);
 
-  $: trimmed = search.trim();
-  $: filtered = trimmed ? searchEmoji(trimmed) : EMOJI;
-  $: visible = filtered.slice(0, MAX_RESULTS);
+  let trimmed = $derived(search.trim());
+  run(() => {
+    filtered = trimmed ? searchEmoji(trimmed) : EMOJI;
+  });
+
+  onMount(() => {
+    const frame = requestAnimationFrame(() => searchInput?.focus());
+    return () => cancelAnimationFrame(frame);
+  });
+  run(() => {
+    visible = filtered.slice(0, MAX_RESULTS);
+  });
 
   function close() {
     dispatch('close');
@@ -30,7 +42,7 @@
   }
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} />
 
 <div class="emoji-panel" role="dialog" aria-label="Emoji picker">
   <div class="emoji-header">
@@ -38,7 +50,7 @@
       <div class="emoji-title">Emoji</div>
       <p class="emoji-subtitle">Search and add a reaction</p>
     </div>
-    <button class="emoji-close btn btn-ghost btn-sm" type="button" on:click={close} aria-label="Close emoji picker">
+    <button class="emoji-close btn btn-ghost btn-sm" type="button" onclick={close} aria-label="Close emoji picker">
       <i class="bx bx-x text-xl" aria-hidden="true"></i>
     </button>
   </div>
@@ -50,7 +62,7 @@
       placeholder="Search emoji"
       bind:value={search}
       aria-label="Search emoji"
-      autofocus
+      bind:this={searchInput}
     />
   </label>
 
@@ -62,7 +74,7 @@
           class="emoji-cell"
           aria-label={emoji.name}
           title={emoji.name}
-          on:click={() => pick(emoji.char)}
+          onclick={() => pick(emoji.char)}
         >
           <span aria-hidden="true">{emoji.char}</span>
         </button>

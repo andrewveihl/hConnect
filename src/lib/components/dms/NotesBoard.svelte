@@ -1,23 +1,27 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy } from 'svelte';
   import { user } from '$lib/stores/user';
   import { subscribeNotes, addNote, updateNote, deleteNote, type NoteDoc } from '$lib/firestore/notes';
 
-  let notes: NoteDoc[] = [];
-  let unsub: (() => void) | null = null;
+  let notes: NoteDoc[] = $state([]);
+  let unsub: (() => void) | null = $state(null);
 
-  $: if ($user?.uid) {
-    unsub?.();
-    unsub = subscribeNotes($user.uid, (rows) => (notes = rows));
-  }
+  run(() => {
+    if ($user?.uid) {
+      unsub?.();
+      unsub = subscribeNotes($user.uid, (rows) => (notes = rows));
+    }
+  });
   onDestroy(() => unsub?.());
 
   // Composer state
-  let composing = false;
-  let title = '';
-  let content = '';
-  let color: string | null = null;
-  let query = '';
+  let composing = $state(false);
+  let title = $state('');
+  let content = $state('');
+  let color: string | null = $state(null);
+  let query = $state('');
 
   function resetComposer() {
     composing = false;
@@ -68,21 +72,21 @@
     return text.toLowerCase().includes(needle);
   }
 
-  $: normalizedQuery = query.trim().toLowerCase();
-  $: filteredNotes =
-    normalizedQuery.length === 0
+  let normalizedQuery = $derived(query.trim().toLowerCase());
+  let filteredNotes =
+    $derived(normalizedQuery.length === 0
       ? notes
       : notes.filter(
           (note) =>
             matches(note.title, normalizedQuery) ||
             matches(note.content, normalizedQuery)
-        );
-  $: orderedNotes = [...(filteredNotes ?? [])].sort((a, b) => {
+        ));
+  let orderedNotes = $derived([...(filteredNotes ?? [])].sort((a, b) => {
     if (a.pinned === b.pinned) {
       return toMillis(b.updatedAt ?? b.createdAt) - toMillis(a.updatedAt ?? a.createdAt);
     }
     return a.pinned ? -1 : 1;
-  });
+  }));
 
   function colorClass(c: string | null | undefined) {
     switch (c) {
@@ -109,7 +113,7 @@
     <button
       class="notes-new-button"
       type="button"
-      on:click={() => (composing = !composing)}
+      onclick={() => (composing = !composing)}
       aria-expanded={composing}
     >
       <i class="bx bx-plus"></i>
@@ -132,16 +136,16 @@
       ></textarea>
       <div class="note-composer__footer">
         <div class="note-colors">
-          <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" on:click={() => (color = 'yellow')}></button>
-          <button class="color-swatch color-green" type="button" aria-label="Set note color to green" on:click={() => (color = 'green')}></button>
-          <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" on:click={() => (color = 'blue')}></button>
-          <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" on:click={() => (color = 'pink')}></button>
-          <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" on:click={() => (color = 'purple')}></button>
-          <button class="color-swatch color-default" type="button" aria-label="Reset note color" on:click={() => (color = null)}></button>
+          <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" onclick={() => (color = 'yellow')}></button>
+          <button class="color-swatch color-green" type="button" aria-label="Set note color to green" onclick={() => (color = 'green')}></button>
+          <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" onclick={() => (color = 'blue')}></button>
+          <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" onclick={() => (color = 'pink')}></button>
+          <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" onclick={() => (color = 'purple')}></button>
+          <button class="color-swatch color-default" type="button" aria-label="Reset note color" onclick={() => (color = null)}></button>
         </div>
         <div class="note-composer__actions">
-          <button class="btn btn-ghost" type="button" on:click={resetComposer}>Cancel</button>
-          <button class="btn btn-primary" type="button" on:click={saveNote}>Save note</button>
+          <button class="btn btn-ghost" type="button" onclick={resetComposer}>Cancel</button>
+          <button class="btn btn-primary" type="button" onclick={saveNote}>Save note</button>
         </div>
       </div>
     </div>
@@ -164,7 +168,7 @@
               type="button"
               title={n.pinned ? 'Unpin note' : 'Pin note'}
               aria-label={n.pinned ? 'Unpin note' : 'Pin note'}
-              on:click={() => togglePin(n)}
+              onclick={() => togglePin(n)}
             >
               <i class={`bx ${n.pinned ? 'bxs-bookmark' : 'bx-bookmark'}`}></i>
             </button>
@@ -176,19 +180,19 @@
           {/if}
           <div class="note-card__footer">
             <div class="note-colors">
-              <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" on:click={() => changeColor(n, 'yellow')}></button>
-              <button class="color-swatch color-green" type="button" aria-label="Set note color to green" on:click={() => changeColor(n, 'green')}></button>
-              <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" on:click={() => changeColor(n, 'blue')}></button>
-              <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" on:click={() => changeColor(n, 'pink')}></button>
-              <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" on:click={() => changeColor(n, 'purple')}></button>
-              <button class="color-swatch color-default" type="button" aria-label="Reset note color" on:click={() => changeColor(n, null)}></button>
+              <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" onclick={() => changeColor(n, 'yellow')}></button>
+              <button class="color-swatch color-green" type="button" aria-label="Set note color to green" onclick={() => changeColor(n, 'green')}></button>
+              <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" onclick={() => changeColor(n, 'blue')}></button>
+              <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" onclick={() => changeColor(n, 'pink')}></button>
+              <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" onclick={() => changeColor(n, 'purple')}></button>
+              <button class="color-swatch color-default" type="button" aria-label="Reset note color" onclick={() => changeColor(n, null)}></button>
             </div>
             <button
               class="note-icon-button note-icon-button--danger"
               type="button"
               title="Delete note"
               aria-label="Delete note"
-              on:click={() => remove(n)}
+              onclick={() => remove(n)}
             >
               <i class="bx bx-trash"></i>
             </button>

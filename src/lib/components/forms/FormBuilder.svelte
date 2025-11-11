@@ -1,11 +1,13 @@
 ﻿<script lang="ts">
+  import { preventDefault } from 'svelte/legacy';
+
   import { createEventDispatcher, onMount } from 'svelte';
   const dispatch = createEventDispatcher();
 
-  let title = '';
-  let questions: string[] = [''];
+  let title = $state('');
+  let questions: string[] = $state(['']);
 
-  let titleInput: HTMLInputElement | null = null;
+  let titleInput: HTMLInputElement | null = $state(null);
   onMount(() => titleInput?.focus());
 
   const add = () => (questions = [...questions, '']);
@@ -36,13 +38,13 @@
   aria-modal="true"
   aria-label="Create form"
   tabindex="-1"
-  on:keydown={onKeydown}
+  onkeydown={onKeydown}
 >
   <div class="form-panel">
-    <form on:submit|preventDefault={create} class="form-builder">
+    <form onsubmit={preventDefault(create)} class="form-builder">
       <div class="form-header">
         <h3 class="form-title">New question form</h3>
-        <button type="button" class="form-close" on:click={() => dispatch('close')} aria-label="Close">
+        <button type="button" class="form-close" onclick={() => dispatch('close')} aria-label="Close">
           <i class="bx bx-x" aria-hidden="true"></i>
         </button>
       </div>
@@ -72,7 +74,7 @@
                 <button
                   type="button"
                   class="form-question-remove"
-                  on:click={() => remove(i)}
+                  onclick={() => remove(i)}
                   aria-label={`Remove question ${i + 1}`}
                   aria-controls="{uid}-q-{i}"
                   title="Remove question"
@@ -86,13 +88,13 @@
       </fieldset>
 
       <div class="form-footer">
-        <button type="button" class="btn btn-ghost btn-sm" on:click={add}>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={add}>
           <i class="bx bx-plus" aria-hidden="true"></i>
           Add question
         </button>
 
         <div class="form-actions">
-          <button type="button" class="btn btn-ghost btn-sm" on:click={() => dispatch('close')}>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={() => dispatch('close')}>
             Cancel
           </button>
           <button

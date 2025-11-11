@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { preventDefault } from 'svelte/legacy';
+
   import { goto } from '$app/navigation';
   import { signOutUser } from '$lib/firebase'; // ✅ use existing export
 
-  let busy = false;
+  let busy = $state(false);
   async function handleClick() {
     try {
       busy = true;
@@ -16,7 +18,7 @@
 
 <button
   class="btn btn-ghost"
-  on:click|preventDefault={handleClick}
+  onclick={preventDefault(handleClick)}
   disabled={busy}
   aria-busy={busy}
 >

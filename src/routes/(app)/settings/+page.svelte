@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { user } from '$lib/stores/user';
@@ -11,7 +13,11 @@
   import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
   import InvitePanel from '$lib/components/app/InvitePanel.svelte';
 
-  export let serverId: string | null = null;
+  interface Props {
+    serverId?: string | null;
+  }
+
+  let { serverId = null }: Props = $props();
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const FIRESTORE_IMAGE_LIMIT = 900 * 1024; // Keep data URLs safely under 1 MB Firestore limit
@@ -23,15 +29,15 @@ function pickString(value: unknown): string | undefined {
   return trimmed.length ? trimmed : undefined;
 }
 
-let displayName = '';
-let photoURL = '';
-let authPhotoURL = '';
-let previewPhotoURL = '';
-let providerPhotoAvailable = false;
-let loading = true;
-let loadedUid: string | null = null;
-let avatarFileInput: HTMLInputElement | null = null;
-let avatarError: string | null = null;
+let displayName = $state('');
+let photoURL = $state('');
+let authPhotoURL = $state('');
+let previewPhotoURL = $state('');
+let providerPhotoAvailable = $state(false);
+let loading = $state(true);
+let loadedUid: string | null = $state(null);
+let avatarFileInput: HTMLInputElement | null = $state(null);
+let avatarError: string | null = $state(null);
 
   type NotifPrefs = {
     desktopEnabled: boolean;
@@ -49,22 +55,28 @@ let avatarError: string | null = null;
     allMessages: false
   };
 
-  $: previewPhotoURL =
-    pickString(photoURL) ??
-    pickString(authPhotoURL) ??
-    pickString($user?.photoURL) ??
-    '';
+  run(() => {
+    previewPhotoURL =
+      pickString(photoURL) ??
+      pickString(authPhotoURL) ??
+      pickString($user?.photoURL) ??
+      '';
+  });
 
-  $: providerPhotoAvailable =
-    Boolean(pickString(authPhotoURL) ?? pickString($user?.photoURL));
+  run(() => {
+    providerPhotoAvailable =
+      Boolean(pickString(authPhotoURL) ?? pickString($user?.photoURL));
+  });
 
   const themeChoices: Array<{ id: ThemeMode; label: string; description: string }> = [
     { id: 'dark', label: 'Dark', description: 'Charcoal surfaces with teal highlights.' },
     { id: 'light', label: 'Light', description: 'Bright panels and the same teal accent palette.' }
   ];
 
-  let themeMode: ThemeMode = get(themeStore);
-  $: themeMode = $themeStore;
+  let themeMode: ThemeMode = $state(get(themeStore));
+  run(() => {
+    themeMode = $themeStore;
+  });
 
   async function loadProfile(uid: string) {
     const database = db();
@@ -129,14 +141,16 @@ let avatarError: string | null = null;
     loading = false;
   });
 
-  $: if ($user?.uid && !loadedUid) {
-    loading = true;
-    loadProfile($user.uid)
-      .catch((error) => console.error('Failed to load profile', error))
-      .finally(() => {
-        loading = false;
-      });
-  }
+  run(() => {
+    if ($user?.uid && !loadedUid) {
+      loading = true;
+      loadProfile($user.uid)
+        .catch((error) => console.error('Failed to load profile', error))
+        .finally(() => {
+          loading = false;
+        });
+    }
+  });
 
   async function save() {
     if (!$user?.uid) return;
@@ -308,10 +322,10 @@ let avatarError: string | null = null;
               </div>
               <div class="settings-avatar__actions">
                 <div class="settings-chip-row">
-                  <button class="settings-chip" on:click={useGooglePhoto} disabled={!providerPhotoAvailable}>
+                  <button class="settings-chip" onclick={useGooglePhoto} disabled={!providerPhotoAvailable}>
                     Use Google/Apple photo
                   </button>
-                  <button type="button" class="settings-chip settings-chip--primary" on:click={triggerAvatarUpload}>
+                  <button type="button" class="settings-chip settings-chip--primary" onclick={triggerAvatarUpload}>
                     Upload photo
                   </button>
                 </div>
@@ -320,7 +334,7 @@ let avatarError: string | null = null;
                   type="file"
                   accept="image/*"
                   bind:this={avatarFileInput}
-                  on:change={onAvatarFileSelected}
+                  onchange={onAvatarFileSelected}
                 />
                 {#if avatarError}
                   <p class="settings-hint settings-hint--error">{avatarError}</p>
@@ -351,7 +365,7 @@ let avatarError: string | null = null;
             </label>
 
             <footer class="settings-actions">
-              <button class="btn btn-primary" on:click={save}>Save profile</button>
+              <button class="btn btn-primary" onclick={save}>Save profile</button>
             </footer>
           </section>
 
@@ -368,7 +382,7 @@ let avatarError: string | null = null;
                   <p>Show native alerts when new messages arrive.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button class="settings-chip" on:click={enableDesktopNotifications}>Grant permission</button>
+                  <button class="settings-chip" onclick={enableDesktopNotifications}>Grant permission</button>
                 </div>
               </div>
 
@@ -378,7 +392,7 @@ let avatarError: string | null = null;
                   <p>Receive updates even when the app is closed.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button class="settings-chip" on:click={enablePush}>Enable on this device</button>
+                  <button class="settings-chip" onclick={enablePush}>Enable on this device</button>
                 </div>
               </div>
 
@@ -397,7 +411,7 @@ let avatarError: string | null = null;
             </p>
 
             <footer class="settings-actions settings-actions--inline">
-              <button class="btn btn-primary" on:click={save}>Save notification settings</button>
+              <button class="btn btn-primary" onclick={save}>Save notification settings</button>
             </footer>
           </section>
 
@@ -411,7 +425,7 @@ let avatarError: string | null = null;
                 <button
                   type="button"
                   class={`appearance-option ${themeMode === choice.id ? 'appearance-option--active' : ''}`}
-                  on:click={() => updateThemePreference(choice.id)}
+                  onclick={() => updateThemePreference(choice.id)}
                 >
                   <span class="appearance-swatch" data-theme={choice.id}></span>
                   <span class="font-semibold">{choice.label}</span>

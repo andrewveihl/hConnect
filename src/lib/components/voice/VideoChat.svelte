@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, stopPropagation } from 'svelte/legacy';
+
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { get } from 'svelte/store';
@@ -34,11 +36,11 @@
 
   const CALL_DOC_ID = 'live';
   const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
-  let serverId: string | null = null;
-  let channelId: string | null = null;
-  let sessionChannelName = '';
-  let sessionServerName = '';
-  let sessionVisible = false;
+  let serverId = $state<string | null>(null);
+  let channelId = $state<string | null>(null);
+  let sessionChannelName = $state('');
+  let sessionServerName = $state('');
+  let sessionVisible = $state(false);
 
   type ParticipantState = {
     uid: string;
@@ -133,32 +135,32 @@
     return trimmed.length ? trimmed : undefined;
   }
 
-  let localVideoEl: HTMLVideoElement | null = null;
-  let localStream: MediaStream | null = null;
+  let localVideoEl = $state<HTMLVideoElement | null>(null);
+  let localStream = $state<MediaStream | null>(null);
 
-  let remoteStreams = new Map<string, MediaStream>();
+  let remoteStreams = $state(new Map<string, MediaStream>());
   let audioRefs = new Map<string, HTMLAudioElement>();
   let videoRefs = new Map<string, HTMLVideoElement>();
-  let participantControls = new Map<string, ParticipantControls>();
-  let menuOpenFor: string | null = null;
+  let participantControls = $state(new Map<string, ParticipantControls>());
+  let menuOpenFor = $state<string | null>(null);
   let longPressTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let isTouchDevice = false;
 
-  let serverMetaUnsub: Unsubscribe | null = null;
-  let memberUnsub: Unsubscribe | null = null;
-  let serverOwnerId: string | null = null;
-  let myPerms: Record<string, any> | null = null;
-  let watchedServerId: string | null = null;
-  let watchedMemberKey: string | null = null;
-  let canKickMembers = false;
+  let serverMetaUnsub = $state<Unsubscribe | null>(null);
+  let memberUnsub = $state<Unsubscribe | null>(null);
+  let serverOwnerId = $state<string | null>(null);
+  let myPerms = $state<Record<string, any> | null>(null);
+  let watchedServerId = $state<string | null>(null);
+  let watchedMemberKey = $state<string | null>(null);
+  let canKickMembers = $state(false);
 
-  let pc: RTCPeerConnection | null = null;
+  let pc: RTCPeerConnection | null = $state(null);
   let audioSender: RTCRtpSender | null = null;
   let videoSender: RTCRtpSender | null = null;
   let audioTransceiverRef: RTCRtpTransceiver | null = null;
   let videoTransceiverRef: RTCRtpTransceiver | null = null;
 
-  let callRef: DocumentReference | null = null;
+  let callRef = $state<DocumentReference | null>(null);
   let offerCandidatesRef: CollectionReference | null = null;
   let answerCandidatesRef: CollectionReference | null = null;
   let localCandidatesRef: CollectionReference | null = null;
@@ -174,50 +176,54 @@
   let offerDescriptionUnsub: Unsubscribe | null = null;
   let answerDescriptionUnsub: Unsubscribe | null = null;
 
-  let participantDocRef: DocumentReference | null = null;
+  let participantDocRef = $state<DocumentReference | null>(null);
   let myProfile: Record<string, any> | null = null;
   let myProfileUnsub: Unsubscribe | null = null;
   let latestOfferDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
   let latestAnswerDescription: { revision: number; sdp: string; type: RTCSdpType } | null = null;
   let descriptionStorageEnabled = true;
 
-  let participants: ParticipantState[] = [];
-  let participantMedia: ParticipantMedia[] = [];
-  let participantTiles: ParticipantTile[] = [];
+  let participants = $state<ParticipantState[]>([]);
+  let participantMedia = $state<ParticipantMedia[]>([]);
+  let participantTiles = $state<ParticipantTile[]>([]);
   let session: VoiceSession | null = null;
-  let activeSessionKey: string | null = null;
+  let activeSessionKey = $state<string | null>(null);
   let sessionQueue: Promise<void> = Promise.resolve();
   let voiceUnsubscribe: (() => void) | null = null;
-  let peerDiagnostics: PeerDiagnostics = {
+  let peerDiagnostics = $state<PeerDiagnostics>({
     transceivers: [],
     senders: [],
     receivers: [],
     remoteStreams: []
-  };
-  let isJoined = false;
-  let isConnecting = false;
-  let isMicMuted = true;
-  let isCameraOff = true;
-  let remoteConnected = false;
+  });
+  let isJoined = $state(false);
+  let isConnecting = $state(false);
+  let isMicMuted = $state(true);
+  let isCameraOff = $state(true);
+  let remoteConnected = $state(false);
   let screenStream: MediaStream | null = null;
-  let isScreenSharing = false;
-  let isScreenSharePending = false;
+  let isScreenSharing = $state(false);
+  let isScreenSharePending = $state(false);
   let shouldRestoreCameraOnShareEnd = false;
-  let audioNeedsUnlock = false;
-  let isPlaybackMuted = false;
-  export let layout: 'standalone' | 'embedded' = 'standalone';
+  let audioNeedsUnlock = $state(false);
+  let isPlaybackMuted = $state(false);
+  interface Props {
+    layout?: 'standalone' | 'embedded';
+  }
+
+  let { layout = 'standalone' }: Props = $props();
   let compactMediaQuery: MediaQueryList | null = null;
-  let compactMatch = false;
-  let isCompact = false;
+  let compactMatch = $state(false);
+  let isCompact = $state(false);
   let handleCompactChange: ((event: MediaQueryListEvent) => void) | null = null;
-  let isRestartingCall = false;
+  let isRestartingCall = $state(false);
   let reconnectAttemptCount = 0;
-  let signalingState = 'closed';
-  let connectionState = 'new';
-  let iceConnectionState = 'new';
-  let iceGatheringState = 'new';
-  let publishedCandidateCount = 0;
-  let appliedCandidateCount = 0;
+  let signalingState = $state('closed');
+  let connectionState = $state('new');
+  let iceConnectionState = $state('new');
+  let iceGatheringState = $state('new');
+  let publishedCandidateCount = $state(0);
+  let appliedCandidateCount = $state(0);
 
   type AudioMonitor = {
     stream: MediaStream;
@@ -230,10 +236,10 @@
 
   let audioContext: AudioContext | null = null;
   let audioMonitors = new Map<string, AudioMonitor>();
-  let speakingParticipants = new Set<string>();
+  let speakingParticipants = $state(new Set<string>());
   let permissionPreflight: Promise<void> | null = null;
   let permissionWarningShown = false;
-  let callSnapshotDebug = '';
+  let callSnapshotDebug = $state('');
   type VoiceLogEntry = {
     id: string;
     timestamp: string;
@@ -241,19 +247,19 @@
     details?: string;
     severity: 'info' | 'warn' | 'error';
   };
-  let voiceLogs: VoiceLogEntry[] = [];
+  let voiceLogs: VoiceLogEntry[] = $state([]);
   let voiceLogSequence = 0;
-  let voiceErrorCount = 0;
-  let voiceWarnCount = 0;
+  let voiceErrorCount = $state(0);
+  let voiceWarnCount = $state(0);
   const remoteCandidateKeys = new Set<string>();
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
   const DEBUG_PANEL_STORAGE_KEY = 'hconnect:voice:debug-panel-open';
   const QUICK_STATS_STORAGE_KEY = 'hconnect:voice:debug.quickstats';
   const DEBUG_PANEL_DRAG_MARGIN = 12;
-  let debugPanelVisible = false;
-  let hasDebugAlerts = false;
+  let debugPanelVisible = $state(false);
+  let hasDebugAlerts = $state(false);
   let mostRecentAlertId: string | null = null;
-  let debugPanelPosition: { x: number; y: number } | null = null;
+  let debugPanelPosition: { x: number; y: number } | null = $state(null);
   type DebugPanelDragState = {
     pointerId: number;
     offsetX: number;
@@ -263,8 +269,8 @@
     handle: HTMLElement;
   };
   let debugPanelDrag: DebugPanelDragState | null = null;
-  let isDebugPanelDragging = false;
-  let debugPanelDrawerEl: HTMLElement | null = null;
+  let isDebugPanelDragging = $state(false);
+  let debugPanelDrawerEl: HTMLElement | null = $state(null);
   const dispatch = createEventDispatcher<{ openMobileChat: void }>();
 
   const DEFAULT_STUN_SERVERS = [
@@ -289,17 +295,17 @@
   }
 
   const allowTurnFallback = parseBooleanFlag(publicEnv.PUBLIC_ENABLE_TURN_FALLBACK, true);
-  let fallbackTurnActivated = false;
+  let fallbackTurnActivated = $state(false);
   let fallbackTurnActivationReason: string | null = null;
   let hasTurnServers = false;
-  let usingFallbackTurnServers = false;
-  let forceRelayIceTransport = false;
+  let usingFallbackTurnServers = $state(false);
+  let forceRelayIceTransport = $state(false);
   let consecutiveIceErrors = 0;
   let connectionFailureCount = 0;
   let lastIceErrorTimestamp = 0;
   let lastTurnConfigSignature: string | null = null;
-  let debugLoggingEnabled = true;
-  let isOfferer = false;
+  let debugLoggingEnabled = $state(true);
+  let isOfferer = $state(false);
   let lastOfferRevision = 0;
   let lastAnswerRevision = 0;
   let negotiationInFlight: Promise<void> | null = null;
@@ -936,15 +942,18 @@
     if (!connection || typeof connection.getTransceivers !== 'function') return [];
     return connection
       .getTransceivers()
-      .map((trx, index) => ({
+      .map((trx, index) => {
+        const trxAny = trx as any;
+        return {
         index,
         mid: trx.mid ?? null,
         direction: trx.direction ?? null,
-        currentDirection: (trx as any)?.currentDirection ?? null,
+        currentDirection: trxAny?.currentDirection ?? null,
         senderKind: trx.sender?.track?.kind ?? null,
         receiverKind: trx.receiver?.track?.kind ?? null,
-        stopped: trx.stopped ?? false
-      }))
+        stopped: trxAny?.stopped ?? false
+      };
+      })
       .filter(Boolean);
   }
 
@@ -957,11 +966,17 @@
     const logs = voiceLogs.slice(0, maxLogs);
     const transceiverSnapshot = describeTransceiverOrder(pc);
     const senderSnapshot =
-      pc?.getSenders?.().map((sender) => ({
+      pc?.getSenders?.().map((sender) => {
+        const senderAny = sender as any;
+        const streams = Array.isArray(senderAny?.streams)
+          ? senderAny.streams.map((stream: MediaStream) => stream.id)
+          : [];
+        return {
         trackKind: sender.track?.kind ?? null,
-        streams: sender.streams?.map((stream) => stream.id) ?? [],
+        streams,
         transportState: (sender as any)?.transport?.state ?? null
-      })) ?? [];
+        };
+      }) ?? [];
     const localStreamSummary = summarizeLocalStreamForDebug(localStream);
     const remoteStreamSummary = summarizeRemoteStreamsForDebug(remoteStreams);
     let statsSnapshot: PeerConnectionStatsSnapshot | null = null;
@@ -1234,10 +1249,11 @@
     if (current === desired) return;
     voiceDebug(`${context} transceiver direction update`, { from: current, to: desired, ...details });
     try {
-      if (typeof transceiver.setDirection === 'function') {
-        transceiver.setDirection(desired);
+      const trxAny = transceiver as any;
+      if (typeof trxAny?.setDirection === 'function') {
+        trxAny.setDirection(desired);
       } else {
-        (transceiver as any).direction = desired;
+        trxAny.direction = desired;
       }
     } catch (err) {
       console.warn(`Failed to set ${context} transceiver direction`, err);
@@ -1287,25 +1303,35 @@
 
     const transceivers =
       typeof connection.getTransceivers === 'function'
-        ? connection.getTransceivers().map((transceiver) => ({
-            mid: transceiver.mid ?? null,
-            currentDirection: transceiver.currentDirection ?? transceiver.direction ?? null,
-            preferredDirection: transceiver.direction ?? null,
-            isStopped: transceiver.stopped ?? false,
-            senderTrack: describeTrack(transceiver.sender?.track ?? null),
-            receiverTrack: describeTrack(transceiver.receiver?.track ?? null)
-          }))
+        ? connection.getTransceivers().map((transceiver) => {
+            const trxAny = transceiver as any;
+            return {
+              mid: transceiver.mid ?? null,
+              currentDirection: trxAny?.currentDirection ?? transceiver.direction ?? null,
+              preferredDirection: transceiver.direction ?? null,
+              isStopped: trxAny?.stopped ?? false,
+              senderTrack: describeTrack(transceiver.sender?.track ?? null),
+              receiverTrack: describeTrack(transceiver.receiver?.track ?? null)
+            };
+          })
         : [];
 
     const senders =
       typeof connection.getSenders === 'function'
         ? connection.getSenders().map((sender) => {
-            const rawTransport = (sender as any)?.transport ?? null;
+            const senderAny = sender as any;
+            const rawTransport = senderAny?.transport ?? null;
             const transportState =
               rawTransport && typeof rawTransport.state === 'string' ? (rawTransport.state as string) : null;
+            const streamList =
+              typeof senderAny?.getStreams === 'function'
+                ? senderAny.getStreams().map((stream: MediaStream) => stream.id)
+                : Array.isArray(senderAny?.streams)
+                  ? senderAny.streams.map((stream: MediaStream) => stream.id)
+                  : [];
             return {
               track: describeTrack(sender.track ?? null),
-              streams: typeof sender.getStreams === 'function' ? sender.getStreams().map((stream) => stream.id) : [],
+              streams: streamList,
               transportState
             };
           })
@@ -1313,11 +1339,19 @@
 
     const receivers =
       typeof connection.getReceivers === 'function'
-        ? connection.getReceivers().map((receiver) => ({
-            track: describeTrack(receiver.track ?? null),
-            streams:
-              typeof receiver.getStreams === 'function' ? receiver.getStreams().map((stream) => stream.id) : []
-          }))
+        ? connection.getReceivers().map((receiver) => {
+            const receiverAny = receiver as any;
+            const streamList =
+              typeof receiverAny?.getStreams === 'function'
+                ? receiverAny.getStreams().map((stream: MediaStream) => stream.id)
+                : Array.isArray(receiverAny?.streams)
+                  ? receiverAny.streams.map((stream: MediaStream) => stream.id)
+                  : [];
+            return {
+              track: describeTrack(receiver.track ?? null),
+              streams: streamList
+            };
+          })
         : [];
 
     const remoteStreamsDiagnostics: RemoteStreamDiagnostics[] = Array.from(remoteStreams.values()).map((stream) => ({
@@ -1527,14 +1561,14 @@
     }
   }
 
-  let statusMessage = '';
-  let errorMessage = '';
+  let statusMessage = $state('');
+  let errorMessage = $state('');
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   const RECONNECT_DELAY_MS = 3500;
   let lastPresencePayload: Record<string, unknown> | null = null;
   let presenceDebounce: ReturnType<typeof setTimeout> | null = null;
-  let lastParticipantsSnapshot: ParticipantState[] | null = null;
-  let debugParticipants: ParticipantState[] = [];
+  let lastParticipantsSnapshot: ParticipantState[] | null = $state(null);
+  let debugParticipants: ParticipantState[] = $state([]);
 
   voiceUnsubscribe = voiceSession.subscribe((next) => {
     sessionQueue = sessionQueue.then(() => handleSessionChange(next));
@@ -1559,16 +1593,6 @@
     return true;
   }
 
-  $: hasAudioTrack = !!(localStream && localStream.getAudioTracks().length);
-  $: hasVideoTrack = !!(localStream && localStream.getVideoTracks().length);
-  $: micButtonLabel = hasAudioTrack && !isMicMuted ? 'Mute mic' : 'Enable mic';
-  $: cameraButtonLabel = hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video';
-  $: screenShareButtonLabel = isScreenSharing ? 'Stop sharing' : 'Share screen';
-  $: playbackButtonLabel = isPlaybackMuted ? 'Unmute call audio' : 'Mute call audio';
-  $: playbackButtonText = isPlaybackMuted ? 'Unmute' : 'Mute audio';
-  $: isEmbedded = layout === 'embedded';
-  $: isCompact = isEmbedded && compactMatch;
-  $: participantCount = participants.length;
 
   const DEFAULT_VOLUME = 0.85;
   const STORAGE_PREFIX = 'hconnect:voice:controls:';
@@ -1622,60 +1646,11 @@
     return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
   }
 
-  $: quickStatsItems = (() => {
-    const callDocPath = callRef?.path ?? 'none';
-    const compactCallDoc = compactIdentifier(callDocPath);
-    const logsCaptured = voiceLogs.length;
-    return [
-      { key: 'signaling', label: 'Signaling', value: toDisplayLabel(signalingState) },
-      { key: 'connection', label: 'Connection', value: toDisplayLabel(connectionState) },
-      { key: 'ice-connection', label: 'ICE Conn', value: toDisplayLabel(iceConnectionState) },
-      { key: 'ice-gathering', label: 'ICE Gather', value: toDisplayLabel(iceGatheringState) },
-      { key: 'local-ice', label: 'Local ICE', value: String(publishedCandidateCount) },
-      { key: 'remote-ice', label: 'Remote ICE', value: String(appliedCandidateCount) },
-      { key: 'ice-policy', label: 'ICE Policy', value: describeIcePolicyStatus() },
-      { key: 'turn', label: 'TURN', value: describeTurnStatus() },
-      {
-        key: 'role',
-        label: 'Role',
-        value: isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'
-      },
-      {
-        key: 'call-doc',
-        label: 'Call Doc',
-        value: compactCallDoc.display,
-        tooltip: compactCallDoc.tooltip
-      },
-      { key: 'errors', label: 'Errors', value: String(voiceErrorCount) },
-      { key: 'warnings', label: 'Warnings', value: String(voiceWarnCount) },
-      {
-        key: 'logs',
-        label: 'Logs cached',
-        value: `${Math.min(logsCaptured, 250)}/${logsCaptured}`,
-        tooltip: `${logsCaptured} total voice logs cached (showing up to 250)`
-      }
-    ] as QuickStatItem[];
-  })();
 
-  $: quickStatsSummary = [
-    `Sig:${abbreviate(signalingState)}`,
-    `Conn:${abbreviate(connectionState)}`,
-    `ICE:${abbreviate(iceConnectionState)}`,
-    `Role:${abbreviate(isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle')}`,
-    `Err:${voiceErrorCount}`,
-    `Warn:${voiceWarnCount}`
-  ].join(' • ');
 
-  $: quickStatsSummaryTooltip = [
-    ...quickStatsItems.map((item) => `${item.label}: ${item.tooltip ?? item.value}`),
-    statusMessage ? `Status: ${statusMessage}` : null,
-    errorMessage ? `Error: ${errorMessage}` : null
-  ]
-    .filter(Boolean)
-    .join('\n');
 
-  let quickStatsExpanded = false;
-  let copyInFlight = false;
+  let quickStatsExpanded = $state(false);
+  let copyInFlight = $state(false);
 
   function toggleQuickStats(expand?: boolean) {
     const target = typeof expand === 'boolean' ? expand : !quickStatsExpanded;
@@ -1696,212 +1671,15 @@
     }
     return quickStatsExpanded;
   }
-  $: if (browser) {
-    setVoiceDebugSection('call.session', {
-      serverId,
-      channelId,
-      sessionVisible,
-      sessionChannelName,
-      sessionServerName,
-      isJoined,
-      isConnecting,
-      isOfferer,
-      activeSessionKey
-    });
-  }
 
-  $: if (browser) {
-    setVoiceDebugSection('call.participants', {
-      count: participants.length,
-      summary: summarizeParticipantsForDebug(participants)
-    });
-  }
 
-  $: if (browser) {
-    const remoteSummary = summarizeRemoteStreamsForDebug(remoteStreams);
-    setVoiceDebugSection('call.remoteStreams', {
-      count: remoteSummary.length,
-      streams: remoteSummary
-    });
-  }
 
-  $: if (browser) {
-    setVoiceDebugSection('call.localStream', {
-      stream: summarizeLocalStreamForDebug(localStream),
-      hasAudioTrack,
-      hasVideoTrack,
-      micMuted: isMicMuted,
-      cameraOff: isCameraOff,
-      screenSharing: isScreenSharing
-    });
-  }
 
-  $: if (browser) {
-    setVoiceDebugSection('call.status', {
-      statusMessage: statusMessage || null,
-      errorMessage: errorMessage || null,
-      voiceErrorCount,
-      voiceWarnCount,
-      pcState: {
-        signaling: pc?.signalingState ?? null,
-        connection: pc?.connectionState ?? null,
-        iceConnection: pc?.iceConnectionState ?? null,
-        iceGathering: pc?.iceGatheringState ?? null
-      }
-    });
-  }
 
-  $: currentUserId = $user?.uid ?? null;
-  $: selfParticipant = participants.find((p) => p.uid === currentUserId) ?? null;
-  $: localHasAudio = selfParticipant?.hasAudio ?? (hasAudioTrack && !isMicMuted);
-  $: localHasVideo = selfParticipant?.hasVideo ?? (hasVideoTrack && !isCameraOff);
-  $: participantMedia = (() => {
-    const usedStreamIds = new Set<string>();
-    const tiles: ParticipantMedia[] = participants.map((p) => {
-      const streamId = p.streamId ?? null;
-      let stream: MediaStream | null = null;
-      if (p.uid === currentUserId) {
-        stream = localStream;
-      } else if (streamId && remoteStreams.has(streamId)) {
-        stream = remoteStreams.get(streamId) ?? null;
-      }
-      if (stream && streamId) {
-        usedStreamIds.add(streamId);
-      }
-      return {
-        uid: p.uid,
-        isSelf: p.uid === currentUserId,
-        streamId,
-        stream,
-        hasAudio: p.hasAudio,
-        hasVideo: p.hasVideo
-      };
-    });
 
-    if (tiles.some((tile) => !tile.isSelf && (tile.hasVideo || tile.hasAudio) && !tile.stream) && remoteStreams.size) {
-      const availableStreams = Array.from(remoteStreams.entries());
-      for (const tile of tiles) {
-        if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
-        const preferVideo = tile.hasVideo;
-        const matchesVideo = (stream: MediaStream) => streamHasLiveVideo(stream);
-        const matchesAudio = (stream: MediaStream) =>
-          stream.getAudioTracks().some((track) => track.readyState !== 'ended');
 
-        let fallbackEntry =
-          availableStreams.find(([id, stream]) => {
-            if (usedStreamIds.has(id)) return false;
-            return preferVideo ? matchesVideo(stream) : matchesAudio(stream);
-          }) ?? null;
 
-        if (!fallbackEntry && preferVideo) {
-          fallbackEntry = availableStreams.find(([id, stream]) => {
-            if (usedStreamIds.has(id)) return false;
-            return matchesAudio(stream);
-          }) ?? null;
-        }
-
-        if (!fallbackEntry) continue;
-        const [fallbackId, fallbackStream] = fallbackEntry;
-        tile.streamId = tile.streamId ?? fallbackId;
-        tile.stream = fallbackStream;
-        usedStreamIds.add(fallbackId);
-      }
-    }
-
-    return tiles;
-  })();
-  $: selfIdentity = computeSelfIdentity();
-
-  $: participantTiles = participantMedia.map((media) => {
-    const base = participants.find((p) => p.uid === media.uid);
-    const controls = media.isSelf
-      ? { volume: 1, muted: false }
-      : participantControls.get(media.uid) ?? { volume: DEFAULT_VOLUME, muted: false };
-    const streamAudioActive = media.stream
-      ? media.stream.getAudioTracks().some((track) => track.readyState !== 'ended')
-      : false;
-    const streamVideoActive = streamHasLiveVideo(media.stream);
-    const resolvedHasAudio = media.isSelf
-      ? localHasAudio || streamAudioActive
-      : media.hasAudio || streamAudioActive;
-    const resolvedHasVideo = media.isSelf ? localHasVideo || streamVideoActive : media.hasVideo || streamVideoActive;
-    const basePhotoURL = base?.photoURL ?? null;
-    const selfPhotoURL = selfIdentity?.photoURL ?? selfIdentity?.authPhotoURL ?? null;
-    return {
-      ...media,
-      hasAudio: resolvedHasAudio,
-      hasVideo: resolvedHasVideo,
-      displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
-      photoURL: media.isSelf ? selfPhotoURL ?? basePhotoURL : basePhotoURL,
-      controls,
-      screenSharing: base?.screenSharing ?? false,
-      isSpeaking: speakingParticipants.has(media.uid)
-    };
-  });
-  $: remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
-  $: localVideoEl && localStream && (localVideoEl.srcObject = localStream);
-  $: {
-    const seenUids = new Set<string>();
-    participantMedia.forEach((tile) => {
-      seenUids.add(tile.uid);
-      if (!tile.isSelf) {
-        ensureParticipantControls(tile.uid);
-        applyParticipantControls(tile.uid);
-      }
-      attachStreamToRefs(tile.uid, tile.stream);
-      monitorStreamAudio(tile.uid, tile.stream);
-    });
-    for (const uid of Array.from(audioMonitors.keys())) {
-      if (!seenUids.has(uid)) {
-        stopAudioMonitor(uid);
-      }
-    }
-  }
-  $: if (serverId && serverId !== watchedServerId) {
-    watchedServerId = serverId;
-    watchServerMeta(serverId);
-  } else if (!serverId && watchedServerId) {
-    watchedServerId = null;
-    serverOwnerId = null;
-    serverMetaUnsub?.();
-    serverMetaUnsub = null;
-  }
-  $: {
-    const key = serverId && currentUserId ? `${serverId}:${currentUserId}` : null;
-    if (key !== watchedMemberKey) {
-      memberUnsub?.();
-      watchedMemberKey = key;
-      if (serverId && currentUserId) {
-        watchMemberDoc(serverId, currentUserId);
-      } else {
-        myPerms = null;
-      }
-    }
-  }
-  $: canKickMembers =
-    !!currentUserId &&
-    (!!(serverOwnerId && serverOwnerId === currentUserId) ||
-      !!myPerms?.manageServer ||
-      !!myPerms?.kickMembers);
-
-  $: debugParticipants = lastParticipantsSnapshot ?? participants;
-
-  let lastPresenceSignature: string | null = null;
-  $: if (participantDocRef && isJoined) {
-    const identity = computeSelfIdentity();
-    const signature = [
-      hasAudioTrack && !isMicMuted,
-      hasVideoTrack && (!isCameraOff || isScreenSharing),
-      identity.displayName ?? '',
-      identity.photoURL ?? '',
-      identity.authPhotoURL ?? '',
-      isScreenSharing ? '1' : '0'
-    ].join('|');
-    if (signature !== lastPresenceSignature) {
-      lastPresenceSignature = signature;
-      updateParticipantPresence({}, identity).catch((err) => console.warn('Failed to sync presence', err));
-    }
-  }
+  let lastPresenceSignature: string | null = $state(null);
 
   onMount(() => {
     const onUnload = () => {
@@ -5000,6 +4778,290 @@
     if (disabled) classes.push('call-control-button--disabled');
     return classes.join(' ');
   }
+  let hasAudioTrack = $derived(!!(localStream && localStream.getAudioTracks().length));
+  let hasVideoTrack = $derived(!!(localStream && localStream.getVideoTracks().length));
+  let micButtonLabel = $derived(hasAudioTrack && !isMicMuted ? 'Mute mic' : 'Enable mic');
+  let cameraButtonLabel = $derived(hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video');
+  let screenShareButtonLabel = $derived(isScreenSharing ? 'Stop sharing' : 'Share screen');
+  let playbackButtonLabel = $derived(isPlaybackMuted ? 'Unmute call audio' : 'Mute call audio');
+  let playbackButtonText = $derived(isPlaybackMuted ? 'Unmute' : 'Mute audio');
+  let isEmbedded = $derived(layout === 'embedded');
+  run(() => {
+    isCompact = isEmbedded && compactMatch;
+  });
+  let participantCount = $derived(participants.length);
+  let quickStatsItems = $derived((() => {
+    const callDocPath = callRef?.path ?? 'none';
+    const compactCallDoc = compactIdentifier(callDocPath);
+    const logsCaptured = voiceLogs.length;
+    return [
+      { key: 'signaling', label: 'Signaling', value: toDisplayLabel(signalingState) },
+      { key: 'connection', label: 'Connection', value: toDisplayLabel(connectionState) },
+      { key: 'ice-connection', label: 'ICE Conn', value: toDisplayLabel(iceConnectionState) },
+      { key: 'ice-gathering', label: 'ICE Gather', value: toDisplayLabel(iceGatheringState) },
+      { key: 'local-ice', label: 'Local ICE', value: String(publishedCandidateCount) },
+      { key: 'remote-ice', label: 'Remote ICE', value: String(appliedCandidateCount) },
+      { key: 'ice-policy', label: 'ICE Policy', value: describeIcePolicyStatus() },
+      { key: 'turn', label: 'TURN', value: describeTurnStatus() },
+      {
+        key: 'role',
+        label: 'Role',
+        value: isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle'
+      },
+      {
+        key: 'call-doc',
+        label: 'Call Doc',
+        value: compactCallDoc.display,
+        tooltip: compactCallDoc.tooltip
+      },
+      { key: 'errors', label: 'Errors', value: String(voiceErrorCount) },
+      { key: 'warnings', label: 'Warnings', value: String(voiceWarnCount) },
+      {
+        key: 'logs',
+        label: 'Logs cached',
+        value: `${Math.min(logsCaptured, 250)}/${logsCaptured}`,
+        tooltip: `${logsCaptured} total voice logs cached (showing up to 250)`
+      }
+    ] as QuickStatItem[];
+  })());
+  let quickStatsSummary = $derived([
+    `Sig:${abbreviate(signalingState)}`,
+    `Conn:${abbreviate(connectionState)}`,
+    `ICE:${abbreviate(iceConnectionState)}`,
+    `Role:${abbreviate(isJoined ? (isOfferer ? 'offerer' : 'answerer') : 'idle')}`,
+    `Err:${voiceErrorCount}`,
+    `Warn:${voiceWarnCount}`
+  ].join(' • '));
+  let quickStatsSummaryTooltip = $derived([
+    ...quickStatsItems.map((item) => `${item.label}: ${item.tooltip ?? item.value}`),
+    statusMessage ? `Status: ${statusMessage}` : null,
+    errorMessage ? `Error: ${errorMessage}` : null
+  ]
+    .filter(Boolean)
+    .join('\n'));
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('call.session', {
+        serverId,
+        channelId,
+        sessionVisible,
+        sessionChannelName,
+        sessionServerName,
+        isJoined,
+        isConnecting,
+        isOfferer,
+        activeSessionKey
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('call.participants', {
+        count: participants.length,
+        summary: summarizeParticipantsForDebug(participants)
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      const remoteSummary = summarizeRemoteStreamsForDebug(remoteStreams);
+      setVoiceDebugSection('call.remoteStreams', {
+        count: remoteSummary.length,
+        streams: remoteSummary
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('call.localStream', {
+        stream: summarizeLocalStreamForDebug(localStream),
+        hasAudioTrack,
+        hasVideoTrack,
+        micMuted: isMicMuted,
+        cameraOff: isCameraOff,
+        screenSharing: isScreenSharing
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('call.status', {
+        statusMessage: statusMessage || null,
+        errorMessage: errorMessage || null,
+        voiceErrorCount,
+        voiceWarnCount,
+        pcState: {
+          signaling: pc?.signalingState ?? null,
+          connection: pc?.connectionState ?? null,
+          iceConnection: pc?.iceConnectionState ?? null,
+          iceGathering: pc?.iceGatheringState ?? null
+        }
+      });
+    }
+  });
+  let currentUserId = $derived($user?.uid ?? null);
+  let selfParticipant = $derived(participants.find((p) => p.uid === currentUserId) ?? null);
+  let localHasAudio = $derived(selfParticipant?.hasAudio ?? (hasAudioTrack && !isMicMuted));
+  let localHasVideo = $derived(selfParticipant?.hasVideo ?? (hasVideoTrack && !isCameraOff));
+  run(() => {
+    participantMedia = (() => {
+      const usedStreamIds = new Set<string>();
+      const tiles: ParticipantMedia[] = participants.map((p) => {
+        const streamId = p.streamId ?? null;
+        let stream: MediaStream | null = null;
+        if (p.uid === currentUserId) {
+          stream = localStream;
+        } else if (streamId && remoteStreams.has(streamId)) {
+          stream = remoteStreams.get(streamId) ?? null;
+        }
+        if (stream && streamId) {
+          usedStreamIds.add(streamId);
+        }
+        return {
+          uid: p.uid,
+          isSelf: p.uid === currentUserId,
+          streamId,
+          stream,
+          hasAudio: p.hasAudio,
+          hasVideo: p.hasVideo
+        };
+      });
+
+      if (tiles.some((tile) => !tile.isSelf && (tile.hasVideo || tile.hasAudio) && !tile.stream) && remoteStreams.size) {
+        const availableStreams = Array.from(remoteStreams.entries());
+        for (const tile of tiles) {
+          if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
+          const preferVideo = tile.hasVideo;
+          const matchesVideo = (stream: MediaStream) => streamHasLiveVideo(stream);
+          const matchesAudio = (stream: MediaStream) =>
+            stream.getAudioTracks().some((track) => track.readyState !== 'ended');
+
+          let fallbackEntry =
+            availableStreams.find(([id, stream]) => {
+              if (usedStreamIds.has(id)) return false;
+              return preferVideo ? matchesVideo(stream) : matchesAudio(stream);
+            }) ?? null;
+
+          if (!fallbackEntry && preferVideo) {
+            fallbackEntry = availableStreams.find(([id, stream]) => {
+              if (usedStreamIds.has(id)) return false;
+              return matchesAudio(stream);
+            }) ?? null;
+          }
+
+          if (!fallbackEntry) continue;
+          const [fallbackId, fallbackStream] = fallbackEntry;
+          tile.streamId = tile.streamId ?? fallbackId;
+          tile.stream = fallbackStream;
+          usedStreamIds.add(fallbackId);
+        }
+      }
+
+      return tiles;
+    })();
+  });
+  let selfIdentity = $derived(computeSelfIdentity());
+  run(() => {
+    participantTiles = participantMedia.map((media) => {
+      const base = participants.find((p) => p.uid === media.uid);
+      const controls = media.isSelf
+        ? { volume: 1, muted: false }
+        : participantControls.get(media.uid) ?? { volume: DEFAULT_VOLUME, muted: false };
+      const streamAudioActive = media.stream
+        ? media.stream.getAudioTracks().some((track) => track.readyState !== 'ended')
+        : false;
+      const streamVideoActive = streamHasLiveVideo(media.stream);
+      const resolvedHasAudio = media.isSelf
+        ? localHasAudio || streamAudioActive
+        : media.hasAudio || streamAudioActive;
+      const resolvedHasVideo = media.isSelf ? localHasVideo || streamVideoActive : media.hasVideo || streamVideoActive;
+      const basePhotoURL = base?.photoURL ?? null;
+      const selfPhotoURL = selfIdentity?.photoURL ?? selfIdentity?.authPhotoURL ?? null;
+      return {
+        ...media,
+        hasAudio: resolvedHasAudio,
+        hasVideo: resolvedHasVideo,
+        displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
+        photoURL: media.isSelf ? selfPhotoURL ?? basePhotoURL : basePhotoURL,
+        controls,
+        screenSharing: base?.screenSharing ?? false,
+        isSpeaking: speakingParticipants.has(media.uid)
+      };
+    });
+  });
+  run(() => {
+    remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
+  });
+  run(() => {
+    localVideoEl && localStream && (localVideoEl.srcObject = localStream);
+  });
+  run(() => {
+    const seenUids = new Set<string>();
+    participantMedia.forEach((tile) => {
+      seenUids.add(tile.uid);
+      if (!tile.isSelf) {
+        ensureParticipantControls(tile.uid);
+        applyParticipantControls(tile.uid);
+      }
+      attachStreamToRefs(tile.uid, tile.stream);
+      monitorStreamAudio(tile.uid, tile.stream);
+    });
+    for (const uid of Array.from(audioMonitors.keys())) {
+      if (!seenUids.has(uid)) {
+        stopAudioMonitor(uid);
+      }
+    }
+  });
+  run(() => {
+    if (serverId && serverId !== watchedServerId) {
+      watchedServerId = serverId;
+      watchServerMeta(serverId);
+    } else if (!serverId && watchedServerId) {
+      watchedServerId = null;
+      serverOwnerId = null;
+      serverMetaUnsub?.();
+      serverMetaUnsub = null;
+    }
+  });
+  run(() => {
+    const key = serverId && currentUserId ? `${serverId}:${currentUserId}` : null;
+    if (key !== watchedMemberKey) {
+      memberUnsub?.();
+      watchedMemberKey = key;
+      if (serverId && currentUserId) {
+        watchMemberDoc(serverId, currentUserId);
+      } else {
+        myPerms = null;
+      }
+    }
+  });
+  run(() => {
+    canKickMembers =
+      !!currentUserId &&
+      (!!(serverOwnerId && serverOwnerId === currentUserId) ||
+        !!myPerms?.manageServer ||
+        !!myPerms?.kickMembers);
+  });
+  run(() => {
+    debugParticipants = lastParticipantsSnapshot ?? participants;
+  });
+  run(() => {
+    if (participantDocRef && isJoined) {
+      const identity = computeSelfIdentity();
+      const signature = [
+        hasAudioTrack && !isMicMuted,
+        hasVideoTrack && (!isCameraOff || isScreenSharing),
+        identity.displayName ?? '',
+        identity.photoURL ?? '',
+        identity.authPhotoURL ?? '',
+        isScreenSharing ? '1' : '0'
+      ].join('|');
+      if (signature !== lastPresenceSignature) {
+        lastPresenceSignature = signature;
+        updateParticipantPresence({}, identity).catch((err) => console.warn('Failed to sync presence', err));
+      }
+    }
+  });
 </script>
 
 <div
@@ -5012,7 +5074,7 @@
       <div class="call-debug-banner">
         <i class="bx bx-bug"></i>
         Debug logging active - open the browser console to view `[voice]` events.
-        <button type="button" on:click={() => setVoiceDebug(false)}>
+        <button type="button" onclick={() => setVoiceDebug(false)}>
           Disable
         </button>
       </div>
@@ -5047,7 +5109,7 @@
             <button
               type="button"
               class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
-              on:click={() => toggleDebugPanel()}
+              onclick={() => toggleDebugPanel()}
               aria-pressed={debugPanelVisible}
               aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
             >
@@ -5068,7 +5130,7 @@
           <button
             type="button"
             class="call-header__minimize"
-            on:click={handleMinimize}
+            onclick={handleMinimize}
             aria-label="Hide call"
           >
             <i class="bx bx-minus"></i>
@@ -5100,9 +5162,9 @@
             <article
               class={`call-tile ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking' : ''}`}
               data-voice-menu
-              on:touchstart={() => handleLongPressStart(tile.uid)}
-              on:touchend={() => handleLongPressEnd(tile.uid)}
-              on:touchcancel={() => handleLongPressEnd(tile.uid)}
+              ontouchstart={() => handleLongPressStart(tile.uid)}
+              ontouchend={() => handleLongPressEnd(tile.uid)}
+              ontouchcancel={() => handleLongPressEnd(tile.uid)}
             >
               <div class="call-tile__media">
                 <video
@@ -5154,7 +5216,7 @@
                   <button
                     type="button"
                     class="call-tile__menu-button"
-                    on:click|stopPropagation={() => openMenu(tile.uid)}
+                    onclick={stopPropagation(() => openMenu(tile.uid))}
                     data-voice-menu
                     aria-label={`Voice options for ${tile.displayName}`}
                   >
@@ -5167,7 +5229,7 @@
                 <div class="call-tile__menu-panel" data-voice-menu>
                   <div class="call-menu__header">
                     <span>{tile.displayName}</span>
-                    <button type="button" on:click={closeMenu} aria-label="Close participant menu">
+                    <button type="button" onclick={closeMenu} aria-label="Close participant menu">
                       <i class="bx bx-x"></i>
                     </button>
                   </div>
@@ -5183,7 +5245,7 @@
                       max="100"
                       step="5"
                       value={Math.round(tile.controls.volume * 100)}
-                      on:input={(event) => {
+                      oninput={(event) => {
                         const target = event.currentTarget as HTMLInputElement;
                         setParticipantVolume(tile.uid, Number(target.value) / 100);
                       }}
@@ -5192,7 +5254,7 @@
                   <button
                     type="button"
                     class="call-menu__action"
-                    on:click={() => toggleParticipantMute(tile.uid)}
+                    onclick={() => toggleParticipantMute(tile.uid)}
                   >
                     <span>{tile.controls.muted ? 'Unmute for me' : 'Mute for me'}</span>
                     <i class={`bx ${tile.controls.muted ? 'bx-volume-full' : 'bx-volume-mute'}`}></i>
@@ -5201,7 +5263,7 @@
                     <button
                       type="button"
                       class="call-menu__action call-menu__action--danger"
-                      on:click={() => {
+                      onclick={() => {
                         const target = participants.find((p) => p.uid === tile.uid);
                         if (target) kickParticipant(target);
                         closeMenu();
@@ -5238,7 +5300,7 @@
         <div class="call-controls__row call-controls__row--join">
           <button
             class="call-button call-button--primary"
-            on:click={handleJoinClick}
+            onclick={handleJoinClick}
             disabled={isConnecting || !serverId || !channelId}
           >
             <i class="bx bx-phone"></i>
@@ -5253,7 +5315,7 @@
           <div class="call-controls__status">
             {#if audioNeedsUnlock}
               <div class="call-audio-unlock">
-                <button class="call-button call-button--primary" type="button" on:click={unlockAudioPlayback}>
+                <button class="call-button call-button--primary" type="button" onclick={unlockAudioPlayback}>
                   <i class="bx bx-volume-full"></i>
                   Enable audio
                 </button>
@@ -5267,7 +5329,7 @@
           </div>
           <div class="call-controls__group call-controls__group--main">
             <div class="call-controls__item">
-              <button class={controlClasses({ active: !isMicMuted })} on:click={toggleMic} aria-label={micButtonLabel}>
+              <button class={controlClasses({ active: !isMicMuted })} onclick={toggleMic} aria-label={micButtonLabel}>
                 <i class={`bx ${isMicMuted ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
               </button>
               <span>{isMicMuted ? 'Muted' : 'Mute'}</span>
@@ -5275,7 +5337,7 @@
             <div class="call-controls__item">
               <button
                 class={controlClasses({ active: !isCameraOff && !isScreenSharing })}
-                on:click={toggleCamera}
+                onclick={toggleCamera}
                 aria-label={cameraButtonLabel}
               >
                 <i class={`bx ${isCameraOff || isScreenSharing ? 'bx-video-off' : 'bx-video'}`}></i>
@@ -5286,7 +5348,7 @@
               <div class="call-controls__item">
                 <button
                   class={controlClasses({ active: isScreenSharing, disabled: isScreenSharePending })}
-                  on:click={toggleScreenShare}
+                  onclick={toggleScreenShare}
                   aria-label={screenShareButtonLabel}
                   disabled={isScreenSharePending}
                 >
@@ -5298,7 +5360,7 @@
             <div class="call-controls__item">
               <button
                 class={controlClasses({ active: !isPlaybackMuted })}
-                on:click={togglePlaybackMute}
+                onclick={togglePlaybackMute}
                 aria-label={playbackButtonLabel}
               >
                 <i class={`bx ${isPlaybackMuted ? 'bx-volume-mute' : 'bx-volume-full'}`}></i>
@@ -5307,7 +5369,7 @@
             </div>
             {#if compactMatch}
               <div class="call-controls__item call-controls__item--leave call-controls__item--leave-inline">
-                <button class={controlClasses({ danger: true })} on:click={handleLeave} aria-label="Leave call">
+                <button class={controlClasses({ danger: true })} onclick={handleLeave} aria-label="Leave call">
                   <i class="bx bx-phone-off"></i>
                 </button>
                 <span>Leave</span>
@@ -5315,7 +5377,7 @@
             {/if}
             {#if !compactMatch}
               <div class="call-controls__item call-controls__item--collapse">
-                <button class={controlClasses()} type="button" on:click={handleMinimize} aria-label="Minimize call">
+                <button class={controlClasses()} type="button" onclick={handleMinimize} aria-label="Minimize call">
                   <i class="bx bx-window-alt"></i>
                 </button>
                 <span>Collapse</span>
@@ -5326,7 +5388,7 @@
                 <button
                   type="button"
                   class={controlClasses()}
-                  on:click={openMobileChatPanel}
+                  onclick={openMobileChatPanel}
                   aria-label="Open message thread"
                 >
                   <i class="bx bx-message-dots"></i>
@@ -5338,7 +5400,7 @@
           {#if !compactMatch}
             <div class="call-controls__group call-controls__group--exit">
               <div class="call-controls__item call-controls__item--leave">
-                <button class={controlClasses({ danger: true })} on:click={handleLeave} aria-label="Leave call">
+                <button class={controlClasses({ danger: true })} onclick={handleLeave} aria-label="Leave call">
                   <i class="bx bx-phone-off"></i>
                 </button>
                 <span>Leave</span>
@@ -5366,7 +5428,7 @@
         <header
           class="call-debug-panel__header"
           class:call-debug-panel__header--dragging={isDebugPanelDragging}
-          on:pointerdown={handleDebugPanelPointerDown}
+          onpointerdown={handleDebugPanelPointerDown}
         >
           <div class="call-debug-panel__heading">
             <i class="bx bx-bug"></i>
@@ -5376,20 +5438,20 @@
             <button
               type="button"
               class="call-debug-panel__copy"
-              on:click={() => handleDebugPanelCopy(150, 220, 'panel-header')}
+              onclick={() => handleDebugPanelCopy(150, 220, 'panel-header')}
               disabled={copyInFlight}
             >
               <i class={`bx ${copyInFlight ? 'bx-loader bx-spin' : 'bx-clipboard'}`}></i>
               <span>{copyInFlight ? 'Copying…' : 'Copy'}</span>
             </button>
-            <button type="button" class="call-debug-panel__refresh" on:click={handleDebugPanelRefresh}>
+            <button type="button" class="call-debug-panel__refresh" onclick={handleDebugPanelRefresh}>
               <i class="bx bx-refresh"></i>
               <span>Refresh</span>
             </button>
             <button
               type="button"
               class="call-debug-panel__close"
-              on:click={() => toggleDebugPanel(false)}
+              onclick={() => toggleDebugPanel(false)}
               aria-label="Close debug panel"
             >
               <i class="bx bx-x"></i>
@@ -5406,7 +5468,7 @@
                   <button
                     type="button"
                     class="quick-stats__toggle"
-                    on:click={() => toggleQuickStats()}
+                    onclick={() => toggleQuickStats()}
                     aria-expanded={quickStatsExpanded}
                     title={quickStatsExpanded ? 'Hide detailed stats' : 'Show detailed stats'}
                   >
@@ -5416,7 +5478,7 @@
                   <button
                     type="button"
                     class="quick-stats__copy"
-                    on:click={() => handleDebugPanelCopy(150, 220, 'quick-stats')}
+                    onclick={() => handleDebugPanelCopy(150, 220, 'quick-stats')}
                     title="Copy expanded diagnostics bundle"
                     disabled={copyInFlight}
                   >
@@ -5596,7 +5658,7 @@
                 <button
                   type="button"
                   class="call-debug-action"
-                  on:click={() => handleDebugPanelCopy(160, 240, 'tools-section')}
+                  onclick={() => handleDebugPanelCopy(160, 240, 'tools-section')}
                   disabled={copyInFlight}
                 >
                   <i class={`bx ${copyInFlight ? 'bx-loader bx-spin' : 'bx-copy'}`}></i>
@@ -5605,7 +5667,7 @@
                 <button
                   type="button"
                   class="call-debug-action"
-                  on:click={handleDebugPanelRefresh}
+                  onclick={handleDebugPanelRefresh}
                 >
                   <i class="bx bx-refresh"></i>
                   <span>Refresh diagnostics</span>
@@ -5613,7 +5675,7 @@
                 <button
                   type="button"
                   class="call-debug-action"
-                  on:click={handleResetIceStrategy}
+                  onclick={handleResetIceStrategy}
                   disabled={!forceRelayIceTransport && !fallbackTurnActivated && !usingFallbackTurnServers}
                 >
                   <i class="bx bx-undo"></i>
@@ -5622,7 +5684,7 @@
                 <button
                   type="button"
                   class="call-debug-action"
-                  on:click={handleForceRestart}
+                  onclick={handleForceRestart}
                   disabled={isRestartingCall || isConnecting}
                 >
                   <i class={`bx ${isRestartingCall ? 'bx-loader-alt bx-spin' : 'bx-reset'}`}></i>

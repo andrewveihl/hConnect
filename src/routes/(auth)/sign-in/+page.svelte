@@ -4,8 +4,8 @@
   import { user } from '$lib/stores/user';
   import { signInWithGoogle, signInWithApple } from '$lib/firebase';
 
-  let status = 'Ready';
-  let errorMsg = '';
+  let status = $state('Ready');
+  let errorMsg = $state('');
 
   onMount(() => {
     const unsub = user.subscribe((u) => {
@@ -58,13 +58,13 @@
 
     <div class="space-y-3">
       <button
-        on:click={google}
+        onclick={google}
         class="w-full rounded-xl border border-white/15 bg-white text-slate-900 px-4 py-3 text-sm font-medium hover:bg-white/95 active:scale-[.99]">
         Continue with Google
       </button>
 
       <button
-        on:click={apple}
+        onclick={apple}
         class="w-full rounded-xl border border-white/15 bg-black text-white px-4 py-3 text-sm font-medium hover:bg-black/90 active:scale-[.99]">
         Continue with Apple
       </button>

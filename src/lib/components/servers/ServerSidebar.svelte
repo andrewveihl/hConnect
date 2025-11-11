@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
@@ -28,16 +30,15 @@
     writeBatch
   } from 'firebase/firestore';
 
-  export let serverId: string | undefined;
-  export let activeChannelId: string | null = null;
-  export let onPickChannel: (id: string) => void = () => {};
+  interface Props {
+    serverId: string | undefined;
+    activeChannelId?: string | null;
+    onPickChannel?: (id: string) => void;
+  }
+
+  let { serverId, activeChannelId = null, onPickChannel = () => {} }: Props = $props();
   const dispatch = createEventDispatcher<{ pick: string }>();
 
-  $: computedServerId =
-    serverId ??
-    $page.params.serverID ??
-    ($page.params as any).serverId ??
-    null;
 
   type Chan = {
     id: string;
@@ -58,59 +59,31 @@
     status?: 'active' | 'left';
   };
 
-  let channels: Chan[] = [];
-  let serverName = 'Server';
-  let showCreate = false;
-  let myChannelOrder: string[] = [];
-  let reorderMode: 'none' | 'default' | 'personal' = 'none';
-  let workingOrder: string[] = [];
-  let savingOrder = false;
-  let orderError: string | null = null;
+  type PermissionFlags = {
+    manageServer?: boolean;
+    manageRoles?: boolean;
+    manageChannels?: boolean;
+    reorderChannels?: boolean;
+  };
 
-  let voicePresence: Record<string, VoiceParticipant[]> = {};
+  let channels: Chan[] = $state([]);
+  let serverName = $state('Server');
+  let showCreate = $state(false);
+  let myChannelOrder: string[] = [];
+  let reorderMode: 'none' | 'default' | 'personal' = $state('none');
+  let workingOrder: string[] = $state([]);
+  let savingOrder = $state(false);
+  let orderError: string | null = $state(null);
+
+  let voicePresence: Record<string, VoiceParticipant[]> = $state({});
   const voiceUnsubs = new Map<string, Unsubscribe>();
-  let activeVoice: VoiceSession | null = null;
+  let activeVoice: VoiceSession | null = $state(null);
   const unsubscribeVoiceSession = voiceSession.subscribe((value) => {
     activeVoice = value;
   });
 
-  $: if (browser) {
-    setVoiceDebugSection('serverSidebar.channels', {
-      serverId: computedServerId ?? null,
-      totalChannels: channels.length,
-      voiceChannels: channels
-        .filter((c) => c.type === 'voice')
-        .map((c) => ({
-          id: c.id,
-          name: c.name,
-          position: typeof c.position === 'number' ? c.position : null,
-          isPrivate: !!c.isPrivate
-        })),
-      reorderMode,
-      activeChannelId
-    });
-  }
 
-  $: if (browser) {
-    setVoiceDebugSection('serverSidebar.voicePresence', {
-      serverId: computedServerId ?? null,
-      watcherCount: voiceUnsubs.size,
-      presence: summarizeVoicePresence(voicePresence)
-    });
-  }
 
-  $: if (browser) {
-    setVoiceDebugSection('serverSidebar.voiceSession', {
-      activeVoice: activeVoice
-        ? {
-            serverId: activeVoice.serverId,
-            channelId: activeVoice.channelId,
-            channelName: activeVoice.channelName
-          }
-        : null,
-      computedServerId
-    });
-  }
 
   let unsubChannels: Unsubscribe | null = null;
   let unsubServerMeta: Unsubscribe | null = null;
@@ -119,15 +92,15 @@
   let unsubPersonalOrder: Unsubscribe | null = null;
 
   let ownerId: string | null = null;
-  let myRole: 'owner' | 'admin' | 'member' | null = null;
-  let myPerms: Record<string, any> | null = null;
+  let myRole: 'owner' | 'admin' | 'member' | null = $state(null);
+  let myPerms = $state<PermissionFlags | null>(null);
   let myRoleIds: string[] = [];
-  let lastServerId: string | null = null;
-  let mentionHighlights: Set<string> = new Set();
+  let lastServerId: string | null = $state(null);
+  let mentionHighlights: Set<string> = $state(new Set());
 
   // Basic notification prefs (subset of full settings)
-  let notifDesktopEnabled = false;
-  let notifAllMessages = false;
+  let notifDesktopEnabled = $state(false);
+  let notifAllMessages = $state(false);
   function subscribeNotifPrefs() {
     if (!$user?.uid) return;
     const db = getDb();
@@ -402,32 +375,11 @@
     workingOrder = result;
   }
 
-  $: mentionHighlights = new Set(
-    ($notifications ?? [])
-      .filter(
-        (item) =>
-          item.kind === 'channel' &&
-          item.isMention &&
-          item.serverId === computedServerId &&
-          typeof item.channelId === 'string'
-      )
-      .map((item) => item.channelId as string)
-  );
 
   function canMoveChannel(id: string, type: Chan['type'], delta: number) {
     return !!findSibling(id, type, delta);
   }
 
-  $: isOwner = computeIsOwner();
-  $: isAdminLike =
-    isOwner ||
-    myRole === 'admin' ||
-    !!(myPerms?.manageServer || myPerms?.manageRoles);
-  $: canManageChannels =
-    isOwner ||
-    !!myPerms?.manageChannels ||
-    !!myPerms?.manageServer;
-  $: canReorderPersonal = !!myPerms?.reorderChannels;
 
   function watchServerMeta(server: string) {
     unsubServerMeta?.();
@@ -525,25 +477,11 @@
     return allowed.some((roleId: string) => myRoleIds.includes(roleId));
   }
 
-  let displayOrderIds: string[] = [];
-  let orderedChannels: Chan[] = [];
-  let visibleChannels: Chan[] = [];
+  let displayOrderIds: string[] = $state([]);
+  let orderedChannels: Chan[] = $state([]);
+  let visibleChannels: Chan[] = $state([]);
 
-$: if (reorderMode === 'default') {
-  const target = defaultOrderIds();
-  const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
-  if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
-} else if (reorderMode === 'personal') {
-  const target = personalOrderIds();
-  const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
-  if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
-} else if (workingOrder.length) {
-  workingOrder = [];
-}
 
-  $: displayOrderIds = getDisplayOrderIds();
-  $: orderedChannels = applyOrder(displayOrderIds, channels);
-  $: visibleChannels = orderedChannels.filter(canSeeChannel);
 
   function subscribeAll(server: string) {
     resetVoiceWatchers();
@@ -566,23 +504,8 @@ $: if (reorderMode === 'default') {
     }
   }
 
-  $: if (computedServerId && computedServerId !== lastServerId) {
-    lastServerId = computedServerId;
-    subscribeAll(computedServerId);
-  }
 
-  $: if (computedServerId && $user?.uid) {
-    watchMyMember(computedServerId);
-  }
 
-  $: if (browser && window.matchMedia('(min-width: 768px)').matches && computedServerId) {
-    if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
-      const fallback = visibleChannels[0];
-      if (fallback) pick(fallback.id);
-    } else if (!activeChannelId && visibleChannels.length) {
-      pick(visibleChannels[0].id);
-    }
-  }
 
   onDestroy(() => {
     unsubChannels?.();
@@ -720,25 +643,9 @@ $: if (reorderMode === 'default') {
   }
 
   // Unread state map
-  let unreadByChannel: Record<string, number> = {};
-  let prevUnread: Record<string, number> = {};
-  let unreadReady = false;
-  $: if (browser && unreadReady && document.visibilityState === 'hidden' && notifDesktopEnabled && notifAllMessages) {
-    try {
-      for (const id in unreadByChannel) {
-        const curr = unreadByChannel[id] ?? 0;
-        const prev = prevUnread[id] ?? 0;
-        if (curr > prev && id !== activeChannelId) {
-          const chan = channels.find((c) => c.id === id);
-          const title = chan?.name ? `#${chan.name}` : 'New message';
-          new Notification(title, { body: `New messages in ${serverName}`, tag: `ch-${id}` });
-        }
-      }
-    } catch {}
-    prevUnread = { ...unreadByChannel };
-  } else {
-    prevUnread = { ...unreadByChannel };
-  }
+  let unreadByChannel: Record<string, number> = $state({});
+  let prevUnread: Record<string, number> = $state({});
+  let unreadReady = $state(false);
 
   async function deleteChannel(id: string, name: string) {
     if (!computedServerId || !canManageChannels) return;
@@ -773,6 +680,136 @@ $: if (reorderMode === 'default') {
       console.error(err);
     }
   }
+  let computedServerId =
+    $derived(serverId ??
+    $page.params.serverID ??
+    ($page.params as any).serverId ??
+    null);
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('serverSidebar.channels', {
+        serverId: computedServerId ?? null,
+        totalChannels: channels.length,
+        voiceChannels: channels
+          .filter((c) => c.type === 'voice')
+          .map((c) => ({
+            id: c.id,
+            name: c.name,
+            position: typeof c.position === 'number' ? c.position : null,
+            isPrivate: !!c.isPrivate
+          })),
+        reorderMode,
+        activeChannelId
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('serverSidebar.voicePresence', {
+        serverId: computedServerId ?? null,
+        watcherCount: voiceUnsubs.size,
+        presence: summarizeVoicePresence(voicePresence)
+      });
+    }
+  });
+  run(() => {
+    if (browser) {
+      setVoiceDebugSection('serverSidebar.voiceSession', {
+        activeVoice: activeVoice
+          ? {
+              serverId: activeVoice.serverId,
+              channelId: activeVoice.channelId,
+              channelName: activeVoice.channelName
+            }
+          : null,
+        computedServerId
+      });
+    }
+  });
+  run(() => {
+    mentionHighlights = new Set(
+      ($notifications ?? [])
+        .filter(
+          (item) =>
+            item.kind === 'channel' &&
+            item.isMention &&
+            item.serverId === computedServerId &&
+            typeof item.channelId === 'string'
+        )
+        .map((item) => item.channelId as string)
+    );
+  });
+  let isOwner = $derived(computeIsOwner());
+  let isAdminLike =
+    $derived(isOwner ||
+    myRole === 'admin' ||
+    !!(myPerms?.manageServer || myPerms?.manageRoles));
+  let canManageChannels =
+    $derived(isOwner ||
+    !!myPerms?.manageChannels ||
+    !!myPerms?.manageServer);
+  let canReorderPersonal = $derived(!!myPerms?.reorderChannels);
+run(() => {
+    if (reorderMode === 'default') {
+    const target = defaultOrderIds();
+    const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
+    if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
+  } else if (reorderMode === 'personal') {
+    const target = personalOrderIds();
+    const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
+    if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
+  } else if (workingOrder.length) {
+    workingOrder = [];
+  }
+  });
+  run(() => {
+    displayOrderIds = getDisplayOrderIds();
+  });
+  run(() => {
+    orderedChannels = applyOrder(displayOrderIds, channels);
+  });
+  run(() => {
+    visibleChannels = orderedChannels.filter(canSeeChannel);
+  });
+  run(() => {
+    if (computedServerId && computedServerId !== lastServerId) {
+      lastServerId = computedServerId;
+      subscribeAll(computedServerId);
+    }
+  });
+  run(() => {
+    if (computedServerId && $user?.uid) {
+      watchMyMember(computedServerId);
+    }
+  });
+  run(() => {
+    if (browser && window.matchMedia('(min-width: 768px)').matches && computedServerId) {
+      if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
+        const fallback = visibleChannels[0];
+        if (fallback) pick(fallback.id);
+      } else if (!activeChannelId && visibleChannels.length) {
+        pick(visibleChannels[0].id);
+      }
+    }
+  });
+  run(() => {
+    if (browser && unreadReady && document.visibilityState === 'hidden' && notifDesktopEnabled && notifAllMessages) {
+      try {
+        for (const id in unreadByChannel) {
+          const curr = unreadByChannel[id] ?? 0;
+          const prev = prevUnread[id] ?? 0;
+          if (curr > prev && id !== activeChannelId) {
+            const chan = channels.find((c) => c.id === id);
+            const title = chan?.name ? `#${chan.name}` : 'New message';
+            new Notification(title, { body: `New messages in ${serverName}`, tag: `ch-${id}` });
+          }
+        }
+      } catch {}
+      prevUnread = { ...unreadByChannel };
+    } else {
+      prevUnread = { ...unreadByChannel };
+    }
+  });
 </script>
 
 <aside
@@ -797,7 +834,7 @@ $: if (reorderMode === 'default') {
             class="btn btn-ghost h-8 px-2 "
             title="Reorder channels"
             aria-label="Reorder channels"
-            on:click={beginReorder}
+            onclick={beginReorder}
           >
             <i class="bx bx-sort-alt-2 text-lg" aria-hidden="true"></i>
           </button>
@@ -805,7 +842,7 @@ $: if (reorderMode === 'default') {
           <button
             type="button"
             class="btn btn-primary h-8 px-3 "
-            on:click={saveReorder}
+            onclick={saveReorder}
             disabled={savingOrder}
           >
             {savingOrder ? 'SavingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦' : 'Save'}
@@ -813,7 +850,7 @@ $: if (reorderMode === 'default') {
           <button
             type="button"
             class="btn btn-ghost h-8 px-2 "
-            on:click={cancelReorder}
+            onclick={cancelReorder}
             disabled={savingOrder}
           >
             Cancel
@@ -826,7 +863,7 @@ $: if (reorderMode === 'default') {
           class="btn btn-ghost h-8 w-8 grid place-items-center "
           title="Server settings"
           aria-label="Server settings"
-          on:click={openServerSettings}
+          onclick={openServerSettings}
         >
           <i class="bx bx-cog text-[16px]" aria-hidden="true"></i>
         </button>
@@ -836,7 +873,7 @@ $: if (reorderMode === 'default') {
         class="btn btn-ghost h-8 w-8 grid place-items-center "
         title="Create channel"
         aria-label="Create channel"
-        on:click={() => (showCreate = true)}
+        onclick={() => (showCreate = true)}
         disabled={reorderMode !== 'none'}
       >
         <i class="bx bx-plus" aria-hidden="true"></i>
@@ -878,7 +915,7 @@ $: if (reorderMode === 'default') {
                   class="channel-reorder-button"
                   title="Move up"
                   aria-label="Move channel up"
-                  on:click={() => moveChannelInWorkingOrder(c.id, 'text', -1)}
+                  onclick={() => moveChannelInWorkingOrder(c.id, 'text', -1)}
                   disabled={!canMoveChannel(c.id, 'text', -1) || savingOrder}
                 >
                   <i class="bx bx-chevron-up text-sm" aria-hidden="true"></i>
@@ -888,7 +925,7 @@ $: if (reorderMode === 'default') {
                   class="channel-reorder-button"
                   title="Move down"
                   aria-label="Move channel down"
-                  on:click={() => moveChannelInWorkingOrder(c.id, 'text', 1)}
+                  onclick={() => moveChannelInWorkingOrder(c.id, 'text', 1)}
                   disabled={!canMoveChannel(c.id, 'text', 1) || savingOrder}
                 >
                   <i class="bx bx-chevron-down text-sm" aria-hidden="true"></i>
@@ -899,7 +936,7 @@ $: if (reorderMode === 'default') {
             <button
               type="button"
               class="channel-row__button"
-              on:click={() => pick(c.id)}
+              onclick={() => pick(c.id)}
               aria-label={`Open #${c.name} text channel`}
               disabled={reorderMode !== 'none'}
             >
@@ -926,7 +963,7 @@ $: if (reorderMode === 'default') {
                   class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10"
                   title="Rename"
                   aria-label="Rename channel"
-                  on:click={() => renameChannel(c.id, c.name)}
+                  onclick={() => renameChannel(c.id, c.name)}
                 >
                   <i class="bx bx-edit text-sm"></i>
                 </button>
@@ -934,7 +971,7 @@ $: if (reorderMode === 'default') {
                   class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10 text-red-400"
                   title="Delete"
                   aria-label="Delete channel"
-                  on:click={() => deleteChannel(c.id, c.name)}
+                  onclick={() => deleteChannel(c.id, c.name)}
                 >
                   <i class="bx bx-trash text-sm"></i>
                 </button>
@@ -962,7 +999,7 @@ $: if (reorderMode === 'default') {
                   class="channel-reorder-button"
                   title="Move up"
                   aria-label="Move voice channel up"
-                  on:click={() => moveChannelInWorkingOrder(c.id, 'voice', -1)}
+                  onclick={() => moveChannelInWorkingOrder(c.id, 'voice', -1)}
                   disabled={!canMoveChannel(c.id, 'voice', -1) || savingOrder}
                 >
                   <i class="bx bx-chevron-up text-sm" aria-hidden="true"></i>
@@ -972,7 +1009,7 @@ $: if (reorderMode === 'default') {
                   class="channel-reorder-button"
                   title="Move down"
                   aria-label="Move voice channel down"
-                  on:click={() => moveChannelInWorkingOrder(c.id, 'voice', 1)}
+                  onclick={() => moveChannelInWorkingOrder(c.id, 'voice', 1)}
                   disabled={!canMoveChannel(c.id, 'voice', 1) || savingOrder}
                 >
                   <i class="bx bx-chevron-down text-sm" aria-hidden="true"></i>
@@ -983,7 +1020,7 @@ $: if (reorderMode === 'default') {
             <button
               type="button"
               class="channel-row__button"
-              on:click={() => pick(c.id)}
+              onclick={() => pick(c.id)}
               aria-label={`Open ${c.name} voice channel`}
               disabled={reorderMode !== 'none'}
             >
@@ -1007,7 +1044,7 @@ $: if (reorderMode === 'default') {
                   class="h-7 w-7 grid place-items-center rounded hover:bg-white/10"
                   title="Rename"
                   aria-label="Rename channel"
-                  on:click={() => renameChannel(c.id, c.name)}
+                  onclick={() => renameChannel(c.id, c.name)}
                 >
                   <i class="bx bx-edit text-sm"></i>
                 </button>
@@ -1015,7 +1052,7 @@ $: if (reorderMode === 'default') {
                   class="h-7 w-7 grid place-items-center rounded hover:bg-white/10 text-red-400"
                   title="Delete"
                   aria-label="Delete channel"
-                  on:click={() => deleteChannel(c.id, c.name)}
+                  onclick={() => deleteChannel(c.id, c.name)}
                 >
                   <i class="bx bx-trash text-sm"></i>
                 </button>

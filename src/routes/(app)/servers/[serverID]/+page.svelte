@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
@@ -27,15 +29,26 @@ import { looksLikeImage } from '$lib/utils/fileType';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
-  // Comes from +page.ts
-  export let data: { serverId: string | null };
+  
+  interface Props {
+    data: { serverId: string | null };
+  }
 
-  // Normalize once
-  $: serverId =
-    data?.serverId ??
-    $page.params.serverID ??
-    ($page.params as any).serverId ??
-    null;
+  let { data }: Props = $props();
+
+  const resolveServerId = (
+    params: Record<string, string | undefined>,
+    fallback: string | null | undefined
+  ) => params.serverID ?? params.serversID ?? params.serverId ?? fallback ?? null;
+
+  let serverId = $state<string | null>(null);
+  run(() => {
+    serverId = resolveServerId(
+      $page.params as Record<string, string | undefined>,
+      data?.serverId ?? null
+    );
+  });
+
 
   type Channel = { id: string; name: string; type: 'text' | 'voice'; position?: number };
   type MentionSendRecord = {
@@ -46,24 +59,24 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
     kind?: 'member' | 'role';
   };
 
-  let channels: Channel[] = [];
-  let activeChannel: Channel | null = null;
-  let requestedChannelId: string | null = null;
-let messages: any[] = [];
-let replyTarget: ReplyReferenceInput | null = null;
-let lastReplyChannelId: string | null = null;
-let profiles: Record<string, any> = {};
-let pendingUploads: PendingUploadPreview[] = [];
-let lastPendingChannelId: string | null = null;
+let channels: Channel[] = $state([]);
+  let activeChannel: Channel | null = $state(null);
+  let requestedChannelId: string | null = $state(null);
+let messages: any[] = $state([]);
+let replyTarget: ReplyReferenceInput | null = $state(null);
+let lastReplyChannelId: string | null = $state(null);
+let profiles: Record<string, any> = $state({});
+let pendingUploads: PendingUploadPreview[] = $state([]);
+let lastPendingChannelId: string | null = $state(null);
   const profileUnsubs: Record<string, Unsubscribe> = {};
-  let serverDisplayName = 'Server';
-  let serverMetaUnsub: Unsubscribe | null = null;
-  let mentionOptions: MentionDirectoryEntry[] = [];
-  let memberMentionOptions: MentionDirectoryEntry[] = [];
-  let roleMentionOptions: MentionDirectoryEntry[] = [];
-  let mentionDirectoryStop: Unsubscribe | null = null;
-  let mentionRolesStop: Unsubscribe | null = null;
-  let lastMentionServer: string | null = null;
+  let serverDisplayName = $state('Server');
+  let serverMetaUnsub: Unsubscribe | null = $state(null);
+  let mentionOptions: MentionDirectoryEntry[] = $state([]);
+  let memberMentionOptions: MentionDirectoryEntry[] = $state([]);
+  let roleMentionOptions: MentionDirectoryEntry[] = $state([]);
+  let mentionDirectoryStop: Unsubscribe | null = $state(null);
+  let mentionRolesStop: Unsubscribe | null = $state(null);
+  let lastMentionServer: string | null = $state(null);
 
   const canonicalHandle = (value: string) =>
     (value ?? '')
@@ -122,27 +135,7 @@ let lastPendingChannelId: string | null = null;
     );
   }
 
-  $: {
-    const currentMentionServer = serverId ?? null;
-    if (currentMentionServer !== lastMentionServer) {
-      mentionDirectoryStop?.();
-      mentionRolesStop?.();
-      memberMentionOptions = [];
-      roleMentionOptions = [];
-      mentionOptions = [];
-      lastMentionServer = currentMentionServer;
-      if (currentMentionServer) {
-        mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
-          memberMentionOptions = entries;
-          updateMentionOptionList();
-        });
-        startRoleMentionWatch(currentMentionServer);
-      } else {
-        mentionDirectoryStop = null;
-        mentionRolesStop = null;
-      }
-    }
-  }
+
 
   function pickString(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -294,17 +287,6 @@ let lastPendingChannelId: string | null = null;
     }
   }
 
-  $: {
-    const channelId = activeChannel?.id ?? null;
-    if (channelId !== lastReplyChannelId) {
-      lastReplyChannelId = channelId;
-      replyTarget = null;
-    }
-    if (channelId !== lastPendingChannelId) {
-      lastPendingChannelId = channelId;
-      pendingUploads = [];
-    }
-  }
 
   function buildReplyReference(message: any): ReplyReferenceInput | null {
     const messageId = pickString(message?.id);
@@ -538,75 +520,24 @@ let lastPendingChannelId: string | null = null;
       }
     };
   }
-  let showCreate = false;
-  let voiceState: VoiceSession | null = null;
-  let isVoiceChannelView = false;
-  let isViewingActiveVoiceChannel = false;
-  let showVoiceLobby = false;
-  let voiceInviteUrl: string | null = null;
-  let currentUserDisplayName = '';
-  let currentUserPhotoURL: string | null = null;
+  let showCreate = $state(false);
+  let voiceState: VoiceSession | null = $state(null);
+  let isVoiceChannelView = $state(false);
+  let isViewingActiveVoiceChannel = $state(false);
+  let showVoiceLobby = $state(false);
+  let voiceInviteUrl: string | null = $state(null);
+  let currentUserDisplayName = $state('');
+  let currentUserPhotoURL: string | null = $state(null);
   const unsubscribeVoice = voiceSession.subscribe((value) => {
     voiceState = value;
   });
 
-  $: {
-    const visible = !!(voiceState && voiceState.visible);
-    if (visible !== lastVoiceVisible) {
-      lastVoiceVisible = visible;
-      if (isMobile) {
-        mobileVoicePane = visible ? 'call' : 'chat';
-      }
-    }
-  }
 
-  $: isVoiceChannelView = activeChannel?.type === 'voice';
-  $: isViewingActiveVoiceChannel =
-    Boolean(
-      isVoiceChannelView &&
-        voiceState &&
-        serverId &&
-        voiceState.serverId === serverId &&
-        voiceState.channelId === activeChannel?.id
-    );
-  $: showVoiceLobby = Boolean(isVoiceChannelView && !isViewingActiveVoiceChannel);
-  $: voiceInviteUrl = (() => {
-    if (!serverId || !activeChannel || activeChannel.type !== 'voice') return null;
-    try {
-      const url = new URL($page.url.href);
-      url.searchParams.set('channel', activeChannel.id);
-      return url.toString();
-    } catch {
-      return `${$page.url.pathname}?channel=${encodeURIComponent(activeChannel.id)}`;
-    }
-  })();
-  $: if (isViewingActiveVoiceChannel && voiceState && !voiceState.visible) {
-    voiceSession.setVisible(true);
-  }
-  $: currentUserDisplayName = deriveCurrentDisplayName();
-  $: currentUserPhotoURL = deriveCurrentPhotoURL();
 
-  $: if (isMobile !== lastIsMobile) {
-    lastIsMobile = isMobile;
-    if (!isMobile) {
-      mobileVoicePane = 'chat';
-    } else if (voiceState?.visible) {
-      mobileVoicePane = 'call';
-    }
-  }
 
-  $: if ($user?.uid) {
-    const fallbackPhoto = pickString($user.photoURL) ?? null;
-    updateProfileCache($user.uid, {
-      displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
-      photoURL: fallbackPhoto,
-      authPhotoURL: fallbackPhoto,
-      email: pickString($user.email) ?? undefined
-    });
-  }
 
   // listeners
-  let channelsUnsub: (() => void) | null = null;
+  let channelsUnsub: (() => void) | null = $state(null);
   let messagesUnsub: (() => void) | null = null;
 
   function clearChannelsUnsub() { channelsUnsub?.(); channelsUnsub = null; }
@@ -734,7 +665,7 @@ let lastPendingChannelId: string | null = null;
           nextUrl.searchParams.set('channel', id);
           goto(`${nextUrl.pathname}${nextUrl.search}`, {
             replaceState: true,
-            keepfocus: true,
+            keepFocus: true,
             noScroll: true
           });
         }
@@ -759,16 +690,16 @@ let lastPendingChannelId: string | null = null;
   /* ===========================
      Mobile panels + gestures
      =========================== */
-  let showChannels = false;
-  let showMembers = false;
-  let isMobile = false;
-  let mobileVoicePane: 'call' | 'chat' = 'chat';
+  let showChannels = $state(false);
+  let showMembers = $state(false);
+  let isMobile = $state(false);
+  let mobileVoicePane: 'call' | 'chat' = $state('chat');
   let mobilePaneTracking = false;
   let mobilePaneStartX = 0;
   let mobilePaneStartY = 0;
-  let lastVoiceVisible = false;
-  let lastIsMobile = false;
-  let hideMessageInput = false;
+  let lastVoiceVisible = $state(false);
+  let lastIsMobile = $state(false);
+  let hideMessageInput = $state(false);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 40;
@@ -908,114 +839,8 @@ let lastPendingChannelId: string | null = null;
     mobilePaneTracking = false;
   }
 
-  $: hideMessageInput = isMobile && showChannels;
 
-  $: {
-    if (serverId) {
-      serverMetaUnsub?.();
-      const database = db();
-      const ref = doc(database, 'servers', serverId);
-      serverMetaUnsub = onSnapshot(
-        ref,
-        (snap) => {
-          const data = snap.data() as any;
-          const nextName =
-            pickString(data?.displayName) ??
-            pickString(data?.name) ??
-            pickString(data?.title) ??
-            'Server';
-          serverDisplayName = nextName;
-          voiceSession.setServerName(serverId, nextName);
-        },
-        () => {
-          serverDisplayName = 'Server';
-          voiceSession.setServerName(serverId, 'Server');
-        }
-      );
-    } else {
-      serverMetaUnsub?.();
-      serverMetaUnsub = null;
-      serverDisplayName = 'Server';
-    }
-  }
 
-  // subscribe to channels
-  $: if (serverId) {
-    const database = db();
-    const q = query(collection(database, 'servers', serverId, 'channels'), orderBy('position'));
-    clearChannelsUnsub();
-    channelsUnsub = onSnapshot(q, (snap) => {
-      channels = snap.docs.map((d) => {
-        const x: any = d.data();
-        const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'channel';
-        const type = x.type === 'voice' ? 'voice' : 'text';
-        return { id: d.id, ...x, name, type: type as 'text' | 'voice' } as Channel;
-      });
-
-      const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
-      const requestedId = requestedChannelId;
-
-      if (!activeChannel && channels.length) {
-        if (requestedId) {
-          const target = channels.find((c) => c.id === requestedId);
-          if (target) {
-            pickChannel(target.id);
-          } else if (isDesktop) {
-            pickChannel(channels[0].id);
-          } else {
-            activeChannel = null;
-            showMembers = false;
-            showChannels = true;
-          }
-        } else if (isDesktop) {
-          // desktop: auto-pick first channel
-          pickChannel(channels[0].id);
-        } else {
-          // mobile: show channel list first
-          activeChannel = null;
-          showMembers = false;
-          showChannels = true;
-        }
-      } else if (activeChannel) {
-        const updated = channels.find((c) => c.id === activeChannel!.id);
-        if (updated) {
-          activeChannel = updated;
-        } else if (channels.length) {
-          if (requestedId) {
-            const target = channels.find((c) => c.id === requestedId);
-            if (target) {
-              pickChannel(target.id);
-            } else if (isDesktop) {
-              pickChannel(channels[0].id);
-            } else {
-              activeChannel = null;
-              showMembers = false;
-              showChannels = true;
-            }
-          } else if (isDesktop) {
-            pickChannel(channels[0].id);
-          } else {
-            activeChannel = null;
-            showMembers = false;
-            showChannels = true;
-          }
-        } else {
-          activeChannel = null;
-          clearMessagesUnsub();
-          messages = [];
-          showChannels = false;
-          showMembers = false;
-        }
-      }
-    });
-  } else {
-    clearChannelsUnsub();
-    clearMessagesUnsub();
-    channels = [];
-    activeChannel = null;
-    messages = [];
-    profiles = {};
-  }
 
   onDestroy(() => {
     clearChannelsUnsub();
@@ -1246,28 +1071,248 @@ let lastPendingChannelId: string | null = null;
     const ref = buildReplyReference(event.detail?.message);
     if (ref) replyTarget = ref;
   }
-
-  $: requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
-  $: if (
-    requestedChannelId &&
-    requestedChannelId !== activeChannel?.id &&
-    channels.some((c) => c.id === requestedChannelId)
-  ) {
-    pickChannel(requestedChannelId);
-  }
-
-  $: if (voiceState && serverId && voiceState.serverId !== serverId && voiceState.visible) {
-    voiceSession.setVisible(false);
-  }
-
-  // mobile: when switching servers, open channels panel
-  $: if (serverId) {
-    const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
-    if (!isDesktop && !activeChannel) {
-      showChannels = true;
-      showMembers = false;
+  run(() => {
+    const currentMentionServer = serverId ?? null;
+    if (currentMentionServer !== lastMentionServer) {
+      mentionDirectoryStop?.();
+      mentionRolesStop?.();
+      memberMentionOptions = [];
+      roleMentionOptions = [];
+      mentionOptions = [];
+      lastMentionServer = currentMentionServer;
+      if (currentMentionServer) {
+        mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
+          memberMentionOptions = entries;
+          updateMentionOptionList();
+        });
+        startRoleMentionWatch(currentMentionServer);
+      } else {
+        mentionDirectoryStop = null;
+        mentionRolesStop = null;
+      }
     }
-  }
+  });
+  run(() => {
+    requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
+  });
+  // subscribe to channels
+  run(() => {
+    if (serverId) {
+      const database = db();
+      const q = query(collection(database, 'servers', serverId, 'channels'), orderBy('position'));
+      clearChannelsUnsub();
+      channelsUnsub = onSnapshot(q, (snap) => {
+        channels = snap.docs.map((d) => {
+          const x: any = d.data();
+          const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'channel';
+          const type = x.type === 'voice' ? 'voice' : 'text';
+          return { id: d.id, ...x, name, type: type as 'text' | 'voice' } as Channel;
+        });
+
+        const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
+        const requestedId = requestedChannelId;
+
+        if (!activeChannel && channels.length) {
+          if (requestedId) {
+            const target = channels.find((c) => c.id === requestedId);
+            if (target) {
+              pickChannel(target.id);
+            } else if (isDesktop) {
+              pickChannel(channels[0].id);
+            } else {
+              activeChannel = null;
+              showMembers = false;
+              showChannels = true;
+            }
+          } else if (isDesktop) {
+            // desktop: auto-pick first channel
+            pickChannel(channels[0].id);
+          } else {
+            // mobile: show channel list first
+            activeChannel = null;
+            showMembers = false;
+            showChannels = true;
+          }
+        } else if (activeChannel) {
+          const updated = channels.find((c) => c.id === activeChannel!.id);
+          if (updated) {
+            activeChannel = updated;
+          } else if (channels.length) {
+            if (requestedId) {
+              const target = channels.find((c) => c.id === requestedId);
+              if (target) {
+                pickChannel(target.id);
+              } else if (isDesktop) {
+                pickChannel(channels[0].id);
+              } else {
+                activeChannel = null;
+                showMembers = false;
+                showChannels = true;
+              }
+            } else if (isDesktop) {
+              pickChannel(channels[0].id);
+            } else {
+              activeChannel = null;
+              showMembers = false;
+              showChannels = true;
+            }
+          } else {
+            activeChannel = null;
+            clearMessagesUnsub();
+            messages = [];
+            showChannels = false;
+            showMembers = false;
+          }
+        }
+      });
+    } else {
+      clearChannelsUnsub();
+      clearMessagesUnsub();
+      channels = [];
+      activeChannel = null;
+      messages = [];
+      profiles = {};
+    }
+  });
+  run(() => {
+    const channelId = activeChannel?.id ?? null;
+    if (channelId !== lastReplyChannelId) {
+      lastReplyChannelId = channelId;
+      replyTarget = null;
+    }
+    if (channelId !== lastPendingChannelId) {
+      lastPendingChannelId = channelId;
+      pendingUploads = [];
+    }
+  });
+  run(() => {
+    const visible = !!(voiceState && voiceState.visible);
+    if (visible !== lastVoiceVisible) {
+      lastVoiceVisible = visible;
+      if (isMobile) {
+        mobileVoicePane = visible ? 'call' : 'chat';
+      }
+    }
+  });
+  run(() => {
+    isVoiceChannelView = activeChannel?.type === 'voice';
+  });
+  run(() => {
+    isViewingActiveVoiceChannel =
+      Boolean(
+        isVoiceChannelView &&
+          voiceState &&
+          serverId &&
+          voiceState.serverId === serverId &&
+          voiceState.channelId === activeChannel?.id
+      );
+  });
+  run(() => {
+    showVoiceLobby = Boolean(isVoiceChannelView && !isViewingActiveVoiceChannel);
+  });
+  run(() => {
+    voiceInviteUrl = (() => {
+      if (!serverId || !activeChannel || activeChannel.type !== 'voice') return null;
+      try {
+        const url = new URL($page.url.href);
+        url.searchParams.set('channel', activeChannel.id);
+        return url.toString();
+      } catch {
+        return `${$page.url.pathname}?channel=${encodeURIComponent(activeChannel.id)}`;
+      }
+    })();
+  });
+  run(() => {
+    if (isViewingActiveVoiceChannel && voiceState && !voiceState.visible) {
+      voiceSession.setVisible(true);
+    }
+  });
+  run(() => {
+    currentUserDisplayName = deriveCurrentDisplayName();
+  });
+  run(() => {
+    currentUserPhotoURL = deriveCurrentPhotoURL();
+  });
+  run(() => {
+    if (isMobile !== lastIsMobile) {
+      lastIsMobile = isMobile;
+      if (!isMobile) {
+        mobileVoicePane = 'chat';
+      } else if (voiceState?.visible) {
+        mobileVoicePane = 'call';
+      }
+    }
+  });
+  run(() => {
+    if ($user?.uid) {
+      const fallbackPhoto = pickString($user.photoURL) ?? null;
+      updateProfileCache($user.uid, {
+        displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
+        photoURL: fallbackPhoto,
+        authPhotoURL: fallbackPhoto,
+        email: pickString($user.email) ?? undefined
+      });
+    }
+  });
+  // mobile: when switching servers, open channels panel
+  run(() => {
+    if (serverId) {
+      const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
+      if (!isDesktop && !activeChannel) {
+        showChannels = true;
+        showMembers = false;
+      }
+    }
+  });
+  run(() => {
+    hideMessageInput = isMobile && showChannels;
+  });
+  run(() => {
+    if (serverId) {
+      serverMetaUnsub?.();
+      const database = db();
+      const ref = doc(database, 'servers', serverId);
+      serverMetaUnsub = onSnapshot(
+        ref,
+        (snap) => {
+          const data = snap.data() as any;
+          const nextName =
+            pickString(data?.displayName) ??
+            pickString(data?.name) ??
+            pickString(data?.title) ??
+            'Server';
+          serverDisplayName = nextName;
+          if (serverId) {
+            voiceSession.setServerName(serverId, nextName);
+          }
+        },
+        () => {
+          serverDisplayName = 'Server';
+          if (serverId) {
+            voiceSession.setServerName(serverId, 'Server');
+          }
+        }
+      );
+    } else {
+      serverMetaUnsub?.();
+      serverMetaUnsub = null;
+      serverDisplayName = 'Server';
+    }
+  });
+  run(() => {
+    if (
+      requestedChannelId &&
+      requestedChannelId !== activeChannel?.id &&
+      channels.some((c) => c.id === requestedChannelId)
+    ) {
+      pickChannel(requestedChannelId);
+    }
+  });
+  run(() => {
+    if (voiceState && serverId && voiceState.serverId !== serverId && voiceState.visible) {
+      voiceSession.setVisible(false);
+    }
+  });
 </script>
 
 <!-- Layout summary:
@@ -1284,7 +1329,7 @@ let lastPendingChannelId: string | null = null;
         <ServerSidebar
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
-          onPickChannel={(id) => pickChannel(id)}
+          onPickChannel={(id: string) => pickChannel(id)}
         />
       {:else}
         <div class="p-4 text-white/70">Select a server from the left to view channels.</div>
@@ -1308,12 +1353,12 @@ let lastPendingChannelId: string | null = null;
 
       <div class="flex-1 panel-muted flex flex-col min-h-0">
         {#if isMobile && voiceState && voiceState.visible}
-          <div class="mobile-call-wrapper md:hidden" on:touchstart={handleMobilePaneTouchStart} on:touchmove={handleMobilePaneTouchMove} on:touchend={handleMobilePaneTouchEnd}>
+          <div class="mobile-call-wrapper md:hidden" ontouchstart={handleMobilePaneTouchStart} ontouchmove={handleMobilePaneTouchMove} ontouchend={handleMobilePaneTouchEnd}>
             <div class="mobile-call-tabs">
               <button
                 type="button"
                 class={`mobile-call-tab ${mobileVoicePane === 'call' ? 'is-active' : ''}`}
-                on:click={() => setMobileVoicePane('call')}
+                onclick={() => setMobileVoicePane('call')}
                 aria-pressed={mobileVoicePane === 'call'}
               >
                 <i class="bx bx-headphone"></i>
@@ -1322,7 +1367,7 @@ let lastPendingChannelId: string | null = null;
               <button
                 type="button"
                 class={`mobile-call-tab ${mobileVoicePane === 'chat' ? 'is-active' : ''}`}
-                on:click={() => setMobileVoicePane('chat')}
+                onclick={() => setMobileVoicePane('chat')}
                 aria-pressed={mobileVoicePane === 'chat'}
               >
                 <i class="bx bx-message-dots"></i>
@@ -1416,14 +1461,14 @@ let lastPendingChannelId: string | null = null;
                 <button
                   class="bg-white/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-white/25"
                   type="button"
-                  on:click={() => voiceSession.setVisible(true)}
+                  onclick={() => voiceSession.setVisible(true)}
                 >
                   Return to voice
                 </button>
                 <button
                   class="btn btn-danger px-3 py-1.5 text-sm font-medium"
                   type="button"
-                  on:click={() => voiceSession.leave()}
+                  onclick={() => voiceSession.leave()}
                 >
                   Leave
                 </button>
@@ -1499,7 +1544,7 @@ let lastPendingChannelId: string | null = null;
         <ServerSidebar
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
-          onPickChannel={(id) => pickChannel(id)}
+          onPickChannel={(id: string) => pickChannel(id)}
           on:pick={() => (showChannels = false)}
         />
       {:else}
@@ -1522,7 +1567,7 @@ let lastPendingChannelId: string | null = null;
       class="mobile-panel__close -ml-2"
       aria-label="Back to chat"
       type="button"
-      on:click={() => (showMembers = false)}
+      onclick={() => (showMembers = false)}
     >
       <i class="bx bx-chevron-right text-2xl"></i>
     </button>

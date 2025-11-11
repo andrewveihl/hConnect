@@ -12,11 +12,16 @@
   import MobileDock from '$lib/components/app/MobileDock.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
+  interface Props {
+    children?: import('svelte').Snippet;
+  }
+
+  let { children }: Props = $props();
 
   // App name used everywhere (tab title, social tags)
   const APP_TITLE = 'hConnect';
 
-  let activeVoice: VoiceSession | null = null;
+  let activeVoice: VoiceSession | null = $state(null);
   const stopVoice = voiceSession.subscribe((value) => {
     activeVoice = value;
   });
@@ -70,7 +75,7 @@
     } else {
       sessionStorage.removeItem(RESUME_DM_SCROLL_KEY);
     }
-    await goto(target, { replaceState: true, noScroll: true, keepfocus: true });
+    await goto(target, { replaceState: true, noScroll: true, keepFocus: true });
   }
 
   // Re-assert after every route change (overrides page-level titles) and persist location
@@ -129,7 +134,7 @@
 <!-- Full-screen app surface -->
 <div class="app-shell has-mobile-dock app-bg">
   <div class="app-shell__body">
-    <slot />
+    {@render children?.()}
   </div>
 
   <MobileDock />

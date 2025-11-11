@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, preventDefault } from 'svelte/legacy';
+
   import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
@@ -14,26 +16,30 @@
     type ServerInvite
   } from '$lib/firestore/invites';
 
-  export let serverId: string | null = null;
-  export let embedded = false;
+  interface Props {
+    serverId?: string | null;
+    embedded?: boolean;
+  }
 
-  let invites: ServerInvite[] = [];
-  let unsubInbox: (() => void) | null = null;
-  let unsubSent: (() => void) | null = null;
+  let { serverId = $bindable(null), embedded = false }: Props = $props();
+
+  let invites: ServerInvite[] = $state([]);
+  let unsubInbox: (() => void) | null = $state(null);
+  let unsubSent: (() => void) | null = $state(null);
 
   let serverName: string | null = null;
   let serverIcon: string | null = null;
 
-  let isOwner = false;
-  let isAdmin = false;
+  let isOwner = $state(false);
+  let isAdmin = $state(false);
 
-  let candidateUid = '';
-  let sending = false;
-  let sent = false;
-  let inviteErr = '';
+  let candidateUid = $state('');
+  let sending = $state(false);
+  let sent = $state(false);
+  let inviteErr = $state('');
 
   let metaLoadedFor: string | null = null;
-  let inboxUid: string | null = null;
+  let inboxUid: string | null = $state(null);
 
   let senderNames: Record<string, string> = {};
   const pendingSenderLoads = new Set<string>();
@@ -233,44 +239,50 @@
     }
   });
 
-  $: if (typeof window !== 'undefined') {
-    const uid = $user?.uid ?? null;
-    if (uid !== inboxUid) {
-      unsubInbox?.();
-      inboxUid = uid;
-      if (uid) {
-        unsubInbox = subscribeInbox(uid, (rows) => {
-          invites = rows
-            .slice()
-            .sort((a, b) => {
-              const ta = a.createdAt?.toMillis?.() ?? 0;
-              const tb = b.createdAt?.toMillis?.() ?? 0;
-              return tb - ta;
-            });
-        });
-      } else {
-        invites = [];
-        unsubInbox = null;
+  run(() => {
+    if (typeof window !== 'undefined') {
+      const uid = $user?.uid ?? null;
+      if (uid !== inboxUid) {
+        unsubInbox?.();
+        inboxUid = uid;
+        if (uid) {
+          unsubInbox = subscribeInbox(uid, (rows) => {
+            invites = rows
+              .slice()
+              .sort((a, b) => {
+                const ta = a.createdAt?.toMillis?.() ?? 0;
+                const tb = b.createdAt?.toMillis?.() ?? 0;
+                return tb - ta;
+              });
+          });
+        } else {
+          invites = [];
+          unsubInbox = null;
+        }
       }
     }
-  }
+  });
 
-  $: if (typeof window !== 'undefined') {
-    for (const inv of invites) {
-      void ensureSenderDisplayName(inv);
+  run(() => {
+    if (typeof window !== 'undefined') {
+      for (const inv of invites) {
+        void ensureSenderDisplayName(inv);
+      }
     }
-  }
+  });
 
-  $: trimmedCandidate = candidateUid.trim();
-  $: inviteButtonDisabled = sending || sent || !trimmedCandidate;
-  $: inviteButtonLabel = sent ? 'Sent' : sending ? 'Sending...' : 'Invite';
-  $: canInviteByUid = Boolean(serverId && (isOwner || isAdmin));
+  let trimmedCandidate = $derived(candidateUid.trim());
+  let inviteButtonDisabled = $derived(sending || sent || !trimmedCandidate);
+  let inviteButtonLabel = $derived(sent ? 'Sent' : sending ? 'Sending...' : 'Invite');
+  let canInviteByUid = $derived(Boolean(serverId && (isOwner || isAdmin)));
 
-  $: if (serverId) {
-    loadServerMeta();
-  }
+  run(() => {
+    if (serverId) {
+      loadServerMeta();
+    }
+  });
 
-  $: {
+  run(() => {
     unsubSent?.();
     if (serverId && trimmedCandidate) {
       unsubSent = subscribePendingInviteForUser(trimmedCandidate, serverId, (inv) => {
@@ -286,7 +298,7 @@
       sent = false;
       unsubSent = null;
     }
-  }
+  });
 
   function senderLabelFor(inv: ServerInvite): string {
     const uid = inv.fromUid;
@@ -338,10 +350,10 @@
                 </div>
               </div>
               <div class="invite-item__actions">
-                <button type="button" class="btn btn-primary invite-button" on:click={() => onAccept(inv)}>
+                <button type="button" class="btn btn-primary invite-button" onclick={() => onAccept(inv)}>
                   Accept
                 </button>
-                <button type="button" class="btn btn-ghost invite-button" on:click={() => onDecline(inv)}>
+                <button type="button" class="btn btn-ghost invite-button" onclick={() => onDecline(inv)}>
                   Decline
                 </button>
               </div>
@@ -360,7 +372,7 @@
           <span class="invite-tag invite-tag--success">Pending</span>
         {/if}
       </header>
-      <form class="invite-form" on:submit|preventDefault={onSendInvite}>
+      <form class="invite-form" onsubmit={preventDefault(onSendInvite)}>
         <div class="invite-form__row">
           <input
             class="invite-input"

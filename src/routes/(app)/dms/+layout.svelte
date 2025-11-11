@@ -6,6 +6,11 @@
 
   // Notifications helpers (make sure the file below exists)
   import { requestDMNotificationPermission, enableDMNotifications } from '$lib/notify/dms';
+  interface Props {
+    children?: import('svelte').Snippet;
+  }
+
+  let { children }: Props = $props();
 
   let stopNotify: (() => void) | null = null;
 
@@ -34,6 +39,6 @@
 <div class="h-dvh app-bg text-primary flex overflow-hidden">
   <LeftPane activeServerId={null} />
   <div class="flex-1 flex flex-col overflow-hidden panel">
-    <slot />
+    {@render children?.()}
   </div>
 </div>

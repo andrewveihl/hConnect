@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 
-  let showThreads = false;
+  let showThreads = $state(false);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 28;
@@ -90,7 +90,7 @@
             class="channel-header__toggle md:hidden"
             type="button"
             aria-label="Open conversations"
-            on:click={() => (showThreads = true)}
+            onclick={() => (showThreads = true)}
           >
             <i class="bx bx-chevron-left text-xl"></i>
           </button>
@@ -123,7 +123,7 @@
   aria-label="Conversations"
 >
   <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" on:click={() => (showThreads = false)}>
+    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
       <i class="bx bx-chevron-left text-2xl"></i>
     </button>
     <div class="mobile-panel__title">Conversations</div>

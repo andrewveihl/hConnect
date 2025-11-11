@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run, passive, preventDefault } from 'svelte/legacy';
+
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
@@ -9,10 +11,11 @@
   import { sendServerInvite, type ServerInvite } from '$lib/firestore/invites';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 
-  import {
+import {
     collection, doc, getDoc, onSnapshot, getDocs,
     query, orderBy, setDoc, updateDoc, deleteDoc,
-    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch, where
+    limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch, where,
+    type Unsubscribe
   } from 'firebase/firestore';
 
 const ICON_MAX_BYTES = 8 * 1024 * 1024;
@@ -23,46 +26,46 @@ const DEFAULT_SIDEBAR = '#13171d';
 const DEFAULT_MENTION = '#f97316';
 
 // routing
-  let serverId: string | null = null;
-  let serverOwnerId: string | null = null;
+  let serverId: string | null = $state(null);
+  let serverOwnerId: string | null = $state(null);
 
   // access
-  let allowed = false;
-  let isOwner = false;
-  let isAdmin = false;
+  let allowed = $state(false);
+  let isOwner = $state(false);
+  let isAdmin = $state(false);
 
   // server meta
-  let serverName = '';
-  let serverIcon = '';
-  let serverIconInput: HTMLInputElement | null = null;
-  let serverIconError: string | null = null;
+  let serverName = $state('');
+  let serverIcon = $state('');
+  let serverIconInput: HTMLInputElement | null = $state(null);
+  let serverIconError: string | null = $state(null);
   type ChatDensity = 'cozy' | 'compact';
   type BubbleShape = 'rounded' | 'pill' | 'minimal';
-  let accentColor = DEFAULT_ACCENT;
-  let sidebarColor = DEFAULT_SIDEBAR;
-  let mentionColor = DEFAULT_MENTION;
-  let chatDensity: ChatDensity = 'cozy';
-  let chatBubbleShape: BubbleShape = 'rounded';
-  let chatHighlightMentions = true;
-  let chatAllowThreads = true;
-  let chatAllowReactions = true;
-  let chatShowJoinMessages = true;
-  let chatSlowModeSeconds = 0;
-  let inviteAutomationEnabled = false;
-  let inviteDomains: string[] = [];
-  let inviteDomainInput = '';
-  let inviteDefaultRoleId: string | null = null;
-  let inviteDefaultRoleSelection = '';
-  let inviteAutomationStatus: string | null = null;
-  let inviteAutomationError: string | null = null;
-  let inviteAutomationBusy = false;
-  let deleteConfirm = '';
-  let deleteBusy = false;
-  let deleteError: string | null = null;
+  let accentColor = $state(DEFAULT_ACCENT);
+  let sidebarColor = $state(DEFAULT_SIDEBAR);
+  let mentionColor = $state(DEFAULT_MENTION);
+  let chatDensity: ChatDensity = $state('cozy');
+  let chatBubbleShape: BubbleShape = $state('rounded');
+  let chatHighlightMentions = $state(true);
+  let chatAllowThreads = $state(true);
+  let chatAllowReactions = $state(true);
+  let chatShowJoinMessages = $state(true);
+  let chatSlowModeSeconds = $state(0);
+  let inviteAutomationEnabled = $state(false);
+  let inviteDomains: string[] = $state([]);
+  let inviteDomainInput = $state('');
+  let inviteDefaultRoleId: string | null = $state(null);
+  let inviteDefaultRoleSelection = $state('');
+  let inviteAutomationStatus: string | null = $state(null);
+  let inviteAutomationError: string | null = $state(null);
+  let inviteAutomationBusy = $state(false);
+  let deleteConfirm = $state('');
+  let deleteBusy = $state(false);
+  let deleteError: string | null = $state(null);
 
   // tabs
   type Tab = 'overview' | 'members' | 'channels' | 'roles' | 'danger';
-  let tab: Tab = 'members'; // land on Members where Invite lives
+  let tab: Tab = $state('members'); // land on Members where Invite lives
   const tabItems: Array<{ id: Tab; label: string }> = [
     { id: 'overview', label: 'Overview' },
     { id: 'members', label: 'Members' },
@@ -89,18 +92,18 @@ const DEFAULT_MENTION = '#f97316';
   };
 
   // live lists
-  let members: ServerMember[] = [];
-  let membersWithProfiles: EnrichedMember[] = [];
-  let memberDirectory: Record<string, MentionDirectoryEntry> = {};
-  let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = [];
-  let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
-  let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[] }> = [];
-  let newChannelName = '';
-  let newChannelType: 'text' | 'voice' = 'text';
-  let newChannelPrivate = false;
-  let newChannelAllowedRoleIds: string[] = [];
-  let channelCreateBusy = false;
-  let channelError: string | null = null;
+  let members: ServerMember[] = $state([]);
+  let membersWithProfiles: EnrichedMember[] = $state([]);
+  let memberDirectory: Record<string, MentionDirectoryEntry> = $state({});
+  let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
+let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
+let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
+  let newChannelName = $state('');
+  let newChannelType: 'text' | 'voice' = $state('text');
+  let newChannelPrivate = $state(false);
+  let newChannelAllowedRoleIds: string[] = $state([]);
+  let channelCreateBusy = $state(false);
+  let channelError: string | null = $state(null);
   type RolePermissionKey =
     | 'manageServer'
     | 'manageRoles'
@@ -120,14 +123,14 @@ const DEFAULT_MENTION = '#f97316';
     position?: number;
     permissions?: Partial<Record<RolePermissionKey, boolean>>;
   };
-  let roles: Role[] = [];
-  let sortedRoles: Role[] = [];
-  let assignableRoles: Role[] = [];
-  let newRoleName = '';
-  let newRoleColor = '#5865f2';
-  let roleUpdateBusy: Record<string, boolean> = {};
-  let roleError: string | null = null;
-  let roleCollapsed: Record<string, boolean> = {};
+  let roles: Role[] = $state([]);
+  let sortedRoles: Role[] = $state([]);
+  let assignableRoles: Role[] = $state([]);
+  let newRoleName = $state('');
+  let newRoleColor = $state('#5865f2');
+  let roleUpdateBusy: Record<string, boolean> = $state({});
+  let roleError: string | null = $state(null);
+  let roleCollapsed: Record<string, boolean> = $state({});
 
   // profiles (people who have logged in)
   type Profile = {
@@ -137,20 +140,20 @@ const DEFAULT_MENTION = '#f97316';
     email?: string;
     photoURL?: string;
   };
-  let allProfiles: Profile[] = [];
-  let profileIndex: Record<string, Profile> = {};
+  let allProfiles: Profile[] = $state([]);
+  let profileIndex: Record<string, Profile> = $state({});
   let inviteProfiles: Record<string, Profile> = {};
   const inviteProfileStops = new Map<string, Unsubscribe>();
-  let memberSearch = '';
-  let memberRoleFilter: 'all' | 'owner' | 'admin' | 'custom' = 'all';
-  let filteredMembers: EnrichedMember[] = [];
-  let pendingInvites: ServerInvite[] = [];
-  let pendingInvitesByUid: Record<string, ServerInvite> = {};
-  let inviteLoading: Record<string, boolean> = {};
-  let inviteCancelBusy: Record<string, boolean> = {};
-  let clearInvitesBusy = false;
-  let clearInvitesError: string | null = null;
-  let inviteError: string | null = null;
+  let memberSearch = $state('');
+  let memberRoleFilter: 'all' | 'owner' | 'admin' | 'custom' = $state('all');
+  let filteredMembers: EnrichedMember[] = $state([]);
+  let pendingInvites: ServerInvite[] = $state([]);
+  let pendingInvitesByUid: Record<string, ServerInvite> = $state({});
+  let inviteLoading: Record<string, boolean> = $state({});
+  let inviteCancelBusy: Record<string, boolean> = $state({});
+  let clearInvitesBusy = $state(false);
+  let clearInvitesError: string | null = $state(null);
+  let inviteError: string | null = $state(null);
   let touchStartX = 0;
   let touchStartY = 0;
   let touchStartAt = 0;
@@ -357,42 +360,54 @@ const DEFAULT_MENTION = '#f97316';
     });
   }
 
-  $: membersWithProfiles = members.map((member) => {
-    const entry = memberDirectory[member.uid];
-    return {
-      ...member,
-      displayName: resolveMemberLabel(member, entry),
-      photoURL: resolveMemberAvatar(member, entry)
-    };
+  run(() => {
+    membersWithProfiles = members.map((member) => {
+      const entry = memberDirectory[member.uid];
+      return {
+        ...member,
+        displayName: resolveMemberLabel(member, entry),
+        photoURL: resolveMemberAvatar(member, entry)
+      };
+    });
   });
-  $: profileIndex = allProfiles.reduce<Record<string, Profile>>((acc, profile) => {
-    acc[profile.uid] = profile;
-    return acc;
-  }, {});
-  $: sortedChannels = [...channels].sort((a, b) => {
-    const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
-    const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
-    return ap - bp;
+  run(() => {
+    profileIndex = allProfiles.reduce<Record<string, Profile>>((acc, profile) => {
+      acc[profile.uid] = profile;
+      return acc;
+    }, {});
   });
-  $: sortedRoles = [...roles].sort((a, b) => {
-    const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
-    const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
-    return ap - bp;
+  run(() => {
+    sortedChannels = [...channels].sort((a, b) => {
+      const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+      const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+      return ap - bp;
+    });
   });
-  $: assignableRoles = sortedRoles.filter((role) => {
-    const lower = (role.name ?? '').toLowerCase();
-    return lower !== 'everyone' && lower !== 'admin';
+  run(() => {
+    sortedRoles = [...roles].sort((a, b) => {
+      const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+      const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+      return ap - bp;
+    });
   });
-  $: {
+  run(() => {
+    assignableRoles = sortedRoles.filter((role) => {
+      const lower = (role.name ?? '').toLowerCase();
+      return lower !== 'everyone' && lower !== 'admin';
+    });
+  });
+  run(() => {
     const availableRoleIds = new Set(sortedRoles.map((r) => r.id));
     if (newChannelAllowedRoleIds.some((id) => !availableRoleIds.has(id))) {
       newChannelAllowedRoleIds = newChannelAllowedRoleIds.filter((id) => availableRoleIds.has(id));
     }
-  }
-  $: if (!newChannelPrivate && newChannelAllowedRoleIds.length) {
-    newChannelAllowedRoleIds = [];
-  }
-  $: {
+  });
+  run(() => {
+    if (!newChannelPrivate && newChannelAllowedRoleIds.length) {
+      newChannelAllowedRoleIds = [];
+    }
+  });
+  run(() => {
     const ids = new Set(sortedRoles.map((r) => r.id));
     const next: Record<string, boolean> = { ...roleCollapsed };
     let changed = false;
@@ -409,44 +424,48 @@ const DEFAULT_MENTION = '#f97316';
       }
     }
     if (changed) roleCollapsed = next;
-  }
-  $: filteredMembers = membersWithProfiles.filter((member) => {
-    const term = memberSearch.trim().toLowerCase();
-    const dirHandle = memberDirectory[member.uid]?.handle?.toLowerCase() ?? '';
-    const matchesTerm =
-      !term ||
-      member.displayName.toLowerCase().includes(term) ||
-      member.uid.toLowerCase().includes(term) ||
-      (dirHandle && dirHandle.includes(term)) ||
-      (Array.isArray(member.roleIds) &&
-        member.roleIds.some((roleId) => {
-          const target = sortedRoles.find((r) => r.id === roleId);
-          return target?.name?.toLowerCase().includes(term);
-        }));
-
-    if (!matchesTerm) return false;
-
-    if (memberRoleFilter === 'owner') {
-      return serverOwnerId ? member.uid === serverOwnerId : false;
-    }
-    if (memberRoleFilter === 'admin') {
-      return (member.role ?? '').toLowerCase() === 'admin';
-    }
-    if (memberRoleFilter === 'custom') {
-      return Array.isArray(member.roleIds) && member.roleIds.length > 0;
-    }
-    return true;
   });
-  $: canManageChannels = isOwner || isAdmin;
-  $: if (deleteError && deleteConfirm.trim().toLowerCase() === 'confirm') {
-    deleteError = null;
-  }
-  $: {
+  run(() => {
+    filteredMembers = membersWithProfiles.filter((member) => {
+      const term = memberSearch.trim().toLowerCase();
+      const dirHandle = memberDirectory[member.uid]?.handle?.toLowerCase() ?? '';
+      const matchesTerm =
+        !term ||
+        member.displayName.toLowerCase().includes(term) ||
+        member.uid.toLowerCase().includes(term) ||
+        (dirHandle && dirHandle.includes(term)) ||
+        (Array.isArray(member.roleIds) &&
+          member.roleIds.some((roleId) => {
+            const target = sortedRoles.find((r) => r.id === roleId);
+            return target?.name?.toLowerCase().includes(term);
+          }));
+
+      if (!matchesTerm) return false;
+
+      if (memberRoleFilter === 'owner') {
+        return serverOwnerId ? member.uid === serverOwnerId : false;
+      }
+      if (memberRoleFilter === 'admin') {
+        return (member.role ?? '').toLowerCase() === 'admin';
+      }
+      if (memberRoleFilter === 'custom') {
+        return Array.isArray(member.roleIds) && member.roleIds.length > 0;
+      }
+      return true;
+    });
+  });
+  let canManageChannels = $derived(isOwner || isAdmin);
+  run(() => {
+    if (deleteError && deleteConfirm.trim().toLowerCase() === 'confirm') {
+      deleteError = null;
+    }
+  });
+  run(() => {
     const nextDefaultRole = inviteDefaultRoleId ?? '';
     if (inviteDefaultRoleSelection !== nextDefaultRole) {
       inviteDefaultRoleSelection = nextDefaultRole;
     }
-  }
+  });
   const rolePermissionOptions: Array<{ key: RolePermissionKey; label: string; description: string }> = [
     {
       key: 'manageServer',
@@ -1133,13 +1152,16 @@ const DEFAULT_MENTION = '#f97316';
     touchStartTarget = null;
   }
 
+  const touchStartListener = (event: Event) => handleTouchStart(event as TouchEvent);
+  const touchEndListener = (event: Event) => handleTouchEnd(event as TouchEvent);
+
   // ===== INLINE INVITE (filter in-memory; no dialogs) =====
-  let search = '';
-  $: q = (search || '').trim().toLowerCase();
+  let search = $state('');
+  let q = $derived((search || '').trim().toLowerCase());
 
   // Derived: filter and exclude users already in this server (optional)
-  $: memberSet = new Set(members.map(m => m.uid));
-  $: filtered = allProfiles
+  let memberSet = $derived(new Set(members.map(m => m.uid)));
+  let filtered = $derived(allProfiles
     .filter(p => {
       // donÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢t show people already in the server
       if (memberSet.has(p.uid)) return false;
@@ -1150,7 +1172,7 @@ const DEFAULT_MENTION = '#f97316';
       const u = (p.uid || '').toLowerCase();
       return n.includes(q) || d.includes(q) || e.includes(q) || u.includes(q);
     })
-    .slice(0, 50); // keep list tidy
+    .slice(0, 50)); // keep list tidy
 
   // invite to first text channel (keeps your current accept flow)
   async function inviteUser(toUid: string) {
@@ -1292,8 +1314,8 @@ async function clearPendingInvites() {
   <div
     class="settings-shell"
     style={`--server-accent:${accentColor}; --server-sidebar:${sidebarColor}; --server-mention:${mentionColor};`}
-    on:touchstart|passive={handleTouchStart}
-    on:touchend|passive={handleTouchEnd}
+    use:passive={['touchstart', () => touchStartListener]}
+    use:passive={['touchend', () => touchEndListener]}
   >
     <div class="settings-container">
 
@@ -1304,7 +1326,7 @@ async function clearPendingInvites() {
           class="settings-back"
           aria-label="Go back"
           title="Back"
-          on:click={goBack}
+          onclick={goBack}
         >
           <i class="bx bx-left-arrow-alt text-xl leading-none"></i>
         </button>
@@ -1324,7 +1346,7 @@ async function clearPendingInvites() {
             class="settings-tab"
             class:is-active={tab === item.id}
             aria-selected={tab === item.id}
-            on:click={() => (tab = item.id)}
+            onclick={() => (tab = item.id)}
           >
             {item.label}
           </button>
@@ -1357,13 +1379,13 @@ async function clearPendingInvites() {
                     aria-label="Server icon URL"
                   />
                   <div class="flex flex-wrap gap-2">
-                    <button type="button" class="btn btn-ghost btn-sm" on:click={triggerServerIconUpload}>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={triggerServerIconUpload}>
                       Upload image
                     </button>
                     <button
                       type="button"
                       class="btn btn-ghost btn-sm"
-                      on:click={() => {
+                      onclick={() => {
                         serverIcon = '';
                         serverIconError = null;
                       }}
@@ -1372,7 +1394,7 @@ async function clearPendingInvites() {
                       Clear icon
                     </button>
                   </div>
-                  <input class="hidden" type="file" accept="image/*" bind:this={serverIconInput} on:change={onServerIconSelected} />
+                  <input class="hidden" type="file" accept="image/*" bind:this={serverIconInput} onchange={onServerIconSelected} />
                   {#if serverIconError}
                     <p class="text-xs text-red-300">{serverIconError}</p>
                   {/if}
@@ -1390,7 +1412,7 @@ async function clearPendingInvites() {
               </div>
             </div>
             <div class="settings-actions">
-              <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+              <button type="button" class="btn btn-primary h-10 px-5" onclick={saveOverview}>Save changes</button>
             </div>
           </div>
 
@@ -1407,7 +1429,7 @@ async function clearPendingInvites() {
                   <input
                     class="input input--compact"
                     value={accentColor}
-                    on:input={(e) => (accentColor = (e.currentTarget as HTMLInputElement).value)}
+                    oninput={(e) => (accentColor = (e.currentTarget as HTMLInputElement).value)}
                   />
                 </div>
               </div>
@@ -1418,7 +1440,7 @@ async function clearPendingInvites() {
                   <input
                     class="input input--compact"
                     value={sidebarColor}
-                    on:input={(e) => (sidebarColor = (e.currentTarget as HTMLInputElement).value)}
+                    oninput={(e) => (sidebarColor = (e.currentTarget as HTMLInputElement).value)}
                   />
                 </div>
               </div>
@@ -1429,7 +1451,7 @@ async function clearPendingInvites() {
                   <input
                     class="input input--compact"
                     value={mentionColor}
-                    on:input={(e) => (mentionColor = (e.currentTarget as HTMLInputElement).value)}
+                    oninput={(e) => (mentionColor = (e.currentTarget as HTMLInputElement).value)}
                   />
                 </div>
               </div>
@@ -1454,7 +1476,7 @@ async function clearPendingInvites() {
               </div>
             </div>
             <div class="settings-actions">
-              <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+              <button type="button" class="btn btn-primary h-10 px-5" onclick={saveOverview}>Save changes</button>
             </div>
           </div>
 
@@ -1498,14 +1520,14 @@ async function clearPendingInvites() {
                   <button
                     type="button"
                     class:active-chip={chatDensity === 'cozy'}
-                    on:click={() => (chatDensity = 'cozy')}
+                    onclick={() => (chatDensity = 'cozy')}
                   >
                     Cozy
                   </button>
                   <button
                     type="button"
                     class:active-chip={chatDensity === 'compact'}
-                    on:click={() => (chatDensity = 'compact')}
+                    onclick={() => (chatDensity = 'compact')}
                   >
                     Compact
                   </button>
@@ -1522,7 +1544,7 @@ async function clearPendingInvites() {
                     max="300"
                     step="5"
                     value={chatSlowModeSeconds}
-                    on:input={(e) => (chatSlowModeSeconds = Number((e.currentTarget as HTMLInputElement).value))}
+                    oninput={(e) => (chatSlowModeSeconds = Number((e.currentTarget as HTMLInputElement).value))}
                   />
                   <input
                     class="input input--compact w-20"
@@ -1539,7 +1561,7 @@ async function clearPendingInvites() {
               </div>
             </div>
             <div class="settings-actions">
-              <button type="button" class="btn btn-primary h-10 px-5" on:click={saveOverview}>Save changes</button>
+              <button type="button" class="btn btn-primary h-10 px-5" onclick={saveOverview}>Save changes</button>
             </div>
           </div>
 
@@ -1564,9 +1586,9 @@ async function clearPendingInvites() {
                     class="input input--compact flex-1"
                     placeholder="example.com"
                     value={inviteDomainInput}
-                    on:input={(e) => (inviteDomainInput = (e.currentTarget as HTMLInputElement).value)}
+                    oninput={(e) => (inviteDomainInput = (e.currentTarget as HTMLInputElement).value)}
                   />
-                  <button type="button" class="btn btn-ghost" on:click={addInviteDomain}>Add</button>
+                  <button type="button" class="btn btn-ghost" onclick={addInviteDomain}>Add</button>
                 </div>
                 {#if inviteDomains.length === 0}
                   <p class="settings-caption">No domains yet. Add one like <code>company.com</code>.</p>
@@ -1578,7 +1600,7 @@ async function clearPendingInvites() {
                         <button
                           type="button"
                           aria-label={`Remove ${domain}`}
-                          on:click={() => removeInviteDomain(domain)}
+                          onclick={() => removeInviteDomain(domain)}
                         >
                           <i class="bx bx-x" aria-hidden="true"></i>
                         </button>
@@ -1593,7 +1615,7 @@ async function clearPendingInvites() {
                   id="auto-role"
                   class="input"
                   bind:value={inviteDefaultRoleSelection}
-                  on:change={() => {
+                  onchange={() => {
                     inviteDefaultRoleId = inviteDefaultRoleSelection ? inviteDefaultRoleSelection : null;
                   }}
                 >
@@ -1616,14 +1638,14 @@ async function clearPendingInvites() {
                 type="button"
                 class="btn btn-ghost"
                 disabled={!inviteAutomationEnabled || inviteAutomationBusy}
-                on:click={sendAutoInvitesForDomains}
+                onclick={sendAutoInvitesForDomains}
               >
                 {inviteAutomationBusy ? 'Syncing...' : 'Run domain sync'}
               </button>
               <button
                 type="button"
                 class="btn btn-primary h-10 px-5"
-                on:click={saveOverview}
+                onclick={saveOverview}
                 disabled={inviteAutomationBusy}
               >
                 Save changes
@@ -1658,7 +1680,7 @@ async function clearPendingInvites() {
                     src={r.photoURL || ''}
                     alt=""
                     class="settings-invite__avatar"
-                    on:error={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+                    onerror={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
                   />
                   <div class="flex-1 min-w-0">
                     <div class="truncate">{r.displayName || r.email || r.uid}</div>
@@ -1667,9 +1689,11 @@ async function clearPendingInvites() {
                   {#if isOwner || isAdmin}
                     <button
                       class="btn btn-primary btn-sm"
-                      disabled={!isOwner || pendingInvitesByUid[r.uid] || inviteLoading[r.uid]}
+                      disabled={
+                        !isOwner || !!pendingInvitesByUid[r.uid] || !!inviteLoading[r.uid]
+                      }
                       title={pendingInvitesByUid[r.uid] ? 'Invite already pending' : undefined}
-                      on:click={() => inviteUser(r.uid)}
+                      onclick={() => inviteUser(r.uid)}
                     >
                       {#if pendingInvitesByUid[r.uid]}
                         Pending
@@ -1706,7 +1730,7 @@ async function clearPendingInvites() {
                 <button
                   class="btn btn-danger btn-sm"
                   disabled={clearInvitesBusy}
-                  on:click={clearPendingInvites}
+                  onclick={clearPendingInvites}
                 >
                   {clearInvitesBusy ? 'Clearing...' : 'Clear invites'}
                 </button>
@@ -1726,7 +1750,7 @@ async function clearPendingInvites() {
                       src={profile?.photoURL || ''}
                       alt=""
                       class="h-10 w-10 rounded-full bg-white/10"
-                      on:error={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+                      onerror={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
                     />
                     <div class="flex-1 min-w-0">
                       <div class="truncate font-medium">
@@ -1745,7 +1769,7 @@ async function clearPendingInvites() {
                       <button
                         class="btn btn-danger btn-sm"
                         disabled={inviteCancelBusy[invite.id ?? `${serverId}__${invite.toUid}`]}
-                        on:click={() => cancelInvite(invite)}
+                        onclick={() => cancelInvite(invite)}
                       >
                         {inviteCancelBusy[invite.id ?? `${serverId}__${invite.toUid}`] ? 'Removing...' : 'Remove invite'}
                       </button>
@@ -1772,28 +1796,28 @@ async function clearPendingInvites() {
               <button
                 type="button"
                 class:active-filter={memberRoleFilter === 'all'}
-                on:click={() => (memberRoleFilter = 'all')}
+                onclick={() => (memberRoleFilter = 'all')}
               >
                 All
               </button>
               <button
                 type="button"
                 class:active-filter={memberRoleFilter === 'owner'}
-                on:click={() => (memberRoleFilter = 'owner')}
+                onclick={() => (memberRoleFilter = 'owner')}
               >
                 Owners
               </button>
               <button
                 type="button"
                 class:active-filter={memberRoleFilter === 'admin'}
-                on:click={() => (memberRoleFilter = 'admin')}
+                onclick={() => (memberRoleFilter = 'admin')}
               >
                 Admins
               </button>
               <button
                 type="button"
                 class:active-filter={memberRoleFilter === 'custom'}
-                on:click={() => (memberRoleFilter = 'custom')}
+                onclick={() => (memberRoleFilter = 'custom')}
               >
                 Has custom roles
               </button>
@@ -1817,7 +1841,7 @@ async function clearPendingInvites() {
                   src={m.photoURL || ''}
                   alt=""
                   class="h-9 w-9 rounded-full bg-white/10"
-                  on:error={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+                  onerror={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
                 />
                 <div class="flex-1 min-w-0">
                   <div class="truncate">{m.displayName || m.uid}</div>
@@ -1829,13 +1853,13 @@ async function clearPendingInvites() {
                     <button
                       class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
                       disabled={!isOwner && m.role === 'admin'}
-                      on:click={() => setRole(m.uid, 'member')}
+                      onclick={() => setRole(m.uid, 'member')}
                     >
                       Member
                     </button>
                     <button
                       class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                      on:click={() => setRole(m.uid, 'admin')}
+                      onclick={() => setRole(m.uid, 'admin')}
                     >
                       Admin
                     </button>
@@ -1844,12 +1868,12 @@ async function clearPendingInvites() {
 
                 {#if isOwner || isAdmin}
                   <div class="settings-member-row__moderation">
-                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15" on:click={() => kick(m.uid)}>
+                    <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15" onclick={() => kick(m.uid)}>
                       Kick
                     </button>
                     <button
                       class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                      on:click={() => ban(m.uid)}
+                      onclick={() => ban(m.uid)}
                     >
                       Ban
                     </button>
@@ -1865,7 +1889,7 @@ async function clearPendingInvites() {
                         type="checkbox"
                         checked={Array.isArray(m.roleIds) && m.roleIds.includes(role.id)}
                         disabled={!isAdmin}
-                        on:change={(e) =>
+                        onchange={(e) =>
                           toggleMemberRole(m.uid, role.id, (e.currentTarget as HTMLInputElement).checked)}
                       />
                       <span>{role.name}</span>
@@ -1890,7 +1914,7 @@ async function clearPendingInvites() {
               </div>
               {#if isOwner || isAdmin}
                 <button class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                  on:click={() => unban(b.uid)}>Unban</button>
+                  onclick={() => unban(b.uid)}>Unban</button>
               {/if}
             </div>
           {/each}
@@ -1900,7 +1924,7 @@ async function clearPendingInvites() {
       <!-- channels -->
       {#if tab === 'channels'}
         <div class="settings-card settings-channel-create">
-          <form class="settings-channel-form" on:submit|preventDefault={createChannelInline}>
+          <form class="settings-channel-form" onsubmit={preventDefault(createChannelInline)}>
             <div class="settings-channel-form__row">
               <input
                 class="input flex-1"
@@ -1935,7 +1959,7 @@ async function clearPendingInvites() {
                         <input
                           type="checkbox"
                           checked={newChannelAllowedRoleIds.includes(role.id)}
-                          on:change={(event) =>
+                          onchange={(event) =>
                             toggleNewChannelRole(role.id, (event.currentTarget as HTMLInputElement).checked)}
                         />
                         <span>{role.name}</span>
@@ -1977,7 +2001,7 @@ async function clearPendingInvites() {
                     <button
                       type="button"
                       class="settings-icon-btn"
-                      on:click={() => moveChannel(c.id, 'up')}
+                      onclick={() => moveChannel(c.id, 'up')}
                       disabled={index === 0}
                       aria-label="Move channel up"
                     >
@@ -1986,7 +2010,7 @@ async function clearPendingInvites() {
                     <button
                       type="button"
                       class="settings-icon-btn"
-                      on:click={() => moveChannel(c.id, 'down')}
+                      onclick={() => moveChannel(c.id, 'down')}
                       disabled={index === sortedChannels.length - 1}
                       aria-label="Move channel down"
                     >
@@ -1996,13 +2020,13 @@ async function clearPendingInvites() {
                   <div class="settings-channel-row__actions">
                     <button
                       class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
-                      on:click={() => renameChannel(c.id, c.name)}
+                      onclick={() => renameChannel(c.id, c.name)}
                     >
                       Rename
                     </button>
                     <button
                       class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                      on:click={() => deleteChannel(c.id, c.name)}
+                      onclick={() => deleteChannel(c.id, c.name)}
                     >
                       Delete
                     </button>
@@ -2019,7 +2043,7 @@ async function clearPendingInvites() {
                           type="checkbox"
                           checked={Array.isArray(c.allowedRoleIds) && c.allowedRoleIds.includes(role.id)}
                           disabled={!canManageChannels}
-                          on:change={(e) =>
+                          onchange={(e) =>
                             toggleChannelRole(c.id, role.id, (e.currentTarget as HTMLInputElement).checked)}
                         />
                         <span>{role.name}</span>
@@ -2038,7 +2062,7 @@ async function clearPendingInvites() {
 
       {#if tab === 'roles'}
         <div class="settings-card space-y-4">
-          <form class="settings-role-create" on:submit|preventDefault={createRole}>
+          <form class="settings-role-create" onsubmit={preventDefault(createRole)}>
             <input
               class="flex-1 rounded bg-white/10 px-3 py-2"
               placeholder="Role name (e.g. Moderator)"
@@ -2073,7 +2097,7 @@ async function clearPendingInvites() {
                     type="button"
                     class="settings-role-summary"
                     aria-expanded={!roleCollapsed[role.id]}
-                    on:click={() => toggleRoleCollapse(role.id)}
+                    onclick={() => toggleRoleCollapse(role.id)}
                   >
                     <span class="settings-role-summary__left">
                       <span
@@ -2099,7 +2123,7 @@ async function clearPendingInvites() {
                             class="settings-role-name"
                             value={role.name}
                             aria-label="Role name"
-                            on:blur={(e) => setRoleName(role.id, (e.currentTarget as HTMLInputElement).value)}
+                            onblur={(e) => setRoleName(role.id, (e.currentTarget as HTMLInputElement).value)}
                             disabled={!isAdmin || roleUpdateBusy[role.id]}
                           />
                           <input
@@ -2107,7 +2131,7 @@ async function clearPendingInvites() {
                             type="color"
                             aria-label="Role color"
                             value={role.color ?? '#5865f2'}
-                            on:input={(e) => setRoleColor(role.id, (e.currentTarget as HTMLInputElement).value)}
+                            oninput={(e) => setRoleColor(role.id, (e.currentTarget as HTMLInputElement).value)}
                             disabled={!isAdmin || roleUpdateBusy[role.id]}
                             title="Role color"
                           />
@@ -2116,7 +2140,7 @@ async function clearPendingInvites() {
                           <button
                             type="button"
                             class="settings-icon-btn"
-                            on:click={() => moveRole(role.id, 'up')}
+                            onclick={() => moveRole(role.id, 'up')}
                             disabled={index === 0 || roleUpdateBusy[role.id]}
                             aria-label="Move role up"
                           >
@@ -2125,7 +2149,7 @@ async function clearPendingInvites() {
                           <button
                             type="button"
                             class="settings-icon-btn"
-                            on:click={() => moveRole(role.id, 'down')}
+                            onclick={() => moveRole(role.id, 'down')}
                             disabled={index === sortedRoles.length - 1 || roleUpdateBusy[role.id]}
                             aria-label="Move role down"
                           >
@@ -2133,7 +2157,7 @@ async function clearPendingInvites() {
                           </button>
                           <button
                             class="px-3 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
-                            on:click={() => deleteRole(role.id, role.name)}
+                            onclick={() => deleteRole(role.id, role.name)}
                             disabled={!isOwner || roleUpdateBusy[role.id]}
                           >
                             Delete
@@ -2150,7 +2174,7 @@ async function clearPendingInvites() {
                               type="checkbox"
                               checked={!!role.permissions?.[option.key]}
                               disabled={!isAdmin || roleUpdateBusy[role.id]}
-                              on:change={(e) =>
+                              onchange={(e) =>
                                 toggleRolePermission(
                                   role.id,
                                   option.key,
@@ -2198,7 +2222,7 @@ async function clearPendingInvites() {
             <button
               class="btn btn-sm btn-danger"
               disabled={!isOwner || deleteBusy}
-              on:click={deleteServer}
+              onclick={deleteServer}
             >
               {deleteBusy ? 'Deleting...' : 'Delete Server'}
             </button>
@@ -2343,7 +2367,7 @@ async function clearPendingInvites() {
     scroll-snap-align: start;
   }
 
-  .settings-tab:is(:hover, :focus-visible) {
+  .settings-tab:is(:global(:hover, :focus-visible)) {
     background: color-mix(in srgb, var(--color-panel) 92%, transparent);
     color: var(--color-text-primary);
   }

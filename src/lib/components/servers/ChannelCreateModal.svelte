@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
@@ -6,29 +8,38 @@
   import { getDb } from '$lib/firebase';
   import { collection, onSnapshot, orderBy, query, type Unsubscribe } from 'firebase/firestore';
 
-  export let open = false;
-  export let serverId: string | undefined;
-  export let onClose: () => void = () => {};
-  export let onCreated: (id: string) => void = () => {};
+  interface Props {
+    open?: boolean;
+    serverId: string | undefined;
+    onClose?: () => void;
+    onCreated?: (id: string) => void;
+  }
+
+  let {
+    open = $bindable(false),
+    serverId,
+    onClose = () => {},
+    onCreated = () => {}
+  }: Props = $props();
 
   // fallback to route param if prop not passed
-  $: serverIdFinal =
-    serverId ??
+  let serverIdFinal =
+    $derived(serverId ??
     $page.params.serverID ??
     ($page.params as any).serverId ??
-    ($page.params as any).id;
+    ($page.params as any).id);
 
   type Role = { id: string; name?: string };
 
-  let chName = '';
-  let chType: 'text' | 'voice' = 'text';
-  let chPrivate = false;
-  let busy = false;
-  let errorMsg = '';
-  let selectedRoleIds: string[] = [];
-  let roleOptions: Role[] = [];
-  let roleStop: Unsubscribe | null = null;
-  let roleWatcherServerId: string | null = null;
+  let chName = $state('');
+  let chType: 'text' | 'voice' = $state('text');
+  let chPrivate = $state(false);
+  let busy = $state(false);
+  let errorMsg = $state('');
+  let selectedRoleIds: string[] = $state([]);
+  let roleOptions: Role[] = $state([]);
+  let roleStop: Unsubscribe | null = $state(null);
+  let roleWatcherServerId: string | null = $state(null);
 
   function reset() {
     chName = '';
@@ -62,7 +73,7 @@
     }
   }
 
-  $: {
+  run(() => {
     const nextId = browser ? serverIdFinal ?? null : null;
     if (roleWatcherServerId === nextId) {
       // no change
@@ -79,18 +90,20 @@
         });
       }
     }
-  }
+  });
 
-  $: {
+  run(() => {
     const available = new Set(roleOptions.map((role) => role.id));
     if (selectedRoleIds.some((id) => !available.has(id))) {
       selectedRoleIds = selectedRoleIds.filter((id) => available.has(id));
     }
-  }
+  });
 
-  $: if ((!browser || !chPrivate) && selectedRoleIds.length) {
-    selectedRoleIds = [];
-  }
+  run(() => {
+    if ((!browser || !chPrivate) && selectedRoleIds.length) {
+      selectedRoleIds = [];
+    }
+  });
 
   function toggleRole(roleId: string, enabled: boolean) {
     selectedRoleIds = enabled
@@ -111,7 +124,7 @@
       type="button"
       class="absolute inset-0 w-full h-full bg-black/60"
       aria-label="Close dialog"
-      on:click={close}
+      onclick={close}
     ></button>
 
     <div class="absolute inset-0 grid place-items-center p-4">
@@ -133,11 +146,11 @@
             <legend class="block text-sm mb-1">Type</legend>
             <div class="flex items-center gap-4 text-sm">
               <div class="flex items-center gap-2">
-                <input id="ctype-text" type="radio" name="ctype" checked={chType === 'text'} on:change={() => (chType = 'text')} />
+                <input id="ctype-text" type="radio" name="ctype" checked={chType === 'text'} onchange={() => (chType = 'text')} />
                 <label for="ctype-text">Text</label>
               </div>
               <div class="flex items-center gap-2">
-                <input id="ctype-voice" type="radio" name="ctype" checked={chType === 'voice'} on:change={() => (chType = 'voice')} />
+                <input id="ctype-voice" type="radio" name="ctype" checked={chType === 'voice'} onchange={() => (chType = 'voice')} />
                 <label for="ctype-voice">Voice</label>
               </div>
             </div>
@@ -166,7 +179,7 @@
                       <input
                         type="checkbox"
                         checked={selectedRoleIds.includes(role.id)}
-                        on:change={(event) =>
+                        onchange={(event) =>
                           toggleRole(role.id, (event.currentTarget as HTMLInputElement).checked)}
                       />
                       <span>{role.name || 'Role'}</span>
@@ -187,11 +200,11 @@
           {/if}
 
           <div class="flex gap-2 pt-2">
-            <button type="button" class="btn btn-ghost flex-1" on:click={close}>Cancel</button>
+            <button type="button" class="btn btn-ghost flex-1" onclick={close}>Cancel</button>
             <button
               type="button"
               class="btn btn-primary flex-1"
-              on:click={submit}
+              onclick={submit}
               aria-label="Create channel"
               disabled={busy}
             >
