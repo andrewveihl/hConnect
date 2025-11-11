@@ -16,8 +16,12 @@ export type PredictionInput = {
   platform?: 'desktop' | 'mobile';
 };
 
+import { PUBLIC_AI_ENDPOINT } from '$env/static/public';
+
+const AI_ENDPOINT = (PUBLIC_AI_ENDPOINT?.trim() || '/api/ai') as string;
+
 async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-  const response = await fetch('/api/ai', {
+  const response = await fetch(AI_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
