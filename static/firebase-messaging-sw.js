@@ -68,32 +68,67 @@ async function getMessaging() {
   return messagingInstance;
 }
 
-async function setupBackgroundHandler() {
-  const messaging = await getMessaging();
-  if (!messaging) return;
-  messaging.onBackgroundMessage((payload) => {
-    const title = payload?.notification?.title || payload?.data?.title || 'New message';
-    const body = payload?.notification?.body || payload?.data?.body || '';
-    const tag = payload?.data?.tag || undefined;
-    const icon = payload?.notification?.icon || '/Logo_transparent.png';
-    const badgeCount = Number(payload?.data?.badge ?? payload?.notification?.badge ?? 0);
-
-    self.registration.showNotification(title, {
-      body,
-      icon,
-      tag,
-      data: payload?.data || {}
-    });
-
-    if (typeof self.registration.setAppBadge === 'function') {
-      Promise.resolve()
-        .then(() => self.registration.setAppBadge(badgeCount > 0 ? badgeCount : 1))
-        .catch(() => {});
+function readPayloadFromPush(event) {
+  if (!event?.data) return null;
+  try {
+    return event.data.json();
+  } catch {
+    try {
+      return JSON.parse(event.data.text());
+    } catch {
+      return null;
     }
-  });
+  }
 }
 
-setupBackgroundHandler();
+async function showNotificationForPayload(payload) {
+  if (!payload) return;
+  const title = payload?.notification?.title || payload?.data?.title || 'New message';
+  const body = payload?.notification?.body || payload?.data?.body || '';
+  const tag = payload?.data?.tag || undefined;
+  const icon = payload?.notification?.icon || '/Logo_transparent.png';
+  const badgeCount = Number(payload?.data?.badge ?? payload?.notification?.badge ?? 0);
+
+  await self.registration.showNotification(title, {
+    body,
+    icon,
+    tag,
+    data: payload?.data || {}
+  });
+
+  if (typeof self.registration.setAppBadge === 'function') {
+    Promise.resolve()
+      .then(() => self.registration.setAppBadge(badgeCount > 0 ? badgeCount : 1))
+      .catch(() => {});
+  }
+}
+
+self.addEventListener('push', (event) => {
+  event.waitUntil(
+    (async () => {
+      const payload = readPayloadFromPush(event);
+      if (payload) {
+        await showNotificationForPayload(payload);
+      }
+    })()
+  );
+});
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      const messaging = await getMessaging();
+      if (!messaging) return;
+      try {
+        const token = await messaging.getToken();
+        const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        clients.forEach((client) => client.postMessage({ type: 'FCM_TOKEN_REFRESHED', token }));
+      } catch (err) {
+        console.warn('push subscription refresh failed', err);
+      }
+    })()
+  );
+});
 
 self.addEventListener('notificationclick', (event) => {
   const target = event.notification?.data?.link || event.notification?.data?.url || '/';
