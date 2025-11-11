@@ -2,6 +2,12 @@ import express from 'express';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+app.use((err, _req, res, next) => {
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({ error: 'Invalid JSON body.', detail: err.message });
+  }
+  return next(err);
+});
 
 const allowedOriginsEnv = process.env.CORS_ALLOWED_ORIGINS ?? '';
 const allowedOrigins = allowedOriginsEnv
@@ -189,6 +195,11 @@ async function generatePredictions(body) {
   return normalizePredictionArray(raw, count);
 }
 
+app.all('/api/ai', (req, res, next) => {
+  if (req.method === 'POST') return next();
+  return res.status(405).json({ error: 'Method not allowed. Use POST for /api/ai.' });
+});
+
 app.post('/api/ai', async (req, res) => {
   if (!OPENAI_KEY) {
     return res.status(501).json({ error: 'OpenAI API key missing. Set OPENAI_API_KEY in the environment.' });
@@ -216,5 +227,26 @@ app.post('/api/ai', async (req, res) => {
   }
 });
 
+const describeRoutes = () =>
+  app._router?.stack
+    ?.filter((layer) => layer.route)
+    .map((layer) => {
+      const methods = Object.keys(layer.route.methods || {})
+        .map((method) => method.toUpperCase())
+        .join('|');
+      return `${methods} ${layer.route.path}`;
+    });
+
+app.use((err, _req, res, _next) => {
+  console.error('[ai] unhandled error', err);
+  res
+    .status(500)
+    .json({ error: 'Unexpected server error. Check Cloud Run logs for details.', detail: err?.message ?? null });
+});
+
 const port = Number(process.env.PORT) || 8080;
-app.listen(port, '0.0.0.0', () => console.log(`listening on ${port}`));
+app.listen(port, '0.0.0.0', () => {
+  const routes = describeRoutes() ?? [];
+  console.log(`listening on ${port}`);
+  console.log('registered routes:', routes);
+});

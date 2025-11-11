@@ -35,7 +35,7 @@ async function readErrorDetail(response: Response) {
 }
 
 async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-  let lastError: Error | null = null;
+  const errors: string[] = [];
   for (const endpoint of ENDPOINTS) {
     try {
       const response = await fetch(endpoint, {
@@ -46,14 +46,17 @@ async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal):
       });
       if (!response.ok) {
         const detail = await readErrorDetail(response);
-        throw new Error(detail || `AI request failed (${response.status})`);
+        const message = detail || `AI request failed (${response.status})`;
+        throw new Error(message);
       }
       return (await response.json()) as T;
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error('AI request failed');
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : 'unknown error';
+      errors.push(`${endpoint}: ${message}`);
     }
   }
-  throw lastError ?? new Error('AI request failed');
+  throw new Error(errors.length ? errors.join(' | ') : 'AI request failed');
 }
 
 export async function requestReplySuggestion(input: ReplySuggestionInput, signal?: AbortSignal) {
