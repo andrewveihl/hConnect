@@ -8,7 +8,7 @@
   import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
-  import { requestReplySuggestion, requestPredictions } from '$lib/api/ai';
+  import { requestReplySuggestion, requestPredictions, requestRewriteSuggestions } from '$lib/api/ai';
   import type { ReplyMessageContext } from '$lib/api/ai';
 
   type MentionCandidate = {
@@ -65,6 +65,32 @@
     return trimmed.length ? trimmed : '';
   };
 
+  type RewriteMode =
+    | 'rephrase'
+    | 'shorten'
+    | 'elaborate'
+    | 'formal'
+    | 'casual'
+    | 'bulletize'
+    | 'summarize';
+
+  const MAX_AI_CONTEXT = 10;
+  const MIN_REWRITE_LENGTH = 20;
+
+  const rewriteActions: Array<{ id: RewriteMode; label: string; icon: string; description: string }> = [
+    { id: 'rephrase', label: 'Rephrase', icon: 'bx-wand', description: 'Same meaning, fresher wording.' },
+    { id: 'shorten', label: 'Shorten', icon: 'bx-cut', description: 'Trim it down to the essentials.' },
+    { id: 'elaborate', label: 'Elaborate', icon: 'bx-expand', description: 'Add a bit more helpful detail.' },
+    { id: 'formal', label: 'More formal', icon: 'bx-briefcase', description: 'Polish it for announcements.' },
+    { id: 'casual', label: 'More casual', icon: 'bx-coffee', description: 'Relaxed tone for friends.' },
+    { id: 'bulletize', label: 'Bulletize', icon: 'bx-list-ul', description: 'Break it into quick bullets.' },
+    { id: 'summarize', label: 'Summarize', icon: 'bx-notepad', description: 'Recap the draft in a blurb.' }
+  ];
+
+  const rewriteActionLookup = new Map<RewriteMode, (typeof rewriteActions)[number]>(
+    rewriteActions.map((action) => [action.id, action])
+  );
+
   function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
     if (!rawQuery) return 0;
     const lower = rawQuery.toLowerCase();
@@ -91,6 +117,7 @@
     replyTarget?: ReplyReferenceInput | null;
     replySource?: any | null;
     defaultSuggestionSource?: any | null;
+    conversationContext?: any[] | null;
     aiAssistEnabled?: boolean;
     threadLabel?: string | null;
     onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
@@ -107,6 +134,7 @@
     replyTarget = null,
     replySource = null,
     defaultSuggestionSource = null,
+    conversationContext = [],
     aiAssistEnabled = false,
     threadLabel = '',
     onSend = () => {},
@@ -163,12 +191,44 @@
   let predictionAbort: AbortController | null = null;
   let predictionTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPredictionSeed = '';
+  let aiContextWindow: ReplyMessageContext[] = $state([]);
+  let rewriteMenuOpen = $state(false);
+  let rewriteMenuEl: HTMLDivElement | null = $state(null);
+  let rewriteMenuButton: HTMLButtonElement | null = $state(null);
+  let disposeRewriteOutside: (() => void) | null = $state(null);
+  let rewriteMode: RewriteMode | null = $state(null);
+  let rewriteDefaultMode: RewriteMode = $state('rephrase');
+  let rewriteOptions: string[] = $state([]);
+  let rewriteIndex = $state(0);
+  let rewriteLoading = $state(false);
+  let rewriteError: string | null = $state(null);
+  let rewriteAbort: AbortController | null = null;
+  let rewriteSeed = '';
+  let rewriteHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  let rewriteHoldTriggered = false;
 
   const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
   const isDesktop = $derived(platform === 'desktop');
   const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && replyTarget?.messageId));
   const showGeneralCoach = $derived(Boolean(aiAssistAllowed && !replyTarget && defaultSuggestionSource && !text.trim()));
   const showDesktopPrediction = $derived(Boolean(aiAssistAllowed && isDesktop));
+  const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
+  const showRewriteCoach = $derived(
+    Boolean(aiAssistAllowed && rewriteMode && (rewriteLoading || rewriteError || rewriteOptions.length))
+  );
+  const activeRewrite = $derived(
+    rewriteOptions.length ? rewriteOptions[Math.min(rewriteIndex, rewriteOptions.length - 1)] ?? '' : ''
+  );
+  const rewriteModeLabel = $derived(
+    rewriteMode
+      ? rewriteActionLookup.get(rewriteMode)?.label ?? 'Rewrite'
+      : rewriteActionLookup.get(rewriteDefaultMode)?.label ?? 'Rewrite'
+  );
+  const rewriteModeIcon = $derived(
+    rewriteMode
+      ? rewriteActionLookup.get(rewriteMode)?.icon ?? 'bx-wand'
+      : rewriteActionLookup.get(rewriteDefaultMode)?.icon ?? 'bx-wand'
+  );
 
   const REPLY_PREVIEW_LIMIT = 160;
   const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
@@ -295,6 +355,7 @@
       onSend(payload);
       dispatch('send', payload);
       text = '';
+      clearRewriteState(true);
       clearPredictions();
       lastPredictionSeed = '';
       mentionDraft.clear();
@@ -500,7 +561,8 @@
       const suggestion = await requestReplySuggestion(
         {
           message: payload,
-          threadLabel: pickString(threadLabel) || null
+          threadLabel: pickString(threadLabel) || null,
+          context: aiContextWindow
         },
         controller.signal
       );
@@ -549,7 +611,8 @@
       const suggestion = await requestReplySuggestion(
         {
           message: payload,
-          threadLabel: pickString(threadLabel) || null
+          threadLabel: pickString(threadLabel) || null,
+          context: aiContextWindow
         },
         controller.signal
       );
@@ -684,6 +747,158 @@
   function regenerateGeneralSuggestion() {
     lastGeneralSuggestionId = null;
     void fetchGeneralSuggestion(true);
+  }
+
+  function closeRewriteMenu() {
+    rewriteMenuOpen = false;
+    rewriteHoldTriggered = false;
+    clearRewriteHoldTimer();
+  }
+
+  function clearRewriteState(clearMode = false) {
+    rewriteAbort?.abort();
+    rewriteAbort = null;
+    rewriteLoading = false;
+    rewriteError = null;
+    rewriteOptions = [];
+    rewriteIndex = 0;
+    rewriteSeed = '';
+    if (clearMode) {
+      rewriteMode = null;
+    }
+  }
+
+  function handleRewriteAction(mode: RewriteMode) {
+    rewriteDefaultMode = mode;
+    rewriteMode = mode;
+    void runRewrite(mode, true);
+    closeRewriteMenu();
+  }
+
+  async function runRewrite(mode: RewriteMode, force = false) {
+    if (!aiAssistAllowed) {
+      rewriteError = 'AI currently unavailable.';
+      rewriteLoading = false;
+      return;
+    }
+    const trimmed = text.trim();
+    const minimum = mode === 'rephrase' ? 1 : MIN_REWRITE_LENGTH;
+    if (!trimmed || trimmed.length < minimum) {
+      rewriteError = mode === 'rephrase' ? 'Draft is too short to rephrase.' : 'Type a bit more first.';
+      rewriteLoading = false;
+      return;
+    }
+    if (!force && rewriteSeed === trimmed && rewriteOptions.length) {
+      return;
+    }
+    rewriteAbort?.abort();
+    const controller = new AbortController();
+    rewriteAbort = controller;
+    rewriteLoading = true;
+    rewriteError = null;
+    rewriteSeed = trimmed;
+    rewriteOptions = [];
+    rewriteIndex = 0;
+    try {
+      const options = await requestRewriteSuggestions(
+        {
+          text: trimmed,
+          threadLabel: pickString(threadLabel) || null,
+          context: aiContextWindow,
+          mode
+        },
+        controller.signal
+      );
+      if (rewriteAbort !== controller) return;
+      rewriteOptions = options;
+      rewriteIndex = 0;
+      if (!options.length) {
+        rewriteError = 'No rewrite ready yet.';
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const message = error instanceof Error ? error.message : String(error);
+      rewriteError = message;
+      if (/openai api key missing/i.test(message)) {
+        aiServiceAvailable = false;
+      }
+    } finally {
+      if (rewriteAbort === controller) {
+        rewriteLoading = false;
+      }
+    }
+  }
+
+  function clearRewriteHoldTimer() {
+    if (rewriteHoldTimer) {
+      clearTimeout(rewriteHoldTimer);
+      rewriteHoldTimer = null;
+    }
+  }
+
+  function handleRewritePointerDown() {
+    if (disabled || !aiAssistAllowed) return;
+    rewriteHoldTriggered = false;
+    clearRewriteHoldTimer();
+    rewriteHoldTimer = setTimeout(() => {
+      rewriteHoldTimer = null;
+      rewriteHoldTriggered = true;
+      rewriteMenuOpen = true;
+    }, 450);
+  }
+
+  function handleRewritePointerUp() {
+    clearRewriteHoldTimer();
+  }
+
+  function handleRewritePointerLeave() {
+    clearRewriteHoldTimer();
+  }
+
+  function handleRewriteClick(event: MouseEvent) {
+    if (rewriteHoldTriggered) {
+      rewriteHoldTriggered = false;
+      event.preventDefault();
+      return;
+    }
+    if (!aiAssistAllowed) {
+      event.preventDefault();
+      return;
+    }
+    const mode = rewriteDefaultMode ?? 'rephrase';
+    rewriteMode = mode;
+    void runRewrite(mode, true);
+    rewriteMenuOpen = false;
+  }
+
+  function acceptRewrite() {
+    const proposal = pickString(activeRewrite);
+    if (!proposal) return;
+    text = proposal;
+    clearRewriteState(true);
+    lastPredictionSeed = '';
+    queuePrediction();
+    requestAnimationFrame(() => inputEl?.focus());
+  }
+
+  function dismissRewrite() {
+    clearRewriteState(true);
+  }
+
+  function cycleRewriteOption() {
+    if (rewriteOptions.length > 1) {
+      rewriteIndex = (rewriteIndex + 1) % rewriteOptions.length;
+    } else {
+      void runRewrite(rewriteDefaultMode, true);
+    }
+  }
+
+  function retryRewrite() {
+    rewriteOptions = [];
+    rewriteIndex = 0;
+    rewriteError = null;
+    rewriteSeed = '';
+    void runRewrite(rewriteDefaultMode, true);
   }
 
   function refreshMentionDraft() {
@@ -860,6 +1075,17 @@
     return () => document.removeEventListener('pointerdown', handler);
   }
 
+  function registerRewriteOutsideWatcher() {
+    if (typeof document === 'undefined') return null;
+    const handler = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (rewriteMenuEl?.contains(target) || rewriteMenuButton?.contains(target)) return;
+      rewriteMenuOpen = false;
+    };
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
+  }
+
 
   onMount(() => {
     if (typeof window === 'undefined') return;
@@ -935,6 +1161,9 @@
     cancelReplySuggestion();
     cancelGeneralSuggestion();
     clearPredictions();
+    clearRewriteState(true);
+    disposeRewriteOutside?.();
+    clearRewriteHoldTimer();
     if (predictionTimer) {
       clearTimeout(predictionTimer);
       predictionTimer = null;
@@ -977,6 +1206,40 @@
   });
 
   run(() => {
+    const sources = Array.isArray(conversationContext) ? conversationContext : [];
+    const normalized = sources
+      .map((entry) => buildMessagePayload(entry))
+      .filter((entry): entry is ReplyMessageContext => Boolean(entry));
+    aiContextWindow = normalized.slice(-MAX_AI_CONTEXT);
+  });
+
+  run(() => {
+    disposeRewriteOutside?.();
+    disposeRewriteOutside = rewriteMenuOpen ? registerRewriteOutsideWatcher() : null;
+  });
+
+  run(() => {
+    if (!aiAssistAllowed) {
+      rewriteMenuOpen = false;
+    }
+  });
+
+  run(() => {
+    if (!rewriteEligible) {
+      clearRewriteState(true);
+    }
+  });
+
+  run(() => {
+    if (!rewriteMode || rewriteLoading) return;
+    if (rewriteSeed && text.trim() !== rewriteSeed) {
+      rewriteOptions = [];
+      rewriteIndex = 0;
+      rewriteError = null;
+    }
+  });
+
+  run(() => {
     if (showReplyCoach) {
       void fetchReplyCoach();
     } else {
@@ -1012,7 +1275,117 @@
 
 <svelte:window onkeydown={onEsc} />
 
-<div class="chat-input-stack">
+<div class="chat-input-root">
+  <div class="chat-input-overlays">
+    {#if showGeneralCoach}
+      <div class="ai-card ai-card--standalone ai-card--suggested" role="status">
+        <div class="suggested-reply">
+          <div class="suggested-reply__icon">
+            <i class="bx bx-message-rounded-dots" aria-hidden="true"></i>
+          </div>
+          <div class="suggested-reply__content">
+            <div class="suggested-reply__label">Suggested reply</div>
+            {#if aiGeneralLoading}
+              <div class="suggested-reply__status">Drafting a reply...</div>
+            {:else if aiGeneralError}
+              <div class="suggested-reply__status suggested-reply__status--error">{aiGeneralError}</div>
+            {:else if aiGeneralSuggestion}
+              <p class="suggested-reply__text">{aiGeneralSuggestion}</p>
+            {:else}
+              <div class="suggested-reply__status">No reply yet. Tap refresh.</div>
+            {/if}
+          </div>
+          <div class="suggested-reply__actions">
+            {#if aiGeneralError}
+              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
+                Try again
+              </button>
+            {:else if aiGeneralSuggestion}
+              <button
+                type="button"
+                class="ai-card__button ai-card__button--primary"
+                onclick={applyGeneralSuggestion}
+              >
+                Use
+              </button>
+              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
+                Refresh
+              </button>
+            {:else if !aiGeneralLoading}
+              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
+                Refresh
+              </button>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showRewriteCoach}
+      <div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
+        <div class="ai-card__header">
+          <div class="ai-card__badge">
+            <i class="bx bx-wand" aria-hidden="true"></i>
+            <span>Rewrite &mdash; {rewriteModeLabel}</span>
+          </div>
+          {#if rewriteOptions.length > 1}
+            <div class="ai-card__meta">{rewriteIndex + 1}/{rewriteOptions.length}</div>
+          {/if}
+        </div>
+        <div class="ai-card__body">
+          {#if rewriteLoading && !activeRewrite}
+            <div class="ai-card__status">Polishing your draft...</div>
+          {:else if rewriteError}
+            <div class="ai-card__status ai-card__status--error">{rewriteError}</div>
+            <div class="ai-card__actions">
+              <button type="button" class="ai-card__button ai-card__button--primary" onclick={retryRewrite}>
+                Try again
+              </button>
+              <button type="button" class="ai-card__button" onclick={dismissRewrite}>
+                Dismiss
+              </button>
+            </div>
+          {:else if activeRewrite}
+            <p class="ai-card__text">{activeRewrite}</p>
+            <div class="ai-card__actions ai-card__actions--triple">
+              <button type="button" class="ai-card__button ai-card__button--primary" onclick={acceptRewrite}>
+                Replace draft
+              </button>
+              <button type="button" class="ai-card__button" onclick={dismissRewrite}>
+                Keep mine
+              </button>
+              <button type="button" class="ai-card__button" onclick={cycleRewriteOption}>
+                Another take
+              </button>
+            </div>
+          {:else}
+            <div class="ai-card__status">Hang tight while we polish that draft.</div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    {#if showDesktopPrediction && (aiInlineSuggestion || aiPredictionLoading || aiPredictionError)}
+      <button
+        type="button"
+        class={`ai-inline-hint ${aiPredictionLoading && !aiInlineSuggestion ? 'is-loading' : ''}`}
+        onclick={acceptInlineSuggestion}
+        disabled={!aiInlineSuggestion}
+      >
+        {#if aiInlineSuggestion}
+          <span class="ai-inline-hint__label">Next</span>
+          <span class="ai-inline-hint__text">{aiInlineSuggestion}</span>
+          <span class="ai-inline-hint__meta">Press Tab</span>
+        {:else if aiPredictionError}
+          <span class="ai-inline-hint__status ai-inline-hint__status--error">AI paused</span>
+        {:else}
+          <span class="ai-inline-hint__status">Predicting...</span>
+        {/if}
+      </button>
+    {/if}
+  </div>
+
+  <div class="chat-input-stack">
   {#if replyTarget}
     <div class="reply-banner" role="status">
       <div class="reply-banner__indicator" aria-hidden="true"></div>
@@ -1021,27 +1394,42 @@
         <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
         <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
         {#if showReplyCoach}
-          <div class="ai-reply-card">
-            {#if aiReplyLoading}
-              <div class="ai-reply-card__status">Drafting a suggestion...</div>
-            {:else if aiReplyError}
-              <div class="ai-reply-card__status ai-reply-card__status--error">{aiReplyError}</div>
-              <button type="button" class="ai-reply-card__button" onclick={regenerateReplySuggestion}>
-                Try again
-              </button>
-            {:else if aiReplySuggestion}
-              <p class="ai-reply-card__text">{aiReplySuggestion}</p>
-              <div class="ai-reply-card__actions">
-                <button type="button" class="ai-reply-card__button ai-reply-card__button--primary" onclick={applyReplySuggestion}>
-                  Insert suggestion
-                </button>
-                <button type="button" class="ai-reply-card__button" onclick={regenerateReplySuggestion}>
-                  Regenerate
-                </button>
+          <div class="ai-card ai-card--inline" role="status">
+            <div class="ai-card__header">
+              <div class="ai-card__badge">
+                <i class="bx bx-sparkles" aria-hidden="true"></i>
+                <span>Reply coach</span>
               </div>
-            {:else}
-              <div class="ai-reply-card__status">No suggestion yet. Tap regenerate.</div>
-            {/if}
+              {#if !aiReplyLoading}
+                <button type="button" class="ai-card__pill" onclick={regenerateReplySuggestion}>
+                  Refresh
+                </button>
+              {/if}
+            </div>
+            <div class="ai-card__body">
+              {#if aiReplyLoading}
+                <div class="ai-card__status">Drafting a suggestion...</div>
+              {:else if aiReplyError}
+                <div class="ai-card__status ai-card__status--error">{aiReplyError}</div>
+                <div class="ai-card__actions">
+                  <button type="button" class="ai-card__button" onclick={regenerateReplySuggestion}>
+                    Try again
+                  </button>
+                </div>
+              {:else if aiReplySuggestion}
+                <p class="ai-card__text">{aiReplySuggestion}</p>
+                <div class="ai-card__actions">
+                  <button type="button" class="ai-card__button ai-card__button--primary" onclick={applyReplySuggestion}>
+                    Insert suggestion
+                  </button>
+                  <button type="button" class="ai-card__button" onclick={regenerateReplySuggestion}>
+                    Another idea
+                  </button>
+                </div>
+              {:else}
+                <div class="ai-card__status">Tap refresh to get a draft.</div>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
@@ -1053,35 +1441,6 @@
       >
         <i class="bx bx-x"></i>
       </button>
-    </div>
-  {/if}
-
-  {#if showGeneralCoach}
-    <div class="ai-reply-card ai-reply-card--standalone" role="status">
-      {#if aiGeneralLoading}
-        <div class="ai-reply-card__status">Thinking of something to say...</div>
-      {:else if aiGeneralError}
-        <div class="ai-reply-card__status ai-reply-card__status--error">{aiGeneralError}</div>
-        <button type="button" class="ai-reply-card__button" onclick={regenerateGeneralSuggestion}>
-          Try again
-        </button>
-      {:else if aiGeneralSuggestion}
-        <p class="ai-reply-card__text">{aiGeneralSuggestion}</p>
-        <div class="ai-reply-card__actions">
-          <button
-            type="button"
-            class="ai-reply-card__button ai-reply-card__button--primary"
-            onclick={applyGeneralSuggestion}
-          >
-            Use suggestion
-          </button>
-          <button type="button" class="ai-reply-card__button" onclick={regenerateGeneralSuggestion}>
-            New idea
-          </button>
-        </div>
-      {:else}
-        <div class="ai-reply-card__status">No suggestion yet. Tap refresh.</div>
-      {/if}
     </div>
   {/if}
 
@@ -1185,24 +1544,6 @@
     </div>
 
     <div class="flex-1 relative chat-input__field">
-      {#if showDesktopPrediction && (aiInlineSuggestion || aiPredictionLoading || aiPredictionError)}
-        <button
-          type="button"
-          class={`ai-inline-hint ${aiPredictionLoading && !aiInlineSuggestion ? 'is-loading' : ''}`}
-          onclick={acceptInlineSuggestion}
-          disabled={!aiInlineSuggestion}
-        >
-          {#if aiInlineSuggestion}
-            <span class="ai-inline-hint__label">Next</span>
-            <span class="ai-inline-hint__text">{aiInlineSuggestion}</span>
-            <span class="ai-inline-hint__meta">Press Tab</span>
-          {:else if aiPredictionError}
-            <span class="ai-inline-hint__status ai-inline-hint__status--error">AI paused</span>
-          {:else}
-            <span class="ai-inline-hint__status">Predicting...</span>
-          {/if}
-        </button>
-      {/if}
 
       <textarea
         class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
@@ -1285,6 +1626,54 @@
           {/if}
         </div>
       {/if}
+
+      <div class="rewrite-trigger">
+        <button
+          type="button"
+          class="rewrite-button"
+          onclick={handleRewriteClick}
+          onpointerdown={handleRewritePointerDown}
+          onpointerup={handleRewritePointerUp}
+          onpointerleave={handleRewritePointerLeave}
+          onpointercancel={handleRewritePointerLeave}
+          disabled={disabled || !aiAssistAllowed}
+          aria-haspopup="menu"
+          aria-expanded={rewriteMenuOpen}
+          bind:this={rewriteMenuButton}
+        >
+          <i class={`bx ${rewriteModeIcon}`} aria-hidden="true"></i>
+          <span>{rewriteModeLabel}</span>
+        </button>
+        {#if rewriteMenuOpen}
+          <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
+            <div class="rewrite-menu__header">Sound-check message</div>
+            {#if !rewriteEligible}
+              <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
+            {/if}
+            <div class="rewrite-menu__list">
+              {#each rewriteActions as action}
+                {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
+                  onclick={() => handleRewriteAction(action.id)}
+                  disabled={!rewriteEligible || actionBusy}
+                >
+                  <span class="rewrite-menu__icon">
+                    <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                  </span>
+                  <span class="rewrite-menu__content">
+                    <span class="rewrite-menu__title">{action.label}</span>
+                    <span class="rewrite-menu__description">{action.description}</span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+
       <button
         class="chat-send-button"
         type="submit"
@@ -1296,6 +1685,7 @@
       </button>
     </div>
   </form>
+</div>
 </div>
 
 {#if showGif}
@@ -1493,6 +1883,29 @@
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
   }
 
+  .chat-input-root {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chat-input-overlays {
+    position: absolute;
+    left: 0;
+    right: auto;
+    bottom: calc(100% + 0.6rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    width: min(420px, 100%);
+    pointer-events: none;
+    align-items: flex-start;
+  }
+
+  .chat-input-overlays > * {
+    pointer-events: auto;
+  }
+
   .chat-input-stack {
     display: flex;
     flex-direction: column;
@@ -1547,51 +1960,197 @@
     text-overflow: ellipsis;
   }
 
-  .ai-reply-card {
+  .ai-card {
+    border-radius: 1.1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 18px 32px rgba(5, 8, 18, 0.32);
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .ai-card--inline {
     margin-top: 0.65rem;
-    border-radius: var(--radius-md);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    padding: 0.65rem 0.75rem;
-    display: grid;
-    gap: 0.45rem;
   }
 
-  .ai-reply-card__text {
+  .ai-card--standalone {
+    margin-bottom: 0.65rem;
+  }
+
+  .ai-card--rewrite {
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--color-panel) 85%, var(--color-accent) 18%),
+      color-mix(in srgb, var(--color-panel-muted) 90%, transparent)
+    );
+    border-color: color-mix(in srgb, var(--color-border-subtle) 45%, var(--color-accent) 20%);
+  }
+
+  .ai-card--suggested {
+    padding: 0.4rem 0.6rem;
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    box-shadow: none;
+  }
+
+  .ai-card__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ai-card__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    padding: 0.22rem 0.75rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-accent) 80%, white);
+    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+  }
+
+  .ai-card__badge i {
+    font-size: 1rem;
+  }
+
+  .ai-card__pill {
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: transparent;
+    color: var(--text-65);
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.22rem 0.9rem;
+    font-weight: 650;
+  }
+
+  .ai-card__meta {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-55);
+  }
+
+  .ai-card__body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .ai-card__text {
     margin: 0;
-    font-size: 0.9rem;
-    line-height: 1.35;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--color-text-primary);
   }
 
-  .ai-reply-card__actions {
+  .ai-card__status {
+    font-size: 0.82rem;
+    color: var(--text-65);
+  }
+
+  .ai-card__status--error {
+    color: var(--color-danger, #ff9a9a);
+  }
+
+  .ai-card__actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
+    gap: 0.5rem;
   }
 
-  .ai-reply-card__button {
+  .ai-card__button {
     border-radius: var(--radius-pill);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
     background: transparent;
     color: var(--text-70);
-    font-size: 0.78rem;
-    padding: 0.25rem 0.85rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.42rem 1rem;
+    transition: background 150ms ease, border 150ms ease, color 150ms ease;
   }
 
-  .ai-reply-card__button--primary {
-    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
-    color: var(--color-panel);
+  .ai-card__button:hover,
+  .ai-card__button:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+    outline: none;
+  }
+
+  .ai-card__button--primary {
     border-color: transparent;
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    color: color-mix(in srgb, var(--color-panel-muted) 96%, white);
   }
 
-  .ai-reply-card__status {
+  .suggested-reply {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+  }
+
+  .suggested-reply__icon {
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: 0.8rem;
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
+    display: grid;
+    place-items: center;
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .suggested-reply__content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .suggested-reply__label {
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-55);
+  }
+
+  .suggested-reply__text {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--color-text-primary);
+  }
+
+  .suggested-reply__status {
     font-size: 0.8rem;
     color: var(--text-60);
   }
 
-  .ai-reply-card__status--error {
-    color: var(--color-danger, #ffb4b4);
+  .suggested-reply__status--error {
+    color: var(--color-danger, #ff8a8a);
   }
+
+  .suggested-reply__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .suggested-reply__actions .ai-card__button {
+    padding: 0.3rem 0.85rem;
+  }
+
+
+
+
+
 
   .reply-banner__close {
     border: 0;
@@ -1774,15 +2333,129 @@
     color: var(--color-danger, #ffb4b4);
   }
 
-  .ai-reply-card--standalone {
-    margin-bottom: 0.85rem;
-  }
 
 
   .chat-input__actions {
     display: flex;
     align-items: center;
     gap: 0.45rem;
+  }
+
+  .rewrite-trigger {
+    position: relative;
+  }
+
+  .rewrite-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    color: var(--text-70);
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.9rem;
+  }
+
+  .rewrite-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .rewrite-button:not(:disabled):hover,
+  .rewrite-button:not(:disabled):focus-visible {
+    background: color-mix(in srgb, var(--color-panel-muted) 95%, transparent);
+    outline: none;
+  }
+
+  .rewrite-menu {
+    position: absolute;
+    top: auto;
+    bottom: calc(100% + 0.45rem);
+    right: 0;
+    width: min(18rem, 80vw);
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    padding: 0.75rem;
+    z-index: 60;
+    box-shadow:
+      0 14px 26px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+
+  .rewrite-menu__header {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-55);
+    margin-bottom: 0.4rem;
+  }
+
+  .rewrite-menu__hint {
+    font-size: 0.78rem;
+    color: var(--text-60);
+    margin-bottom: 0.4rem;
+  }
+
+  .rewrite-menu__list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .rewrite-menu__item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    border-radius: 0.85rem;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 0.45rem 0.55rem;
+    text-align: left;
+    transition: background 140ms ease, border 140ms ease;
+  }
+
+  .rewrite-menu__item:not(:disabled):hover,
+  .rewrite-menu__item:not(:disabled):focus-visible {
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    outline: none;
+  }
+
+  .rewrite-menu__item:disabled,
+  .rewrite-menu__item.is-disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .rewrite-menu__icon {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.9rem;
+    background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+    display: grid;
+    place-items: center;
+    color: var(--color-accent);
+  }
+
+  .rewrite-menu__content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    color: var(--color-text-primary);
+  }
+
+  .rewrite-menu__title {
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+
+  .rewrite-menu__description {
+    font-size: 0.77rem;
+    color: var(--text-60);
   }
 
   .emoji-trigger {

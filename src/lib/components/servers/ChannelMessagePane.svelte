@@ -20,6 +20,11 @@
     inputPaddingBottom?: string;
     emptyMessage?: string;
     hideInput?: boolean;
+    threadStats?: Record<string, { count?: number; lastAt?: number }>;
+    defaultSuggestionSource?: any | null;
+    aiAssistEnabled?: boolean;
+    threadLabel?: string | null;
+    conversationContext?: any[] | null;
     onVote?: (event: CustomEvent<any>) => void;
     onSubmitForm?: (event: CustomEvent<any>) => void;
     onReact?: (event: CustomEvent<any>) => void;
@@ -47,6 +52,11 @@
     inputPaddingBottom = 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
     emptyMessage = 'Pick a channel to start chatting.',
     hideInput = false,
+    threadStats = {},
+    defaultSuggestionSource = null,
+    aiAssistEnabled = false,
+    threadLabel = '',
+    conversationContext = [],
     onVote = () => {},
     onSubmitForm = () => {},
     onReact = () => {},
@@ -71,6 +81,7 @@
       {messages}
       users={profiles}
       {currentUserId}
+      threadStats={threadStats}
       {pendingUploads}
       {scrollToBottomSignal}
       on:vote={onVote}
@@ -78,6 +89,7 @@
       on:react={onReact}
       on:loadMore={onLoadMore}
       on:reply={(event) => dispatch('reply', event.detail)}
+      on:thread={(event) => dispatch('thread', event.detail)}
     />
   </div>
   {#if !hideInput}
@@ -86,6 +98,10 @@
         placeholder={`Message #${channelName}`}
         {mentionOptions}
         {replyTarget}
+        {defaultSuggestionSource}
+        conversationContext={conversationContext}
+        aiAssistEnabled={aiAssistEnabled}
+        threadLabel={threadLabel || channelName}
         onSend={onSend}
         onSendGif={onSendGif}
         onCreatePoll={onCreatePoll}
