@@ -51,6 +51,13 @@ async function postJson<T>(body: Record<string, unknown>, signal?: AbortSignal):
       }
       return (await response.json()) as T;
     } catch (error) {
+      if (
+        error instanceof DOMException
+          ? error.name === 'AbortError'
+          : error instanceof Error && error.name === 'AbortError'
+      ) {
+        throw error;
+      }
       const message =
         error instanceof Error ? error.message : typeof error === 'string' ? error : 'unknown error';
       errors.push(`${endpoint}: ${message}`);
