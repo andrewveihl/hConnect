@@ -195,12 +195,15 @@ async function generatePredictions(body) {
   return normalizePredictionArray(raw, count);
 }
 
-app.all('/api/ai', (req, res, next) => {
-  if (req.method === 'POST') return next();
-  return res.status(405).json({ error: 'Method not allowed. Use POST for /api/ai.' });
+const aiRouter = express.Router();
+
+aiRouter.options('/', (_req, res) => res.sendStatus(204));
+
+aiRouter.get('/', (_req, res) => {
+  res.status(405).json({ error: 'Method not allowed. Use POST for /api/ai.' });
 });
 
-app.post('/api/ai', async (req, res) => {
+aiRouter.post('/', async (req, res) => {
   if (!OPENAI_KEY) {
     return res.status(501).json({ error: 'OpenAI API key missing. Set OPENAI_API_KEY in the environment.' });
   }
@@ -226,6 +229,10 @@ app.post('/api/ai', async (req, res) => {
     return res.status(500).json({ error: message });
   }
 });
+
+aiRouter.all('*', (_req, res) => res.status(404).json({ error: 'Not found.' }));
+
+app.use('/api/ai', aiRouter);
 
 const describeRoutes = () =>
   app._router?.stack
