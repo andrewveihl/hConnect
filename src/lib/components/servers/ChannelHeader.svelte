@@ -1,18 +1,22 @@
 <script lang="ts">
   interface Props {
     channel?: { id: string; type: 'text' | 'voice'; name: string } | null;
+    thread?: { id: string; name?: string | null } | null;
     channelsVisible?: boolean;
     membersVisible?: boolean;
     onToggleChannels?: (() => void) | null;
     onToggleMembers?: (() => void) | null;
+    onExitThread?: (() => void) | null;
   }
 
   let {
     channel = null,
+    thread = null,
     channelsVisible = false,
     membersVisible = false,
     onToggleChannels = null,
-    onToggleMembers = null
+    onToggleMembers = null,
+    onExitThread = null
   }: Props = $props();
 </script>
 
@@ -39,6 +43,10 @@
           {/if}
         </span>
         <span class="truncate max-w-[160px] sm:max-w-none">{channel.name}</span>
+        {#if thread}
+          <i class="bx bx-chevron-right text-soft" aria-hidden="true"></i>
+          <span class="channel-header__thread-name truncate">{thread.name || 'Thread'}</span>
+        {/if}
       </div>
     {:else}
       <div class="channel-header__title">
@@ -48,6 +56,16 @@
   </div>
 
   <div class="channel-header__right">
+    {#if thread}
+      <button
+        type="button"
+        class="channel-header__thread-exit"
+        onclick={() => onExitThread?.()}
+      >
+        <i class="bx bx-arrow-back" aria-hidden="true"></i>
+        <span>Back to {channel?.name ?? 'channel'}</span>
+      </button>
+    {/if}
     {#if !membersVisible}
       <button
         class="channel-header__toggle md:hidden"
@@ -60,3 +78,30 @@
     {/if}
   </div>
 </header>
+
+<style>
+  .channel-header__thread-name {
+    font-size: 0.9rem;
+    color: var(--text-70);
+    max-width: 160px;
+  }
+
+  .channel-header__thread-exit {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--color-text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.25rem 0.9rem;
+  }
+
+  .channel-header__thread-exit:hover,
+  .channel-header__thread-exit:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 20%, transparent);
+    outline: none;
+  }
+</style>

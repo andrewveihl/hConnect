@@ -6,6 +6,7 @@ export * as invites from './invites';
 export * as messages from './messages';
 export * as notes from './notes';
 export * as servers from './servers';
+export * as threads from './threads';
 export * as users from './users';
 
 export * from './schema';

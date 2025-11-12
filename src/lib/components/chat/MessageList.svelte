@@ -44,7 +44,8 @@
     | (BaseChatMessage & { url: string; type: 'gif' })
     | (BaseChatMessage & { file: { name: string; size?: number; url: string; contentType?: string }; type: 'file' })
     | (BaseChatMessage & { poll: { question: string; options: string[]; votes?: Record<number, number> }; type: 'poll' })
-    | (BaseChatMessage & { form: { title: string; questions: string[] }; type: 'form' });
+    | (BaseChatMessage & { form: { title: string; questions: string[] }; type: 'form' })
+    | (BaseChatMessage & { text?: string; type: 'system' });
 
   interface Props {
     messages?: ChatMessage[];
@@ -52,7 +53,7 @@
     currentUserId?: string | null;
     scrollToBottomSignal?: number;
     pendingUploads?: PendingUploadPreview[];
-    threadStats?: Record<string, { count?: number; lastAt?: number }>;
+    threadStats?: Record<string, { count?: number; lastAt?: number; threadId?: string; status?: string; archived?: boolean }>;
     hideReplyPreview?: boolean;
   }
 
@@ -821,6 +822,53 @@
     align-items: flex-start;
   }
 
+  .message-action-bar {
+    position: absolute;
+    top: -1.8rem;
+    right: 0;
+    display: inline-flex;
+    gap: 0.3rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+
+  .message-action-bar--mine {
+    right: auto;
+    left: 0;
+  }
+
+  .message-action-bar.is-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .message-action {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+    color: var(--text-65);
+    display: grid;
+    place-items: center;
+    font-size: 1rem;
+    transition: border 120ms ease, color 120ms ease, background 120ms ease;
+  }
+
+  .message-action:not(:disabled):hover,
+  .message-action:not(:disabled):focus-visible {
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    outline: none;
+  }
+
+  .message-action:disabled {
+    opacity: 0.2;
+    pointer-events: none;
+  }
+
   .message-body--continued {
     margin-top: 0.04rem;
     gap: 0.12rem;
@@ -961,6 +1009,16 @@
     line-height: 1.5;
     box-shadow: 0 8px 18px rgba(9, 12, 16, 0.22);
     transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .system-message {
+    padding: 0.35rem 0.8rem;
+    border-radius: 0.85rem;
+    background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+    color: var(--text-65);
+    font-size: 0.84rem;
+    display: inline-block;
+    margin-bottom: 0.3rem;
   }
 
   .message-bubble--mine {
@@ -1403,89 +1461,54 @@
     transition: background 120ms ease, transform 120ms ease;
   }
 
-  .reaction-menu__action:hover,
-  .reaction-menu__action:focus-visible {
-    background: var(--color-accent-strong);
-    transform: translateY(-1px);
-    outline: none;
-  }
+.reaction-menu__action:hover,
+.reaction-menu__action:focus-visible {
+  background: var(--color-accent-strong);
+  transform: translateY(-1px);
+  outline: none;
+}
 
-  .message-thread-meta {
-    margin-top: 0.4rem;
-    display: flex;
-    justify-content: flex-start;
-  }
+.thread-inline-chip {
+  margin-top: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  background: color-mix(in srgb, var(--color-panel-muted) 92%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-65);
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
 
-  .thread-preview-card {
-    width: 100%;
-    border-radius: 1rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    padding: 0.55rem 0.8rem;
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    text-align: left;
-    transition: border 140ms ease, transform 140ms ease;
-  }
+.thread-inline-chip i {
+  font-size: 1rem;
+  color: var(--color-accent);
+}
 
-  .thread-preview-card:hover,
-  .thread-preview-card:focus-visible {
-    border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
-    transform: translateY(-1px);
-    outline: none;
-  }
+.thread-inline-chip__count {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
 
-  .thread-preview__icon {
-    width: 2.4rem;
-    height: 2.4rem;
-    border-radius: 0.9rem;
-    background: color-mix(in srgb, var(--color-panel) 60%, transparent);
-    display: grid;
-    place-items: center;
-    color: var(--color-accent);
-  }
+.thread-inline-chip__cta {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-accent);
+}
 
-  .thread-preview__body {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
+.thread-inline-chip:hover,
+.thread-inline-chip:focus-visible {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  color: var(--color-text-primary);
+  transform: translateY(-1px);
+  outline: none;
+}
 
-  .thread-preview__title {
-    font-weight: 600;
-    font-size: 0.88rem;
-    color: var(--color-text-primary);
-  }
-
-  .thread-preview__subtitle {
-    font-size: 0.78rem;
-    color: var(--text-60);
-  }
-
-  .thread-preview__chevron {
-    color: var(--text-50);
-  }
-
-  .thread-start-link {
-    border: none;
-    background: transparent;
-    color: var(--text-55);
-    font-size: 0.82rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-weight: 600;
-    padding: 0.25rem 0.3rem;
-  }
-
-  .thread-start-link:hover,
-  .thread-start-link:focus-visible {
-    color: var(--color-text-primary);
-    outline: none;
-  }
 </style>
 
 <div
@@ -1522,6 +1545,7 @@
       )}
       {@const showTimestampMobile = !hasHoverSupport && reactionMenuFor === m.id}
       {@const replyRef = (m as any).replyTo ?? null}
+      {@const threadMeta = threadStats?.[m.id]}
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
@@ -1555,44 +1579,6 @@
                   <span>{initialsFor(nameFor(m))}</span>
                 {/if}
               </div>
-              {@const threadInfo = threadStats[m.id] ?? null}
-              <div class="message-thread-meta">
-                {#if threadInfo?.count}
-                  <button
-                    type="button"
-                    class="thread-preview-card"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      event.preventDefault();
-                      openThread(m);
-                    }}
-                  >
-                    <div class="thread-preview__icon">
-                      <i class="bx bx-git-branch" aria-hidden="true"></i>
-                    </div>
-                    <div class="thread-preview__body">
-                      <div class="thread-preview__title">
-                        {threadInfo.count} {threadInfo.count === 1 ? 'reply' : 'replies'} in thread
-                      </div>
-                      <div class="thread-preview__subtitle">Open thread to catch up</div>
-                    </div>
-                    <i class="bx bx-chevron-right thread-preview__chevron" aria-hidden="true"></i>
-                  </button>
-                {:else}
-                  <button
-                    type="button"
-                    class="thread-start-link"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      event.preventDefault();
-                      openThread(m);
-                    }}
-                  >
-                    <i class="bx bx-git-branch" aria-hidden="true"></i>
-                    <span>Start thread</span>
-                  </button>
-                {/if}
-              </div>
             {/if}
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
@@ -1609,17 +1595,49 @@
                 }}
               >
                 {#if currentUserId}
-                  <button
-                    type="button"
-                    class={`reaction-add reaction-add-floating ${mine ? 'reaction-add-floating--mine' : 'reaction-add-floating--other'} ${showAdd ? 'is-visible' : ''}`}
-                    disabled={!showAdd}
-                    aria-hidden={!showAdd}
-                    onclick={(event) => onAddReactionClick(event, m.id)}
-                    onpointerdown={(event) => { event.stopPropagation(); clearLongPressTimer(); }}
-                    aria-label="Add reaction"
-                  >
-                    +
-                  </button>
+                  <div class={`message-action-bar ${mine ? 'message-action-bar--mine' : ''} ${showAdd ? 'is-visible' : ''}`}>
+                    <button
+                      type="button"
+                      class="message-action"
+                      aria-label="Reply"
+                      title="Reply"
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        event.preventDefault();
+                        handleReplyClick(event, m);
+                      }}
+                    >
+                      <i class="bx bx-reply" aria-hidden="true"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="message-action"
+                      aria-label="Start thread"
+                      title="Start thread"
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        event.preventDefault();
+                        openThread(m);
+                      }}
+                    >
+                      <i class="bx bx-message-square-add" aria-hidden="true"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="message-action"
+                      aria-label="Add reaction"
+                      title="Add reaction"
+                      disabled={!showAdd}
+                      aria-hidden={!showAdd}
+                      onclick={(event) => onAddReactionClick(event, m.id)}
+                      onpointerdown={(event) => {
+                        event.stopPropagation();
+                        clearLongPressTimer();
+                      }}
+                    >
+                      <i class="bx bx-smile" aria-hidden="true"></i>
+                    </button>
+                  </div>
                 {/if}
                 {#if replyRef && !hideReplyPreview}
                   {@const replyChain = flattenReplyChain(replyRef)}
@@ -1637,7 +1655,11 @@
                     {/each}
                   </div>
                 {/if}
-                {#if !m.type || m.type === 'text'}
+                {#if m.type === 'system'}
+                  <div class="system-message">
+                    <span>{(m as any).text ?? ''}</span>
+                  </div>
+                {:else if !m.type || m.type === 'text'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                       {#if isMentionSegment(segment)}
@@ -1748,6 +1770,27 @@
                       </button>
                     </div>
                   </div>
+                {/if}
+                {#if threadMeta}
+                  <button
+                    type="button"
+                    class="thread-inline-chip"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      openThread(m);
+                    }}
+                  >
+                    <i class="bx bx-message-rounded-dots" aria-hidden="true"></i>
+                    <span class="thread-inline-chip__count">
+                      {#if threadMeta.count}
+                        {threadMeta.count} {threadMeta.count === 1 ? 'reply' : 'replies'}
+                      {:else}
+                        View thread
+                      {/if}
+                    </span>
+                    <span class="thread-inline-chip__cta">Open</span>
+                  </button>
                 {/if}
               </div>
               {#if (m as any).createdAt && !sameMinuteAsNext}
@@ -1870,13 +1913,6 @@
     </div>
   </div>
 {/if}
-
-
-
-
-
-
-
 
 
 

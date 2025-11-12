@@ -44,6 +44,46 @@ service cloud.firestore {
         || canConnectVoice(serverId);
     }
 
+    match /notifications/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+      match /items/{itemId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    function threadDocExists(serverId, channelId, threadId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId));
+    }
+
+    function threadDoc(serverId, channelId, threadId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId));
+    }
+
+    function threadHasMember(serverId, channelId, threadId, uid) {
+      return threadDocExists(serverId, channelId, threadId)
+        && threadDoc(serverId, channelId, threadId).data.memberUids is list
+        && uid in threadDoc(serverId, channelId, threadId).data.memberUids;
+    }
+
+    function hasThreadPermission(serverId, channelId, threadId, perm) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId)/permissions/$(request.auth.uid))
+        && get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId)/permissions/$(request.auth.uid)).data[perm] == true;
+    }
+
+    function canReadThread(serverId, channelId, threadId) {
+      return canViewChannel(serverId)
+        || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
+        || hasThreadPermission(serverId, channelId, threadId, "canRead");
+    }
+
+    function canPostThread(serverId, channelId, threadId) {
+      return canSendInChannel(serverId)
+        || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
+        || hasThreadPermission(serverId, channelId, threadId, "canPost");
+    }
+
     /* ---------------- DM helpers (legacy tolerant) ---------------- */
 
     function docHasParticipant(docData, uid) {
@@ -133,7 +173,7 @@ service cloud.firestore {
       }
 
       match /presence/{presenceId} {
-        allow read: if isSignedIn() && request.auth.uid == uid;
+        allow read: if isSignedIn();
         allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
       }
 
@@ -142,6 +182,10 @@ service cloud.firestore {
       }
 
       match /notes/{noteId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /threadMembership/{threadId} {
         allow read, write: if isSignedIn() && request.auth.uid == uid;
       }
     }
@@ -189,6 +233,27 @@ service cloud.firestore {
           allow read: if canViewChannel(serverId);
           allow create: if isSignedIn() && request.auth.uid == uid;
           allow update, delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
+        }
+
+        match /threads/{threadId} {
+          allow read: if canReadThread(serverId, channelId, threadId);
+          allow create: if canSendInChannel(serverId)
+            && isSignedIn()
+            && request.resource.data.createdBy == request.auth.uid;
+          allow update: if canPostThread(serverId, channelId, threadId) || isServerAdmin(serverId);
+          allow delete: if isServerAdmin(serverId);
+
+          match /messages/{messageId} {
+            allow read: if canReadThread(serverId, channelId, threadId);
+            allow create: if canPostThread(serverId, channelId, threadId);
+            allow update, delete: if false;
+          }
+
+          match /permissions/{uid} {
+            allow read: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId));
+            allow create, update: if canPostThread(serverId, channelId, threadId) || isServerAdmin(serverId);
+            allow delete: if isServerAdmin(serverId);
+          }
         }
 
         match /calls/{callId} {
