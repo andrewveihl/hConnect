@@ -19,7 +19,7 @@
     activeThreadId?: string | null;
   }
 
-  type PresenceState = 'online' | 'idle' | 'offline';
+  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
   type PresenceDoc = {
     state?: string | null;
@@ -35,12 +35,14 @@
 
   const presenceLabels: Record<PresenceState, string> = {
     online: 'Online',
+    busy: 'Busy',
     idle: 'Idle',
     offline: 'Offline'
   };
 
   const presenceClassMap: Record<PresenceState, string> = {
     online: 'presence-dot--online',
+    busy: 'presence-dot--busy',
     idle: 'presence-dot--idle',
     offline: 'presence-dot--offline'
   };
@@ -183,7 +185,10 @@
     return undefined;
   }
 
-  const isRecent = (value: unknown, ms = 5 * 60 * 1000) => {
+  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+  const IDLE_WINDOW_MS = 60 * 60 * 1000;
+
+  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
     if (!value) return false;
     try {
       if (typeof value === 'number') {
@@ -204,6 +209,49 @@
       return false;
     }
     return false;
+  };
+
+  const toMillis = (value: unknown): number | null => {
+    try {
+      if (!value) return null;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      if (value instanceof Date) return value.getTime();
+      if (typeof (value as any)?.toMillis === 'function') {
+        const ts = (value as any).toMillis();
+        return Number.isFinite(ts) ? ts : null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const normalizePresence = (raw?: string | null): PresenceState | null => {
+    if (!raw) return null;
+    const normalized = raw.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
+    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
+    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
+    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
+    return null;
+  };
+
+  const manualStateFrom = (source: any): PresenceState | null => {
+    if (!source || typeof source !== 'object') return null;
+    const raw =
+      pickString(source.manualState) ??
+      pickString((source.manual as any)?.state);
+    if (!raw) return null;
+    const expiresAt =
+      toMillis(source.manualExpiresAt) ??
+      toMillis((source.manual as any)?.expiresAt);
+    if (expiresAt && Date.now() > expiresAt) return null;
+    return normalizePresence(raw);
   };
 
 
@@ -438,6 +486,11 @@
     ];
 
     for (const source of sources) {
+      const manual = manualStateFrom(source);
+      if (manual) return manual;
+    }
+
+    for (const source of sources) {
       const bool = booleanPresenceFrom(source);
       if (bool !== null) {
         return bool ? 'online' : 'offline';
@@ -447,17 +500,15 @@
     for (const source of sources) {
       const raw = statusFromSource(source);
       if (!raw) continue;
-      const normalized = raw.toLowerCase();
-      if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
-      if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
-      if (['dnd', 'busy', 'offline', 'invisible', 'do not disturb', 'off'].includes(normalized)) return 'offline';
+      const normalized = normalizePresence(raw);
+      if (normalized) return normalized;
     }
 
     for (const source of sources) {
       const recent = recentActivityFrom(source);
       if (!recent) continue;
-      if (isRecent(recent, 5 * 60 * 1000)) return 'online';
-      if (isRecent(recent, 30 * 60 * 1000)) return 'idle';
+      if (isRecent(recent, ONLINE_WINDOW_MS)) return 'online';
+      if (isRecent(recent, IDLE_WINDOW_MS)) return 'idle';
       return 'offline';
     }
 

@@ -1001,10 +1001,16 @@ run(() => {
       latestInboundMessage = null;
       return;
     }
-    const fallback = [...messages]
-      .reverse()
-      .find((msg) => msg?.uid && me?.uid && msg.uid !== me.uid);
-    latestInboundMessage = fallback ?? null;
+    const latestAuthored = [...messages].reverse().find((msg) => msg?.uid);
+    if (!latestAuthored) {
+      latestInboundMessage = null;
+      return;
+    }
+    if (me?.uid && latestAuthored.uid === me.uid) {
+      latestInboundMessage = null;
+      return;
+    }
+    latestInboundMessage = latestAuthored;
   });
 
   run(() => {

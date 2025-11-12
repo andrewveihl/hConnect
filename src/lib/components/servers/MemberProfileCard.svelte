@@ -7,11 +7,13 @@
     color?: string | null;
   };
 
+  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
+
   type MemberRow = {
     uid: string;
     label: string;
     avatar: string | null;
-    status: 'online' | 'idle' | 'offline';
+    status: PresenceState;
     baseRole: 'owner' | 'admin' | 'member' | null;
     roles: RoleDoc[];
   };
@@ -24,8 +26,9 @@
     about?: string | null;
   };
 
-  const presenceLabels: Record<'online' | 'idle' | 'offline', string> = {
+  const presenceLabels: Record<PresenceState, string> = {
     online: 'Online',
+    busy: 'Busy',
     idle: 'Idle',
     offline: 'Offline'
   };

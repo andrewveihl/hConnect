@@ -24,8 +24,6 @@
     query,
     doc,
     type Unsubscribe,
-    deleteDoc,
-    updateDoc,
     setDoc,
     writeBatch
   } from 'firebase/firestore';
@@ -74,6 +72,10 @@
   let workingOrder: string[] = $state([]);
   let savingOrder = $state(false);
   let orderError: string | null = $state(null);
+  let draggingChannelId: string | null = $state(null);
+  let draggingChannelType: Chan['type'] | null = $state(null);
+  let dragOverChannelId: string | null = $state(null);
+  let dragOverAfter = $state(false);
 
   let voicePresence: Record<string, VoiceParticipant[]> = $state({});
   const voiceUnsubs = new Map<string, Unsubscribe>();
@@ -380,6 +382,102 @@
     return !!findSibling(id, type, delta);
   }
 
+  function resetDragState() {
+    draggingChannelId = null;
+    draggingChannelType = null;
+    dragOverChannelId = null;
+    dragOverAfter = false;
+  }
+
+  function startChannelDrag(event: DragEvent, id: string, type: Chan['type']) {
+    if (reorderMode === 'none' || savingOrder) {
+      event.preventDefault();
+      return;
+    }
+    draggingChannelId = id;
+    draggingChannelType = type;
+    dragOverChannelId = null;
+    dragOverAfter = false;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', id);
+    }
+  }
+
+  function handleChannelDragOver(event: DragEvent, targetId: string, type: Chan['type']) {
+    if (reorderMode === 'none' || !draggingChannelId || savingOrder) return;
+    if (draggingChannelId === targetId) {
+      event.preventDefault();
+      return;
+    }
+    if (draggingChannelType && draggingChannelType !== type) return;
+    const sourceChan = channelById(draggingChannelId);
+    const targetChan = channelById(targetId);
+    if (!sourceChan || !targetChan) return;
+    if (sourceChan.type !== type || targetChan.type !== type) return;
+    if (reorderMode !== 'default' && (!canSeeChannel(sourceChan) || !canSeeChannel(targetChan))) return;
+
+    const element = event.currentTarget as HTMLElement;
+    const rect = element.getBoundingClientRect();
+    const after = event.clientY - rect.top > rect.height / 2;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+    dragOverChannelId = targetId;
+    dragOverAfter = after;
+  }
+
+  function reorderChannelsByDrag(sourceId: string, targetId: string, type: Chan['type'], placeAfter: boolean) {
+    if (reorderMode === 'none' || !workingOrder.length) return;
+    if (sourceId === targetId) return;
+    const scoped = workingOrder
+      .map((cid, index) => ({ cid, index }))
+      .filter(({ cid }) => {
+        const chan = channelById(cid);
+        if (!chan || chan.type !== type) return false;
+        if (reorderMode === 'default') return true;
+        return canSeeChannel(chan);
+      });
+
+    const sourceEntry = scoped.find((entry) => entry.cid === sourceId);
+    const targetEntry = scoped.find((entry) => entry.cid === targetId);
+    if (!sourceEntry || !targetEntry) return;
+
+    const result = [...workingOrder];
+    result.splice(sourceEntry.index, 1);
+
+    let targetIndex = targetEntry.index;
+    if (sourceEntry.index < targetEntry.index) {
+      targetIndex -= 1;
+    }
+    let insertIndex = placeAfter ? targetIndex + 1 : targetIndex;
+    insertIndex = Math.max(0, Math.min(result.length, insertIndex));
+    result.splice(insertIndex, 0, sourceEntry.cid);
+    workingOrder = result;
+  }
+
+  function handleChannelDrop(event: DragEvent, targetId: string, type: Chan['type']) {
+    if (reorderMode === 'none' || !draggingChannelId || savingOrder) {
+      resetDragState();
+      return;
+    }
+    if (draggingChannelType && draggingChannelType !== type) {
+      resetDragState();
+      return;
+    }
+    event.preventDefault();
+    const element = event.currentTarget as HTMLElement;
+    const rect = element.getBoundingClientRect();
+    const after = event.clientY - rect.top > rect.height / 2;
+    reorderChannelsByDrag(draggingChannelId, targetId, type, after);
+    resetDragState();
+  }
+
+  function endChannelDrag() {
+    resetDragState();
+  }
+
 
   function watchServerMeta(server: string) {
     unsubServerMeta?.();
@@ -582,6 +680,7 @@
 
   function beginReorder() {
     orderError = null;
+    resetDragState();
     if (canManageChannels) {
       reorderMode = 'default';
       workingOrder = defaultOrderIds();
@@ -595,6 +694,7 @@
     reorderMode = 'none';
     workingOrder = [];
     orderError = null;
+    resetDragState();
   }
 
   async function saveReorder() {
@@ -633,6 +733,7 @@
       console.error('Failed to save channel order', error);
       orderError = 'Could not save channel order. Try again.';
     } finally {
+      resetDragState();
       savingOrder = false;
     }
   }
@@ -647,39 +748,6 @@
   let prevUnread: Record<string, number> = $state({});
   let unreadReady = $state(false);
 
-  async function deleteChannel(id: string, name: string) {
-    if (!computedServerId || !canManageChannels) return;
-    const ok = confirm(`Delete channel #${name}? This cannot be undone.`);
-    if (!ok) return;
-
-    const db = getDb();
-    try {
-      await deleteDoc(doc(db, 'servers', computedServerId, 'channels', id));
-      if (activeChannelId === id) {
-        const next = channels.find((c) => c.id !== id);
-        if (next) pick(next.id);
-      }
-    } catch (err) {
-      alert('Failed to delete channel.');
-      console.error(err);
-    }
-  }
-
-  async function renameChannel(id: string, oldName: string) {
-    if (!computedServerId || !canManageChannels) return;
-    const name = prompt('Rename channel to:', oldName);
-    if (!name || name.trim() === oldName) return;
-
-    const db = getDb();
-    try {
-      await updateDoc(doc(db, 'servers', computedServerId, 'channels', id), {
-        name: name.trim()
-      });
-    } catch (err) {
-      alert('Failed to rename channel.');
-      console.error(err);
-    }
-  }
   let computedServerId =
     $derived(serverId ??
     $page.params.serverID ??
@@ -901,13 +969,17 @@ run(() => {
         <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
       </div>
     {/if}
-    <div>
-      <div class="channel-section-header">Text channels</div>
-      <div class="space-y-1">
+    <div class="space-y-1">
         {#each visibleChannels.filter((c) => c.type === 'text') as c (c.id)}
-          <div
-            class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''}`}
-          >
+        <div
+          class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
+          role="listitem"
+          draggable={reorderMode !== 'none' && !savingOrder}
+          ondragstart={(event) => startChannelDrag(event, c.id, 'text')}
+          ondragend={endChannelDrag}
+          ondragover={(event) => handleChannelDragOver(event, c.id, 'text')}
+          ondrop={(event) => handleChannelDrop(event, c.id, 'text')}
+        >
             {#if reorderMode !== 'none'}
               <div class="channel-reorder-controls">
                 <button
@@ -956,42 +1028,24 @@ run(() => {
                 {/if}
               </span>
             </button>
-
-            {#if canManageChannels && reorderMode === 'none'}
-              <div class="channel-actions shrink-0">
-                <button
-                  class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10"
-                  title="Rename"
-                  aria-label="Rename channel"
-                  onclick={() => renameChannel(c.id, c.name)}
-                >
-                  <i class="bx bx-edit text-sm"></i>
-                </button>
-                <button
-                  class="h-7 w-7 shrink-0 grid place-items-center rounded hover:bg-white/10 text-red-400"
-                  title="Delete"
-                  aria-label="Delete channel"
-                  onclick={() => deleteChannel(c.id, c.name)}
-                >
-                  <i class="bx bx-trash text-sm"></i>
-                </button>
-              </div>
-            {/if}
           </div>
         {/each}
         {#if !visibleChannels.some((c) => c.type === 'text')}
           <div class="text-xs text-soft px-3 py-2">No accessible text channels.</div>
         {/if}
-      </div>
     </div>
 
-    <div>
-      <div class="channel-section-header">Voice channels</div>
-      <div class="space-y-1">
+    <div class="space-y-1">
         {#each visibleChannels.filter((c) => c.type === 'voice') as c (c.id)}
-          <div
-            class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''}`}
-          >
+        <div
+          class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
+          role="listitem"
+          draggable={reorderMode !== 'none' && !savingOrder}
+          ondragstart={(event) => startChannelDrag(event, c.id, 'voice')}
+          ondragend={endChannelDrag}
+          ondragover={(event) => handleChannelDragOver(event, c.id, 'voice')}
+          ondrop={(event) => handleChannelDrop(event, c.id, 'voice')}
+        >
             {#if reorderMode !== 'none'}
               <div class="channel-reorder-controls">
                 <button
@@ -1037,27 +1091,6 @@ run(() => {
                 {/if}
               </span>
             </button>
-
-            {#if canManageChannels && reorderMode === 'none'}
-              <div class="channel-actions shrink-0">
-                <button
-                  class="h-7 w-7 grid place-items-center rounded hover:bg-white/10"
-                  title="Rename"
-                  aria-label="Rename channel"
-                  onclick={() => renameChannel(c.id, c.name)}
-                >
-                  <i class="bx bx-edit text-sm"></i>
-                </button>
-                <button
-                  class="h-7 w-7 grid place-items-center rounded hover:bg-white/10 text-red-400"
-                  title="Delete"
-                  aria-label="Delete channel"
-                  onclick={() => deleteChannel(c.id, c.name)}
-                >
-                  <i class="bx bx-trash text-sm"></i>
-                </button>
-              </div>
-            {/if}
           </div>
 
           {#if (voicePresence[c.id]?.length ?? 0) > 0}
@@ -1099,10 +1132,9 @@ run(() => {
             </div>
           {/if}
         {/each}
-        {#if !visibleChannels.some((c) => c.type === 'voice')}
-          <div class="text-xs text-soft px-3 py-2">No accessible voice channels.</div>
-        {/if}
-      </div>
+      {#if !visibleChannels.some((c) => c.type === 'voice')}
+        <div class="text-xs text-soft px-3 py-2">No accessible voice channels.</div>
+      {/if}
     </div>
 
     <ChannelCreateModal
@@ -1115,6 +1147,44 @@ run(() => {
 </aside>
 
 <style>
+  .channel-row {
+    position: relative;
+  }
+
+  .channel-row[draggable='true'] {
+    cursor: grab;
+  }
+
+  .channel-row[draggable='true']:active {
+    cursor: grabbing;
+  }
+
+  .channel-row--dragging {
+    opacity: 0.45;
+  }
+
+  .channel-row--drop-before::before,
+  .channel-row--drop-after::after {
+    content: '';
+    position: absolute;
+    left: 0.75rem;
+    right: 0.75rem;
+    height: 2px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 85%, transparent);
+    pointer-events: none;
+  }
+
+  .channel-row--drop-before::before {
+    top: 0;
+    transform: translateY(-50%);
+  }
+
+  .channel-row--drop-after::after {
+    bottom: 0;
+    transform: translateY(50%);
+  }
+
   .channel-row--mention .channel-row__button {
     border-left: 3px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
     padding-left: 0.9rem;

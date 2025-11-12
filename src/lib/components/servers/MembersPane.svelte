@@ -44,7 +44,7 @@
     position?: number;
   };
 
-  type PresenceState = 'online' | 'idle' | 'offline';
+  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
   type MemberRow = {
     uid: string;
@@ -99,6 +99,7 @@
   let visibleRows: MemberRow[] = $state([]);
   let visibleGroupMap: Record<PresenceState, MemberRow[]> = $state({
     online: [],
+    busy: [],
     idle: [],
     offline: []
   });
@@ -116,9 +117,10 @@
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
   let currentServer: string | null = $state(null);
-  const statusOrder: PresenceState[] = ['online', 'idle', 'offline'];
+  const statusOrder: PresenceState[] = ['online', 'busy', 'idle', 'offline'];
   const statusLabels: Record<PresenceState, string> = {
     online: 'Online',
+    busy: 'Busy',
     idle: 'Idle',
     offline: 'Offline'
   };
@@ -173,7 +175,7 @@
         acc[status] = visibleRows.filter((row) => row.status === status);
         return acc;
       },
-      { online: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
+      { online: [], busy: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
     );
   });
 
@@ -206,7 +208,10 @@
     return resolveProfilePhotoURL(profile, fallback);
   };
 
-  const isRecent = (value: unknown, ms = 5 * 60 * 1000) => {
+  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+  const IDLE_WINDOW_MS = 60 * 60 * 1000;
+
+  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
     if (!value) return false;
     try {
       if (typeof value === 'number') {
@@ -229,10 +234,64 @@
     return false;
   };
 
+  const toMillis = (value: unknown): number | null => {
+    try {
+      if (!value) return null;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      if (value instanceof Date) return value.getTime();
+      if (typeof value === 'object' && value !== null) {
+        const maybeTs = value as { toMillis?: () => number };
+        if (typeof maybeTs.toMillis === 'function') {
+          const ts = maybeTs.toMillis();
+          return Number.isFinite(ts) ? ts : null;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const normalizePresence = (raw?: string | null): PresenceState | null => {
+    if (!raw) return null;
+    const normalized = raw.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
+    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
+    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
+    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
+    return null;
+  };
+
+  const manualPresenceFrom = (...sources: any[]): PresenceState | null => {
+    for (const source of sources) {
+      if (!source) continue;
+      const raw =
+        pickString(source.manualState) ??
+        pickString((source.manual as any)?.state);
+      if (!raw) continue;
+      const normalized = normalizePresence(raw);
+      if (!normalized) continue;
+      const expiresAt =
+        toMillis(source.manualExpiresAt) ??
+        toMillis((source.manual as any)?.expiresAt);
+      if (expiresAt && Date.now() > expiresAt) continue;
+      return normalized;
+    }
+    return null;
+  };
+
   function presenceState(uid: string): PresenceState {
     const member = members[uid] as any;
     const profile = profiles[uid] as any;
     const presence = presenceDocs[uid] as any;
+
+    const manual = manualPresenceFrom(presence, profile, member);
+    if (manual) return manual;
 
     const booleanState =
       typeof member?.online === 'boolean'
@@ -254,9 +313,12 @@
       : typeof presence?.active === 'boolean'
         ? presence.active
         : null;
-    if (booleanState !== null) {
-      return booleanState ? 'online' : 'offline';
+
+    if (booleanState === true) {
+      return 'online';
     }
+
+    let offlineHint = booleanState === false;
 
     const rawStatus =
       pickString(member?.status) ??
@@ -272,11 +334,11 @@
       pickString(presence?.status);
 
     if (rawStatus) {
-      const normalized = rawStatus.toLowerCase();
-      if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
-      if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
-      if (['dnd', 'busy', 'offline', 'invisible', 'do not disturb', 'off'].includes(normalized))
-        return 'offline';
+      const normalized = normalizePresence(rawStatus);
+      if (normalized === 'busy') return 'busy';
+      if (normalized === 'online') return 'online';
+      if (normalized === 'idle') return 'idle';
+      if (normalized === 'offline') offlineHint = true;
     }
 
     const lastActive =
@@ -292,18 +354,23 @@
       (presence?.timestamp as any);
 
     if (lastActive) {
-      if (isRecent(lastActive, 5 * 60 * 1000)) return 'online';
-      if (isRecent(lastActive, 30 * 60 * 1000)) return 'idle';
+      const seenOnline = isRecent(lastActive, ONLINE_WINDOW_MS);
+      const seenIdle = isRecent(lastActive, IDLE_WINDOW_MS);
+
+      if (!offlineHint && seenOnline) return 'online';
+      if (seenIdle) return 'idle';
       return 'offline';
     }
 
-    return 'offline';
+    return offlineHint ? 'idle' : 'offline';
   }
 
   const statusClass = (state: PresenceState) => {
     switch (state) {
       case 'online':
         return 'presence-dot--online';
+      case 'busy':
+        return 'presence-dot--busy';
       case 'idle':
         return 'presence-dot--idle';
       default:
@@ -634,8 +701,8 @@
       </div>
     </div>
   {/if}
-  <div
-    class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
+    <div
+      class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
     bind:this={memberScrollContainer}
   >
     {#if rows.length}

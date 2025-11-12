@@ -17,6 +17,9 @@
 
   type MentionSegment = { type: 'mention'; value: string; data?: MentionView };
   type TextSegment = { type: 'text'; value: string };
+  type LinkChunk =
+    | { type: 'text'; value: string }
+    | { type: 'link'; value: string; href: string };
   type ReplyPreview = {
     messageId: string;
     authorId?: string | null;
@@ -187,6 +190,40 @@
   ): segment is MentionSegment {
     return segment.type === 'mention';
   }
+
+  function linkifyText(value: string): LinkChunk[] {
+    if (!value) return [{ type: 'text', value: '' }];
+    const chunks: LinkChunk[] = [];
+    let lastIndex = 0;
+    URL_REGEX.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = URL_REGEX.exec(value))) {
+      const start = match.index;
+      if (start > lastIndex) {
+        chunks.push({ type: 'text', value: value.slice(lastIndex, start) });
+      }
+      let raw = match[0];
+      let trailing = '';
+      while (raw.length && /[)\],.!?:;]+$/.test(raw)) {
+        trailing = raw.slice(-1) + trailing;
+        raw = raw.slice(0, -1);
+      }
+      if (raw) {
+        const href = raw.startsWith('http') ? raw : `https://${raw}`;
+        chunks.push({ type: 'link', value: raw, href });
+      }
+      if (trailing) {
+        chunks.push({ type: 'text', value: trailing });
+      }
+      lastIndex = URL_REGEX.lastIndex;
+    }
+    if (lastIndex < value.length) {
+      chunks.push({ type: 'text', value: value.slice(lastIndex) });
+    }
+    return chunks;
+  }
+
+  const URL_REGEX = /((https?:\/\/|www\.)[^\s<]+)/gi;
 
   const PREVIEW_LIMIT = 140;
 
@@ -1000,6 +1037,20 @@
     border-color: currentColor;
   }
 
+  .chat-link {
+    color: var(--text-70);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    word-break: break-word;
+  }
+
+  .chat-link:hover,
+  .chat-link:focus-visible {
+    color: var(--color-text-primary);
+    outline: none;
+  }
+
   .chat-gif {
     display: block;
     max-width: min(440px, 100%);
@@ -1600,7 +1651,20 @@
                           {label}
                         </span>
                       {:else}
-                        {segment.value}
+                        {#each linkifyText(segment.value) as chunk, chunkIdx (chunkIdx)}
+                          {#if chunk.type === 'link'}
+                            <a
+                              class="chat-link"
+                              href={chunk.href}
+                              target="_blank"
+                              rel="noreferrer noopener nofollow"
+                            >
+                              {chunk.value}
+                            </a>
+                          {:else}
+                            {chunk.value}
+                          {/if}
+                        {/each}
                       {/if}
                     {/each}
                   </div>
@@ -1806,12 +1870,6 @@
     </div>
   </div>
 {/if}
-
-
-
-
-
-
 
 
 
