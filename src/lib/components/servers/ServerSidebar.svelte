@@ -28,13 +28,25 @@
     writeBatch
   } from 'firebase/firestore';
 
+  import type { ChannelThread } from '$lib/firestore/threads';
+
   interface Props {
     serverId: string | undefined;
     activeChannelId?: string | null;
     onPickChannel?: (id: string) => void;
+    threads?: Array<ChannelThread & { unread?: boolean }>;
+    activeThreadId?: string | null;
+    onPickThread?: (thread: { id: string; parentChannelId: string }) => void;
   }
 
-  let { serverId, activeChannelId = null, onPickChannel = () => {} }: Props = $props();
+  let {
+    serverId,
+    activeChannelId = null,
+    onPickChannel = () => {},
+    threads = [],
+    activeThreadId = null,
+    onPickThread = () => {}
+  }: Props = $props();
   const dispatch = createEventDispatcher<{ pick: string }>();
 
 
@@ -1090,11 +1102,45 @@ run(() => {
                   <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
                 {/if}
               </span>
-            </button>
-          </div>
+        </button>
+      </div>
 
-          {#if (voicePresence[c.id]?.length ?? 0) > 0}
-            <div class="channel-voice-presence">
+      {@const channelThreadList = (threads ?? []).filter((thread) => thread.parentChannelId === c.id && thread.status !== 'archived')}
+      {#if channelThreadList.length}
+        <ul class="thread-list">
+          {#each channelThreadList as thread (thread.id)}
+            <li>
+              <button
+                type="button"
+                class={`thread-row ${thread.id === activeThreadId ? 'is-active' : ''}`}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onPickThread({
+                    id: thread.id,
+                    parentChannelId: thread.parentChannelId ?? c.id
+                  });
+                }}
+              >
+                <div class="thread-row__info">
+                  <i class="bx bx-message-square-dots" aria-hidden="true"></i>
+                  <span class="thread-row__name">{thread.name || 'Thread'}</span>
+                </div>
+                <div class="thread-row__meta">
+                  {#if thread.unread}
+                    <span class="thread-row__dot" aria-hidden="true"></span>
+                  {/if}
+                  {#if thread.messageCount}
+                    <span class="thread-row__count">{thread.messageCount}</span>
+                  {/if}
+                </div>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      {#if (voicePresence[c.id]?.length ?? 0) > 0}
+        <div class="channel-voice-presence">
               <div class="flex flex-wrap items-center gap-2">
                 <div class="flex items-center -space-x-2">
                   {#each voicePresence[c.id].slice(0, 4) as member (member.uid)}
@@ -1205,6 +1251,68 @@ run(() => {
     color: var(--color-accent);
     font-size: 0.68rem;
     font-weight: 700;
+  }
+
+  .thread-list {
+    list-style: none;
+    margin: 0.2rem 0 0.35rem 2rem;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .thread-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    border-radius: 0.6rem;
+    border: 1px solid transparent;
+    padding: 0.35rem 0.45rem;
+    color: var(--text-70);
+    font-size: 0.8rem;
+  }
+
+  .thread-row:hover,
+  .thread-row.is-active {
+    border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .thread-row__info {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .thread-row__info i {
+    font-size: 1rem;
+    opacity: 0.65;
+  }
+
+  .thread-row__meta {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .thread-row__dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 999px;
+    background: var(--color-accent);
+    display: inline-block;
+  }
+
+  .thread-row__count {
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    color: var(--color-accent);
   }
 
 </style>

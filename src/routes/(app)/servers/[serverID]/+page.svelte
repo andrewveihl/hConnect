@@ -9,21 +9,31 @@
 
   import LeftPane from '$lib/components/app/LeftPane.svelte';
   import ServerSidebar from '$lib/components/servers/ServerSidebar.svelte';
-  import ChannelHeader from '$lib/components/servers/ChannelHeader.svelte';
-  import MembersPane from '$lib/components/servers/MembersPane.svelte';
+import ChannelHeader from '$lib/components/servers/ChannelHeader.svelte';
+import MembersPane from '$lib/components/servers/MembersPane.svelte';
+import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
-  import ThreadDrawer from '$lib/components/chat/ThreadDrawer.svelte';
+  import ThreadPane from '$lib/components/chat/ThreadPane.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
   import VoiceLobby from '$lib/components/voice/VoiceLobby.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
 
   import { db } from '$lib/firestore';
-  import { collection, doc, onSnapshot, orderBy, query, getDocs, endBefore, limitToLast, type Unsubscribe } from 'firebase/firestore';
+  import { collection, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+  import {
+    createChannelThread,
+    sendThreadMessage,
+    streamChannelThreads,
+    streamThreadMessages,
+    markThreadRead as markThreadReadThread,
+    type ChannelThread,
+    type ThreadMessage
+  } from '$lib/firestore/threads';
 import { markChannelRead } from '$lib/firebase/unread';
 import { uploadChannelFile } from '$lib/firebase/storage';
 import { looksLikeImage } from '$lib/utils/fileType';
@@ -59,18 +69,31 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
     color?: string | null;
     kind?: 'member' | 'role';
   };
+  type ThreadPreviewMeta = {
+    threadId: string;
+    count: number;
+    lastAt?: number;
+    status: ChannelThread['status'];
+    name?: string;
+    unread?: boolean;
+    archived?: boolean;
+  };
 
 let channels: Channel[] = $state([]);
 let activeChannel: Channel | null = $state(null);
 let requestedChannelId: string | null = $state(null);
 let messages: any[] = $state([]);
-let threadStats: Record<string, { count: number; lastAt: number }> = $state({});
+let channelThreads: ChannelThread[] = $state([]);
+let threadsByChannel: Record<string, ChannelThread[]> = $state({});
+let threadServerScope: string | null = null;
+let threadStats: Record<string, ThreadPreviewMeta> = $state({});
 let activeThreadRoot: any = $state(null);
-let threadMessages: any[] = $state([]);
-let threadDrawerOpen = $state(false);
+let activeThread: ChannelThread | null = $state(null);
+let threadMessages: ThreadMessage[] = $state([]);
 let threadReplyTarget: ReplyReferenceInput | null = $state(null);
 let threadConversationContext: any[] = $state([]);
 let threadDefaultSuggestionSource: any = $state(null);
+let threadUnreadMap: Record<string, boolean> = $state({});
 let latestInboundMessage: any = $state(null);
 let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
@@ -80,6 +103,14 @@ let profiles: Record<string, any> = $state({});
 let pendingUploads: PendingUploadPreview[] = $state([]);
 let scrollToBottomSignal = $state(0);
 let lastPendingChannelId: string | null = $state(null);
+let pendingThreadId: string | null = null;
+let pendingThreadRoot: any = null;
+const threadReadStops = new Map<string, Unsubscribe>();
+let threadReadCursors: Record<string, number | null> = {};
+let threadsUnsub: Unsubscribe | null = null;
+let threadMessagesUnsub: Unsubscribe | null = null;
+let lastThreadStreamChannel: string | null = null;
+let lastThreadStreamId: string | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   let serverDisplayName = $state('Server');
   let serverMetaUnsub: Unsubscribe | null = $state(null);
@@ -588,6 +619,32 @@ let lastPendingChannelId: string | null = $state(null);
 
   function clearChannelsUnsub() { channelsUnsub?.(); channelsUnsub = null; }
   function clearMessagesUnsub() { messagesUnsub?.(); messagesUnsub = null; }
+  function clearThreadsUnsub() { threadsUnsub?.(); threadsUnsub = null; }
+  function clearThreadMessagesUnsub() { threadMessagesUnsub?.(); threadMessagesUnsub = null; }
+  function clearThreadReadSubs() {
+    threadReadStops.forEach((stop) => stop());
+    threadReadStops.clear();
+    threadReadCursors = {};
+  }
+  function resetThreadState(options: { resetCache?: boolean } = {}) {
+    clearThreadMessagesUnsub();
+    clearThreadsUnsub();
+    clearThreadReadSubs();
+    channelThreads = [];
+    threadStats = {};
+    threadUnreadMap = {};
+    activeThread = null;
+    activeThreadRoot = null;
+    threadMessages = [];
+    threadConversationContext = [];
+    threadDefaultSuggestionSource = null;
+    threadReplyTarget = null;
+    pendingThreadId = null;
+    pendingThreadRoot = null;
+    if (options.resetCache) {
+      threadsByChannel = {};
+    }
+  }
 
   function selectChannelObject(id: string): Channel {
     const found = channels.find((c) => c.id === id);
@@ -678,11 +735,176 @@ let lastPendingChannelId: string | null = $state(null);
     });
   }
 
+  function watchThreadRead(threadId: string) {
+    if (!$user?.uid) return;
+    if (threadReadStops.has(threadId)) return;
+    const database = db();
+    const ref = doc(database, 'profiles', $user.uid, 'threadMembership', threadId);
+    const stop = onSnapshot(
+      ref,
+      (snap) => {
+        const data: any = snap.data() ?? {};
+        const raw = data?.lastReadAt ?? null;
+        threadReadCursors[threadId] = raw?.toMillis?.() ? raw.toMillis() : toMillis(raw);
+        recomputeThreadStats();
+      },
+      () => {
+        threadReadCursors[threadId] = null;
+      }
+    );
+    threadReadStops.set(threadId, stop);
+  }
+
+  function recomputeThreadStats() {
+    const aggregates: Record<string, ThreadPreviewMeta> = {};
+    const unreadMap: Record<string, boolean> = {};
+    for (const thread of channelThreads) {
+      const rootId = pickString(thread.createdFromMessageId ?? null);
+      if (!rootId) continue;
+      const lastAt = toMillis(thread.lastMessageAt);
+      const readAt = threadReadCursors[thread.id] ?? null;
+      const unread = Boolean(lastAt && (!readAt || readAt < lastAt));
+      aggregates[rootId] = {
+        threadId: thread.id,
+        count: thread.messageCount ?? 0,
+        lastAt: lastAt ?? undefined,
+        status: thread.status,
+        name: thread.name,
+        unread,
+        archived: thread.status === 'archived'
+      };
+      unreadMap[thread.id] = unread;
+    }
+    threadStats = aggregates;
+    threadUnreadMap = unreadMap;
+  }
+
+  function subscribeThreads(currServerId: string, channelId: string) {
+    clearThreadsUnsub();
+    channelThreads = [];
+    const stop = streamChannelThreads(currServerId, channelId, (list) => {
+      channelThreads = list;
+      threadsByChannel = { ...threadsByChannel, [channelId]: list };
+      const present = new Set(list.map((thread) => thread.id));
+      present.forEach((threadId) => watchThreadRead(threadId));
+      for (const [threadId, stopRead] of threadReadStops) {
+        if (!present.has(threadId)) {
+          stopRead();
+          threadReadStops.delete(threadId);
+          delete threadReadCursors[threadId];
+        }
+      }
+      if (pendingThreadId) {
+        const pending = list.find((thread) => thread.id === pendingThreadId);
+        if (pending) {
+          const root =
+            pendingThreadRoot ??
+            messages.find((msg) => msg.id === pending.createdFromMessageId) ??
+            activeThreadRoot ??
+            null;
+          if (root) {
+            activateThreadView(pending, root);
+          } else {
+            activeThread = pending;
+            prefetchThreadMemberProfiles(pending);
+          }
+          pendingThreadId = null;
+          pendingThreadRoot = null;
+        }
+      } else if (activeThread) {
+        const current = list.find((thread) => thread.id === activeThread?.id);
+        if (current) {
+          activeThread = current;
+          prefetchThreadMemberProfiles(current);
+        } else {
+          closeThreadView();
+        }
+      }
+      recomputeThreadStats();
+    });
+    threadsUnsub = stop;
+  }
+
+function sidebarThreadList() {
+  const combined: Array<ChannelThread & { unread?: boolean }> = [];
+  const cacheEntries = Object.values(threadsByChannel);
+  const seen = new Set<string>();
+  if (cacheEntries.length) {
+    for (const list of cacheEntries) {
+      for (const thread of list ?? []) {
+        if (!thread || thread.status === 'archived' || seen.has(thread.id)) continue;
+        seen.add(thread.id);
+        combined.push({
+          ...thread,
+          unread: threadUnreadMap[thread.id] ?? false
+        });
+      }
+    }
+  } else if (channelThreads.length) {
+    for (const thread of channelThreads) {
+      if (thread.status === 'archived') continue;
+      combined.push({
+        ...thread,
+        unread: threadUnreadMap[thread.id] ?? false
+      });
+    }
+  }
+  return combined;
+}
+
+  function resolveThreadMembers() {
+    if (!activeThread) return [];
+    return (activeThread.memberUids ?? []).map((uid) => {
+      const profile = profiles[uid] ?? {};
+      return {
+        uid,
+        displayName:
+          pickString(profile.displayName) ??
+          pickString(profile.name) ??
+          pickString(profile.email) ??
+          uid,
+        photoURL: resolveProfilePhotoURL(profile)
+      };
+    });
+  }
+
+  function attachThreadStream(thread: ChannelThread | null) {
+    if (!thread || !serverId || !activeChannel?.id) {
+      clearThreadMessagesUnsub();
+      threadMessages = [];
+      lastThreadStreamChannel = null;
+      lastThreadStreamId = null;
+      return;
+    }
+    if (
+      lastThreadStreamChannel === activeChannel.id &&
+      lastThreadStreamId === thread.id
+    ) {
+      return;
+    }
+    clearThreadMessagesUnsub();
+    lastThreadStreamChannel = activeChannel.id;
+    lastThreadStreamId = thread.id;
+    threadMessagesUnsub = streamThreadMessages(serverId, activeChannel.id, thread.id, (list) => {
+      threadMessages = list;
+      if ($user?.uid && activeThread?.id === thread.id && serverId && activeChannel?.id) {
+        const last = list[list.length - 1];
+        const at = last?.createdAt ?? null;
+        const lastId = last?.id ?? null;
+        void markThreadReadThread($user.uid, serverId, activeChannel.id, thread.id, {
+          at,
+          lastMessageId: lastId
+        });
+      }
+    });
+  }
+
   function pickChannel(id: string) {
     if (!serverId) return;
     const next = selectChannelObject(id);
     activeChannel = next;
     messages = [];
+    resetThreadState();
 
     if (next.type === 'voice') {
       clearMessagesUnsub();
@@ -695,6 +917,7 @@ let lastPendingChannelId: string | null = $state(null);
       }
     } else {
       subscribeMessages(serverId, id);
+      subscribeThreads(serverId, id);
       voiceSession.setVisible(false);
       // Optimistically mark as read on navigation to the channel
       if ($user?.uid) {
@@ -896,6 +1119,7 @@ let lastPendingChannelId: string | null = $state(null);
   onDestroy(() => {
     clearChannelsUnsub();
     clearMessagesUnsub();
+    resetThreadState();
     cleanupProfileSubscriptions();
     unsubscribeVoice();
     serverMetaUnsub?.();
@@ -1085,152 +1309,49 @@ let lastPendingChannelId: string | null = $state(null);
     }
   }
 
-  async function handleThreadSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
+  async function handleThreadSend(payload: string | { text: string; mentions?: MentionSendRecord[] }) {
     const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
     const trimmed = raw?.trim?.() ?? '';
     if (!trimmed) return;
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    if (!activeThread) { alert('Open a thread before replying.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
-    const replyRef = ensureThreadReplyReference(typeof payload === 'object' ? payload?.replyTo ?? null : null);
     const mentions = normalizeMentionSendList(
       typeof payload === 'object' ? payload?.mentions ?? [] : []
     );
     try {
-      await sendChannelMessage(serverId, activeChannel.id, {
-        type: 'text',
-        text: trimmed,
-        uid: $user.uid,
-        displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL(),
-        mentions,
-        replyTo: replyRef ?? undefined
-      });
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
-    } catch (err) {
-      console.error(err);
-      alert(`Failed to send thread reply: ${err}`);
-    }
-  }
-
-  async function handleThreadSendGif(detail: string | { url: string; replyTo?: ReplyReferenceInput | null }) {
-    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
-    if (!trimmed) return;
-    if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    if (!$user) { alert('Sign in to send messages.'); return; }
-    const replyRef = ensureThreadReplyReference(typeof detail === 'object' ? detail?.replyTo ?? null : null);
-    try {
-      await sendChannelMessage(serverId, activeChannel.id, {
-        type: 'gif',
-        url: trimmed,
-        uid: $user.uid,
-        displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL(),
-        replyTo: replyRef ?? undefined
-      });
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
-    } catch (err) {
-      console.error(err);
-      alert(`Failed to share GIF: ${err}`);
-    }
-  }
-
-  async function handleThreadUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
-    const selection = Array.from(request?.files ?? []).filter((file): file is File => file instanceof File);
-    if (!selection.length) return;
-    if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    if (!$user) { alert('Sign in to send messages.'); return; }
-    const replyRef = ensureThreadReplyReference(request?.replyTo ?? null);
-    let replyUsed = false;
-    const identity = {
-      uid: $user.uid,
-      displayName: deriveCurrentDisplayName(),
-      photoURL: deriveCurrentPhotoURL()
-    };
-    for (const file of selection) {
-      const pending = registerPendingUpload(file);
-      try {
-        const uploaded = await uploadChannelFile({
-          serverId,
-          channelId: activeChannel.id,
+      await sendThreadMessage({
+        serverId,
+        channelId: activeChannel.id,
+        threadId: activeThread.id,
+        author: {
           uid: $user.uid,
-          file,
-          onProgress: (progress) => pending.update(progress ?? 0)
-        });
-        await sendChannelMessage(serverId, activeChannel.id, {
-          type: 'file',
-          file: {
-            name: file.name || uploaded.name,
-            url: uploaded.url,
-            size: file.size ?? uploaded.size,
-            contentType: file.type || uploaded.contentType,
-            storagePath: uploaded.storagePath
-          },
-          ...identity,
-          replyTo: !replyUsed && replyRef ? replyRef : undefined
-        });
-        pending.finish(true);
-        if (replyRef && !replyUsed) {
-          replyUsed = true;
-        }
-      } catch (err) {
-        pending.finish(false);
-        console.error(err);
-        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
-        break;
-      }
-    }
-    threadReplyTarget = buildReplyReference(activeThreadRoot);
-  }
-
-  async function handleThreadCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
-    if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    if (!$user) { alert('Sign in to send messages.'); return; }
-    const replyRef = ensureThreadReplyReference(poll?.replyTo ?? null);
-    try {
-      await sendChannelMessage(serverId, activeChannel.id, {
-        type: 'poll',
-        poll: {
-          question: poll.question,
-          options: poll.options
+          displayName: deriveCurrentDisplayName()
         },
-        uid: $user.uid,
-        displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL(),
-        replyTo: replyRef ?? undefined
+        text: trimmed,
+        mentions
       });
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
     } catch (err) {
       console.error(err);
-      alert(`Failed to create poll: ${err}`);
+      alert(`Failed to send thread reply: ${err instanceof Error ? err.message : err}`);
     }
   }
 
-  async function handleThreadCreateForm(form: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) {
-    if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    if (!$user) { alert('Sign in to send messages.'); return; }
-    const replyRef = ensureThreadReplyReference(form?.replyTo ?? null);
-    try {
-      await sendChannelMessage(serverId, activeChannel.id, {
-        type: 'form',
-        form: {
-          title: form.title,
-          questions: form.questions
-        },
-        uid: $user.uid,
-        displayName: deriveCurrentDisplayName(),
-        photoURL: deriveCurrentPhotoURL(),
-        replyTo: replyRef ?? undefined
-      });
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
-    } catch (err) {
-      console.error(err);
-      alert(`Failed to share form: ${err}`);
-    }
+  async function handleThreadSendGif() {
+    alert('GIFs are not supported inside threads yet.');
+  }
+
+  async function handleThreadUploadFiles() {
+    alert('File uploads are not supported inside threads yet.');
+  }
+
+  async function handleThreadCreatePoll() {
+    alert('Polls are not supported inside threads yet.');
+  }
+
+  async function handleThreadCreateForm() {
+    alert('Forms are not supported inside threads yet.');
   }
 
   async function handleVote(event: CustomEvent<{ messageId: string; optionIndex: number }>) {
@@ -1274,27 +1395,195 @@ let lastPendingChannelId: string | null = $state(null);
     if (ref) replyTarget = ref;
   }
 
-  function openThreadFromMessage(message: any) {
-    if (!message) return;
-    activeThreadRoot = message;
-    threadDrawerOpen = true;
-    threadReplyTarget = buildReplyReference(message);
+  function activateThreadView(thread: ChannelThread, rootMessage: any) {
+    activeThreadRoot = rootMessage;
+    threadReplyTarget = null;
+    activeThread = thread;
+    pendingThreadId = null;
+    pendingThreadRoot = null;
+    attachThreadStream(thread);
+    prefetchThreadMemberProfiles(thread);
   }
 
-  function closeThreadDrawer() {
-    threadDrawerOpen = false;
+  function prefetchThreadMemberProfiles(thread: ChannelThread | null) {
+    if (!thread) return;
+    try {
+      const database = db();
+      for (const uid of thread.memberUids ?? []) {
+        ensureProfileSubscription(database, uid);
+      }
+    } catch (err) {
+      console.error('[threads] failed to prefetch member profiles', err);
+    }
+  }
+
+  async function openThreadFromMessage(message: any) {
+    if (!message) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    let existing =
+      channelThreads.find((thread) => thread.createdFromMessageId === message.id) ?? null;
+    if (!existing) {
+      try {
+        const database = db();
+        const threadSnap = await getDocs(
+          query(
+            collection(database, 'servers', serverId, 'channels', activeChannel.id, 'threads'),
+            where('createdFromMessageId', '==', message.id),
+            limit(1)
+          )
+        );
+        const docSnap = threadSnap.docs[0];
+        if (docSnap) {
+          pendingThreadId = docSnap.id;
+          pendingThreadRoot = message;
+          return;
+        }
+      } catch (err) {
+        console.error('[threads] lookup failed', err);
+      }
+    }
+    if (existing) {
+      activateThreadView(existing, message);
+      return;
+    }
+    if (!$user) {
+      alert('Sign in to start a thread.');
+      return;
+    }
+    try {
+      const mentionUids = Array.isArray(message?.mentions)
+        ? message.mentions
+            .map((mention: any) => pickString(mention?.uid))
+            .filter((value: string | undefined): value is string => Boolean(value))
+        : [];
+      pendingThreadId = await createChannelThread({
+        serverId,
+        channelId: activeChannel.id,
+        sourceMessageId: message.id,
+        sourceMessageText:
+          pickString(message?.text) ??
+          pickString(message?.content) ??
+          pickString(message?.preview) ??
+          '',
+        creator: {
+          uid: $user.uid,
+          displayName: deriveCurrentDisplayName()
+        },
+        initialMentions: mentionUids,
+        mentionProfiles: profiles
+      });
+      pendingThreadRoot = message;
+      await hydrateThreadAfterCreate(pendingThreadId, message);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to start thread: ${err instanceof Error ? err.message : err}`);
+      pendingThreadId = null;
+      pendingThreadRoot = null;
+    }
+  }
+
+  async function hydrateThreadAfterCreate(threadId: string | null, rootMessage: any) {
+    if (!threadId || !serverId || !activeChannel?.id) return;
+    try {
+      const database = db();
+      const snap = await getDoc(
+        doc(database, 'servers', serverId, 'channels', activeChannel.id, 'threads', threadId)
+      );
+      if (!snap.exists()) return;
+      const raw = snap.data() ?? {};
+      const hydrated = { id: snap.id, ...(raw as ChannelThread) } as ChannelThread;
+      activateThreadView(hydrated, rootMessage);
+      const channelId = activeChannel.id;
+      const previous = threadsByChannel[channelId] ?? [];
+      const nextList = previous.some((entry) => entry.id === hydrated.id)
+        ? previous.map((entry) => (entry.id === hydrated.id ? hydrated : entry))
+        : [hydrated, ...previous];
+      threadsByChannel = { ...threadsByChannel, [channelId]: nextList };
+      if (!channelThreads.some((entry) => entry.id === hydrated.id)) {
+        channelThreads = [hydrated, ...channelThreads];
+        recomputeThreadStats();
+      }
+    } catch (err) {
+      console.error('[threads] failed to hydrate newly created thread', err);
+    }
+  }
+
+  async function ensureChannelActive(channelId: string) {
+    if (!channelId) return false;
+    if (activeChannel?.id === channelId) return true;
+    pickChannel(channelId);
+    const started = Date.now();
+    while (Date.now() - started < 2000) {
+      if (activeChannel?.id === channelId) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return activeChannel?.id === channelId;
+  }
+
+  async function openThreadFromSidebar(target: { id: string; parentChannelId: string }) {
+    if (!serverId) return;
+    const { id: threadId, parentChannelId } = target;
+    const channelReady = await ensureChannelActive(parentChannelId);
+    if (!channelReady || !activeChannel?.id) {
+      alert('Unable to open the thread yet. Please try again.');
+      return;
+    }
+    let thread = channelThreads.find((entry) => entry.id === threadId);
+    if (!thread) {
+      try {
+        const database = db();
+        const snap = await getDoc(
+          doc(database, 'servers', serverId, 'channels', activeChannel.id, 'threads', threadId)
+        );
+        if (snap.exists()) {
+          const raw = snap.data() as ChannelThread;
+          thread = {
+            id: snap.id,
+            ...raw,
+            channelId: raw?.channelId ?? raw?.parentChannelId ?? activeChannel.id,
+            parentChannelId: raw?.parentChannelId ?? raw?.channelId ?? activeChannel.id
+          };
+        }
+      } catch (err) {
+        console.error('[threads] failed to load thread metadata', err);
+      }
+    }
+    if (!thread) {
+      alert('Unable to load that thread right now.');
+      return;
+    }
+    let root = messages.find((msg) => msg.id === thread.createdFromMessageId) ?? null;
+    if (!root) {
+      try {
+        const database = db();
+        const snap = await getDoc(
+          doc(database, 'servers', serverId, 'channels', activeChannel.id, 'messages', thread.createdFromMessageId)
+        );
+        if (snap.exists()) {
+          root = toChatMessage(snap.id, snap.data());
+        }
+      } catch (err) {
+        console.error('[threads] failed to load root message', err);
+      }
+    }
+    if (!root) {
+      alert('Unable to load the thread source message yet.');
+      return;
+    }
+    activateThreadView(thread as ChannelThread, root);
+  }
+
+  function closeThreadView() {
     activeThreadRoot = null;
+    activeThread = null;
     threadReplyTarget = null;
     threadMessages = [];
     threadConversationContext = [];
     threadDefaultSuggestionSource = null;
-  }
-
-  function ensureThreadReplyReference(explicit?: ReplyReferenceInput | null) {
-    if (explicit?.messageId) return explicit;
-    if (threadReplyTarget?.messageId) return threadReplyTarget;
-    if (activeThreadRoot) return buildReplyReference(activeThreadRoot);
-    return null;
+    pendingThreadId = null;
+    pendingThreadRoot = null;
+    attachThreadStream(null);
   }
 
   function handleThreadReplySelect(event: CustomEvent<{ message: any }>) {
@@ -1303,12 +1592,15 @@ let lastPendingChannelId: string | null = $state(null);
   }
 
   function resetThreadReplyTarget() {
-    if (activeThreadRoot) {
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
-    } else {
-      threadReplyTarget = null;
-    }
+    threadReplyTarget = null;
   }
+  run(() => {
+    const scope = serverId ?? null;
+    if (scope !== threadServerScope) {
+      threadServerScope = scope;
+      resetThreadState({ resetCache: true });
+    }
+  });
   run(() => {
     const currentMentionServer = serverId ?? null;
     if (currentMentionServer !== lastMentionServer) {
@@ -1506,56 +1798,39 @@ let lastPendingChannelId: string | null = $state(null);
     hideMessageInput = isMobile && showChannels;
   });
   run(() => {
-    const aggregates: Record<string, { count: number; lastAt: number }> = {};
-    for (const message of messages) {
-      const rootId = resolveThreadRootId(message?.replyTo ?? null);
-      if (!rootId) continue;
-      const createdAt = toMillis(message?.createdAt) ?? Date.now();
-      const entry = aggregates[rootId] ?? { count: 0, lastAt: 0 };
-      entry.count += 1;
-      if (createdAt > entry.lastAt) entry.lastAt = createdAt;
-      aggregates[rootId] = entry;
-    }
-    threadStats = aggregates;
+    attachThreadStream(activeThread ?? null);
   });
   run(() => {
-    if (!activeThreadRoot) {
-      threadMessages = [];
-      threadConversationContext = [];
-      threadDefaultSuggestionSource = null;
+    if (!$user?.uid) {
+      clearThreadReadSubs();
       return;
     }
-    const rootId = pickString(activeThreadRoot?.id);
-    if (!rootId) {
-      threadMessages = [];
-      threadConversationContext = [];
-      threadDefaultSuggestionSource = null;
-      return;
-    }
-    const replies = messages.filter((message) => messageBelongsToThread(message, rootId));
-    threadMessages = replies;
-    const contextSources = [activeThreadRoot, ...replies].filter(Boolean).slice(-10);
+    channelThreads.forEach((thread) => watchThreadRead(thread.id));
+  });
+  run(() => {
+    const contextSources = [activeThreadRoot, ...threadMessages].filter(Boolean).slice(-10);
     threadConversationContext = contextSources;
     const latestAuthored =
-      [...replies].reverse().find((msg) => msg?.uid) ??
-      (activeThreadRoot?.uid ? activeThreadRoot : null);
+      [...threadMessages].reverse().find(
+        (msg) => (msg as any)?.authorId ?? (msg as any)?.uid
+      ) ?? (activeThreadRoot?.uid ? activeThreadRoot : null);
     if (!latestAuthored) {
       threadDefaultSuggestionSource = null;
       return;
     }
-    if ($user?.uid && latestAuthored.uid === $user.uid) {
+    const latestUid =
+      (latestAuthored as any)?.authorId ??
+      (latestAuthored as any)?.uid ??
+      null;
+    if ($user?.uid && latestUid === $user.uid) {
       threadDefaultSuggestionSource = null;
       return;
     }
     threadDefaultSuggestionSource = latestAuthored;
   });
   run(() => {
-    if (!threadDrawerOpen) {
+    if (!activeThread) {
       threadReplyTarget = null;
-      return;
-    }
-    if (!threadReplyTarget && activeThreadRoot) {
-      threadReplyTarget = buildReplyReference(activeThreadRoot);
     }
   });
   run(() => {
@@ -1649,6 +1924,9 @@ let lastPendingChannelId: string | null = $state(null);
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
           onPickChannel={(id: string) => pickChannel(id)}
+          threads={sidebarThreadList()}
+          activeThreadId={activeThread?.id ?? null}
+          onPickThread={(thread) => void openThreadFromSidebar(thread)}
         />
       {:else}
         <div class="p-4 text-white/70">Select a server from the left to view channels.</div>
@@ -1658,6 +1936,7 @@ let lastPendingChannelId: string | null = $state(null);
     <div class="flex flex-1 min-w-0 flex-col panel" style="border-radius: var(--radius-sm);">
       <ChannelHeader
         channel={activeChannel}
+        thread={activeThread}
         channelsVisible={showChannels}
         membersVisible={showMembers}
         onToggleChannels={() => {
@@ -1668,6 +1947,7 @@ let lastPendingChannelId: string | null = $state(null);
           showMembers = true;
           showChannels = false;
         }}
+        onExitThread={() => closeThreadView()}
       />
 
       <div class="flex-1 panel-muted flex flex-col min-h-0">
@@ -1700,43 +1980,69 @@ let lastPendingChannelId: string | null = $state(null);
               </div>
             {:else}
               <div class="mobile-chat-card">
-                <ChannelMessagePane
-                  hasChannel={Boolean(serverId && activeChannel)}
-                  channelName={activeChannel?.name ?? ''}
-                  {messages}
-                  {profiles}
-                  currentUserId={$user?.uid ?? null}
-                  {mentionOptions}
-                  {replyTarget}
-                  threadStats={threadStats}
-                  defaultSuggestionSource={latestInboundMessage}
-                  conversationContext={aiConversationContext}
-                  aiAssistEnabled={aiAssistEnabled}
-                  threadLabel={activeChannel?.name ?? ''}
-                  {pendingUploads}
-                  {scrollToBottomSignal}
-                  listClass="message-scroll-region flex-1 overflow-y-auto p-3"
-                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
-                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
-                  emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-                  onVote={handleVote}
-                  onSubmitForm={handleFormSubmit}
-                  onReact={handleReaction}
-                  onLoadMore={() => {
-                    if (serverId && activeChannel?.id) {
-                      loadOlderMessages(serverId, activeChannel.id);
-                    }
-                  }}
-                  onSend={handleSend}
-                  onSendGif={handleSendGif}
-                  onCreatePoll={handleCreatePoll}
-                  onCreateForm={handleCreateForm}
-                  onUploadFiles={handleUploadFiles}
-                  hideInput={hideMessageInput}
-                  on:reply={handleReplyRequest}
-                  on:thread={(event) => openThreadFromMessage(event.detail?.message)}
-                  on:cancelReply={() => (replyTarget = null)}
-                />
+                {#if activeThread}
+                  <ThreadPane
+                    root={activeThreadRoot}
+                    messages={threadMessages}
+                    users={profiles}
+                    currentUserId={$user?.uid ?? null}
+                    mentionOptions={mentionOptions}
+                    pendingUploads={[]}
+                    aiAssistEnabled={aiAssistEnabled}
+                    threadLabel={activeThread?.name ?? activeChannel?.name ?? ''}
+                    conversationContext={threadConversationContext}
+                    replyTarget={threadReplyTarget}
+                    defaultSuggestionSource={threadDefaultSuggestionSource}
+                    members={resolveThreadMembers()}
+                    threadStatus={activeThread?.status ?? null}
+                    on:close={closeThreadView}
+                    on:send={(event) => handleThreadSend(event.detail)}
+                    on:sendGif={handleThreadSendGif}
+                    on:upload={handleThreadUploadFiles}
+                    on:createPoll={handleThreadCreatePoll}
+                    on:createForm={handleThreadCreateForm}
+                    on:reply={handleThreadReplySelect}
+                    on:cancelReply={resetThreadReplyTarget}
+                  />
+                {:else}
+                  <ChannelMessagePane
+                    hasChannel={Boolean(serverId && activeChannel)}
+                    channelName={activeChannel?.name ?? ''}
+                    {messages}
+                    {profiles}
+                    currentUserId={$user?.uid ?? null}
+                    {mentionOptions}
+                    {replyTarget}
+                    threadStats={threadStats}
+                    defaultSuggestionSource={latestInboundMessage}
+                    conversationContext={aiConversationContext}
+                    aiAssistEnabled={aiAssistEnabled}
+                    threadLabel={activeChannel?.name ?? ''}
+                    {pendingUploads}
+                    {scrollToBottomSignal}
+                    listClass="message-scroll-region flex-1 overflow-y-auto p-3"
+                    inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
+                    inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                    emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+                    onVote={handleVote}
+                    onSubmitForm={handleFormSubmit}
+                    onReact={handleReaction}
+                    onLoadMore={() => {
+                      if (serverId && activeChannel?.id) {
+                        loadOlderMessages(serverId, activeChannel.id);
+                      }
+                    }}
+                    onSend={handleSend}
+                    onSendGif={handleSendGif}
+                    onCreatePoll={handleCreatePoll}
+                    onCreateForm={handleCreateForm}
+                    onUploadFiles={handleUploadFiles}
+                    hideInput={hideMessageInput}
+                    on:reply={handleReplyRequest}
+                    on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+                    on:cancelReply={() => (replyTarget = null)}
+                  />
+                {/if}
               </div>
             {/if}
           </div>
@@ -1802,46 +2108,75 @@ let lastPendingChannelId: string | null = $state(null);
             </div>
           {/if}
 
-          <ChannelMessagePane
-            hasChannel={Boolean(serverId && activeChannel)}
-            channelName={activeChannel?.name ?? ''}
-            {messages}
-            {profiles}
-            currentUserId={$user?.uid ?? null}
-            {mentionOptions}
-            {replyTarget}
-            threadStats={threadStats}
-            defaultSuggestionSource={latestInboundMessage}
-            conversationContext={aiConversationContext}
-            aiAssistEnabled={aiAssistEnabled}
-            threadLabel={activeChannel?.name ?? ''}
-            {pendingUploads}
-            {scrollToBottomSignal}
-            emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-            onVote={handleVote}
-            onSubmitForm={handleFormSubmit}
-            onReact={handleReaction}
-            onLoadMore={() => {
-              if (serverId && activeChannel?.id) {
-                loadOlderMessages(serverId, activeChannel.id);
-              }
-            }}
-            onSend={handleSend}
-            onSendGif={handleSendGif}
-            onCreatePoll={handleCreatePoll}
-            onCreateForm={handleCreateForm}
-            onUploadFiles={handleUploadFiles}
-            hideInput={hideMessageInput}
-            on:reply={handleReplyRequest}
-            on:thread={(event) => openThreadFromMessage(event.detail?.message)}
-            on:cancelReply={() => (replyTarget = null)}
-          />
+          {#if activeThread}
+            <ThreadPane
+              root={activeThreadRoot}
+              messages={threadMessages}
+              users={profiles}
+              currentUserId={$user?.uid ?? null}
+              mentionOptions={mentionOptions}
+              pendingUploads={[]}
+              aiAssistEnabled={aiAssistEnabled}
+              threadLabel={activeThread?.name ?? activeChannel?.name ?? ''}
+              conversationContext={threadConversationContext}
+              replyTarget={threadReplyTarget}
+              defaultSuggestionSource={threadDefaultSuggestionSource}
+              members={resolveThreadMembers()}
+              threadStatus={activeThread?.status ?? null}
+              on:close={closeThreadView}
+              on:send={(event) => handleThreadSend(event.detail)}
+              on:sendGif={handleThreadSendGif}
+              on:upload={handleThreadUploadFiles}
+              on:createPoll={handleThreadCreatePoll}
+              on:createForm={handleThreadCreateForm}
+              on:reply={handleThreadReplySelect}
+              on:cancelReply={resetThreadReplyTarget}
+            />
+          {:else}
+            <ChannelMessagePane
+              hasChannel={Boolean(serverId && activeChannel)}
+              channelName={activeChannel?.name ?? ''}
+              {messages}
+              {profiles}
+              currentUserId={$user?.uid ?? null}
+              {mentionOptions}
+              {replyTarget}
+              threadStats={threadStats}
+              defaultSuggestionSource={latestInboundMessage}
+              conversationContext={aiConversationContext}
+              aiAssistEnabled={aiAssistEnabled}
+              threadLabel={activeChannel?.name ?? ''}
+              {pendingUploads}
+              {scrollToBottomSignal}
+              emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+              onVote={handleVote}
+              onSubmitForm={handleFormSubmit}
+              onReact={handleReaction}
+              onLoadMore={() => {
+                if (serverId && activeChannel?.id) {
+                  loadOlderMessages(serverId, activeChannel.id);
+                }
+              }}
+              onSend={handleSend}
+              onSendGif={handleSendGif}
+              onCreatePoll={handleCreatePoll}
+              onCreateForm={handleCreateForm}
+              onUploadFiles={handleUploadFiles}
+              hideInput={hideMessageInput}
+              on:reply={handleReplyRequest}
+              on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+              on:cancelReply={() => (replyTarget = null)}
+            />
+          {/if}
         {/if}
       </div>
     </div>
 
     <div class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
-      {#if serverId}
+      {#if activeThread}
+        {@const threadMembers = resolveThreadMembers()}
+        <ThreadMembersPane members={threadMembers} threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'} />
+      {:else if serverId}
         <MembersPane {serverId} />
       {:else}
         <div class="p-4 text-muted">No server selected.</div>
@@ -1849,29 +2184,6 @@ let lastPendingChannelId: string | null = $state(null);
     </div>
   </div>
 </div>
-
-<ThreadDrawer
-  open={threadDrawerOpen}
-  root={activeThreadRoot}
-  messages={threadMessages}
-  users={profiles}
-  currentUserId={$user?.uid ?? null}
-  mentionOptions={mentionOptions}
-  pendingUploads={[]}
-  aiAssistEnabled={aiAssistEnabled}
-  threadLabel={activeChannel?.name ?? ''}
-  conversationContext={threadConversationContext}
-  replyTarget={threadReplyTarget}
-  defaultSuggestionSource={threadDefaultSuggestionSource}
-  on:close={closeThreadDrawer}
-  on:send={(event) => handleThreadSend(event.detail)}
-  on:sendGif={(event) => handleThreadSendGif(event.detail)}
-  on:upload={(event) => handleThreadUploadFiles(event.detail)}
-  on:createPoll={(event) => handleThreadCreatePoll(event.detail)}
-  on:createForm={(event) => handleThreadCreateForm(event.detail)}
-  on:reply={handleThreadReplySelect}
-  on:cancelReply={resetThreadReplyTarget}
-/>
 
 <!-- ======= MOBILE FULL-SCREEN PANELS (leave 72px rail visible) ======= -->
 
@@ -1901,6 +2213,12 @@ let lastPendingChannelId: string | null = $state(null);
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
           onPickChannel={(id: string) => pickChannel(id)}
+          threads={sidebarThreadList()}
+          activeThreadId={activeThread?.id ?? null}
+          onPickThread={(thread) => {
+            showChannels = false;
+            void openThreadFromSidebar(thread);
+          }}
           on:pick={() => (showChannels = false)}
         />
       {:else}
@@ -1927,11 +2245,14 @@ let lastPendingChannelId: string | null = $state(null);
     >
       <i class="bx bx-chevron-right text-2xl"></i>
     </button>
-    <div class="mobile-panel__title">Members</div>
+    <div class="mobile-panel__title">{activeThread ? 'Thread members' : 'Members'}</div>
   </div>
 
   <div class="flex-1 overflow-y-auto">
-    {#if serverId}
+    {#if activeThread}
+      {@const threadMembers = resolveThreadMembers()}
+      <ThreadMembersPane members={threadMembers} threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'} />
+    {:else if serverId}
       <MembersPane {serverId} showHeader={false} />
     {:else}
       <div class="p-4 text-white/70">No server selected.</div>
@@ -2107,3 +2428,6 @@ let lastPendingChannelId: string | null = $state(null);
     }
   }
 </style>
+
+
+

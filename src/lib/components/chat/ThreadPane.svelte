@@ -1,15 +1,16 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
   import { createEventDispatcher, onDestroy } from 'svelte';
+
   import MessageList from './MessageList.svelte';
   import ChatInput from './ChatInput.svelte';
   import type { PendingUploadPreview } from './types';
   import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { requestThreadSummary, type ThreadSummaryItem, type ThreadSummaryMessage } from '$lib/api/ai';
+  import type { ChannelThread } from '$lib/firestore/threads';
 
   interface Props {
-    open?: boolean;
     root?: any | null;
     messages?: any[];
     users?: Record<string, any>;
@@ -21,12 +22,13 @@
     conversationContext?: any[] | null;
     replyTarget?: ReplyReferenceInput | null;
     defaultSuggestionSource?: any | null;
+    members?: Array<{ uid: string; displayName?: string | null; photoURL?: string | null }>;
+    threadStatus?: ChannelThread['status'] | null;
   }
 
   const dispatch = createEventDispatcher();
 
   let {
-    open = false,
     root = null,
     messages = [],
     users = {},
@@ -37,7 +39,9 @@
     threadLabel = '',
     conversationContext = [],
     replyTarget = null,
-    defaultSuggestionSource = null
+    defaultSuggestionSource = null,
+    members = [],
+    threadStatus = null
   }: Props = $props();
 
   let scrollSignal = $state(0);
@@ -65,6 +69,14 @@
     return pickString(root?.displayName) || pickString(root?.authorName) || pickString(root?.author?.displayName) || 'Someone';
   }) as unknown) as string;
 
+  const initialsFor = (value: string | null | undefined) => {
+    const str = pickString(value) ?? '';
+    if (!str) return '?';
+    const parts = str.split(/\s+/).filter(Boolean);
+    if (!parts.length) return str[0]?.toUpperCase() ?? '?';
+    return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('');
+  };
+
   const lastMessageMillis = ($derived(() => {
     if (!messages.length) return null;
     const last = messages[messages.length - 1];
@@ -87,7 +99,7 @@
   }) as unknown) as number;
 
   const shouldSuggestSummary = ($derived(() => {
-    return open && !summary.length && !summaryLoading && !summaryError && messages.length >= 4 && idleHours >= 1;
+    return !summary.length && !summaryLoading && !summaryError && messages.length >= 4 && idleHours >= 1;
   }) as unknown) as boolean;
 
   const summaryPayload = ($derived(() => {
@@ -102,7 +114,7 @@
 
   run(() => {
     const count = messages.length;
-    if (open && count >= 0) {
+    if (count >= 0) {
       scrollSignal = Date.now();
     }
   });
@@ -148,7 +160,7 @@
   function scrollToMessage(messageId: string | null | undefined) {
     if (!messageId) return;
     requestAnimationFrame(() => {
-      const el = document.querySelector<HTMLElement>(`.thread-drawer__messages [data-message-id="${messageId}"]`);
+      const el = document.querySelector<HTMLElement>(`.thread-pane__messages [data-message-id="${messageId}"]`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         el.classList.add('is-highlighted');
@@ -184,19 +196,38 @@
   }
 </script>
 
-<div class={`thread-drawer ${open ? 'is-open' : ''}`}>
-  <div class="thread-drawer__backdrop" aria-hidden={!open} onclick={handleClose}></div>
-  <aside class="thread-drawer__panel" aria-label="Thread details" tabindex="-1">
-    <header class="thread-drawer__header">
+<section class="thread-pane" aria-label="Thread conversation">
+  <div class="thread-pane__body">
+    <header class="thread-pane__header">
       <div>
-        <div class="thread-drawer__eyebrow">Thread</div>
-        <div class="thread-drawer__title">{rootPreview || 'Conversation'}</div>
-        <div class="thread-drawer__subtitle">Started by {rootAuthor || 'someone'}</div>
+        <div class="thread-pane__eyebrow">Thread</div>
+        <div class="thread-pane__title">{rootPreview || 'Conversation'}</div>
+        <div class="thread-pane__subtitle">Started by {rootAuthor || 'someone'}</div>
       </div>
-      <button type="button" class="thread-drawer__close" aria-label="Close thread" onclick={handleClose}>
-        <i class="bx bx-x"></i>
-      </button>
+      <div class="thread-pane__actions">
+        {#if threadStatus === 'archived'}
+          <span class="thread-status-badge">Archived</span>
+        {/if}
+        <button type="button" class="thread-pane__close" aria-label="Back to channel" onclick={handleClose}>
+          <i class="bx bx-arrow-back"></i>
+          <span>Back</span>
+        </button>
+      </div>
     </header>
+
+    {#if members.length}
+      <div class="thread-pane__members" aria-label="Thread members">
+        {#each members as member (member.uid)}
+          <div class="thread-pane__member" title={member.displayName ?? member.uid}>
+            {#if member.photoURL}
+              <img src={member.photoURL} alt={member.displayName ?? member.uid} loading="lazy" />
+            {:else}
+              <span>{initialsFor(member.displayName ?? member.uid)}</span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
 
     <section class="thread-summary">
       <div class="thread-summary__header">
@@ -218,7 +249,7 @@
       {/if}
       {#if summary.length}
         <ul class="thread-summary__list">
-          {#each summary as item}
+          {#each summary as item, idx (item.id ?? `${idx}-${item.title ?? 'summary'}`)}
             <li>
               <button type="button" class="thread-summary__item" onclick={() => scrollToMessage(item.messageId)}>
                 <div class="thread-summary__item-title">{item.title}</div>
@@ -232,7 +263,7 @@
       {/if}
     </section>
 
-    <div class="thread-drawer__messages">
+    <div class="thread-pane__messages">
       <MessageList
         messages={[...(root ? [root] : []), ...messages.filter((msg) => msg?.id !== root?.id)]}
         {users}
@@ -244,110 +275,120 @@
         on:reply={handleReply}
       />
     </div>
+  </div>
 
-    <div class="thread-drawer__composer">
-      <ChatInput
-        placeholder="Reply in thread"
-        {mentionOptions}
-        {aiAssistEnabled}
-        {threadLabel}
-        conversationContext={conversationContext}
-        replyTarget={replyTarget}
-        defaultSuggestionSource={defaultSuggestionSource}
-        on:send={handleSend}
-        on:sendGif={handleSendGif}
-        on:upload={handleUpload}
-        on:createPoll={handleCreatePoll}
-        on:createForm={handleCreateForm}
-        on:cancelReply={handleCancelReply}
-      />
-    </div>
-  </aside>
-</div>
+  <div class="thread-pane__composer">
+    <ChatInput
+      placeholder="Reply in thread"
+      {mentionOptions}
+      {aiAssistEnabled}
+      {threadLabel}
+      conversationContext={conversationContext}
+      replyTarget={replyTarget}
+      defaultSuggestionSource={defaultSuggestionSource}
+      on:send={handleSend}
+      on:sendGif={handleSendGif}
+      on:upload={handleUpload}
+      on:createPoll={handleCreatePoll}
+      on:createForm={handleCreateForm}
+      on:cancelReply={handleCancelReply}
+    />
+  </div>
+</section>
 
 <style>
-  .thread-drawer {
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 80;
-  }
-
-  .thread-drawer.is-open {
-    pointer-events: auto;
-  }
-
-  .thread-drawer__backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(5, 7, 16, 0.55);
-    opacity: 0;
-    transition: opacity 200ms ease;
-  }
-
-  .thread-drawer.is-open .thread-drawer__backdrop {
-    opacity: 1;
-  }
-
-  .thread-drawer__panel {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(480px, 90vw);
-    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
-    border-left: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  .thread-pane {
     display: flex;
     flex-direction: column;
-    transform: translateX(100%);
-    transition: transform 220ms ease;
+    height: 100%;
+    background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
   }
 
-  .thread-drawer.is-open .thread-drawer__panel {
-    transform: translateX(0);
+  .thread-pane__body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
-  .thread-drawer__header {
+  .thread-pane__header {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
-    padding: 1rem 1.5rem 0.75rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    gap: 1rem;
+    padding: 1.25rem 1.5rem 0.75rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
   }
 
-  .thread-drawer__eyebrow {
+  .thread-pane__eyebrow {
+    font-size: 0.75rem;
     text-transform: uppercase;
-    font-size: 0.7rem;
-    letter-spacing: 0.2em;
-    color: var(--text-55);
+    letter-spacing: 0.25em;
+    color: var(--text-60);
+    margin-bottom: 0.2rem;
   }
 
-  .thread-drawer__title {
-    font-size: 1.2rem;
-    font-weight: 600;
+  .thread-pane__title {
+    font-size: clamp(1rem, 2vw, 1.25rem);
+    font-weight: 700;
     color: var(--color-text-primary);
-    margin-top: 0.2rem;
+    margin-bottom: 0.2rem;
   }
 
-  .thread-drawer__subtitle {
+  .thread-pane__subtitle {
     font-size: 0.85rem;
     color: var(--text-60);
   }
 
-  .thread-drawer__close {
-    border: none;
-    background: transparent;
-    color: var(--text-55);
-    font-size: 1.5rem;
-    padding: 0.25rem;
-    border-radius: 999px;
+  .thread-pane__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
   }
 
-  .thread-drawer__close:hover,
-  .thread-drawer__close:focus-visible {
-    background: color-mix(in srgb, var(--color-border-subtle) 35%, transparent);
+  .thread-pane__close {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: transparent;
     color: var(--color-text-primary);
+    padding: 0.35rem 0.85rem;
+    font-weight: 600;
+  }
+
+  .thread-pane__close:hover,
+  .thread-pane__close:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
     outline: none;
+  }
+
+  .thread-pane__members {
+    display: flex;
+    gap: 0.35rem;
+    padding: 0.9rem 1.5rem 0;
+    flex-wrap: wrap;
+  }
+
+  .thread-pane__member {
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    display: grid;
+    place-items: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-70);
+    background: color-mix(in srgb, var(--color-panel-muted) 90%, transparent);
+    overflow: hidden;
+  }
+
+  .thread-pane__member img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .thread-summary {
@@ -403,7 +444,7 @@
 
   .thread-summary__hint {
     font-size: 0.85rem;
-    color: var(--text-60);
+    color: var(--text-65);
   }
 
   .thread-summary__list {
@@ -436,38 +477,38 @@
     color: var(--text-65);
   }
 
-  .thread-drawer__messages {
+  .thread-pane__messages {
     flex: 1;
     min-height: 0;
     overflow: hidden;
     border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
   }
 
-  .thread-drawer__messages :global(.chat-scroll) {
+  .thread-pane__messages :global(.chat-scroll) {
     padding: 1rem;
   }
 
-  .thread-drawer__messages :global(.thread-chip) {
+  .thread-pane__messages :global(.thread-chip) {
     display: none;
   }
 
-  .thread-drawer__messages :global(.message-block.is-highlighted) {
+  .thread-pane__messages :global(.message-block.is-highlighted) {
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 40%, transparent);
   }
 
-  .thread-drawer__composer {
+  .thread-pane__composer {
     padding: 1rem 1.2rem 1.2rem;
   }
 
-  .thread-drawer__composer :global(.chat-input__actions > :not(.chat-send-button)) {
+  .thread-pane__composer :global(.chat-input__actions > :not(.chat-send-button)) {
     display: none !important;
   }
 
-  .thread-drawer__composer :global(.emoji-trigger) {
+  .thread-pane__composer :global(.emoji-trigger) {
     display: none !important;
   }
 
-  .thread-drawer__composer :global(.rewrite-trigger) {
+  .thread-pane__composer :global(.rewrite-trigger) {
     display: none !important;
   }
 </style>

@@ -1,4 +1,6 @@
 import express from 'express';
+import { initializeApp as initAdminApp, applicationDefault, cert, getApps as getAdminApps } from 'firebase-admin/app';
+import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -51,6 +53,12 @@ const OPENAI_KEY =
   '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+const ARCHIVE_THREADS_TOKEN =
+  process.env.ARCHIVE_THREADS_TOKEN ||
+  process.env.THREAD_JOB_TOKEN ||
+  process.env.JOB_SHARED_SECRET ||
+  '';
+const ARCHIVE_THREADS_LIMIT = Math.min(Math.max(Number(process.env.ARCHIVE_THREADS_LIMIT) || 50, 1), 500);
 
 const MAX_CONTEXT_CHARS = 1200;
 const MAX_TYPED_CHARS = 400;
@@ -98,11 +106,120 @@ const REWRITE_MODE_CONFIG = {
   }
 };
 
+let adminDb = null;
+
+function resolveServiceAccount() {
+  const raw =
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON ??
+    process.env.FIREBASE_SERVICE_ACCOUNT ??
+    null;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error('[threads] Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON', error);
+    return null;
+  }
+}
+
+function ensureAdminDb() {
+  if (adminDb) return adminDb;
+  try {
+    const existing = getAdminApps();
+    if (existing.length) {
+      adminDb = getAdminFirestore(existing[0]);
+      return adminDb;
+    }
+    const serviceAccount = resolveServiceAccount();
+    if (serviceAccount) {
+      initAdminApp({
+        credential: cert(serviceAccount),
+        projectId:
+          process.env.FIREBASE_PROJECT_ID ||
+          serviceAccount.project_id ||
+          process.env.GCLOUD_PROJECT ||
+          process.env.GOOGLE_CLOUD_PROJECT
+      });
+    } else {
+      initAdminApp({
+        credential: applicationDefault(),
+        projectId:
+          process.env.FIREBASE_PROJECT_ID ||
+          process.env.GCLOUD_PROJECT ||
+          process.env.GOOGLE_CLOUD_PROJECT
+      });
+    }
+    adminDb = getAdminFirestore();
+    return adminDb;
+  } catch (error) {
+    console.error('[threads] Failed to initialize Firestore admin', error);
+    throw error;
+  }
+}
+
 app.get('/healthz', (_req, res) => res.send('ok'));
 app.get('/', (_req, res) => res.send('backend up'));
 
 app.get('/api/hello', (_req, res) => {
   res.json({ message: 'Hello from Cloud Run!' });
+});
+
+app.post('/api/archiveThreads', async (req, res) => {
+  if (!ARCHIVE_THREADS_TOKEN) {
+    return res
+      .status(501)
+      .json({ error: 'ARCHIVE_THREADS_TOKEN not configured. Set ARCHIVE_THREADS_TOKEN to enable.' });
+  }
+
+  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const providedToken =
+    bearer ||
+    (typeof req.body?.token === 'string' ? req.body.token : null) ||
+    (typeof req.query?.token === 'string' ? req.query.token : null);
+  if (providedToken !== ARCHIVE_THREADS_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  let db;
+  try {
+    db = ensureAdminDb();
+  } catch (error) {
+    console.error('[threads] admin init failed', error);
+    return res.status(500).json({ error: 'Firestore admin not initialized.' });
+  }
+
+  try {
+    const now = Date.now();
+    const snap = await db
+      .collectionGroup('threads')
+      .where('status', '==', 'active')
+      .where('autoArchiveAt', '<=', now)
+      .orderBy('autoArchiveAt', 'asc')
+      .limit(ARCHIVE_THREADS_LIMIT)
+      .get();
+
+    if (snap.empty) {
+      return res.json({ archived: 0, checked: 0 });
+    }
+
+    const batch = db.batch();
+    snap.forEach((docSnap) => {
+      batch.update(docSnap.ref, {
+        status: 'archived',
+        archivedAt: FieldValue.serverTimestamp(),
+        archiveReason: 'ttl_expired'
+      });
+    });
+    await batch.commit();
+    return res.json({ archived: snap.size, checked: snap.size });
+  } catch (error) {
+    console.error('[threads] archive job failed', error);
+    return res.status(500).json({
+      error: 'Failed to archive threads.',
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 const clampText = (value, max = MAX_CONTEXT_CHARS) => {
