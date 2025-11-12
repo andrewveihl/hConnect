@@ -6,6 +6,8 @@
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
   import { subscribeUserServers } from '$lib/firestore/servers';
+  import { db } from '$lib/firestore';
+  import { doc, onSnapshot, setDoc, deleteField, Timestamp } from 'firebase/firestore';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
   import logoMarkUrl from '$lib/assets/Logo_transparent.png';
@@ -19,6 +21,9 @@
     showBottomActions?: boolean;
   }
 
+  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
+  type StatusSelection = 'auto' | PresenceState;
+
   let {
     activeServerId = null,
     onCreateServer = null,
@@ -29,6 +34,17 @@
   let servers: { id: string; name: string; icon?: string | null }[] = $state([]);
   let unsub: (() => void) | undefined = $state();
   let localCreateOpen = $state(false);
+  let myPresenceState: PresenceState = $state('offline');
+  let myOverrideActive = $state(false);
+  let myOverrideState: PresenceState | null = $state(null);
+  let myOverrideExpiresAt: number | null = $state(null);
+  let statusMenuOpen = $state(false);
+  let statusSaving = $state(false);
+  let statusError: string | null = $state(null);
+  let statusButtonEl: HTMLButtonElement | null = $state(null);
+  let statusMenuEl: HTMLDivElement | null = $state(null);
+  let presenceUnsub: (() => void) | null = $state(null);
+  const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
 
   run(() => {
     if ($user) {
@@ -59,11 +75,244 @@
       ? currentPath.slice(5).split('/')[0] || null
       : null);
 
+  const presenceLabels: Record<PresenceState, string> = {
+    online: 'Online',
+    busy: 'Busy',
+    idle: 'Idle',
+    offline: 'Offline'
+  };
+
+  const statusOptions: Array<{ id: StatusSelection; label: string; description: string; state: PresenceState | null }> = [
+    { id: 'auto', label: 'Auto', description: 'Follow activity', state: null },
+    { id: 'online', label: 'Online', description: 'Available to chat', state: 'online' },
+    { id: 'busy', label: 'Busy', description: 'Do not disturb', state: 'busy' },
+    { id: 'idle', label: 'Idle', description: 'Away for a bit', state: 'idle' },
+    { id: 'offline', label: 'Invisible', description: 'Appear offline', state: 'offline' }
+  ];
+
+  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+  const IDLE_WINDOW_MS = 60 * 60 * 1000;
+  const DEFAULT_OVERRIDE_MS = 24 * 60 * 60 * 1000;
+
   let unreadDMs: NotificationItem[] = $state([]);
   run(() => {
     unreadDMs = ($notifications ?? []).filter((item) => item?.kind === 'dm' && item.unread > 0);
   });
+
+  run(() => {
+    presenceUnsub?.();
+    myPresenceState = 'offline';
+    myOverrideActive = false;
+    myOverrideState = null;
+    myOverrideExpiresAt = null;
+    const uid = $user?.uid;
+    if (!uid) return;
+    const database = db();
+    const ref = doc(database, 'profiles', uid, 'presence', 'status');
+    presenceUnsub = onSnapshot(
+      ref,
+      (snap) => {
+        const data = snap.data() ?? {};
+        const manual = manualStateFromDoc(data);
+        myOverrideActive = !!manual;
+        myOverrideState = manual?.state ?? null;
+        myOverrideExpiresAt = manual?.expiresAt ?? null;
+        myPresenceState = manual?.state ?? computePresenceFromDoc(data);
+      },
+      () => {
+        myPresenceState = 'offline';
+        myOverrideActive = false;
+        myOverrideState = null;
+        myOverrideExpiresAt = null;
+      }
+    );
+  });
+
+  onDestroy(() => presenceUnsub?.());
+
+  const pickString = (value: unknown): string | undefined => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length) return trimmed;
+    }
+    return undefined;
+  };
+
+  const toMillis = (value: unknown): number | null => {
+    try {
+      if (!value) return null;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      if (value instanceof Date) return value.getTime();
+      if (typeof (value as any)?.toMillis === 'function') {
+        const ts = (value as any).toMillis();
+        return Number.isFinite(ts) ? ts : null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
+    const time = toMillis(value);
+    if (time === null) return false;
+    return Date.now() - time <= ms;
+  };
+
+  const normalizePresence = (raw?: string | null): PresenceState | null => {
+    if (!raw) return null;
+    const normalized = raw.trim().toLowerCase();
+    if (!normalized) return null;
+    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
+    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
+    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
+    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
+    return null;
+  };
+
+  const manualStateFromDoc = (source: any): { state: PresenceState; expiresAt: number | null } | null => {
+    if (!source || typeof source !== 'object') return null;
+    const raw =
+      pickString(source.manualState) ??
+      pickString((source.manual as any)?.state);
+    if (!raw) return null;
+    const normalized = normalizePresence(raw);
+    if (!normalized) return null;
+    const expiresAt =
+      toMillis(source.manualExpiresAt) ??
+      toMillis((source.manual as any)?.expiresAt) ??
+      null;
+    if (expiresAt && Date.now() > expiresAt) return null;
+    return { state: normalized, expiresAt };
+  };
+
+  const booleanPresenceFrom = (source: any): boolean | null => {
+    if (!source || typeof source !== 'object') return null;
+    if (typeof source.online === 'boolean') return source.online;
+    if (typeof source.isOnline === 'boolean') return source.isOnline;
+    if (typeof source.active === 'boolean') return source.active;
+    return null;
+  };
+
+  const recentActivityFrom = (source: any): unknown => {
+    if (!source || typeof source !== 'object') return null;
+    return source.lastActive ?? source.lastSeen ?? source.updatedAt ?? source.timestamp ?? null;
+  };
+
+  const computePresenceFromDoc = (source: any): PresenceState => {
+    const manual = manualStateFromDoc(source);
+    if (manual) return manual.state;
+    const bool = booleanPresenceFrom(source);
+    if (bool !== null) return bool ? 'online' : 'offline';
+    const raw =
+      pickString(source?.state) ??
+      pickString(source?.status) ??
+      pickString(source?.presenceState);
+    const normalized = normalizePresence(raw ?? null);
+    if (normalized) return normalized;
+    const recent = recentActivityFrom(source);
+    if (recent) {
+      if (isRecent(recent, ONLINE_WINDOW_MS)) return 'online';
+      if (isRecent(recent, IDLE_WINDOW_MS)) return 'idle';
+    }
+    return 'offline';
+  };
+
+  const statusDotClass = (state: PresenceState) => {
+    switch (state) {
+      case 'online':
+        return 'status-dot--online';
+      case 'busy':
+        return 'status-dot--busy';
+      case 'idle':
+        return 'status-dot--idle';
+      default:
+        return 'status-dot--offline';
+    }
+  };
+
+  const formatOverrideExpiry = (expiresAt: number | null) => {
+    if (!expiresAt) return 'in 24 hours';
+    const diff = expiresAt - Date.now();
+    if (diff <= 0) return 'any moment';
+    const minutes = Math.round(diff / 60000);
+    if (minutes < 60) {
+      return `in ${minutes} min`;
+    }
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) {
+      return `in ${hours} hr${hours === 1 ? '' : 's'}`;
+    }
+    const days = Math.round(hours / 24);
+    return `in ${days} day${days === 1 ? '' : 's'}`;
+  };
+
+
+  const statusDotLabel = () => presenceLabels[myPresenceState] ?? 'Offline';
+
+  async function applyStatusOverride(selection: StatusSelection) {
+    if (!$user?.uid) return;
+    statusSaving = true;
+    statusError = null;
+    try {
+      const database = db();
+      const ref = doc(database, 'profiles', $user.uid, 'presence', 'status');
+      if (selection === 'auto') {
+        await setDoc(
+          ref,
+          {
+            manualState: deleteField(),
+            manualExpiresAt: deleteField()
+          },
+          { merge: true }
+        );
+      } else {
+        const expiresAt = Timestamp.fromMillis(Date.now() + DEFAULT_OVERRIDE_MS);
+        await setDoc(
+          ref,
+          {
+            manualState: selection,
+            manualExpiresAt: expiresAt
+          },
+          { merge: true }
+        );
+      }
+      statusMenuOpen = false;
+    } catch (error) {
+      statusError = error instanceof Error ? error.message : 'Failed to update status.';
+    } finally {
+      statusSaving = false;
+    }
+  }
+
+  const clearStatusOverride = () => applyStatusOverride('auto');
+
+  const toggleStatusMenu = () => {
+    statusMenuOpen = !statusMenuOpen;
+    if (!statusMenuOpen) {
+      statusError = null;
+    }
+  };
+
+  function handleStatusOutside(event: MouseEvent | PointerEvent) {
+    if (!statusMenuOpen) return;
+    const target = event.target as Node | null;
+    if (statusButtonEl?.contains(target) || statusMenuEl?.contains(target)) return;
+    statusMenuOpen = false;
+  }
+
+  function handleStatusKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && statusMenuOpen) {
+      statusMenuOpen = false;
+    }
+  }
 </script>
+
+<svelte:window on:pointerdown={handleStatusOutside} on:keydown={handleStatusKeydown} />
 
 <aside
   class="app-rail h-dvh w-[72px] sticky top-0 left-0 z-30 flex flex-col items-center select-none"
@@ -171,18 +420,82 @@
         </a>
       </div>
 
-      <a
-        href="/settings"
-        class="rail-button rail-button--profile overflow-hidden mt-1"
-        aria-label="Profile"
-        title="Profile"
-      >
-        {#if $user?.photoURL}
-          <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
-        {:else}
-          <i class="bx bx-user text-xl leading-none"></i>
-        {/if}
-      </a>
+      <div class="rail-profile-wrapper">
+        <div class="rail-profile-anchor">
+          <a
+            href="/settings"
+            class="rail-button rail-button--profile overflow-hidden mt-1"
+            aria-label="Profile"
+            title="Profile"
+          >
+            {#if $user?.photoURL}
+              <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
+            {:else}
+              <i class="bx bx-user text-xl leading-none"></i>
+            {/if}
+          </a>
+          <div class="status-menu-container">
+            <button
+              type="button"
+              class="status-button"
+              bind:this={statusButtonEl}
+              onclick={toggleStatusMenu}
+              aria-label={`Set status (currently ${statusDotLabel()})`}
+              title="Set status"
+            >
+              <span class={`status-dot ${statusDotClass(myPresenceState)}`} aria-hidden="true"></span>
+            </button>
+            {#if statusMenuOpen}
+              <div class="status-menu" bind:this={statusMenuEl} role="dialog" aria-label="Set custom status">
+                <div class="status-menu__section">
+                  <div class="status-menu__title">Status</div>
+                  <div class="status-menu__list">
+                    {#each statusOptions as option (option.id)}
+                      <button
+                        type="button"
+                        class={`status-option ${option.id === currentStatusSelection ? 'is-active' : ''}`}
+                        onclick={() => applyStatusOverride(option.id)}
+                        disabled={statusSaving}
+                      >
+                        {#if option.state}
+                          <span class={`status-option__dot ${statusDotClass(option.state)}`} aria-hidden="true"></span>
+                        {:else}
+                          <span class="status-option__dot status-option__dot--auto" aria-hidden="true">
+                            <i class="bx bx-refresh"></i>
+                          </span>
+                        {/if}
+                        <div class="status-option__meta">
+                          <span class="status-option__label">{option.label}</span>
+                          <span class="status-option__description">{option.description}</span>
+                        </div>
+                        {#if option.id === currentStatusSelection}
+                          <i class="bx bx-check status-option__check" aria-hidden="true"></i>
+                        {/if}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+                {#if statusError}
+                  <div class="status-menu__error">{statusError}</div>
+                {/if}
+                {#if myOverrideActive && myOverrideState}
+                  <div class="status-menu__override">
+                    <div class="status-menu__override-label">
+                      Override set to <strong>{presenceLabels[myOverrideState]}</strong>
+                    </div>
+                    <div class="status-menu__override-expiry">Expires {formatOverrideExpiry(myOverrideExpiresAt)}</div>
+                    <button type="button" class="status-menu__clear" onclick={clearStatusOverride} disabled={statusSaving}>
+                      Clear override
+                    </button>
+                  </div>
+                {:else}
+                  <div class="status-menu__hint">Manual statuses expire after 24 hours.</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
     </div>
   {/if}
 </aside>
@@ -194,5 +507,191 @@
     :global(.app-rail .rail-bottom) {
       display: none;
     }
+  }
+
+  .rail-bottom {
+    position: relative;
+  }
+
+  .rail-profile-wrapper {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+
+  .rail-profile-anchor {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .status-menu-container {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    transform: translate(35%, 35%);
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .status-button {
+    width: 1.45rem;
+    height: 1.45rem;
+    border-radius: 999px;
+    border: 2px solid color-mix(in srgb, var(--color-panel) 90%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    display: grid;
+    place-items: center;
+    padding: 0;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    transition: border 150ms ease, background 150ms ease;
+  }
+
+  .status-button:hover,
+  .status-button:focus-visible {
+    border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+    outline: none;
+  }
+
+  .status-dot {
+    width: 0.9rem;
+    height: 0.9rem;
+    border-radius: 999px;
+    border: 2px solid color-mix(in srgb, var(--color-panel) 85%, transparent);
+  }
+
+  .status-dot--online {
+    background: #22c55e;
+  }
+
+  .status-dot--busy {
+    background: #ef4444;
+  }
+
+  .status-dot--idle {
+    background: #facc15;
+  }
+
+  .status-dot--offline {
+    background: #6b7280;
+  }
+
+  .status-menu {
+    position: absolute;
+    left: calc(100% + 0.5rem);
+    bottom: 0;
+    width: 240px;
+    padding: 0.85rem;
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    box-shadow: 0 18px 40px rgba(5, 8, 18, 0.45);
+    z-index: 50;
+  }
+
+  .status-menu__section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .status-menu__title {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-55);
+  }
+
+  .status-menu__list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .status-option {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    padding: 0.35rem 0.4rem;
+    border-radius: 0.75rem;
+    border: 1px solid transparent;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    transition: border 140ms ease, background 140ms ease;
+  }
+
+  .status-option.is-active {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  }
+
+  .status-option__dot {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 999px;
+    border: 2px solid color-mix(in srgb, var(--color-panel) 85%, transparent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+  }
+
+  .status-option__dot--auto {
+    border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    color: var(--text-60);
+  }
+
+  .status-option__meta {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .status-option__label {
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+
+  .status-option__description {
+    font-size: 0.75rem;
+    color: var(--text-60);
+  }
+
+  .status-option__check {
+    font-size: 1.1rem;
+    color: var(--color-accent);
+  }
+
+  .status-menu__error {
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    color: var(--color-danger, #ff9393);
+  }
+
+  .status-menu__override {
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+  }
+
+  .status-menu__clear {
+    align-self: flex-start;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    font-size: 0.78rem;
+    background: transparent;
+    color: var(--text-70);
+  }
+
+  .status-menu__hint {
+    margin-top: 0.6rem;
+    font-size: 0.75rem;
+    color: var(--text-60);
   }
 </style>

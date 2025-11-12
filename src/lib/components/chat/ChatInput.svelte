@@ -213,6 +213,9 @@
   const isDesktop = $derived(platform === 'desktop');
   const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && replyTarget?.messageId));
   const showGeneralCoach = $derived(Boolean(aiAssistAllowed && !replyTarget && defaultSuggestionSource && !text.trim()));
+  const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
+  const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
+  const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
   const showDesktopPrediction = $derived(Boolean(aiAssistAllowed && isDesktop));
   const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
   const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
@@ -385,15 +388,22 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (!mentionActive && canUseGeneralSuggestion && e.key === 'Tab' && !e.shiftKey) {
-      e.preventDefault();
-      applyGeneralSuggestion();
-      return;
-    }
-    if (!mentionActive && showDesktopPrediction && aiInlineSuggestion && e.key === 'Tab' && !e.shiftKey) {
-      e.preventDefault();
-      acceptInlineSuggestion();
-      return;
+    if (!mentionActive && e.key === 'Tab' && !e.shiftKey) {
+      if (showReplyGhost && canUseReplySuggestion) {
+        e.preventDefault();
+        applyReplySuggestion();
+        return;
+      }
+      if (canUseGeneralSuggestion) {
+        e.preventDefault();
+        applyGeneralSuggestion();
+        return;
+      }
+      if (showDesktopPrediction && aiInlineSuggestion) {
+        e.preventDefault();
+        acceptInlineSuggestion();
+        return;
+      }
     }
 
     if (mentionActive) {
@@ -478,7 +488,7 @@
     node.style.height = 'auto';
     const scrollHeight = node.scrollHeight;
     const textHeight = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
-    const ghostHeight = canUseGeneralSuggestion
+    const ghostHeight = showSuggestionGhost
       ? Math.max(minHeight, Math.min(suggestedGhostHeight || 0, maxHeight))
       : 0;
     const nextHeight = Math.max(textHeight, ghostHeight || 0);
@@ -526,7 +536,7 @@
   }
 
   function syncSuggestedGhostHeight() {
-    if (!canUseGeneralSuggestion) {
+    if (!showSuggestionGhost) {
       suggestedGhostHeight = 0;
       return;
     }
@@ -573,7 +583,7 @@
   $effect(() => {
     syncSuggestedGhostHeight();
     syncTextareaSize();
-    if (!canUseGeneralSuggestion) return;
+    if (!showSuggestionGhost) return;
     if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
     const target = suggestedGhostEl;
     if (!target) return;
@@ -1442,64 +1452,6 @@
   </div>
 
   <div class="chat-input-stack">
-  {#if replyTarget}
-    <div class="reply-banner" role="status">
-      <div class="reply-banner__indicator" aria-hidden="true"></div>
-      <div class="reply-banner__body">
-        <div class="reply-banner__label">Replying to</div>
-        <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
-        <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
-        {#if showReplyCoach}
-          <div class="ai-card ai-card--inline" role="status">
-            <div class="ai-card__header">
-              <div class="ai-card__badge">
-                <i class="bx bx-sparkles" aria-hidden="true"></i>
-                <span>Reply coach</span>
-              </div>
-              {#if !aiReplyLoading}
-                <button type="button" class="ai-card__pill" onclick={regenerateReplySuggestion}>
-                  Refresh
-                </button>
-              {/if}
-            </div>
-            <div class="ai-card__body">
-              {#if aiReplyLoading}
-                <div class="ai-card__status">Drafting a suggestion...</div>
-              {:else if aiReplyError}
-                <div class="ai-card__status ai-card__status--error">{aiReplyError}</div>
-                <div class="ai-card__actions">
-                  <button type="button" class="ai-card__button" onclick={regenerateReplySuggestion}>
-                    Try again
-                  </button>
-                </div>
-              {:else if aiReplySuggestion}
-                <p class="ai-card__text">{aiReplySuggestion}</p>
-                <div class="ai-card__actions">
-                  <button type="button" class="ai-card__button ai-card__button--primary" onclick={applyReplySuggestion}>
-                    Insert suggestion
-                  </button>
-                  <button type="button" class="ai-card__button" onclick={regenerateReplySuggestion}>
-                    Another idea
-                  </button>
-                </div>
-              {:else}
-                <div class="ai-card__status">Tap refresh to get a draft.</div>
-              {/if}
-            </div>
-          </div>
-        {/if}
-      </div>
-      <button
-        type="button"
-        class="reply-banner__close"
-        onclick={cancelReply}
-        aria-label="Cancel reply"
-      >
-        <i class="bx bx-x"></i>
-      </button>
-    </div>
-  {/if}
-
   {#if attachments.length}
     <div class="chat-attachments" role="list">
       {#each attachments as attachment}
@@ -1600,6 +1552,24 @@
     </div>
 
     <div class="flex-1 relative chat-input__field">
+      {#if replyTarget}
+        <div class="reply-banner" role="status">
+          <div class="reply-banner__indicator" aria-hidden="true"></div>
+          <div class="reply-banner__body">
+            <div class="reply-banner__label">Replying to</div>
+            <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
+            <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
+          </div>
+          <button
+            type="button"
+            class="reply-banner__close"
+            onclick={cancelReply}
+            aria-label="Cancel reply"
+          >
+            <i class="bx bx-x"></i>
+          </button>
+        </div>
+      {/if}
 
       <div class="chat-input__editor">
         <textarea
@@ -1607,7 +1577,7 @@
           rows="1"
           bind:this={inputEl}
           bind:value={text}
-        placeholder={showGeneralCoach ? '' : placeholder}
+        placeholder={showSuggestionGhost ? '' : placeholder}
           onkeydown={onKeydown}
           oninput={handleInput}
           onpaste={handlePaste}
@@ -1620,14 +1590,15 @@
           aria-label="Message input"
 ></textarea>
 
-        {#if showGeneralCoach}
+        {#if showSuggestionGhost}
+          {@const isReplySuggestion = showReplyGhost}
           <button
             type="button"
             class="chat-input__suggested-refresh"
-            onclick={regenerateGeneralSuggestion}
+            onclick={isReplySuggestion ? regenerateReplySuggestion : regenerateGeneralSuggestion}
             aria-label="Refresh suggested reply"
             title="Refresh suggested reply"
-            disabled={aiGeneralLoading}
+            disabled={isReplySuggestion ? aiReplyLoading : aiGeneralLoading}
           >
             <i class="bx bx-refresh" aria-hidden="true"></i>
           </button>
@@ -1636,20 +1607,38 @@
             aria-live="polite"
             bind:this={suggestedGhostEl}
             style={predictionBoxStyle}
-            >
-              <div class="chat-input__suggested-line">
-                <span class="chat-input__suggested-prefix">{placeholder ?? 'Message'}</span>
-              {#if aiGeneralLoading}
-                <span class="chat-input__suggested-status">Drafting a reply...</span>
-              {:else if aiGeneralError}
-                <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiGeneralError}</span>
-              {:else if aiGeneralSuggestion}
-                <span class="chat-input__suggested-text">{aiGeneralSuggestion}</span>
+          >
+            <div class="chat-input__suggested-line">
+              <span class="chat-input__suggested-prefix">
+                {#if isReplySuggestion}
+                  Reply to {replyRecipientLabel(replyTarget) || 'member'}
+                {:else}
+                  {placeholder ?? 'Message'}
+                {/if}
+              </span>
+              {#if isReplySuggestion}
+                {#if aiReplyLoading}
+                  <span class="chat-input__suggested-status">Drafting a suggestion...</span>
+                {:else if aiReplyError}
+                  <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiReplyError}</span>
+                {:else if aiReplySuggestion}
+                  <span class="chat-input__suggested-text">{aiReplySuggestion}</span>
+                {:else}
+                  <span class="chat-input__suggested-status">Tap refresh to get a draft.</span>
+                {/if}
               {:else}
-                <span class="chat-input__suggested-status">Press refresh for a new idea.</span>
+                {#if aiGeneralLoading}
+                  <span class="chat-input__suggested-status">Drafting a reply...</span>
+                {:else if aiGeneralError}
+                  <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiGeneralError}</span>
+                {:else if aiGeneralSuggestion}
+                  <span class="chat-input__suggested-text">{aiGeneralSuggestion}</span>
+                {:else}
+                  <span class="chat-input__suggested-status">Press refresh for a new idea.</span>
+                {/if}
               {/if}
             </div>
-            {#if aiGeneralSuggestion}
+            {#if (isReplySuggestion ? aiReplySuggestion : aiGeneralSuggestion)}
               <span class="chat-input__suggested-hint">Press Tab to use</span>
             {/if}
           </div>

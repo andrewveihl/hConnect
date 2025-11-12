@@ -1536,11 +1536,18 @@ let lastPendingChannelId: string | null = $state(null);
     threadMessages = replies;
     const contextSources = [activeThreadRoot, ...replies].filter(Boolean).slice(-10);
     threadConversationContext = contextSources;
-    const inbound =
-      [...replies]
-        .reverse()
-        .find((msg) => msg?.uid && $user?.uid && msg.uid !== $user.uid) ?? null;
-    threadDefaultSuggestionSource = inbound ?? activeThreadRoot;
+    const latestAuthored =
+      [...replies].reverse().find((msg) => msg?.uid) ??
+      (activeThreadRoot?.uid ? activeThreadRoot : null);
+    if (!latestAuthored) {
+      threadDefaultSuggestionSource = null;
+      return;
+    }
+    if ($user?.uid && latestAuthored.uid === $user.uid) {
+      threadDefaultSuggestionSource = null;
+      return;
+    }
+    threadDefaultSuggestionSource = latestAuthored;
   });
   run(() => {
     if (!threadDrawerOpen) {
@@ -1555,14 +1562,20 @@ let lastPendingChannelId: string | null = $state(null);
     aiConversationContext = messages.slice(-10);
   });
   run(() => {
-    if (!messages.length || !$user?.uid) {
+    if (!messages.length) {
       latestInboundMessage = null;
       return;
     }
-    const fallback = [...messages]
-      .reverse()
-      .find((msg) => msg?.uid && msg.uid !== $user.uid);
-    latestInboundMessage = fallback ?? null;
+    const latestAuthored = [...messages].reverse().find((msg) => msg?.uid);
+    if (!latestAuthored) {
+      latestInboundMessage = null;
+      return;
+    }
+    if ($user?.uid && latestAuthored.uid === $user.uid) {
+      latestInboundMessage = null;
+      return;
+    }
+    latestInboundMessage = latestAuthored;
   });
   run(() => {
     if (!$user?.uid) {
@@ -2034,16 +2047,16 @@ let lastPendingChannelId: string | null = $state(null);
 
   .mobile-call-card,
   .mobile-chat-card {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    border-radius: 1.3rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    box-shadow:
-      0 24px 45px rgba(10, 15, 30, 0.45),
-      inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    overflow: hidden;
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-radius: 0.75rem;
+      border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+      box-shadow:
+        0 24px 45px rgba(10, 15, 30, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      overflow: hidden;
   }
 
   .mobile-call-card {
@@ -2065,17 +2078,17 @@ let lastPendingChannelId: string | null = $state(null);
   }
 
   .mobile-chat-card {
-    background: color-mix(in srgb, var(--color-panel-muted) 94%, transparent);
-    padding: 0.65rem;
-  }
+      background: color-mix(in srgb, var(--color-panel-muted) 94%, transparent);
+      padding: 0.65rem;
+    }
 
   .mobile-chat-card :global(.chat-input-region) {
-    border-radius: 0 0 1.3rem 1.3rem;
-  }
+      border-radius: 0 0 0.75rem 0.75rem;
+    }
 
   .mobile-chat-card :global(.message-scroll-region) {
-    border-radius: 1.3rem 1.3rem 0 0;
-  }
+      border-radius: 0.75rem 0.75rem 0 0;
+    }
 
   @media (min-width: 768px) {
     .mobile-call-wrapper {
