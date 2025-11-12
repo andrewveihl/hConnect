@@ -186,10 +186,12 @@
   let lastGeneralSuggestionId: string | null = null;
 
   let aiInlineSuggestion = $state('');
-  let aiPredictionLoading = $state(false);
-  let aiPredictionError: string | null = $state(null);
   let predictionAbort: AbortController | null = null;
   let predictionTimer: ReturnType<typeof setTimeout> | null = null;
+  let predictionScroll = $state(0);
+  let predictionBoxStyle = $state('');
+  let suggestedGhostEl: HTMLDivElement | null = $state(null);
+  let suggestedGhostHeight = $state(0);
   let lastPredictionSeed = '';
   let aiContextWindow: ReplyMessageContext[] = $state([]);
   let rewriteMenuOpen = $state(false);
@@ -212,6 +214,7 @@
   const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && replyTarget?.messageId));
   const showGeneralCoach = $derived(Boolean(aiAssistAllowed && !replyTarget && defaultSuggestionSource && !text.trim()));
   const showDesktopPrediction = $derived(Boolean(aiAssistAllowed && isDesktop));
+  const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
   const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
   const showRewriteCoach = $derived(
     Boolean(aiAssistAllowed && rewriteMode && (rewriteLoading || rewriteError || rewriteOptions.length))
@@ -382,6 +385,11 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (!mentionActive && canUseGeneralSuggestion && e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      applyGeneralSuggestion();
+      return;
+    }
     if (!mentionActive && showDesktopPrediction && aiInlineSuggestion && e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault();
       acceptInlineSuggestion();
@@ -455,12 +463,131 @@
     if (mentionOptions.length) {
       updateMentionState();
     }
+    syncTextareaSize();
+    syncPredictionOverlay();
+  }
+
+  function syncTextareaSize() {
+    if (typeof window === 'undefined' || !inputEl) return;
+    const node = inputEl;
+    const computed = window.getComputedStyle(node);
+    const minHeight = parseFloat(computed.minHeight || '0') || 0;
+    const maxHeightValue = computed.maxHeight;
+    const maxHeight =
+      !maxHeightValue || maxHeightValue === 'none' ? Number.POSITIVE_INFINITY : parseFloat(maxHeightValue);
+    node.style.height = 'auto';
+    const scrollHeight = node.scrollHeight;
+    const textHeight = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
+    const ghostHeight = canUseGeneralSuggestion
+      ? Math.max(minHeight, Math.min(suggestedGhostHeight || 0, maxHeight))
+      : 0;
+    const nextHeight = Math.max(textHeight, ghostHeight || 0);
+    node.style.height = `${nextHeight}px`;
+    if (scrollHeight > nextHeight) {
+      node.style.overflowY = 'auto';
+    } else {
+      node.style.overflowY = 'hidden';
+    }
+  }
+
+  function syncPredictionOverlay() {
+    if (!inputEl) {
+      predictionScroll = 0;
+      return;
+    }
+    predictionScroll = inputEl.scrollTop ?? 0;
+  }
+
+  function handleTextareaScroll() {
+    syncPredictionOverlay();
+  }
+
+  function syncPredictionBoxStyle() {
+    if (typeof window === 'undefined' || !inputEl) {
+      predictionBoxStyle = '';
+      return;
+    }
+    const computed = window.getComputedStyle(inputEl);
+    const padding = `${computed.paddingTop} ${computed.paddingRight} ${computed.paddingBottom} ${computed.paddingLeft}`;
+    predictionBoxStyle = [
+      `padding:${padding}`,
+      `font-family:${computed.fontFamily}`,
+      `font-size:${computed.fontSize}`,
+      `font-weight:${computed.fontWeight}`,
+      `font-style:${computed.fontStyle}`,
+      `line-height:${computed.lineHeight}`,
+      `letter-spacing:${computed.letterSpacing}`
+    ].join(';');
   }
 
   function handleSelectionChange() {
     if (!mentionOptions.length) return;
     requestAnimationFrame(() => updateMentionState());
   }
+
+  function syncSuggestedGhostHeight() {
+    if (!canUseGeneralSuggestion) {
+      suggestedGhostHeight = 0;
+      return;
+    }
+    suggestedGhostHeight = suggestedGhostEl?.scrollHeight ?? 0;
+  }
+
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    const handleResize = () => {
+      syncTextareaSize();
+      syncPredictionBoxStyle();
+    };
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  });
+
+  $effect(() => {
+    text;
+    syncTextareaSize();
+    syncPredictionOverlay();
+  });
+
+  $effect(() => {
+    const node = inputEl;
+    if (!node) {
+      predictionBoxStyle = '';
+      return;
+    }
+    syncPredictionBoxStyle();
+    if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
+    const observer = new window.ResizeObserver(() => {
+      syncPredictionBoxStyle();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => syncTextareaSize());
+      } else {
+        syncTextareaSize();
+      }
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    syncSuggestedGhostHeight();
+    syncTextareaSize();
+    if (!canUseGeneralSuggestion) return;
+    if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
+    const target = suggestedGhostEl;
+    if (!target) return;
+    const observer = new window.ResizeObserver(() => {
+      syncSuggestedGhostHeight();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => syncTextareaSize());
+      } else {
+        syncTextareaSize();
+      }
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  });
 
   function handleTextareaFocus() {
     inputFocused = true;
@@ -637,8 +764,6 @@
     predictionAbort?.abort();
     predictionAbort = null;
     aiInlineSuggestion = '';
-    aiPredictionError = null;
-    aiPredictionLoading = false;
   }
 
   function queuePrediction() {
@@ -672,8 +797,6 @@
     predictionAbort?.abort();
     const controller = new AbortController();
     predictionAbort = controller;
-    aiPredictionLoading = true;
-    aiPredictionError = null;
     try {
       const suggestions = await requestPredictions(
         {
@@ -688,13 +811,8 @@
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       const message = error instanceof Error ? error.message : String(error);
-      aiPredictionError = message;
       if (/openai api key missing/i.test(message)) {
         aiServiceAvailable = false;
-      }
-    } finally {
-      if (predictionAbort === controller) {
-        aiPredictionLoading = false;
       }
     }
   }
@@ -1277,50 +1395,6 @@
 
 <div class="chat-input-root">
   <div class="chat-input-overlays">
-    {#if showGeneralCoach}
-      <div class="ai-card ai-card--standalone ai-card--suggested" role="status">
-        <div class="suggested-reply">
-          <div class="suggested-reply__icon">
-            <i class="bx bx-message-rounded-dots" aria-hidden="true"></i>
-          </div>
-          <div class="suggested-reply__content">
-            <div class="suggested-reply__label">Suggested reply</div>
-            {#if aiGeneralLoading}
-              <div class="suggested-reply__status">Drafting a reply...</div>
-            {:else if aiGeneralError}
-              <div class="suggested-reply__status suggested-reply__status--error">{aiGeneralError}</div>
-            {:else if aiGeneralSuggestion}
-              <p class="suggested-reply__text">{aiGeneralSuggestion}</p>
-            {:else}
-              <div class="suggested-reply__status">No reply yet. Tap refresh.</div>
-            {/if}
-          </div>
-          <div class="suggested-reply__actions">
-            {#if aiGeneralError}
-              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
-                Try again
-              </button>
-            {:else if aiGeneralSuggestion}
-              <button
-                type="button"
-                class="ai-card__button ai-card__button--primary"
-                onclick={applyGeneralSuggestion}
-              >
-                Use
-              </button>
-              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
-                Refresh
-              </button>
-            {:else if !aiGeneralLoading}
-              <button type="button" class="ai-card__button" onclick={regenerateGeneralSuggestion}>
-                Refresh
-              </button>
-            {/if}
-          </div>
-        </div>
-      </div>
-    {/if}
-
     {#if showRewriteCoach}
       <div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
         <div class="ai-card__header">
@@ -1365,24 +1439,6 @@
       </div>
     {/if}
 
-    {#if showDesktopPrediction && (aiInlineSuggestion || aiPredictionLoading || aiPredictionError)}
-      <button
-        type="button"
-        class={`ai-inline-hint ${aiPredictionLoading && !aiInlineSuggestion ? 'is-loading' : ''}`}
-        onclick={acceptInlineSuggestion}
-        disabled={!aiInlineSuggestion}
-      >
-        {#if aiInlineSuggestion}
-          <span class="ai-inline-hint__label">Next</span>
-          <span class="ai-inline-hint__text">{aiInlineSuggestion}</span>
-          <span class="ai-inline-hint__meta">Press Tab</span>
-        {:else if aiPredictionError}
-          <span class="ai-inline-hint__status ai-inline-hint__status--error">AI paused</span>
-        {:else}
-          <span class="ai-inline-hint__status">Predicting...</span>
-        {/if}
-      </button>
-    {/if}
   </div>
 
   <div class="chat-input-stack">
@@ -1545,22 +1601,125 @@
 
     <div class="flex-1 relative chat-input__field">
 
-      <textarea
-        class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-        rows="1"
-        bind:this={inputEl}
-        bind:value={text}
-        placeholder={placeholder}
-        onkeydown={onKeydown}
-        oninput={handleInput}
-        onpaste={handlePaste}
-        onkeyup={handleSelectionChange}
-        onclick={handleSelectionChange}
-        onfocus={handleTextareaFocus}
-        onblur={handleTextareaBlur}
-        {disabled}
-        aria-label="Message input"
+      <div class="chat-input__editor">
+        <textarea
+          class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+          rows="1"
+          bind:this={inputEl}
+          bind:value={text}
+        placeholder={showGeneralCoach ? '' : placeholder}
+          onkeydown={onKeydown}
+          oninput={handleInput}
+          onpaste={handlePaste}
+          onkeyup={handleSelectionChange}
+          onclick={handleSelectionChange}
+          onfocus={handleTextareaFocus}
+          onblur={handleTextareaBlur}
+          onscroll={handleTextareaScroll}
+          {disabled}
+          aria-label="Message input"
 ></textarea>
+
+        {#if showGeneralCoach}
+          <button
+            type="button"
+            class="chat-input__suggested-refresh"
+            onclick={regenerateGeneralSuggestion}
+            aria-label="Refresh suggested reply"
+            title="Refresh suggested reply"
+            disabled={aiGeneralLoading}
+          >
+            <i class="bx bx-refresh" aria-hidden="true"></i>
+          </button>
+          <div
+            class="chat-input__suggested-ghost"
+            aria-live="polite"
+            bind:this={suggestedGhostEl}
+            style={predictionBoxStyle}
+            >
+              <div class="chat-input__suggested-line">
+                <span class="chat-input__suggested-prefix">{placeholder ?? 'Message'}</span>
+              {#if aiGeneralLoading}
+                <span class="chat-input__suggested-status">Drafting a reply...</span>
+              {:else if aiGeneralError}
+                <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiGeneralError}</span>
+              {:else if aiGeneralSuggestion}
+                <span class="chat-input__suggested-text">{aiGeneralSuggestion}</span>
+              {:else}
+                <span class="chat-input__suggested-status">Press refresh for a new idea.</span>
+              {/if}
+            </div>
+            {#if aiGeneralSuggestion}
+              <span class="chat-input__suggested-hint">Press Tab to use</span>
+            {/if}
+          </div>
+        {/if}
+
+        {#if showDesktopPrediction && aiInlineSuggestion}
+          {@const overlayText = text || '\u00a0'}
+          <div
+            class="chat-input__prediction"
+            aria-hidden="true"
+            style={predictionBoxStyle}
+          >
+            <div
+              class="chat-input__prediction-content"
+              style={`transform: translateY(-${predictionScroll}px);`}
+            >
+              <span class="chat-input__prediction-shadow">{overlayText}</span>
+              <span class="chat-input__prediction-hint">{aiInlineSuggestion}</span>
+            </div>
+          </div>
+        {/if}
+
+        <div class="rewrite-trigger rewrite-trigger--inline">
+          <button
+            type="button"
+            class="rewrite-button rewrite-button--inline"
+            onclick={handleRewriteClick}
+            onpointerdown={handleRewritePointerDown}
+            onpointerup={handleRewritePointerUp}
+            onpointerleave={handleRewritePointerLeave}
+            onpointercancel={handleRewritePointerLeave}
+            disabled={disabled || !aiAssistAllowed}
+            aria-haspopup="menu"
+            aria-expanded={rewriteMenuOpen}
+            aria-label={`Rewrite message (${rewriteModeLabel})`}
+            bind:this={rewriteMenuButton}
+          >
+            <span class="rewrite-button__sparkle" aria-hidden="true"></span>
+            <i class="bx bx-pencil" aria-hidden="true"></i>
+          </button>
+          {#if rewriteMenuOpen}
+            <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
+              <div class="rewrite-menu__header">Sound-check message</div>
+              {#if !rewriteEligible}
+                <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
+              {/if}
+              <div class="rewrite-menu__list">
+                {#each rewriteActions as action}
+                  {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
+                    onclick={() => handleRewriteAction(action.id)}
+                    disabled={!rewriteEligible || actionBusy}
+                  >
+                    <span class="rewrite-menu__icon">
+                      <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                    </span>
+                    <span class="rewrite-menu__content">
+                      <span class="rewrite-menu__title">{action.label}</span>
+                      <span class="rewrite-menu__description">{action.description}</span>
+                    </span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
 
       {#if mentionActive}
         <div class="mention-menu" role="listbox">
@@ -1626,53 +1785,6 @@
           {/if}
         </div>
       {/if}
-
-      <div class="rewrite-trigger">
-        <button
-          type="button"
-          class="rewrite-button"
-          onclick={handleRewriteClick}
-          onpointerdown={handleRewritePointerDown}
-          onpointerup={handleRewritePointerUp}
-          onpointerleave={handleRewritePointerLeave}
-          onpointercancel={handleRewritePointerLeave}
-          disabled={disabled || !aiAssistAllowed}
-          aria-haspopup="menu"
-          aria-expanded={rewriteMenuOpen}
-          bind:this={rewriteMenuButton}
-        >
-          <i class={`bx ${rewriteModeIcon}`} aria-hidden="true"></i>
-          <span>{rewriteModeLabel}</span>
-        </button>
-        {#if rewriteMenuOpen}
-          <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
-            <div class="rewrite-menu__header">Sound-check message</div>
-            {#if !rewriteEligible}
-              <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
-            {/if}
-            <div class="rewrite-menu__list">
-              {#each rewriteActions as action}
-                {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-                <button
-                  type="button"
-                  role="menuitem"
-                  class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
-                  onclick={() => handleRewriteAction(action.id)}
-                  disabled={!rewriteEligible || actionBusy}
-                >
-                  <span class="rewrite-menu__icon">
-                    <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                  </span>
-                  <span class="rewrite-menu__content">
-                    <span class="rewrite-menu__title">{action.label}</span>
-                    <span class="rewrite-menu__description">{action.description}</span>
-                  </span>
-                </button>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </div>
 
       <button
         class="chat-send-button"
@@ -2090,67 +2202,6 @@
     color: color-mix(in srgb, var(--color-panel-muted) 96%, white);
   }
 
-  .suggested-reply {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-  }
-
-  .suggested-reply__icon {
-    width: 2.2rem;
-    height: 2.2rem;
-    border-radius: 0.8rem;
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    display: grid;
-    place-items: center;
-    color: var(--color-accent);
-    flex-shrink: 0;
-  }
-
-  .suggested-reply__content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .suggested-reply__label {
-    font-size: 0.72rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--text-55);
-  }
-
-  .suggested-reply__text {
-    margin: 0;
-    font-size: 0.9rem;
-    color: var(--color-text-primary);
-  }
-
-  .suggested-reply__status {
-    font-size: 0.8rem;
-    color: var(--text-60);
-  }
-
-  .suggested-reply__status--error {
-    color: var(--color-danger, #ff8a8a);
-  }
-
-  .suggested-reply__actions {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-  }
-
-  .suggested-reply__actions .ai-card__button {
-    padding: 0.3rem 0.85rem;
-  }
-
-
-
-
-
 
   .reply-banner__close {
     border: 0;
@@ -2173,10 +2224,11 @@
   .textarea {
     width: 100%;
     min-height: 2.6rem;
-    max-height: 9.5rem;
+    max-height: min(60vh, 32rem);
     resize: none;
     line-height: 1.4;
     font-family: inherit;
+    overflow-y: hidden;
   }
 
   .mention-menu {
@@ -2287,50 +2339,116 @@
     gap: 0.35rem;
   }
 
-  .ai-inline-hint {
-    align-self: flex-start;
-    border-radius: var(--radius-pill);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
-    color: var(--text-70);
-    font-size: 0.75rem;
-    display: inline-flex;
-    align-items: center;
+  .chat-input__editor {
+    position: relative;
+  }
+
+  .chat-input__editor textarea {
+    position: relative;
+    z-index: 1;
+  }
+
+  .chat-input__prediction {
+    position: absolute;
+    inset: 0;
+    padding: 0.5rem 1rem;
+    pointer-events: none;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 1.4;
+    overflow: hidden;
+    z-index: 2;
+  }
+
+  .chat-input__prediction-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .chat-input__prediction-shadow {
+    color: transparent;
+  }
+
+  .chat-input__prediction-hint {
+    color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+  }
+
+  .chat-input__suggested-ghost {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    pointer-events: none;
+    font-size: 0.95rem;
+    line-height: 1.4;
+    color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding-bottom: 0.3rem;
+  }
+
+  .chat-input__suggested-line {
+    display: flex;
+    flex-wrap: wrap;
     gap: 0.35rem;
-    padding: 0.25rem 0.75rem;
-    pointer-events: auto;
-    z-index: 15;
+    align-items: baseline;
   }
 
-  .ai-inline-hint:disabled {
-    opacity: 0.75;
-    cursor: default;
+  .chat-input__suggested-prefix {
+    color: var(--text-55);
+    font-weight: 500;
+    white-space: nowrap;
   }
 
-  .ai-inline-hint__label {
+  .chat-input__suggested-text {
+    color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
+  }
+
+  .chat-input__suggested-hint {
+    font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    font-size: 0.68rem;
-    color: var(--text-55);
-  }
-
-  .ai-inline-hint__text {
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-
-  .ai-inline-hint__meta {
     color: var(--text-50);
-    font-size: 0.68rem;
   }
 
-  .ai-inline-hint__status {
-    font-size: 0.75rem;
+  .chat-input__suggested-status {
     color: var(--text-55);
   }
 
-  .ai-inline-hint__status--error {
-    color: var(--color-danger, #ffb4b4);
+  .chat-input__suggested-status--error {
+    color: var(--color-danger, #ff9999);
+  }
+
+  .chat-input__suggested-refresh {
+    position: absolute;
+    top: 0.35rem;
+    right: 0.65rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: none;
+    background: transparent;
+    color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
+    display: grid;
+    place-items: center;
+    z-index: 6;
+    padding: 0;
+  }
+
+  .chat-input__suggested-refresh:hover,
+  .chat-input__suggested-refresh:focus-visible {
+    color: var(--color-accent);
+    outline: none;
+  }
+
+  .chat-input__suggested-refresh:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .chat-input__suggested-refresh i {
+    font-size: 0.95rem;
   }
 
 
@@ -2356,6 +2474,46 @@
     font-weight: 600;
     font-size: 0.85rem;
     padding: 0.4rem 0.9rem;
+    position: relative;
+    overflow: visible;
+  }
+
+  .rewrite-trigger--inline {
+    position: absolute;
+    top: -0.5rem;
+    right: -0.6rem;
+    z-index: 6;
+    pointer-events: none;
+  }
+
+  .rewrite-button--inline {
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    border-radius: 999px;
+    justify-content: center;
+    box-shadow:
+      0 4px 10px rgba(0, 0, 0, 0.35),
+      0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 97%, transparent);
+    color: var(--color-accent);
+    pointer-events: auto;
+  }
+
+  .rewrite-button__sparkle {
+    position: absolute;
+    width: 0.5rem;
+    height: 0.5rem;
+    background: radial-gradient(circle, var(--color-accent) 55%, transparent 70%);
+    top: 0.1rem;
+    left: 0.55rem;
+    border-radius: 999px;
+    opacity: 0.55;
+  }
+
+  .rewrite-button--inline i {
+    font-size: 0.8rem;
+    position: relative;
   }
 
   .rewrite-button:disabled {
