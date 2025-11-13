@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
   import { user } from '$lib/stores/user';
+  import { mobileDockSuppressed } from '$lib/stores/ui';
 
   type Link = {
     href: string;
@@ -41,7 +42,12 @@
   };
 </script>
 
-<nav class="mobile-dock md:hidden" aria-label="Primary">
+<nav
+  class="mobile-dock md:hidden"
+  class:mobile-dock--hidden={$mobileDockSuppressed}
+  aria-label="Primary"
+  aria-hidden={$mobileDockSuppressed ? 'true' : undefined}
+>
   <div class="mobile-dock__inner">
     {#each links as link}
       {@const active = link.isActive(currentPath)}
@@ -100,6 +106,9 @@
     border-top: 1px solid var(--color-border-subtle);
     box-shadow: 0 -12px 32px rgba(4, 8, 14, 0.45);
     backdrop-filter: blur(16px);
+    transform: translateY(0);
+    transition: transform 280ms cubic-bezier(0.2, 0.8, 0.25, 1), opacity 200ms ease;
+    will-change: transform, opacity;
   }
 
   .mobile-dock__inner {
@@ -178,5 +187,11 @@
     border-radius: 999px;
     object-fit: cover;
     box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
+  }
+
+  .mobile-dock--hidden {
+    transform: translateY(calc(100% + env(safe-area-inset-bottom, 0px)));
+    opacity: 0;
+    pointer-events: none;
   }
 </style>

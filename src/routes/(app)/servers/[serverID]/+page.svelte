@@ -1056,15 +1056,51 @@ function sidebarThreadList() {
   let hideMessageInput = $state(false);
 
   const LEFT_RAIL = 72;
-  const EDGE_ZONE = 40;
+  const EDGE_ZONE = 120;
   const SWIPE = 48;
+  const SWIPE_RATIO = 0.25;
 
   let tracking = false;
   let startX = 0;
   let startY = 0;
+  let swipeTarget: 'channels' | 'members' | null = null;
+  let channelSwipeMode: 'open' | 'close' | null = null;
+  let memberSwipeMode: 'open' | 'close' | null = null;
+  let channelSwipeWidth = $state(1);
+  let memberSwipeWidth = $state(1);
+  let channelSwipeDelta = $state(0);
+  let memberSwipeDelta = $state(0);
+  let channelSwipeActive = $state(false);
+  let memberSwipeActive = $state(false);
+
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  const channelsTransform = $derived.by(() => {
+    if (channelSwipeActive && channelSwipeMode && channelSwipeWidth > 0) {
+      const progress = clamp(channelSwipeDelta / channelSwipeWidth, -1, 1);
+      if (channelSwipeMode === 'open') {
+        const offset = clamp(-100 + Math.max(progress, 0) * 100, -100, 0);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, -100, 0);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showChannels ? 'translate3d(0, 0, 0)' : 'translate3d(-100%, 0, 0)';
+  });
+  const membersTransform = $derived.by(() => {
+    if (memberSwipeActive && memberSwipeMode && memberSwipeWidth > 0) {
+      const progress = clamp(memberSwipeDelta / memberSwipeWidth, -1, 1);
+      if (memberSwipeMode === 'open') {
+        const offset = clamp(100 + progress * 100, 0, 100);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, 0, 100);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showMembers ? 'translate3d(0, 0, 0)' : 'translate3d(100%, 0, 0)';
+  });
 
   const inLeftEdgeZone = (value: number) => {
-    if (isMobile) return value <= EDGE_ZONE;
+    if (isMobile) return true;
     return value >= LEFT_RAIL && value <= LEFT_RAIL + EDGE_ZONE;
   };
 
@@ -1093,15 +1129,48 @@ function sidebarThreadList() {
       }
     };
 
+    const resetChannelSwipe = () => {
+      channelSwipeMode = null;
+      channelSwipeActive = false;
+      channelSwipeDelta = 0;
+    };
+
+    const resetMemberSwipe = () => {
+      memberSwipeMode = null;
+      memberSwipeActive = false;
+      memberSwipeDelta = 0;
+    };
+
+    const cancelSwipe = () => {
+      tracking = false;
+      swipeTarget = null;
+      resetChannelSwipe();
+      resetMemberSwipe();
+    };
+
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
       const touch = e.touches[0];
       startX = touch.clientX;
       startY = touch.clientY;
+      channelSwipeWidth = Math.max(window.innerWidth, 1);
+      memberSwipeWidth = channelSwipeWidth;
+      resetChannelSwipe();
+      resetMemberSwipe();
+      swipeTarget = null;
 
-      const nearLeft = inLeftEdgeZone(startX);
-      const nearRight = window.innerWidth - startX <= EDGE_ZONE;
-      tracking = nearLeft || nearRight || showChannels || showMembers;
+      const nearLeft = isMobile || inLeftEdgeZone(startX);
+      const nearRight = isMobile || window.innerWidth - startX <= EDGE_ZONE;
+      tracking = showChannels || showMembers || nearLeft || nearRight;
+      if (!tracking) return;
+
+      if (showChannels) {
+        swipeTarget = 'channels';
+        channelSwipeMode = 'close';
+      } else if (showMembers) {
+        swipeTarget = 'members';
+        memberSwipeMode = 'close';
+      }
     };
 
     const onTouchMove = (e: TouchEvent) => {
@@ -1110,32 +1179,59 @@ function sidebarThreadList() {
       const dx = touch.clientX - startX;
       const dy = touch.clientY - startY;
 
-      if (Math.abs(dy) > Math.abs(dx) * 1.35) return;
-
-      if (!showChannels && !showMembers) {
-        const fromLeft = inLeftEdgeZone(startX) && dx >= SWIPE;
-        const fromRight = window.innerWidth - startX <= EDGE_ZONE && dx <= -SWIPE;
-        if (fromLeft) {
-          showChannels = true;
-          tracking = false;
-        } else if (fromRight) {
-          showMembers = true;
-          tracking = false;
-        }
+      if (Math.abs(dy) > Math.abs(dx) * 1.35) {
+        cancelSwipe();
         return;
       }
 
-      if (showChannels && dx <= -SWIPE) {
-        showChannels = false;
-        tracking = false;
-      } else if (showMembers && dx >= SWIPE) {
-        showMembers = false;
-        tracking = false;
+      if (!swipeTarget) {
+        if (dx > 0) {
+          swipeTarget = 'channels';
+          channelSwipeMode = 'open';
+        } else if (dx < 0) {
+          swipeTarget = 'members';
+          memberSwipeMode = 'open';
+        } else {
+          return;
+        }
+      }
+
+      if (swipeTarget === 'channels') {
+        if (!channelSwipeActive) {
+          channelSwipeActive = true;
+          if (!channelSwipeMode) {
+            channelSwipeMode = dx > 0 ? 'open' : 'close';
+          }
+        }
+        channelSwipeDelta = dx;
+      } else if (swipeTarget === 'members') {
+        if (!memberSwipeActive) {
+          memberSwipeActive = true;
+          if (!memberSwipeMode) {
+            memberSwipeMode = dx < 0 ? 'open' : 'close';
+          }
+        }
+        memberSwipeDelta = dx;
       }
     };
 
     const onTouchEnd = () => {
-      tracking = false;
+      if (swipeTarget === 'channels' && channelSwipeMode && channelSwipeWidth > 0) {
+        const traveled =
+          channelSwipeMode === 'close' ? Math.max(0, -channelSwipeDelta) : Math.max(0, channelSwipeDelta);
+        const ratio = traveled / channelSwipeWidth;
+        if (traveled >= SWIPE || ratio >= SWIPE_RATIO) {
+          showChannels = channelSwipeMode === 'open';
+        }
+      } else if (swipeTarget === 'members' && memberSwipeMode && memberSwipeWidth > 0) {
+        const traveled =
+          memberSwipeMode === 'close' ? Math.max(0, memberSwipeDelta) : Math.max(0, -memberSwipeDelta);
+        const ratio = traveled / memberSwipeWidth;
+        if (traveled >= SWIPE || ratio >= SWIPE_RATIO) {
+          showMembers = memberSwipeMode === 'open';
+        }
+      }
+      cancelSwipe();
     };
 
     window.addEventListener('keydown', onKey);
@@ -1160,6 +1256,72 @@ function sidebarThreadList() {
     const cleanup = setupGestures();
     return () => cleanup();
   });
+
+  let disposeThreadSwipe: (() => void) | null = null;
+
+  $effect(() => {
+    disposeThreadSwipe?.();
+    if (!isMobile || !activeThread || mobileVoicePane !== 'chat') {
+      disposeThreadSwipe = null;
+      return;
+    }
+    disposeThreadSwipe = registerThreadSwipeGestures();
+    return () => disposeThreadSwipe?.();
+  });
+
+  function registerThreadSwipeGestures() {
+    const THRESHOLD = 64;
+    let tracking = false;
+    let startX = 0;
+    let startY = 0;
+    let mode: 'close-thread' | 'open-members' | null = null;
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (!activeThread || !isMobile || mobileVoicePane !== 'chat') return;
+      if (showChannels || showMembers) return;
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      tracking = true;
+      mode = null;
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!tracking || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (!mode) {
+        if (Math.abs(dy) > Math.abs(dx) * 1.2) {
+          tracking = false;
+          return;
+        }
+        mode = dx > 0 ? 'close-thread' : 'open-members';
+      }
+      if (mode === 'close-thread' && dx >= THRESHOLD) {
+        tracking = false;
+        closeThreadView();
+      } else if (mode === 'open-members' && dx <= -THRESHOLD) {
+        tracking = false;
+        showMembers = true;
+      }
+    };
+
+    const onTouchEnd = () => {
+      tracking = false;
+      mode = null;
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+    };
+  }
 
   function setMobileVoicePane(pane: 'call' | 'chat') {
     mobileVoicePane = pane;
@@ -2292,7 +2454,8 @@ function sidebarThreadList() {
 <!-- Navigation panel (servers + channels, slides from left) -->
 <div
   class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform"
-  style:transform={showChannels ? 'translateX(0)' : 'translateX(-100%)'}
+  class:mobile-panel--dragging={channelSwipeActive}
+  style:transform={channelsTransform}
   style:pointer-events={showChannels ? 'auto' : 'none'}
   aria-label="Servers and channels"
   style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
@@ -2333,7 +2496,8 @@ function sidebarThreadList() {
 <!-- Members panel (slides from right) -->
 <div
   class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform"
-  style:transform={showMembers ? 'translateX(0)' : 'translateX(100%)'}
+  class:mobile-panel--dragging={memberSwipeActive}
+  style:transform={membersTransform}
   style:pointer-events={showMembers ? 'auto' : 'none'}
   aria-label="Members"
   style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
@@ -2504,6 +2668,22 @@ function sidebarThreadList() {
       background: color-mix(in srgb, var(--color-panel-muted) 94%, transparent);
       padding: 0.65rem;
     }
+
+  .mobile-chat-card :global(.thread-pane) {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+  }
+
+  .mobile-chat-card :global(.thread-pane__body) {
+      flex: 1;
+      min-height: 0;
+  }
+
+  .mobile-chat-card :global(.thread-pane__composer) {
+      margin-top: auto;
+  }
 
   .mobile-chat-card :global(.chat-input-region) {
       border-radius: 0 0 0.75rem 0.75rem;

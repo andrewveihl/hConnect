@@ -170,6 +170,9 @@ body,
 
 body {
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  touch-action: manipulation;
+  -ms-touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
 }
 
 * {
@@ -223,13 +226,21 @@ body {
   --mobile-dock-height: 0px;
 }
 
+.has-mobile-dock--suppressed {
+  --mobile-dock-height: 0px;
+}
+
 @media (max-width: 767px) {
-  .has-mobile-dock {
+  .has-mobile-dock:not(.has-mobile-dock--suppressed) {
     --mobile-dock-height: 4.75rem;
   }
 
-  .has-mobile-dock .app-shell__body {
+  .has-mobile-dock:not(.has-mobile-dock--suppressed) .app-shell__body {
     padding-bottom: calc(var(--mobile-dock-height) + env(safe-area-inset-bottom, 0px));
+  }
+
+  .has-mobile-dock.has-mobile-dock--suppressed .app-shell__body {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
 
@@ -498,6 +509,10 @@ body {
   padding-bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
 }
 
+.mobile-panel--dragging {
+  transition: none !important;
+}
+
 .chat-input-region {
   position: sticky;
   bottom: var(--chat-keyboard-offset, 0px);
@@ -581,6 +596,7 @@ body {
   align-items: center;
   gap: 0.55rem;
   flex: 1;
+  min-width: 0;
   padding: 0.45rem 0.55rem;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
@@ -588,6 +604,17 @@ body {
   color: inherit;
   text-align: left;
   transition: background 120ms ease, border 120ms ease;
+}
+
+.channel-row__button .truncate {
+  min-width: 0;
+}
+
+.channel-row__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .channel-row__button:hover {

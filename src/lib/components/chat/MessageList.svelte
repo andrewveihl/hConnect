@@ -685,6 +685,16 @@
     gap: 0.18rem;
   }
 
+  .chat-scroll,
+  .message-block,
+  .message-layout,
+  .message-content,
+  .message-body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
   .message-block--mine {
     align-items: flex-end;
     text-align: right;
@@ -716,10 +726,12 @@
   }
 
   .message-content {
+    position: relative;
     min-width: 0;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
+    padding-bottom: 1rem;
   }
 
   .message-content--mine {
@@ -751,19 +763,28 @@
   }
 
   .message-inline-timestamp {
-    font-size: 0.75rem;
+    position: absolute;
+    right: 0.35rem;
+    bottom: 0.1rem;
+    font-size: 0.72rem;
     color: var(--text-55);
-    padding: 0 0.35rem;
-    margin-top: 0.15rem;
-    line-height: 1.1;
-    min-height: 1rem;
+    line-height: 1;
     display: flex;
     align-items: center;
     transition: opacity 150ms ease, transform 150ms ease;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    border-radius: 999px;
+    padding: 0.1rem 0.4rem;
   }
 
   .message-inline-timestamp--mine {
-    text-align: right;
+    right: 0.35rem;
+  }
+
+  .message-content:not(.message-content--mine) .message-inline-timestamp {
+    left: 0.35rem;
+    right: auto;
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -1018,6 +1039,7 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
+    text-align: left;
     box-shadow: 0 8px 18px rgba(9, 12, 16, 0.22);
     transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
   }
@@ -1440,11 +1462,6 @@
     transition: background 120ms ease, transform 120ms ease;
   }
 
-  .reaction-button.Custom�{
-    font-size: 0.85rem;
-    font-weight: 600;
-  }
-
   .reaction-button:focus-visible {
     outline: 2px solid rgba(255, 255, 255, 0.4);
     outline-offset: 2px;
@@ -1455,29 +1472,33 @@
     transform: translateY(-1px);
   }
 
-  .reaction-menu__actions {
-    margin-top: 0.75rem;
-    display: flex;
-    justify-content: flex-end;
-  }
+  @media (max-width: 640px) {
+    .reaction-menu {
+      min-width: 140px;
+      max-width: min(220px, 85vw);
+      padding: 0.5rem 0.6rem;
+      border-radius: 0.9rem;
+    }
 
-  .reaction-menu__action {
-    border-radius: 999px;
-    border: 0;
-    padding: 0.35rem 1rem;
-    font-weight: 600;
-    background: var(--color-accent);
-    color: var(--color-text-inverse);
-    font-size: 0.85rem;
-    transition: background 120ms ease, transform 120ms ease;
-  }
+    .reaction-grid {
+      grid-template-columns: repeat(auto-fit, minmax(32px, 1fr));
+      gap: 0.25rem;
+    }
 
-.reaction-menu__action:hover,
-.reaction-menu__action:focus-visible {
-  background: var(--color-accent-strong);
-  transform: translateY(-1px);
-  outline: none;
-}
+    .reaction-button {
+      font-size: 1rem;
+      padding: 0.25rem;
+    }
+
+    .reaction-menu__actions {
+      margin-top: 0.5rem;
+    }
+
+    .reaction-menu__action {
+      font-size: 0.78rem;
+      padding: 0.3rem 0.85rem;
+    }
+  }
 
 .thread-preview-card {
   margin-top: 0.4rem;
@@ -1639,19 +1660,6 @@
                     <button
                       type="button"
                       class="message-action"
-                      aria-label="Reply"
-                      title="Reply"
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        event.preventDefault();
-                        handleReplyClick(event, m);
-                      }}
-                    >
-                      <i class="bx bx-reply" aria-hidden="true"></i>
-                    </button>
-                    <button
-                      type="button"
-                      class="message-action"
                       aria-label="Start thread"
                       title="Start thread"
                       onclick={(event) => {
@@ -1731,7 +1739,7 @@
                   <div class="system-message">
                     <span>{(m as any).text ?? ''}</span>
                   </div>
-                {:else if !m.type || m.type === 'text' || m.type === 'normal'}
+                {:else if !m.type || m.type === 'text' || String(m.type) === 'normal'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                       {#if isMentionSegment(segment)}
@@ -1957,10 +1965,6 @@
       {#each QUICK_REACTIONS as emoji}
         <button type="button" class="reaction-button" onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
       {/each}
-      <button type="button" class="reaction-button custom" onclick={() => promptReaction(reactionMenuFor!)}>Custom�</button>
-    </div>
-    <div class="reaction-menu__actions">
-      <button type="button" class="reaction-menu__action" onclick={() => chooseReply(reactionMenuFor!)}>Reply</button>
     </div>
   </div>
 {/if}

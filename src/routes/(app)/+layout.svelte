@@ -11,6 +11,7 @@
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import MobileDock from '$lib/components/app/MobileDock.svelte';
   import { voiceSession } from '$lib/stores/voice';
+  import { mobileDockSuppressed } from '$lib/stores/ui';
   import type { VoiceSession } from '$lib/stores/voice';
   interface Props {
     children?: import('svelte').Snippet;
@@ -92,6 +93,7 @@
   onMount(() => {
     const stopAuth = startAuthListener();
     const stopPresence = startPresenceService();
+    let detachGestureGuards: (() => void) | null = null;
 
     if (browser) {
       (window as any).__DEBUG = true;
@@ -99,6 +101,17 @@
       document.title = APP_TITLE;
       // Best-effort register SW for push/notifications (no permission prompt here)
       registerFirebaseMessagingSW().catch(() => {});
+      const preventGesture = (event: Event) => {
+        event.preventDefault();
+      };
+      window.addEventListener('gesturestart', preventGesture);
+      window.addEventListener('gesturechange', preventGesture);
+      window.addEventListener('gestureend', preventGesture);
+      detachGestureGuards = () => {
+        window.removeEventListener('gesturestart', preventGesture);
+        window.removeEventListener('gesturechange', preventGesture);
+        window.removeEventListener('gestureend', preventGesture);
+      };
       resumeLastLocation()
         .catch(() => {})
         .finally(() => {
@@ -115,6 +128,7 @@
     return () => {
       stopPresence?.();
       stopAuth?.();
+      detachGestureGuards?.();
     };
   });
 
@@ -132,7 +146,7 @@
 </svelte:head>
 
 <!-- Full-screen app surface -->
-<div class="app-shell has-mobile-dock app-bg">
+<div class="app-shell has-mobile-dock app-bg" class:has-mobile-dock--suppressed={$mobileDockSuppressed}>
   <div class="app-shell__body">
     {@render children?.()}
   </div>

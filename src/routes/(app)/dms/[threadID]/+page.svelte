@@ -129,13 +129,47 @@ let latestInboundMessage: any = $state(null);
 let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
 
-  const LEFT_RAIL = 72;
-  const EDGE_ZONE = 28;
   const SWIPE_THRESHOLD = 64;
+  const SWIPE_RATIO = 0.28;
 
   let tracking = false;
   let startX = 0;
   let startY = 0;
+  let swipeTarget: 'threads' | 'info' | null = null;
+  let leftSwipeMode: 'open' | 'close' | null = null;
+  let rightSwipeMode: 'open' | 'close' | null = null;
+  let leftSwipeWidth = $state(1);
+  let rightSwipeWidth = $state(1);
+  let leftSwipeDelta = $state(0);
+  let rightSwipeDelta = $state(0);
+  let leftSwipeActive = $state(false);
+  let rightSwipeActive = $state(false);
+
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  const threadsTransform = $derived.by(() => {
+    if (leftSwipeActive && leftSwipeMode && leftSwipeWidth > 0) {
+      const progress = clamp(leftSwipeDelta / leftSwipeWidth, -1, 1);
+      if (leftSwipeMode === 'open') {
+        const offset = clamp(-100 + Math.max(progress, 0) * 100, -100, 0);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, -100, 0);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showThreads ? 'translate3d(0, 0, 0)' : 'translate3d(-100%, 0, 0)';
+  });
+  const infoTransform = $derived.by(() => {
+    if (rightSwipeActive && rightSwipeMode && rightSwipeWidth > 0) {
+      const progress = clamp(rightSwipeDelta / rightSwipeWidth, -1, 1);
+      if (rightSwipeMode === 'open') {
+        const offset = clamp(100 + progress * 100, 0, 100);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, 0, 100);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showInfo ? 'translate3d(0, 0, 0)' : 'translate3d(100%, 0, 0)';
+  });
 
   function pickString(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -660,52 +694,128 @@ run(() => {
       }
     };
 
+    const resetThreadsSwipe = () => {
+      leftSwipeMode = null;
+      leftSwipeActive = false;
+      leftSwipeDelta = 0;
+    };
+
+    const resetInfoSwipe = () => {
+      rightSwipeMode = null;
+      rightSwipeActive = false;
+      rightSwipeDelta = 0;
+    };
+
+    const cancelSwipe = () => {
+      tracking = false;
+      swipeTarget = null;
+      resetThreadsSwipe();
+      resetInfoSwipe();
+    };
+
+    const canHandle = () => typeof window !== 'undefined' && window.innerWidth < 768;
+
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 1) return;
+      if (e.touches.length !== 1 || !canHandle()) return;
       const t = e.touches[0];
       startX = t.clientX;
       startY = t.clientY;
+      leftSwipeWidth = Math.max(window.innerWidth, 1);
+      rightSwipeWidth = leftSwipeWidth;
+      swipeTarget = null;
+      resetThreadsSwipe();
+      resetInfoSwipe();
 
-      const nearLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE;
-      const nearRight = window.innerWidth - startX <= EDGE_ZONE;
-
-      tracking = nearLeft || nearRight || showThreads || showInfo;
+      if (showThreads) {
+        swipeTarget = 'threads';
+        leftSwipeMode = 'close';
+      } else if (showInfo) {
+        swipeTarget = 'info';
+        rightSwipeMode = 'close';
+      } else {
+        swipeTarget = null;
+      }
+      tracking = canHandle();
     };
 
     const onTouchMove = (e: TouchEvent) => {
       if (!tracking || e.touches.length !== 1) return;
+      if (!canHandle()) {
+        cancelSwipe();
+        return;
+      }
       const t = e.touches[0];
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
 
-      if (Math.abs(dy) > Math.abs(dx) * 1.25) return;
-
-      if (!showThreads && !showInfo) {
-        const fromInnerLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE && dx >= SWIPE_THRESHOLD;
-        const fromRightEdge = window.innerWidth - startX <= EDGE_ZONE && dx <= -SWIPE_THRESHOLD;
-        if (fromInnerLeft) {
-          showThreads = true;
-          tracking = false;
+      if (!swipeTarget) {
+        if (Math.abs(dy) > Math.abs(dx) * 1.25) {
+          cancelSwipe();
+          return;
         }
-        if (fromRightEdge) {
-          showInfo = true;
-          tracking = false;
+        if (dx > 0) {
+          swipeTarget = 'threads';
+        } else if (dx < 0) {
+          swipeTarget = 'info';
         }
-        return;
       }
 
-      if (showThreads && dx <= -SWIPE_THRESHOLD) {
-        showThreads = false;
-        tracking = false;
-      }
-      if (showInfo && dx >= SWIPE_THRESHOLD) {
-        showInfo = false;
-        tracking = false;
+      if (swipeTarget === 'threads') {
+        if (!leftSwipeActive) {
+          if (Math.abs(dy) > Math.abs(dx) * 1.25) {
+            cancelSwipe();
+            return;
+          }
+          if (!leftSwipeMode) {
+            if (!showThreads && dx > 0) {
+              leftSwipeMode = 'open';
+            } else if (showThreads && dx < 0) {
+              leftSwipeMode = 'close';
+            } else {
+              cancelSwipe();
+              return;
+            }
+          }
+          leftSwipeActive = true;
+        }
+        leftSwipeDelta = dx;
+      } else if (swipeTarget === 'info') {
+        if (!rightSwipeActive) {
+          if (Math.abs(dy) > Math.abs(dx) * 1.25) {
+            cancelSwipe();
+            return;
+          }
+          if (!rightSwipeMode) {
+            if (!showInfo && dx < 0) {
+              rightSwipeMode = 'open';
+            } else if (showInfo && dx > 0) {
+              rightSwipeMode = 'close';
+            } else {
+              cancelSwipe();
+              return;
+            }
+          }
+          rightSwipeActive = true;
+        }
+        rightSwipeDelta = dx;
       }
     };
 
     const onTouchEnd = () => {
-      tracking = false;
+      if (swipeTarget === 'threads' && leftSwipeMode && leftSwipeWidth > 0) {
+        const traveled = leftSwipeMode === 'close' ? Math.max(0, -leftSwipeDelta) : Math.max(0, leftSwipeDelta);
+        const ratio = traveled / leftSwipeWidth;
+        if (traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO) {
+          showThreads = leftSwipeMode === 'open';
+        }
+      } else if (swipeTarget === 'info' && rightSwipeMode && rightSwipeWidth > 0) {
+        const traveled = rightSwipeMode === 'close' ? Math.max(0, rightSwipeDelta) : Math.max(0, -rightSwipeDelta);
+        const ratio = traveled / rightSwipeWidth;
+        if (traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO) {
+          showInfo = rightSwipeMode === 'open';
+        }
+      }
+      cancelSwipe();
     };
 
     const mdMq = window.matchMedia('(min-width: 768px)');
@@ -1184,7 +1294,8 @@ run(() => {
 <!-- Mobile overlays -->
 <div
   class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
+  class:mobile-panel--dragging={leftSwipeActive}
+  style:transform={threadsTransform}
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
@@ -1210,7 +1321,8 @@ run(() => {
 
 <div
   class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  style:transform={showInfo ? 'translateX(0)' : 'translateX(100%)'}
+  class:mobile-panel--dragging={rightSwipeActive}
+  style:transform={infoTransform}
   style:pointer-events={showInfo ? 'auto' : 'none'}
   aria-label="Profile"
 >
