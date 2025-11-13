@@ -303,21 +303,23 @@
   </div>
 
   <div class="thread-pane__composer">
-    <ChatInput
-      placeholder="Reply in thread"
-      {mentionOptions}
-      {aiAssistEnabled}
-      {threadLabel}
-      conversationContext={conversationContext}
-      replyTarget={replyTarget}
-      defaultSuggestionSource={defaultSuggestionSource}
-      on:send={handleSend}
-      on:sendGif={handleSendGif}
-      on:upload={handleUpload}
-      on:createPoll={handleCreatePoll}
-      on:createForm={handleCreateForm}
-      on:cancelReply={handleCancelReply}
-    />
+    <div class="thread-compose-surface">
+      <ChatInput
+        placeholder="Reply in thread"
+        {mentionOptions}
+        {aiAssistEnabled}
+        {threadLabel}
+        conversationContext={conversationContext}
+        replyTarget={replyTarget}
+        defaultSuggestionSource={defaultSuggestionSource}
+        on:send={handleSend}
+        on:sendGif={handleSendGif}
+        on:upload={handleUpload}
+        on:createPoll={handleCreatePoll}
+        on:createForm={handleCreateForm}
+        on:cancelReply={handleCancelReply}
+      />
+    </div>
   </div>
 </section>
 
@@ -522,18 +524,15 @@
   }
 
   .thread-pane__composer {
-    padding: 1rem 1.2rem 1.2rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 96%, transparent);
   }
 
-  .thread-pane__composer :global(.chat-input__actions > :not(.chat-send-button)) {
-    display: none !important;
+  .thread-compose-surface {
+    padding: 0.75rem 1rem 1rem;
   }
 
-  .thread-pane__composer :global(.emoji-trigger) {
-    display: none !important;
-  }
-
-  .thread-pane__composer :global(.rewrite-trigger) {
-    display: none !important;
+  .thread-compose-surface :global(.chat-input-root) {
+    width: 100%;
   }
 </style>

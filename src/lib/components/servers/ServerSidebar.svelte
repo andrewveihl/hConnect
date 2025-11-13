@@ -1026,7 +1026,7 @@ run(() => {
             >
               <i class="bx bx-hash" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
-              <span class="ml-auto flex items-center gap-1">
+              <span class="channel-row__meta ml-auto">
                 {#if mentionHighlights.has(c.id)}
                   <span class="channel-mention-pill" title="You were mentioned">@</span>
                 {/if}
@@ -1092,7 +1092,7 @@ run(() => {
             >
               <i class="bx bx-headphone" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
-              <span class="ml-auto flex items-center gap-2">
+              <span class="channel-row__meta ml-auto">
                 {#if (voicePresence[c.id]?.length ?? 0) > 0}
                   <span class="channel-voice-count">
                     {voicePresence[c.id].length}

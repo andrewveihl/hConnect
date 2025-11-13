@@ -88,6 +88,16 @@
     return a.pinned ? -1 : 1;
   }));
 
+  let openNote: NoteDoc | null = $state(null);
+
+  const openNoteDetail = (note: NoteDoc) => {
+    openNote = note;
+  };
+
+  const closeNoteDetail = () => {
+    openNote = null;
+  };
+
   function colorClass(c: string | null | undefined) {
     switch (c) {
       case 'yellow': return 'bg-yellow-300/20 border-yellow-300/20';
@@ -154,7 +164,12 @@
   {#if orderedNotes.length}
     <div class="notes-grid">
       {#each orderedNotes as n (n.id)}
-        <article class={`note-card ${colorClass(n.color)}`}>
+        <button
+          type="button"
+          class={`note-card note-card--preview ${colorClass(n.color)}`}
+          aria-label={`Open note ${n.title || 'untitled'}`}
+          onclick={() => openNoteDetail(n)}
+        >
           <div class="note-card__header">
             <div class="note-card__title">
               {#if n.title}
@@ -163,41 +178,16 @@
                 <span class="note-card__placeholder">Untitled</span>
               {/if}
             </div>
-            <button
-              class="note-icon-button"
-              type="button"
-              title={n.pinned ? 'Unpin note' : 'Pin note'}
-              aria-label={n.pinned ? 'Unpin note' : 'Pin note'}
-              onclick={() => togglePin(n)}
-            >
-              <i class={`bx ${n.pinned ? 'bxs-bookmark' : 'bx-bookmark'}`}></i>
-            </button>
+            {#if n.pinned}
+              <i class="bx bxs-bookmark note-card__pin" aria-hidden="true"></i>
+            {/if}
           </div>
           {#if n.content}
-            <div class="note-card__body">
+            <div class="note-card__body note-card__body--preview">
               <p>{n.content}</p>
             </div>
           {/if}
-          <div class="note-card__footer">
-            <div class="note-colors">
-              <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" onclick={() => changeColor(n, 'yellow')}></button>
-              <button class="color-swatch color-green" type="button" aria-label="Set note color to green" onclick={() => changeColor(n, 'green')}></button>
-              <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" onclick={() => changeColor(n, 'blue')}></button>
-              <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" onclick={() => changeColor(n, 'pink')}></button>
-              <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" onclick={() => changeColor(n, 'purple')}></button>
-              <button class="color-swatch color-default" type="button" aria-label="Reset note color" onclick={() => changeColor(n, null)}></button>
-            </div>
-            <button
-              class="note-icon-button note-icon-button--danger"
-              type="button"
-              title="Delete note"
-              aria-label="Delete note"
-              onclick={() => remove(n)}
-            >
-              <i class="bx bx-trash"></i>
-            </button>
-          </div>
-        </article>
+        </button>
       {/each}
     </div>
   {:else}
@@ -208,6 +198,70 @@
       {:else}
         <p>You haven't created any notes yet. Tap “New note” to get started.</p>
       {/if}
+    </div>
+  {/if}
+
+  {#if openNote}
+    {@const detail = openNote}
+    <div
+      class="note-detail-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="View note"
+      tabindex="0"
+      onkeydown={(event) => {
+        if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          closeNoteDetail();
+        }
+      }}
+      onclick={(event) => {
+        if (event.target !== event.currentTarget) return;
+        closeNoteDetail();
+      }}
+    >
+      <div class={`note-detail ${colorClass(detail.color)}`}>
+        <div class="note-detail__header">
+          <div>
+            <h3>{detail.title || 'Untitled note'}</h3>
+            <p class="note-detail__timestamp">
+              {#if detail.updatedAt}
+                Updated {new Date(toMillis(detail.updatedAt)).toLocaleString()}
+              {:else if detail.createdAt}
+                Created {new Date(toMillis(detail.createdAt)).toLocaleString()}
+              {/if}
+            </p>
+          </div>
+          <button class="note-icon-button" type="button" aria-label="Close" onclick={closeNoteDetail}>
+            <i class="bx bx-x"></i>
+          </button>
+        </div>
+          <div class="note-detail__body">
+          {#if detail.content}
+            <p>{detail.content}</p>
+          {:else}
+            <p class="note-card__placeholder">No content yet.</p>
+          {/if}
+        </div>
+        <div class="note-detail__footer">
+          <div class="note-colors">
+            <button class="color-swatch color-yellow" type="button" aria-label="Set note color to yellow" onclick={() => changeColor(detail, 'yellow')}></button>
+            <button class="color-swatch color-green" type="button" aria-label="Set note color to green" onclick={() => changeColor(detail, 'green')}></button>
+            <button class="color-swatch color-blue" type="button" aria-label="Set note color to blue" onclick={() => changeColor(detail, 'blue')}></button>
+            <button class="color-swatch color-pink" type="button" aria-label="Set note color to pink" onclick={() => changeColor(detail, 'pink')}></button>
+            <button class="color-swatch color-purple" type="button" aria-label="Set note color to purple" onclick={() => changeColor(detail, 'purple')}></button>
+            <button class="color-swatch color-default" type="button" aria-label="Reset note color" onclick={() => changeColor(detail, null)}></button>
+          </div>
+          <div class="note-detail__actions">
+            <button class="note-icon-button" type="button" aria-label={detail.pinned ? 'Unpin note' : 'Pin note'} onclick={() => togglePin(detail)}>
+              <i class={`bx ${detail.pinned ? 'bxs-bookmark' : 'bx-bookmark'}`}></i>
+            </button>
+            <button class="note-icon-button note-icon-button--danger" type="button" aria-label="Delete note" onclick={() => { remove(detail); closeNoteDetail(); }}>
+              <i class="bx bx-trash"></i>
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
@@ -346,13 +400,23 @@
     display: flex;
     flex-direction: column;
     gap: 0.65rem;
-    min-height: 160px;
+    min-height: 140px;
+    cursor: pointer;
+    transition: transform 120ms ease, border 120ms ease;
+    text-align: left;
+  }
+
+  .note-card:focus-visible,
+  .note-card:hover {
+    border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    transform: translateY(-2px);
   }
 
   .note-card__header {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
+    justify-content: space-between;
   }
 
   .note-card__title span {
@@ -371,11 +435,26 @@
     white-space: pre-wrap;
   }
 
+  .note-card__body--preview {
+    max-height: 4.8rem;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .note-card__body--preview::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 1.5rem;
+    background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--color-panel) 92%, transparent));
+  }
+
   .note-card__footer {
     margin-top: auto;
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    justify-content: space-between;
   }
 
   .note-icon-button {
@@ -396,6 +475,11 @@
 
   .note-icon-button--danger {
     color: #f87171;
+  }
+
+  .note-card__pin {
+    color: var(--text-60);
+    font-size: 1rem;
   }
 
   .notes-empty {
@@ -439,6 +523,75 @@
     background: #4752c4;
   }
 
+  .note-detail-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 7, 13, 0.75);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 1.25rem;
+  }
+
+  .note-detail {
+    width: min(640px, 100%);
+    max-height: 90vh;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .note-detail__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .note-detail__header h3 {
+    margin: 0;
+    font-size: 1.15rem;
+  }
+
+  .note-detail__timestamp {
+    margin: 0.1rem 0 0;
+    font-size: 0.85rem;
+    color: var(--text-60);
+  }
+
+  .note-detail__body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+  }
+
+  .note-detail__body p {
+    white-space: pre-wrap;
+    margin: 0;
+    color: var(--text-90);
+  }
+
+  .note-detail__footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .note-detail__actions {
+    display: inline-flex;
+    gap: 0.5rem;
+  }
+
   @media (max-width: 640px) {
     .notes-toolbar {
       flex-direction: column;
@@ -453,6 +606,15 @@
     .note-composer__actions {
       width: 100%;
       justify-content: flex-end;
+    }
+
+    .note-detail-backdrop {
+      padding: 0.75rem;
+    }
+
+    .note-detail {
+      border-radius: var(--radius-lg);
+      padding: 0.85rem;
     }
   }
 </style>

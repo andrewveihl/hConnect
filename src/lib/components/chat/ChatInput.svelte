@@ -10,6 +10,7 @@
   import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
   import { requestReplySuggestion, requestPredictions, requestRewriteSuggestions } from '$lib/api/ai';
   import type { ReplyMessageContext } from '$lib/api/ai';
+  import { mobileDockSuppressed } from '$lib/stores/ui';
 
   type MentionCandidate = {
     uid: string;
@@ -161,6 +162,8 @@
   let inputFocused = false;
   let keyboardInsetFrame: number | null = null;
   let syncKeyboardInset: (() => void) | null = null;
+  let dockSuppressionActive = false;
+  let dockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 
   let mentionActive = $state(false);
   let mentionFiltered: MentionCandidate[] = $state([]);
@@ -171,7 +174,7 @@
   let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
 
-  let platform: 'desktop' | 'mobile' = 'desktop';
+  let platform: 'desktop' | 'mobile' = $state('desktop');
   let aiServiceAvailable = $state(true);
   let aiReplySuggestion = $state<string | null>(null);
   let aiReplyLoading = $state(false);
@@ -208,6 +211,7 @@
   let rewriteSeed = '';
   let rewriteHoldTimer: ReturnType<typeof setTimeout> | null = null;
   let rewriteHoldTriggered = false;
+  let suggestionTapPrimed = false;
 
   const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
   const isDesktop = $derived(platform === 'desktop');
@@ -216,7 +220,7 @@
   const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
   const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
   const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
-  const showDesktopPrediction = $derived(Boolean(aiAssistAllowed && isDesktop));
+  const showInlinePrediction = $derived(Boolean(aiAssistAllowed));
   const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
   const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
   const showRewriteCoach = $derived(
@@ -399,7 +403,7 @@
         applyGeneralSuggestion();
         return;
       }
-      if (showDesktopPrediction && aiInlineSuggestion) {
+      if (showInlinePrediction && aiInlineSuggestion) {
         e.preventDefault();
         acceptInlineSuggestion();
         return;
@@ -469,6 +473,7 @@
   }
 
   function handleInput() {
+    suggestionTapPrimed = false;
     refreshMentionDraft();
     if (mentionOptions.length) {
       updateMentionState();
@@ -599,14 +604,51 @@
     return () => observer.disconnect();
   });
 
+  $effect(() => {
+    if (!showSuggestionGhost) {
+      suggestionTapPrimed = false;
+    }
+  });
+
+  function engageDockSuppression() {
+    if (platform !== 'mobile') return;
+    if (dockReleaseTimer) {
+      clearTimeout(dockReleaseTimer);
+      dockReleaseTimer = null;
+    }
+    if (dockSuppressionActive) return;
+    dockSuppressionActive = true;
+    mobileDockSuppressed.claim();
+  }
+
+  function releaseDockSuppression(immediate = false) {
+    if (!dockSuppressionActive) return;
+    const release = () => {
+      dockSuppressionActive = false;
+      mobileDockSuppressed.release();
+    };
+    if (dockReleaseTimer) {
+      clearTimeout(dockReleaseTimer);
+      dockReleaseTimer = null;
+    }
+    if (immediate || platform !== 'mobile') {
+      release();
+      return;
+    }
+    dockReleaseTimer = setTimeout(release, 140);
+  }
+
   function handleTextareaFocus() {
     inputFocused = true;
     syncKeyboardInset?.();
+    engageDockSuppression();
   }
 
   function handleTextareaBlur() {
     inputFocused = false;
     syncKeyboardInset?.();
+    releaseDockSuppression();
+    suggestionTapPrimed = false;
   }
 
   function collectMentions(value: string): MentionRecord[] {
@@ -777,7 +819,7 @@
   }
 
   function queuePrediction() {
-    if (!aiAssistAllowed || !showDesktopPrediction) return;
+    if (!showInlinePrediction) return;
     if (predictionTimer) {
       clearTimeout(predictionTimer);
       predictionTimer = null;
@@ -794,7 +836,7 @@
   }
 
   async function fetchPrediction(force = false) {
-    if (!aiAssistAllowed || !showDesktopPrediction) return;
+    if (!showInlinePrediction) return;
     const seed = text;
     if (!seed.trim()) {
       clearPredictions();
@@ -817,7 +859,7 @@
       );
       if (predictionAbort !== controller) return;
       lastPredictionSeed = seed;
-      aiInlineSuggestion = showDesktopPrediction ? suggestions[0] ?? '' : '';
+      aiInlineSuggestion = showInlinePrediction ? suggestions[0] ?? '' : '';
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       const message = error instanceof Error ? error.message : String(error);
@@ -856,7 +898,38 @@
     lastPredictionSeed = '';
     queuePrediction();
     requestAnimationFrame(() => inputEl?.focus());
+    suggestionTapPrimed = false;
     return true;
+  }
+
+  function activeSuggestionText() {
+    if (!showSuggestionGhost) return null;
+    if (showReplyGhost) return pickString(aiReplySuggestion);
+    if (showGeneralCoach) return pickString(aiGeneralSuggestion);
+    return null;
+  }
+
+  function handleTextareaPointerDown(event: PointerEvent) {
+    if (platform !== 'mobile') return;
+    const suggestion = activeSuggestionText();
+    if (!suggestion || text.trim().length) {
+      suggestionTapPrimed = false;
+      return;
+    }
+    if (!suggestionTapPrimed) {
+      suggestionTapPrimed = true;
+      return;
+    }
+    event.preventDefault();
+    suggestionTapPrimed = false;
+    insertSuggestionText(suggestion);
+  }
+
+  function handlePredictionPointer(event: PointerEvent) {
+    if (platform !== 'mobile') return;
+    if (!aiInlineSuggestion) return;
+    event.preventDefault();
+    acceptInlineSuggestion();
   }
 
   function applyReplySuggestion() {
@@ -1273,7 +1346,15 @@
     const update = () => {
       const prefersCoarse = coarse.matches;
       const narrow = window.innerWidth <= 768;
-      platform = prefersCoarse || narrow ? 'mobile' : 'desktop';
+      const nextPlatform = prefersCoarse || narrow ? 'mobile' : 'desktop';
+      if (platform !== nextPlatform) {
+        platform = nextPlatform;
+        if (nextPlatform === 'desktop') {
+          releaseDockSuppression(true);
+        }
+      } else {
+        platform = nextPlatform;
+      }
     };
     update();
     window.addEventListener('resize', update);
@@ -1295,6 +1376,14 @@
     if (predictionTimer) {
       clearTimeout(predictionTimer);
       predictionTimer = null;
+    }
+    if (dockReleaseTimer) {
+      clearTimeout(dockReleaseTimer);
+      dockReleaseTimer = null;
+    }
+    if (dockSuppressionActive) {
+      dockSuppressionActive = false;
+      mobileDockSuppressed.release();
     }
   });
 
@@ -1395,7 +1484,7 @@
       lastPredictionSeed = '';
       return;
     }
-    if (showDesktopPrediction) {
+    if (showInlinePrediction) {
       queuePrediction();
     }
   });
@@ -1578,6 +1667,7 @@
           bind:this={inputEl}
           bind:value={text}
         placeholder={showSuggestionGhost ? '' : placeholder}
+          onpointerdown={handleTextareaPointerDown}
           onkeydown={onKeydown}
           oninput={handleInput}
           onpaste={handlePaste}
@@ -1639,17 +1729,21 @@
               {/if}
             </div>
             {#if (isReplySuggestion ? aiReplySuggestion : aiGeneralSuggestion)}
-              <span class="chat-input__suggested-hint">Press Tab to use</span>
+              <span class="chat-input__suggested-hint">
+                {platform === 'mobile' ? 'Tap again to use' : 'Press Tab to use'}
+              </span>
             {/if}
           </div>
         {/if}
 
-        {#if showDesktopPrediction && aiInlineSuggestion}
+        {#if showInlinePrediction && aiInlineSuggestion}
           {@const overlayText = text || '\u00a0'}
           <div
             class="chat-input__prediction"
-            aria-hidden="true"
+            class:chat-input__prediction--touch={platform === 'mobile'}
+            aria-hidden={platform === 'mobile' ? undefined : 'true'}
             style={predictionBoxStyle}
+            onpointerdown={handlePredictionPointer}
           >
             <div
               class="chat-input__prediction-content"
@@ -2349,6 +2443,11 @@
     z-index: 2;
   }
 
+  .chat-input__prediction--touch {
+    pointer-events: auto;
+    cursor: pointer;
+  }
+
   .chat-input__prediction-content {
     white-space: pre-wrap;
     word-break: break-word;
@@ -2440,6 +2539,52 @@
     font-size: 0.95rem;
   }
 
+  @media (max-width: 640px) {
+    .chat-input__field {
+      gap: 0.45rem;
+    }
+
+    .chat-input__editor textarea {
+      border-radius: 1.2rem;
+      padding-inline: 1rem;
+    }
+
+    .chat-input__suggested-ghost {
+      padding-right: 2.5rem;
+    }
+
+    .chat-input__suggested-hint {
+      font-size: 0.7rem;
+    }
+
+    .ai-card {
+      border-radius: 1rem;
+      padding: 0.85rem;
+      gap: 0.5rem;
+    }
+
+    .ai-card__body {
+      gap: 0.4rem;
+    }
+
+    .rewrite-menu {
+      width: min(10rem, 58vw);
+      padding: 0.4rem;
+      border-radius: 0.65rem;
+      right: 0.15rem;
+    }
+
+    .rewrite-menu__item {
+      gap: 0.45rem;
+      padding: 0.35rem 0.4rem;
+    }
+
+    .rewrite-menu__icon {
+      width: 1.9rem;
+      height: 1.9rem;
+    }
+  }
+
 
 
   .chat-input__actions {
@@ -2470,7 +2615,8 @@
   .rewrite-trigger--inline {
     position: absolute;
     top: -0.5rem;
-    right: -0.6rem;
+    right: -0.2rem;
+    left: auto;
     z-index: 6;
     pointer-events: none;
   }
@@ -2521,15 +2667,17 @@
     top: auto;
     bottom: calc(100% + 0.45rem);
     right: 0;
-    width: min(18rem, 80vw);
-    border-radius: 1rem;
+    left: auto;
+    width: min(12rem, 55vw);
+    border-radius: 0.8rem;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
     background: color-mix(in srgb, var(--color-panel) 94%, transparent);
-    padding: 0.75rem;
+    padding: 0.55rem;
     z-index: 60;
     box-shadow:
       0 14px 26px rgba(0, 0, 0, 0.35),
       inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    transform-origin: top right;
   }
 
   .rewrite-menu__header {

@@ -4,13 +4,30 @@
 
   let showThreads = $state(false);
 
-  const LEFT_RAIL = 72;
-  const EDGE_ZONE = 28;
   const SWIPE_THRESHOLD = 64;
+  const SWIPE_RATIO = 0.28;
 
   let tracking = false;
   let startX = 0;
   let startY = 0;
+  let swipeMode: 'open' | 'close' | null = null;
+  let swipeWidth = $state(1);
+  let swipeDelta = $state(0);
+  let swipeActive = $state(false);
+
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  const panelTransform = $derived.by(() => {
+    if (swipeActive && swipeMode && swipeWidth > 0) {
+      const progress = clamp(swipeDelta / swipeWidth, -1, 1);
+      if (swipeMode === 'open') {
+        const offset = clamp(-100 + Math.max(progress, 0) * 100, -100, 0);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, -100, 0);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showThreads ? 'translate3d(0, 0, 0)' : 'translate3d(-100%, 0, 0)';
+  });
 
   function setupGestures() {
     if (typeof window === 'undefined') return () => {};
@@ -19,33 +36,68 @@
       if (e.key === 'Escape') showThreads = false;
     };
 
+    const resetSwipe = () => {
+      tracking = false;
+      swipeMode = null;
+      swipeActive = false;
+      swipeDelta = 0;
+    };
+
+    const canHandle = () => typeof window !== 'undefined' && window.innerWidth < 768;
+
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 1) return;
+      if (e.touches.length !== 1 || !canHandle()) return;
       const t = e.touches[0];
       startX = t.clientX;
       startY = t.clientY;
-      const nearLeft = startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE;
-      tracking = nearLeft || showThreads;
+      swipeWidth = Math.max(window.innerWidth, 1);
+      swipeDelta = 0;
+      swipeActive = false;
+      tracking = true;
+      swipeMode = showThreads ? 'close' : null;
     };
 
     const onTouchMove = (e: TouchEvent) => {
       if (!tracking || e.touches.length !== 1) return;
+      if (!canHandle()) {
+        resetSwipe();
+        return;
+      }
       const t = e.touches[0];
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
 
-      if (Math.abs(dy) > Math.abs(dx) * 1.25) return;
-
-      if (!showThreads && startX >= LEFT_RAIL && startX <= LEFT_RAIL + EDGE_ZONE && dx >= SWIPE_THRESHOLD) {
-        showThreads = true;
-        tracking = false;
-      } else if (showThreads && dx <= -SWIPE_THRESHOLD) {
-        showThreads = false;
-        tracking = false;
+      if (!swipeActive) {
+        if (Math.abs(dy) > Math.abs(dx) * 1.25) {
+          resetSwipe();
+          return;
+        }
+        if (!swipeMode) {
+          if (!showThreads && dx > 0) {
+            swipeMode = 'open';
+          } else if (showThreads && dx < 0) {
+            swipeMode = 'close';
+          } else {
+            return;
+          }
+        }
+        swipeActive = true;
       }
+
+      swipeDelta = dx;
     };
 
-    const onTouchEnd = () => (tracking = false);
+    const onTouchEnd = () => {
+      if (swipeMode && swipeWidth > 0) {
+        const traveled = swipeMode === 'close' ? Math.max(0, -swipeDelta) : Math.max(0, swipeDelta);
+        const ratio = traveled / swipeWidth;
+        const shouldToggle = traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO;
+        if (shouldToggle) {
+          showThreads = swipeMode === 'open';
+        }
+      }
+      resetSwipe();
+    };
 
     const mdMq = window.matchMedia('(min-width: 768px)');
     const onMedia = () => {
@@ -77,7 +129,7 @@
   });
 </script>
 
-<div class="flex flex-1 overflow-hidden panel-muted">
+<div class="flex flex-1 overflow-hidden panel-muted mobile-full-bleed">
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle">
     <DMsSidebar activeThreadId={null} />
   </div>
@@ -118,7 +170,8 @@
 
 <div
   class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  style:transform={showThreads ? 'translateX(0)' : 'translateX(-100%)'}
+  class:mobile-panel--dragging={swipeActive}
+  style:transform={panelTransform}
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
@@ -136,3 +189,21 @@
     />
   </div>
 </div>
+
+<style>
+  :global(.mobile-full-bleed) {
+    width: 100%;
+  }
+
+  @media (max-width: 767px) {
+    :global(.mobile-full-bleed),
+    :global(.mobile-full-bleed .panel),
+    :global(.mobile-full-bleed .panel-muted) {
+      border-radius: 0 !important;
+    }
+
+    :global(.mobile-panel) {
+      border-radius: 0;
+    }
+  }
+</style>
