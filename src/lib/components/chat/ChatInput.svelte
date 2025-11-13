@@ -215,8 +215,12 @@
 
   const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
   const isDesktop = $derived(platform === 'desktop');
-  const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && replyTarget?.messageId));
-  const showGeneralCoach = $derived(Boolean(aiAssistAllowed && !replyTarget && defaultSuggestionSource && !text.trim()));
+  const isReplying = $derived(Boolean(replyTarget?.messageId));
+  const mobileSuggestionContext = $derived(replySource ?? replyTarget ?? defaultSuggestionSource ?? null);
+  const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && isReplying));
+  const showGeneralCoach = $derived(
+    Boolean(aiAssistAllowed && !isDesktop && isReplying && mobileSuggestionContext && !text.trim())
+  );
   const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
   const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
   const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
@@ -775,7 +779,7 @@
 
   async function fetchGeneralSuggestion(force = false) {
     if (!showGeneralCoach) return;
-    const source = defaultSuggestionSource;
+    const source = mobileSuggestionContext;
     const messageId = contextIdOf(source);
     if (!messageId) return;
     if (!force && messageId === lastGeneralSuggestionId && aiGeneralSuggestion) return;

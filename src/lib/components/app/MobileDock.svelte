@@ -40,6 +40,18 @@
     if (value > 99) return '99+';
     return value.toString();
   };
+
+  function handleNav(event: MouseEvent, link: Link) {
+    event.preventDefault();
+    if (typeof window !== 'undefined' && link.href === '/dms') {
+      try {
+        sessionStorage.setItem('dm-show-list', '1');
+      } catch {
+        // ignore
+      }
+    }
+    goto(link.href);
+  }
 </script>
 
 <nav
@@ -59,10 +71,7 @@
             : 0}
       <a
         href={link.href}
-        onclick={(event) => {
-          event.preventDefault();
-          goto(link.href);
-        }}
+        onclick={(event) => handleNav(event, link)}
         class={`mobile-dock__item ${active ? 'is-active' : ''}`}
         class:mobile-dock__item--alert={!active && badge > 0}
         aria-label={link.label}

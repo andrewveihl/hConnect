@@ -1053,7 +1053,6 @@ function sidebarThreadList() {
   let mobilePaneStartY = 0;
   let lastVoiceVisible = $state(false);
   let lastIsMobile = $state(false);
-  let hideMessageInput = $state(false);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 120;
@@ -2050,9 +2049,6 @@ function sidebarThreadList() {
     }
   });
   run(() => {
-    hideMessageInput = isMobile && showChannels;
-  });
-  run(() => {
     attachThreadStream(activeThread ?? null);
   });
   run(() => {
@@ -2301,7 +2297,6 @@ function sidebarThreadList() {
                     onCreatePoll={handleCreatePoll}
                     onCreateForm={handleCreateForm}
                     onUploadFiles={handleUploadFiles}
-                    hideInput={hideMessageInput}
                     on:reply={handleReplyRequest}
                     on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
                     on:cancelReply={() => (replyTarget = null)}
@@ -2426,7 +2421,6 @@ function sidebarThreadList() {
               onCreatePoll={handleCreatePoll}
               onCreateForm={handleCreateForm}
               onUploadFiles={handleUploadFiles}
-              hideInput={hideMessageInput}
               on:reply={handleReplyRequest}
               on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
               on:cancelReply={() => (replyTarget = null)}
@@ -2436,7 +2430,7 @@ function sidebarThreadList() {
       </div>
     </div>
 
-    <div class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
+    <div class="hidden lg:flex lg:w-80 panel-muted border-l border-subtle overflow-y-auto">
       {#if activeThread}
         {@const threadMembers = resolveThreadMembers()}
         <ThreadMembersPane members={threadMembers} threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'} />
