@@ -246,6 +246,7 @@
 
   const REPLY_PREVIEW_LIMIT = 160;
   const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
+  const SAFE_AREA_VAR = '--chat-safe-area-bottom';
   const KEYBOARD_MOBILE_MAX_WIDTH = 900;
   const KEYBOARD_ACTIVATION_THRESHOLD = 80;
   const createAttachmentId = () => {
@@ -1317,13 +1318,14 @@
       if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
       keyboardInsetFrame = requestAnimationFrame(() => {
         keyboardInsetFrame = null;
-        if (!inputFocused || window.innerWidth > KEYBOARD_MOBILE_MAX_WIDTH) {
-          root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
-          return;
+        let offset = 0;
+        if (inputFocused && window.innerWidth <= KEYBOARD_MOBILE_MAX_WIDTH) {
+          const occupied = Math.round(window.innerHeight - (viewport.height + viewport.offsetTop));
+          const diff = Math.max(0, occupied);
+          offset = diff > KEYBOARD_ACTIVATION_THRESHOLD ? diff : 0;
         }
-        const diff = Math.max(0, Math.round(window.innerHeight - viewport.height));
-        const offset = diff > KEYBOARD_ACTIVATION_THRESHOLD ? diff : 0;
         root.style.setProperty(KEYBOARD_OFFSET_VAR, offset ? `${offset}px` : '0px');
+        root.style.setProperty(SAFE_AREA_VAR, offset ? '0px' : 'env(safe-area-inset-bottom, 0px)');
       });
     };
 
@@ -1340,6 +1342,7 @@
       window.removeEventListener('orientationchange', handleViewportChange);
       if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
       root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
+      root.style.setProperty(SAFE_AREA_VAR, 'env(safe-area-inset-bottom, 0px)');
       syncKeyboardInset = null;
     };
   });

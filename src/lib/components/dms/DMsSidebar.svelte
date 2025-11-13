@@ -838,9 +838,9 @@
             {@const presenceState = presenceStateFor(otherUid, t)}
             {@const timestampLabel = formatThreadTimestamp(t.updatedAt)}
             <li>
-              <div class={`group flex items-center gap-2 px-2 py-2 overflow-hidden ${isActive ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+              <div class={`dm-thread__row group ${isActive ? 'dm-thread__row--active' : ''}`}>
                 <button
-                  class="flex-1 flex items-center gap-3 text-left focus:outline-none min-w-0"
+                  class="dm-thread__button flex items-center gap-3 text-left focus:outline-none min-w-0"
                   onclick={() => openExisting(t.id)}
                 >
                   <div class="dm-thread__avatar">
@@ -866,16 +866,16 @@
                         <span class="dm-thread__timestamp">{timestampLabel}</span>
                       {/if}
                     </div>
-                    <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
-                  </div>
-                  {#if (unreadMap[t.id] ?? 0) > 0}
-                    <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
-                      {unreadMap[t.id]}
-                    </span>
-                  {/if}
-                </button>
-                <button
-                  class="p-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:bg-white/10 text-white/70 hover:text-white transition transition-opacity"
+                  <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
+                </div>
+                {#if (unreadMap[t.id] ?? 0) > 0}
+                  <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
+                    {unreadMap[t.id]}
+                  </span>
+                {/if}
+              </button>
+              <button
+                class="dm-thread__delete-btn"
                   aria-label="Delete conversation"
                   onclick={stopPropagation(() => deleteThread(t.id))}
                 >
@@ -1022,6 +1022,69 @@
     color: var(--color-text-tertiary, rgba(255, 255, 255, 0.6));
     line-height: 1;
     flex-shrink: 0;
+  }
+
+  .dm-thread__row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: var(--radius-md);
+    transition: background 160ms ease;
+  }
+
+  .dm-thread__row:hover {
+    background: color-mix(in srgb, white 8%, transparent);
+  }
+
+  .dm-thread__row--active {
+    background: color-mix(in srgb, white 12%, transparent);
+  }
+
+  .dm-thread__button {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.3rem 0.4rem;
+    padding-right: 2.5rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+  }
+
+  .dm-thread__button:focus-visible {
+    outline: 2px solid color-mix(in srgb, white 35%, transparent);
+    border-radius: var(--radius-md);
+  }
+
+  .dm-thread__delete-btn {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    padding: 0.35rem;
+    border-radius: var(--radius-md);
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.65);
+    opacity: 0;
+    transition:
+      opacity 140ms ease,
+      background 140ms ease,
+      color 140ms ease;
+  }
+
+  .dm-thread__row:hover .dm-thread__delete-btn,
+  .dm-thread__row:focus-within .dm-thread__delete-btn {
+    opacity: 1;
+  }
+
+  .dm-thread__delete-btn:hover,
+  .dm-thread__delete-btn:focus-visible {
+    background: color-mix(in srgb, white 10%, transparent);
+    color: white;
   }
 
   .dm-thread__avatar {
