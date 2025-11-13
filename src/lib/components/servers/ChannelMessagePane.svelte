@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import MessageList from '$lib/components/chat/MessageList.svelte';
   import ChatInput from '$lib/components/chat/ChatInput.svelte';
   import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
@@ -37,6 +37,7 @@
     pendingUploads?: PendingUploadPreview[];
     scrollToBottomSignal?: number;
     replyTarget?: ReplyReferenceInput | null;
+    scrollContextKey?: string | number;
     empty?: import('svelte').Snippet;
   }
 
@@ -69,31 +70,77 @@
     pendingUploads = [],
     scrollToBottomSignal = 0,
     replyTarget = null,
+    scrollContextKey = 'channel-pane',
     empty
   }: Props = $props();
 
   const dispatch = createEventDispatcher();
+
+  let composerEl: HTMLDivElement | null = $state(null);
+  let composerHeight = $state(0);
+  let composerObserver: ResizeObserver | null = null;
+  let mounted = false;
+  let lastComposerEl: HTMLDivElement | null = null;
+
+  function attachComposerObserver() {
+    if (!mounted) return;
+    composerObserver?.disconnect();
+    if (composerEl && typeof ResizeObserver !== 'undefined') {
+      composerObserver = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        composerHeight = entry?.contentRect?.height ?? 0;
+      });
+      composerObserver.observe(composerEl);
+    } else {
+      composerObserver = null;
+      composerHeight = 0;
+    }
+  }
+
+  onMount(() => {
+    mounted = true;
+    attachComposerObserver();
+    return () => {
+      mounted = false;
+      composerObserver?.disconnect();
+      composerObserver = null;
+    };
+  });
+
+  $effect(() => {
+    if (!mounted || composerEl === lastComposerEl) return;
+    lastComposerEl = composerEl;
+    attachComposerObserver();
+  });
+
+  const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 </script>
 
 {#if hasChannel}
-  <div class={listClass}>
-    <MessageList
-      {messages}
-      users={profiles}
-      {currentUserId}
-      threadStats={threadStats}
-      {pendingUploads}
-      {scrollToBottomSignal}
-      on:vote={onVote}
-      on:submitForm={onSubmitForm}
-      on:react={onReact}
-      on:loadMore={onLoadMore}
-      on:reply={(event) => dispatch('reply', event.detail)}
-      on:thread={(event) => dispatch('thread', event.detail)}
-    />
+  <div class={listClass} style={scrollRegionStyle}>
+    {#key scrollContextKey ?? 'channel-pane'}
+      <MessageList
+        {messages}
+        users={profiles}
+        {currentUserId}
+        threadStats={threadStats}
+        {pendingUploads}
+        {scrollToBottomSignal}
+        on:vote={onVote}
+        on:submitForm={onSubmitForm}
+        on:react={onReact}
+        on:loadMore={onLoadMore}
+        on:reply={(event) => dispatch('reply', event.detail)}
+        on:thread={(event) => dispatch('thread', event.detail)}
+      />
+    {/key}
   </div>
   {#if !hideInput}
-    <div class={inputWrapperClass} style:padding-bottom={inputPaddingBottom ?? undefined}>
+    <div
+      class={inputWrapperClass}
+      bind:this={composerEl}
+      style:padding-bottom={inputPaddingBottom ?? undefined}
+    >
       <ChatInput
         placeholder={`Message #${channelName}`}
         {mentionOptions}

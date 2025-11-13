@@ -27,6 +27,7 @@ import { looksLikeImage } from '$lib/utils/fileType';
 
   let { data }: Props = $props();
   let threadID = $derived(data.threadID);
+  const messageScrollKey = $derived(`${threadID ?? 'dm'}`);
 
   let me: any = $state(null);
   run(() => {
@@ -129,6 +130,44 @@ let replySourceMessage: any = $state(null);
 let latestInboundMessage: any = $state(null);
 let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
+let composerEl: HTMLDivElement | null = $state(null);
+let composerHeight = $state(0);
+let composerObserver: ResizeObserver | null = null;
+let lastComposerEl: HTMLDivElement | null = null;
+
+function observeComposer(target: HTMLDivElement | null) {
+  if (!browser || typeof ResizeObserver === 'undefined') {
+    composerHeight = target ? composerHeight : 0;
+    return;
+  }
+  composerObserver?.disconnect();
+  if (target) {
+    composerObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      composerHeight = entry?.contentRect?.height ?? 0;
+    });
+    composerObserver.observe(target);
+  } else {
+    composerObserver = null;
+    composerHeight = 0;
+  }
+}
+
+onMount(() => {
+  observeComposer(composerEl);
+  return () => {
+    composerObserver?.disconnect();
+    composerObserver = null;
+  };
+});
+
+$effect(() => {
+  if (!browser || composerEl === lastComposerEl) return;
+  lastComposerEl = composerEl;
+  observeComposer(composerEl);
+});
+
+const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 
   const SWIPE_THRESHOLD = 64;
   const SWIPE_RATIO = 0.28;
@@ -1193,7 +1232,7 @@ run(() => {
 
     <main class="flex-1 overflow-hidden panel-muted">
       <div class="h-full flex flex-col">
-        <div class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4">
+        <div class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4" style={scrollRegionStyle}>
           {#if messagesLoading}
             <div class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/40 backdrop-blur-sm text-soft">
               <div class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin" aria-hidden="true"></div>
@@ -1201,23 +1240,26 @@ run(() => {
               <span class="sr-only" aria-live="polite">Loading messages...</span>
             </div>
           {/if}
-          <MessageList
-            {messages}
-            users={messageUsers}
-            currentUserId={me?.uid ?? null}
-            {pendingUploads}
-            scrollToBottomSignal={scrollResumeSignal}
-            on:vote={handleVote}
-            on:submitForm={handleFormSubmit}
-            on:react={handleReaction}
-            on:reply={handleReplyRequest}
-          />
+          {#key messageScrollKey}
+            <MessageList
+              {messages}
+              users={messageUsers}
+              currentUserId={me?.uid ?? null}
+              {pendingUploads}
+              scrollToBottomSignal={scrollResumeSignal}
+              on:vote={handleVote}
+              on:submitForm={handleFormSubmit}
+              on:react={handleReaction}
+              on:reply={handleReplyRequest}
+            />
+          {/key}
         </div>
       </div>
     </main>
 
     <div
       class="chat-input-region border-t border-subtle panel p-3"
+      bind:this={composerEl}
       style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
     >
       <ChatInput

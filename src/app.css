@@ -9,6 +9,7 @@
   color-scheme: dark;
 
   --color-app-bg: #404549;
+  --surface-root: var(--color-app-bg);
   --color-app-overlay: rgba(12, 16, 20, 0.35);
   --color-sidebar: #363a40;
   --color-panel: #444950;
@@ -81,6 +82,7 @@
   --text-05: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
 
   --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --chat-input-height: 0px;
 }
 
 @layer utilities {
@@ -94,6 +96,7 @@
   color-scheme: light;
 
   --color-app-bg: #f3f6f8;
+  --surface-root: var(--color-app-bg);
   --color-app-overlay: rgba(8, 12, 18, 0.08);
   --color-sidebar: #ffffff;
   --color-panel: #ffffff;
@@ -128,6 +131,7 @@
   --button-ghost-text: var(--color-text-primary);
 
   --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --chat-input-height: 0px;
 
   --input-bg: rgba(24, 32, 38, 0.06);
   --input-border: rgba(24, 32, 38, 0.14);
@@ -169,7 +173,7 @@ body,
   min-height: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--color-app-bg);
+  background: var(--surface-root);
   color: var(--color-text-primary);
 }
 
@@ -183,7 +187,7 @@ body {
 /* Wraps the entire UI so the background and safe-area padding stay consistent on iOS. */
 .app-root {
   min-height: 100vh;
-  background: var(--color-app-bg);
+  background: var(--surface-root);
   color: var(--color-text-primary);
   display: flex;
   flex-direction: column;
@@ -332,7 +336,7 @@ body {
 /* Utility surfaces                                                           */
 /* -------------------------------------------------------------------------- */
 .app-bg {
-  background: var(--color-app-bg);
+  background: var(--surface-root);
   color: var(--color-text-primary);
 }
 
@@ -341,6 +345,7 @@ body {
   position: relative;
   display: flex;
   flex-direction: column;
+  background: var(--surface-root);
 }
 
 .app-shell__body {
@@ -563,10 +568,14 @@ body {
   gap: 0.75rem;
   height: 3.25rem;
   padding: 0 1rem;
-  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  background: var(--surface-root);
   border-bottom: 1px solid var(--color-border-subtle);
   color: var(--color-text-primary);
   border-radius: 0.35rem;
+}
+
+.mobile-panel__header {
+  background: var(--surface-root) !important;
 }
 
 .channel-header__left {
@@ -653,7 +662,12 @@ body {
 }
 
 .message-scroll-region .chat-scroll {
-  --chat-scroll-padding: calc(var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 0.3rem);
+  --chat-scroll-padding: calc(
+    max(
+      var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
+      0px
+    ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 0.3rem
+  );
 }
 
 @media (max-width: 767px) {
@@ -666,7 +680,11 @@ body {
 
   .message-scroll-region .chat-scroll {
     --chat-scroll-padding: calc(
-      var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 2rem
+      max(
+        var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
+        0px
+      ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--mobile-dock-height, 0px) +
+      var(--chat-keyboard-offset, 0px) + 0.6rem
     );
   }
 }
