@@ -53,7 +53,18 @@
     currentUserId?: string | null;
     scrollToBottomSignal?: number;
     pendingUploads?: PendingUploadPreview[];
-    threadStats?: Record<string, { count?: number; lastAt?: number; threadId?: string; status?: string; archived?: boolean }>;
+    threadStats?: Record<
+      string,
+      {
+        count?: number;
+        lastAt?: number;
+        threadId?: string;
+        status?: string;
+        archived?: boolean;
+        name?: string | null;
+        preview?: string | null;
+      }
+    >;
     hideReplyPreview?: boolean;
   }
 
@@ -1468,45 +1479,74 @@
   outline: none;
 }
 
-.thread-inline-chip {
+.thread-preview-card {
   margin-top: 0.4rem;
+  border-radius: 1rem;
   border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-  border-radius: 999px;
-  padding: 0.25rem 0.75rem;
   background: color-mix(in srgb, var(--color-panel-muted) 92%, transparent);
-  display: inline-flex;
+  padding: 0.65rem 0.85rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  cursor: pointer;
+  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+}
+
+.thread-preview-card__title {
+  display: flex;
   align-items: center;
   gap: 0.45rem;
-  font-size: 0.8rem;
-  color: var(--text-65);
-  cursor: pointer;
-  transition: border-color 150ms ease, color 150ms ease, transform 150ms ease;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
 }
 
-.thread-inline-chip i {
+.thread-preview-card__title i {
+  color: var(--color-accent);
   font-size: 1rem;
-  color: var(--color-accent);
 }
 
-.thread-inline-chip__count {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.thread-inline-chip__cta {
-  font-size: 0.75rem;
-  font-weight: 600;
+.thread-preview-card__label {
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.2em;
+  font-size: 0.65rem;
+  color: var(--text-60);
+}
+
+.thread-preview-card__name {
+  flex: 1;
+  font-weight: 600;
+}
+
+.thread-preview-card__preview {
+  font-size: 0.85rem;
+  color: var(--text-65);
+  line-height: 1.4;
+  max-height: 2.8rem;
+  overflow: hidden;
+}
+
+.thread-preview-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--text-60);
+}
+
+.thread-preview-card__cta {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
   color: var(--color-accent);
 }
 
-.thread-inline-chip:hover,
-.thread-inline-chip:focus-visible {
-  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
-  color: var(--color-text-primary);
+.thread-preview-card:hover,
+.thread-preview-card:focus-visible {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
   transform: translateY(-1px);
   outline: none;
+  background: color-mix(in srgb, var(--color-panel) 96%, transparent);
 }
 
 </style>
@@ -1655,11 +1695,43 @@
                     {/each}
                   </div>
                 {/if}
-                {#if m.type === 'system'}
+                {#if threadMeta}
+                  <div
+                    class="thread-preview-card"
+                    role="button"
+                    tabindex="0"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      openThread(m);
+                    }}
+                    onkeydown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openThread(m);
+                      }
+                    }}
+                  >
+                    <div class="thread-preview-card__title">
+                      <i class="bx bx-message-square-dots" aria-hidden="true"></i>
+                      <span class="thread-preview-card__label">Thread</span>
+                      <span class="thread-preview-card__name">{threadMeta.name || 'Conversation'}</span>
+                    </div>
+                    <div class="thread-preview-card__preview">
+                      {(m as any).text ?? (m as any).content ?? threadMeta.preview ?? 'Tap to view'}
+                    </div>
+                    <div class="thread-preview-card__meta">
+                      <span>
+                        {threadMeta.count ?? 0} {threadMeta.count === 1 ? 'message' : 'messages'}
+                      </span>
+                      <span class="thread-preview-card__cta">View</span>
+                    </div>
+                  </div>
+                {:else if m.type === 'system'}
                   <div class="system-message">
                     <span>{(m as any).text ?? ''}</span>
                   </div>
-                {:else if !m.type || m.type === 'text'}
+                {:else if !m.type || m.type === 'text' || m.type === 'normal'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                       {#if isMentionSegment(segment)}
@@ -1770,27 +1842,6 @@
                       </button>
                     </div>
                   </div>
-                {/if}
-                {#if threadMeta}
-                  <button
-                    type="button"
-                    class="thread-inline-chip"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      event.preventDefault();
-                      openThread(m);
-                    }}
-                  >
-                    <i class="bx bx-message-rounded-dots" aria-hidden="true"></i>
-                    <span class="thread-inline-chip__count">
-                      {#if threadMeta.count}
-                        {threadMeta.count} {threadMeta.count === 1 ? 'reply' : 'replies'}
-                      {:else}
-                        View thread
-                      {/if}
-                    </span>
-                    <span class="thread-inline-chip__cta">Open</span>
-                  </button>
                 {/if}
               </div>
               {#if (m as any).createdAt && !sameMinuteAsNext}

@@ -21,16 +21,18 @@ import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte'
   import type { VoiceSession } from '$lib/stores/voice';
 
   import { db } from '$lib/firestore';
-  import { collection, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, type Unsubscribe } from 'firebase/firestore';
+import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
-  import {
+import {
     createChannelThread,
     sendThreadMessage,
     streamChannelThreads,
     streamThreadMessages,
     markThreadRead as markThreadReadThread,
+    THREAD_DEFAULT_TTL_HOURS,
+    THREAD_MAX_MEMBER_LIMIT,
     type ChannelThread,
     type ThreadMessage
   } from '$lib/firestore/threads';
@@ -85,6 +87,8 @@ let requestedChannelId: string | null = $state(null);
 let messages: any[] = $state([]);
 let channelThreads: ChannelThread[] = $state([]);
 let threadsByChannel: Record<string, ChannelThread[]> = $state({});
+let serverThreadsUnsub: Unsubscribe | null = null;
+let serverThreadsScope: string | null = null;
 let threadServerScope: string | null = null;
 let threadStats: Record<string, ThreadPreviewMeta> = $state({});
 let activeThreadRoot: any = $state(null);
@@ -646,6 +650,65 @@ let lastThreadStreamId: string | null = null;
     }
   }
 
+  function clearServerThreads() {
+    serverThreadsUnsub?.();
+    serverThreadsUnsub = null;
+    threadsByChannel = {};
+    serverThreadsScope = null;
+  }
+
+  function normalizeThreadSnapshot(data: any, id: string): ChannelThread {
+    const derivedParent = data?.parentChannelId ?? data?.channelId ?? '';
+    return {
+      id,
+      serverId: data?.serverId ?? serverId ?? '',
+      channelId: data?.channelId ?? derivedParent,
+      parentChannelId: derivedParent,
+      createdBy: data?.createdBy ?? '',
+      createdFromMessageId: data?.createdFromMessageId ?? '',
+      name: typeof data?.name === 'string' && data.name.trim() ? data.name : 'Thread',
+      preview: data?.preview ?? data?.rootPreview ?? null,
+      createdAt: data?.createdAt,
+      lastMessageAt: data?.lastMessageAt,
+      archivedAt: data?.archivedAt ?? null,
+      autoArchiveAt: data?.autoArchiveAt ?? null,
+      memberUids: Array.isArray(data?.memberUids) ? data.memberUids : [],
+      memberCount: Number(data?.memberCount) || 0,
+      maxMembers: Number(data?.maxMembers) || THREAD_MAX_MEMBER_LIMIT,
+      ttlHours: Number(data?.ttlHours) || THREAD_DEFAULT_TTL_HOURS,
+      status: data?.status ?? 'active',
+      visibility: data?.visibility ?? 'inherit_parent_with_exceptions',
+      messageCount: Number(data?.messageCount) || 0
+    };
+  }
+
+  function subscribeServerThreads(currServerId: string) {
+    const database = db();
+    const q = query(collectionGroup(database, 'threads'), where('serverId', '==', currServerId));
+    clearServerThreads();
+    serverThreadsScope = currServerId;
+    serverThreadsUnsub = onSnapshot(
+      q,
+      (snap) => {
+        const nextMap: Record<string, ChannelThread[]> = {};
+        for (const docSnap of snap.docs) {
+          try {
+            const thread = normalizeThreadSnapshot(docSnap.data(), docSnap.id);
+            if (!thread.parentChannelId || thread.status === 'archived') continue;
+            if (!nextMap[thread.parentChannelId]) nextMap[thread.parentChannelId] = [];
+            nextMap[thread.parentChannelId].push(thread);
+          } catch (err) {
+            console.error('[threads] failed to normalize thread snapshot', err);
+          }
+        }
+        threadsByChannel = nextMap;
+      },
+      (err) => {
+        console.error('[threads] failed to subscribe to server threads', err);
+      }
+    );
+  }
+
   function selectChannelObject(id: string): Channel {
     const found = channels.find((c) => c.id === id);
     return found ?? { id, name: id, type: 'text' };
@@ -784,7 +847,6 @@ let lastThreadStreamId: string | null = null;
     channelThreads = [];
     const stop = streamChannelThreads(currServerId, channelId, (list) => {
       channelThreads = list;
-      threadsByChannel = { ...threadsByChannel, [channelId]: list };
       const present = new Set(list.map((thread) => thread.id));
       present.forEach((threadId) => watchThreadRead(threadId));
       for (const [threadId, stopRead] of threadReadStops) {
@@ -829,10 +891,17 @@ function sidebarThreadList() {
   const combined: Array<ChannelThread & { unread?: boolean }> = [];
   const cacheEntries = Object.values(threadsByChannel);
   const seen = new Set<string>();
+  const viewer = $user?.uid ?? null;
+  const allowThread = (thread: ChannelThread | null | undefined) => {
+    if (!thread) return false;
+    if (!viewer) return true;
+    const members = Array.isArray(thread.memberUids) ? thread.memberUids : [];
+    return members.includes(viewer);
+  };
   if (cacheEntries.length) {
     for (const list of cacheEntries) {
       for (const thread of list ?? []) {
-        if (!thread || thread.status === 'archived' || seen.has(thread.id)) continue;
+        if (!thread || thread.status === 'archived' || seen.has(thread.id) || !allowThread(thread)) continue;
         seen.add(thread.id);
         combined.push({
           ...thread,
@@ -842,7 +911,7 @@ function sidebarThreadList() {
     }
   } else if (channelThreads.length) {
     for (const thread of channelThreads) {
-      if (thread.status === 'archived') continue;
+      if (thread.status === 'archived' || !allowThread(thread)) continue;
       combined.push({
         ...thread,
         unread: threadUnreadMap[thread.id] ?? false
@@ -866,6 +935,17 @@ function sidebarThreadList() {
         photoURL: resolveProfilePhotoURL(profile)
       };
     });
+  }
+
+  function resolveThreadTitle() {
+    return (
+      pickString(activeThreadRoot?.text) ??
+      pickString(activeThreadRoot?.content) ??
+      pickString(activeThreadRoot?.preview) ??
+      pickString(activeThread?.name) ??
+      pickString(activeChannel?.name) ??
+      ''
+    );
   }
 
   function attachThreadStream(thread: ChannelThread | null) {
@@ -1120,6 +1200,7 @@ function sidebarThreadList() {
     clearChannelsUnsub();
     clearMessagesUnsub();
     resetThreadState();
+    clearServerThreads();
     cleanupProfileSubscriptions();
     unsubscribeVoice();
     serverMetaUnsub?.();
@@ -1421,23 +1502,28 @@ function sidebarThreadList() {
     if (!message) return;
     if (!serverId) { alert('Missing server id.'); return; }
     if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
+    const channelId = activeChannel.id;
     let existing =
-      channelThreads.find((thread) => thread.createdFromMessageId === message.id) ?? null;
+      channelThreads.find((thread) => thread.createdFromMessageId === message.id) ??
+      (threadsByChannel[channelId]?.find(
+        (thread) => thread.createdFromMessageId === message.id
+      ) ??
+        null);
     if (!existing) {
       try {
         const database = db();
         const threadSnap = await getDocs(
           query(
-            collection(database, 'servers', serverId, 'channels', activeChannel.id, 'threads'),
+            collection(database, 'servers', serverId, 'channels', channelId, 'threads'),
             where('createdFromMessageId', '==', message.id),
             limit(1)
           )
         );
         const docSnap = threadSnap.docs[0];
-        if (docSnap) {
-          pendingThreadId = docSnap.id;
-          pendingThreadRoot = message;
-          return;
+        if (docSnap?.exists()) {
+          const hydrated = normalizeThreadSnapshot(docSnap.data(), docSnap.id);
+          existing = hydrated;
+          upsertThreadCache(channelId, hydrated);
         }
       } catch (err) {
         console.error('[threads] lookup failed', err);
@@ -1483,6 +1569,22 @@ function sidebarThreadList() {
     }
   }
 
+  function upsertThreadCache(channelId: string, thread: ChannelThread) {
+    if (!channelId || !thread) return;
+    const previous = threadsByChannel[channelId] ?? [];
+    const nextList = previous.some((entry) => entry.id === thread.id)
+      ? previous.map((entry) => (entry.id === thread.id ? thread : entry))
+      : [thread, ...previous];
+    threadsByChannel = { ...threadsByChannel, [channelId]: nextList };
+    if (activeChannel?.id === channelId) {
+      const hasThread = channelThreads.some((entry) => entry.id === thread.id);
+      channelThreads = hasThread
+        ? channelThreads.map((entry) => (entry.id === thread.id ? thread : entry))
+        : [thread, ...channelThreads];
+      recomputeThreadStats();
+    }
+  }
+
   async function hydrateThreadAfterCreate(threadId: string | null, rootMessage: any) {
     if (!threadId || !serverId || !activeChannel?.id) return;
     try {
@@ -1492,18 +1594,9 @@ function sidebarThreadList() {
       );
       if (!snap.exists()) return;
       const raw = snap.data() ?? {};
-      const hydrated = { id: snap.id, ...(raw as ChannelThread) } as ChannelThread;
+      const hydrated = { ...(raw as ChannelThread), id: snap.id } as ChannelThread;
       activateThreadView(hydrated, rootMessage);
-      const channelId = activeChannel.id;
-      const previous = threadsByChannel[channelId] ?? [];
-      const nextList = previous.some((entry) => entry.id === hydrated.id)
-        ? previous.map((entry) => (entry.id === hydrated.id ? hydrated : entry))
-        : [hydrated, ...previous];
-      threadsByChannel = { ...threadsByChannel, [channelId]: nextList };
-      if (!channelThreads.some((entry) => entry.id === hydrated.id)) {
-        channelThreads = [hydrated, ...channelThreads];
-        recomputeThreadStats();
-      }
+      upsertThreadCache(activeChannel.id, hydrated);
     } catch (err) {
       console.error('[threads] failed to hydrate newly created thread', err);
     }
@@ -1539,8 +1632,8 @@ function sidebarThreadList() {
         if (snap.exists()) {
           const raw = snap.data() as ChannelThread;
           thread = {
+            ...(raw as ChannelThread),
             id: snap.id,
-            ...raw,
             channelId: raw?.channelId ?? raw?.parentChannelId ?? activeChannel.id,
             parentChannelId: raw?.parentChannelId ?? raw?.channelId ?? activeChannel.id
           };
@@ -1834,6 +1927,15 @@ function sidebarThreadList() {
     }
   });
   run(() => {
+    if (serverId) {
+      if (serverThreadsScope !== serverId) {
+        subscribeServerThreads(serverId);
+      }
+    } else {
+      clearServerThreads();
+    }
+  });
+  run(() => {
     aiConversationContext = messages.slice(-10);
   });
   run(() => {
@@ -1989,7 +2091,7 @@ function sidebarThreadList() {
                     mentionOptions={mentionOptions}
                     pendingUploads={[]}
                     aiAssistEnabled={aiAssistEnabled}
-                    threadLabel={activeThread?.name ?? activeChannel?.name ?? ''}
+                    threadLabel={resolveThreadTitle()}
                     conversationContext={threadConversationContext}
                     replyTarget={threadReplyTarget}
                     defaultSuggestionSource={threadDefaultSuggestionSource}
@@ -2117,7 +2219,7 @@ function sidebarThreadList() {
               mentionOptions={mentionOptions}
               pendingUploads={[]}
               aiAssistEnabled={aiAssistEnabled}
-              threadLabel={activeThread?.name ?? activeChannel?.name ?? ''}
+              threadLabel={resolveThreadTitle()}
               conversationContext={threadConversationContext}
               replyTarget={threadReplyTarget}
               defaultSuggestionSource={threadDefaultSuggestionSource}

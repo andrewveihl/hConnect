@@ -1,5 +1,6 @@
+<svelte:options runes={false} />
+
 <script lang="ts">
-  import { run } from 'svelte/legacy';
   import { createEventDispatcher, onDestroy } from 'svelte';
 
   import MessageList from './MessageList.svelte';
@@ -7,7 +8,11 @@
   import type { PendingUploadPreview } from './types';
   import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
-  import { requestThreadSummary, type ThreadSummaryItem, type ThreadSummaryMessage } from '$lib/api/ai';
+  import {
+    requestThreadSummary,
+    type ThreadSummaryItem,
+    type ThreadSummaryMessage
+  } from '$lib/api/ai';
   import type { ChannelThread } from '$lib/firestore/threads';
 
   interface Props {
@@ -25,49 +30,56 @@
     members?: Array<{ uid: string; displayName?: string | null; photoURL?: string | null }>;
     threadStatus?: ChannelThread['status'] | null;
   }
+  export let root: any | null = null;
+  export let messages: any[] = [];
+  export let users: Record<string, any> = {};
+  export let currentUserId: string | null = null;
+  export let mentionOptions: MentionDirectoryEntry[] = [];
+  export let pendingUploads: PendingUploadPreview[] = [];
+  export let aiAssistEnabled = false;
+  export let threadLabel = '';
+  export let conversationContext: any[] = [];
+  export let replyTarget: ReplyReferenceInput | null = null;
+  export let defaultSuggestionSource: any = null;
+  export let members: Array<{ uid: string; displayName?: string | null; photoURL?: string | null }> =
+    [];
+  export let threadStatus: ChannelThread['status'] | null = null;
 
   const dispatch = createEventDispatcher();
 
-  let {
-    root = null,
-    messages = [],
-    users = {},
-    currentUserId = null,
-    mentionOptions = [],
-    pendingUploads = [],
-    aiAssistEnabled = false,
-    threadLabel = '',
-    conversationContext = [],
-    replyTarget = null,
-    defaultSuggestionSource = null,
-    members = [],
-    threadStatus = null
-  }: Props = $props();
-
-  let scrollSignal = $state(0);
-  let summary: ThreadSummaryItem[] = $state([]);
-  let summaryLoading = $state(false);
-  let summaryError: string | null = $state(null);
-  let summarySuggested = $state(false);
+  let scrollSignal = 0;
+  let summary: ThreadSummaryItem[] = [];
+  let summaryLoading = false;
+  let summaryError: string | null = null;
+  let summarySuggested = false;
+  let lastMessageMillis: number | null = null;
+  let idleHours = 0;
+  let summaryPayload: ThreadSummaryMessage[] = [];
+  let shouldSuggestSummary = false;
 
   const pickString = (value: any) => (typeof value === 'string' ? value.trim() : '');
 
-  const rootPreview = ($derived(() => {
-    if (!root) return '';
-    return (
-      pickString(root?.text) ??
-      pickString(root?.content) ??
-      pickString(root?.preview) ??
-      pickString(root?.poll?.question) ??
-      pickString(root?.form?.title) ??
-      ''
-    );
-  }) as unknown) as string;
+  const rootPreview = () => {
+    const activeRoot = root;
+    return activeRoot
+      ? pickString(activeRoot?.text) ??
+          pickString(activeRoot?.content) ??
+          pickString(activeRoot?.preview) ??
+          pickString(activeRoot?.poll?.question) ??
+          pickString(activeRoot?.form?.title) ??
+          ''
+      : '';
+  };
 
-  const rootAuthor = ($derived(() => {
-    if (!root) return '';
-    return pickString(root?.displayName) || pickString(root?.authorName) || pickString(root?.author?.displayName) || 'Someone';
-  }) as unknown) as string;
+  const rootAuthor = () => {
+    const activeRoot = root;
+    return activeRoot
+      ? pickString(activeRoot?.displayName) ||
+          pickString(activeRoot?.authorName) ||
+          pickString(activeRoot?.author?.displayName) ||
+          'Someone'
+      : '';
+  };
 
   const initialsFor = (value: string | null | undefined) => {
     const str = pickString(value) ?? '';
@@ -77,47 +89,60 @@
     return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('');
   };
 
-  const lastMessageMillis = ($derived(() => {
-    if (!messages.length) return null;
-    const last = messages[messages.length - 1];
-    const raw = last?.createdAt;
-    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-    if (raw?.toMillis) return raw.toMillis();
-    try {
-      const date = new Date(raw);
-      const time = date.getTime();
-      return Number.isFinite(time) ? time : null;
-    } catch {
-      return null;
+  $: {
+    if (!messages.length) {
+      lastMessageMillis = null;
+    } else {
+      const last = messages[messages.length - 1];
+      const raw = last?.createdAt;
+      if (typeof raw === 'number' && Number.isFinite(raw)) {
+        lastMessageMillis = raw;
+      } else if (raw?.toMillis) {
+        lastMessageMillis = raw.toMillis();
+      } else {
+        try {
+          const date = new Date(raw);
+          const time = date.getTime();
+          lastMessageMillis = Number.isFinite(time) ? time : null;
+        } catch {
+          lastMessageMillis = null;
+        }
+      }
     }
-  }) as unknown) as number | null;
+  }
 
-  const idleHours = ($derived(() => {
-    if (!lastMessageMillis) return 0;
-    const diff = Date.now() - lastMessageMillis;
-    return diff > 0 ? diff / (1000 * 60 * 60) : 0;
-  }) as unknown) as number;
+  $: {
+    idleHours = lastMessageMillis
+      ? Math.max(0, (Date.now() - lastMessageMillis) / (1000 * 60 * 60))
+      : 0;
+  }
 
-  const shouldSuggestSummary = ($derived(() => {
-    return !summary.length && !summaryLoading && !summaryError && messages.length >= 4 && idleHours >= 1;
-  }) as unknown) as boolean;
-
-  const summaryPayload = ($derived(() => {
+  $: {
     const combined = [...(root ? [root] : []), ...messages];
-    return combined.slice(-20).map((entry) => ({
-      id: entry?.id,
-      author: pickString(entry?.displayName) || pickString(entry?.author?.displayName) || pickString(entry?.authorName) || pickString(entry?.uid),
+    summaryPayload = combined.slice(-20).map((entry) => ({
+      id: entry?.id ?? entry?.messageId ?? null,
+      messageId: entry?.messageId ?? entry?.id ?? null,
+      author:
+        pickString(entry?.displayName) ||
+        pickString(entry?.author?.displayName) ||
+        pickString(entry?.authorName) ||
+        pickString(entry?.uid),
       text: pickString(entry?.text) || pickString(entry?.content) || pickString(entry?.preview),
       createdAt: entry?.createdAt?.toMillis?.() ? entry.createdAt.toMillis() : entry?.createdAt ?? null
     }));
-  }) as unknown) as ThreadSummaryMessage[];
+  }
 
-  run(() => {
+  $: {
+    shouldSuggestSummary =
+      !summary.length && !summaryLoading && !summaryError && messages.length >= 4 && idleHours >= 1;
+  }
+
+  $: {
     const count = messages.length;
     if (count >= 0) {
       scrollSignal = Date.now();
     }
-  });
+  }
 
   onDestroy(() => {
     summary = [];
@@ -201,8 +226,8 @@
     <header class="thread-pane__header">
       <div>
         <div class="thread-pane__eyebrow">Thread</div>
-        <div class="thread-pane__title">{rootPreview || 'Conversation'}</div>
-        <div class="thread-pane__subtitle">Started by {rootAuthor || 'someone'}</div>
+        <div class="thread-pane__title">{rootPreview() || 'Conversation'}</div>
+        <div class="thread-pane__subtitle">Started by {rootAuthor() || 'someone'}</div>
       </div>
       <div class="thread-pane__actions">
         {#if threadStatus === 'archived'}
@@ -249,7 +274,7 @@
       {/if}
       {#if summary.length}
         <ul class="thread-summary__list">
-          {#each summary as item, idx (item.id ?? `${idx}-${item.title ?? 'summary'}`)}
+          {#each summary as item, idx (item.messageId ?? `${idx}-${item.title ?? 'summary'}`)}
             <li>
               <button type="button" class="thread-summary__item" onclick={() => scrollToMessage(item.messageId)}>
                 <div class="thread-summary__item-title">{item.title}</div>
