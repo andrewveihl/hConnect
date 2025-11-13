@@ -116,7 +116,7 @@ let threadMessagesUnsub: Unsubscribe | null = null;
 let lastThreadStreamChannel: string | null = null;
 let lastThreadStreamId: string | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
-  let serverDisplayName = $state('Server');
+let serverDisplayName = $state('Server');
   let serverMetaUnsub: Unsubscribe | null = $state(null);
   let mentionOptions: MentionDirectoryEntry[] = $state([]);
   let memberMentionOptions: MentionDirectoryEntry[] = $state([]);
@@ -2280,6 +2280,7 @@ function sidebarThreadList() {
                     threadLabel={activeChannel?.name ?? ''}
                     {pendingUploads}
                     {scrollToBottomSignal}
+                    scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
                     listClass="message-scroll-region flex-1 overflow-y-auto p-3"
                     inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
                     inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
@@ -2407,6 +2408,7 @@ function sidebarThreadList() {
               threadLabel={activeChannel?.name ?? ''}
               {pendingUploads}
               {scrollToBottomSignal}
+              scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
               emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
               onVote={handleVote}
               onSubmitForm={handleFormSubmit}

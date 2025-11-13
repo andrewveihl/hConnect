@@ -56,8 +56,10 @@
   };
 </script>
 
-<div class="flex h-dvh app-bg text-primary overflow-hidden">
-  <LeftPane activeServerId={null} />
+<div class="flex h-dvh app-bg text-primary overflow-hidden mobile-full-bleed">
+  <div class="hidden md:flex md:shrink-0">
+    <LeftPane activeServerId={null} />
+  </div>
 
   <div class="flex flex-1 flex-col overflow-hidden panel-muted">
     <header class="notifications-header">
@@ -153,11 +155,7 @@
     padding-top: calc(env(safe-area-inset-top) + clamp(1rem, 3vw, 1.75rem));
     padding-bottom: clamp(1rem, 3vw, 1.6rem);
     border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 78%, transparent);
-    background: linear-gradient(
-        145deg,
-        color-mix(in srgb, var(--color-panel-muted) 70%, transparent),
-        color-mix(in srgb, var(--color-panel) 40%, transparent)
-      );
+    background: var(--surface-root);
     box-shadow: 0 18px 38px rgba(6, 10, 18, 0.32);
   }
 

@@ -732,11 +732,16 @@
     flex-direction: column;
     align-items: flex-start;
     padding-bottom: 1rem;
+    flex: 0 1 auto;
+    align-self: flex-start;
+    width: fit-content;
+    max-width: min(48rem, 100%);
   }
 
   .message-content--mine {
     align-items: flex-end;
     text-align: right;
+    align-self: flex-end;
   }
 
   .message-heading-row {
@@ -765,7 +770,7 @@
   .message-inline-timestamp {
     position: absolute;
     right: 0.35rem;
-    bottom: 0.1rem;
+    bottom: -0.9rem;
     font-size: 0.72rem;
     color: var(--text-55);
     line-height: 1;
@@ -779,12 +784,14 @@
   }
 
   .message-inline-timestamp--mine {
-    right: 0.35rem;
+    left: 0.35rem;
+    right: auto;
+    bottom: -0.9rem;
   }
 
   .message-content:not(.message-content--mine) .message-inline-timestamp {
-    left: 0.35rem;
-    right: auto;
+    right: 0.35rem;
+    left: auto;
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -850,24 +857,33 @@
     flex-direction: column;
     gap: 0.24rem;
     max-width: 100%;
-    position: relative;
     align-items: flex-start;
+    align-self: flex-start;
+    width: fit-content;
   }
 
   .message-action-bar {
     position: absolute;
-    top: -1.8rem;
-    right: 0;
+    top: 0;
     display: inline-flex;
     gap: 0.3rem;
     opacity: 0;
     pointer-events: none;
     transition: opacity 120ms ease, transform 120ms ease;
+    direction: ltr;
+    transform: translateY(calc(-100% - 0.35rem));
+  }
+
+  .message-action-bar--other {
+    right: 0;
+    left: auto;
+    justify-content: flex-end;
   }
 
   .message-action-bar--mine {
     right: auto;
     left: 0;
+    justify-content: flex-start;
   }
 
   .message-action-bar.is-visible {
@@ -907,6 +923,21 @@
   }
 
   .message-content--mine .message-body {
+    align-items: flex-end;
+    align-self: flex-end;
+  }
+
+  .message-payload {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.24rem;
+    align-items: flex-start;
+    width: fit-content;
+    max-width: 100%;
+  }
+
+  .message-payload--mine {
     align-items: flex-end;
   }
 
@@ -1643,50 +1674,7 @@
             {/if}
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
-              <div
-                class={`message-body ${continued ? 'message-body--continued' : ''}`}
-                role="button"
-                tabindex="0"
-                onclick={(event) => handleReplyClick(event, m)}
-                onkeydown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    handleReplyClick(event, m);
-                  }
-                }}
-              >
-                {#if currentUserId}
-                  <div class={`message-action-bar ${mine ? 'message-action-bar--mine' : ''} ${showAdd ? 'is-visible' : ''}`}>
-                    <button
-                      type="button"
-                      class="message-action"
-                      aria-label="Start thread"
-                      title="Start thread"
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        event.preventDefault();
-                        openThread(m);
-                      }}
-                    >
-                      <i class="bx bx-message-square-add" aria-hidden="true"></i>
-                    </button>
-                    <button
-                      type="button"
-                      class="message-action"
-                      aria-label="Add reaction"
-                      title="Add reaction"
-                      disabled={!showAdd}
-                      aria-hidden={!showAdd}
-                      onclick={(event) => onAddReactionClick(event, m.id)}
-                      onpointerdown={(event) => {
-                        event.stopPropagation();
-                        clearLongPressTimer();
-                      }}
-                    >
-                      <i class="bx bx-smile" aria-hidden="true"></i>
-                    </button>
-                  </div>
-                {/if}
+              <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
                 {#if replyRef && !hideReplyPreview}
                   {@const replyChain = flattenReplyChain(replyRef)}
                   <div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
@@ -1703,6 +1691,50 @@
                     {/each}
                   </div>
                 {/if}
+                <div
+                  class={`message-payload ${mine ? 'message-payload--mine' : ''}`}
+                  role="button"
+                  tabindex="0"
+                  onclick={(event) => handleReplyClick(event, m)}
+                  onkeydown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      handleReplyClick(event, m);
+                    }
+                  }}
+                >
+                  {#if currentUserId}
+                    <div class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}>
+                      <button
+                        type="button"
+                        class="message-action"
+                        aria-label="Start thread"
+                        title="Start thread"
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          event.preventDefault();
+                          openThread(m);
+                        }}
+                      >
+                        <i class="bx bx-message-square-add" aria-hidden="true"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="message-action"
+                        aria-label="Add reaction"
+                        title="Add reaction"
+                        disabled={!showAdd}
+                        aria-hidden={!showAdd}
+                        onclick={(event) => onAddReactionClick(event, m.id)}
+                        onpointerdown={(event) => {
+                          event.stopPropagation();
+                          clearLongPressTimer();
+                        }}
+                      >
+                        <i class="bx bx-smile" aria-hidden="true"></i>
+                      </button>
+                    </div>
+                  {/if}
                 {#if threadMeta}
                   <div
                     class="thread-preview-card"
@@ -1851,37 +1883,38 @@
                     </div>
                   </div>
                 {/if}
-              </div>
-              {#if (m as any).createdAt && !sameMinuteAsNext}
-                <div
-                  class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
-                  aria-hidden={!hasHoverSupport && !showTimestampMobile}
-                >
-                  {formatTime((m as any).createdAt)}
-                </div>
-              {/if}
-
-              {#if reactions.length || currentUserId}
-                <div
-                  class="reaction-row"
-                  style={`margin-top: ${hasReactions ? (continued ? 0.15 : 0.4) : 0}rem;`}
-                >
-                  <div class="reaction-list">
-                    {#each reactions as reaction (reaction.key)}
-                      <button
-                        type="button"
-                        class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
-                        onclick={() => toggleReaction(m.id, reaction.emoji)}
-                        disabled={!currentUserId}
-                        title={reaction.users.join(', ')}
-                      >
-                        <span>{reaction.emoji}</span>
-                        <span class="count">{reaction.count}</span>
-                      </button>
-                    {/each}
+                {#if (m as any).createdAt && !sameMinuteAsNext}
+                  <div
+                    class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
+                    aria-hidden={!hasHoverSupport && !showTimestampMobile}
+                  >
+                    {formatTime((m as any).createdAt)}
                   </div>
-                </div>
-              {/if}
+                {/if}
+              </div>
+
+                {#if reactions.length || currentUserId}
+                  <div
+                    class="reaction-row"
+                    style={`margin-top: ${hasReactions ? (continued ? 0.15 : 0.4) : 0}rem;`}
+                  >
+                    <div class="reaction-list">
+                      {#each reactions as reaction (reaction.key)}
+                        <button
+                          type="button"
+                          class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
+                          onclick={() => toggleReaction(m.id, reaction.emoji)}
+                          disabled={!currentUserId}
+                          title={reaction.users.join(', ')}
+                        >
+                          <span>{reaction.emoji}</span>
+                          <span class="count">{reaction.count}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
             </div>
           </div>
         </div>
