@@ -94,34 +94,42 @@
             <li>
               <button
                 type="button"
-                class="notification-card"
+                class={`notification-card notification-card--${item.priority}`}
                 onclick={() => goTo(item.href)}
                 aria-label={`Open ${item.kind === 'dm' ? 'direct message' : 'channel'} ${item.title}`}
               >
                 <div
-                  class={`notification-card__icon ${item.kind === 'dm' ? 'notification-card__icon--dm' : 'notification-card__icon--channel'}`}
-                >
-                  {#if item.photoURL}
-                    <img src={item.photoURL} alt="" loading="lazy" />
-                  {:else if item.kind === 'dm'}
-                    <i class="bx bx-message-dots" aria-hidden="true"></i>
+                class={`notification-card__icon ${item.kind === 'dm' ? 'notification-card__icon--dm' : item.kind === 'thread' ? 'notification-card__icon--thread' : 'notification-card__icon--channel'}`}
+              >
+                {#if item.photoURL}
+                  <img src={item.photoURL} alt="" loading="lazy" />
+                {:else if item.kind === 'dm'}
+                  <i class="bx bx-message-dots" aria-hidden="true"></i>
+                {:else if item.kind === 'thread'}
+                  <i class="bx bx-message-square-dots" aria-hidden="true"></i>
+                {:else}
+                  <i class="bx bx-hash" aria-hidden="true"></i>
+                {/if}
+              </div>
+
+              <div class={`notification-card__body ${item.priority === 'high' ? 'notification-card__body--high' : 'notification-card__body--low'}`}>
+                <div class="notification-card__title-row">
+                  <span class="notification-card__title">{item.title}</span>
+                  {#if item.priority === 'high'}
+                    {#if item.reason === 'mention'}
+                      <span class="notification-card__pill">Mention</span>
+                    {:else if item.reason === 'thread'}
+                      <span class="notification-card__pill">Thread</span>
+                    {/if}
+                    <span class="notification-card__count">{formatCount(item.highCount ?? item.unread)}</span>
                   {:else}
-                    <i class="bx bx-hash" aria-hidden="true"></i>
+                    <span class="notification-card__dot" aria-hidden="true"></span>
                   {/if}
                 </div>
-
-                <div class="notification-card__body">
-                  <div class="notification-card__title-row">
-                    <span class="notification-card__title">{item.title}</span>
-                    {#if item.isMention}
-                      <span class="notification-card__pill">Mention</span>
-                    {/if}
-                    <span class="notification-card__count">{formatCount(item.unread)}</span>
-                  </div>
-                  <div class="notification-card__meta">
-                    <span class="notification-card__context">
-                      {item.kind === 'dm' ? 'Direct message' : item.context}
-                    </span>
+                <div class="notification-card__meta">
+                  <span class="notification-card__context">
+                    {item.kind === 'dm' ? 'Direct message' : item.context}
+                  </span>
                     {#if item.lastActivity}
                       <span>{formatRelativeTime(item.lastActivity)}</span>
                     {/if}
@@ -211,18 +219,27 @@
     width: 100%;
     border-radius: var(--radius-lg);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 52%, transparent);
-    padding: clamp(1rem, 3vw, 1.3rem) clamp(1rem, 3vw, 1.35rem);
+    padding: clamp(1rem, 3vw, 1.25rem) clamp(1rem, 3vw, 1.35rem);
     text-align: left;
     transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
     cursor: pointer;
     color: inherit;
-    box-shadow: 0 14px 32px rgba(6, 11, 20, 0.28);
+    box-shadow: 0 14px 32px rgba(6, 11, 20, 0.18);
+  }
+
+  .notification-card--high {
+    background: color-mix(in srgb, var(--color-panel) 68%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
+    box-shadow: 0 18px 38px rgba(8, 14, 24, 0.32);
+  }
+
+  .notification-card--low {
+    background: color-mix(in srgb, var(--color-panel) 45%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 24%, transparent);
   }
 
   .notification-card:hover {
     border-color: color-mix(in srgb, var(--color-accent) 42%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 64%, transparent);
     transform: translateY(-2px);
     box-shadow: 0 18px 42px rgba(8, 14, 24, 0.34);
   }
@@ -252,6 +269,12 @@
     border: 1px solid color-mix(in srgb, var(--color-alert, #f87171) 35%, transparent);
   }
 
+  .notification-card__icon--thread {
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+    color: var(--color-accent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  }
+
   .notification-card__icon img {
     width: 100%;
     height: 100%;
@@ -262,6 +285,14 @@
     display: grid;
     gap: 0.5rem;
     min-width: 0;
+  }
+
+  .notification-card__body--low .notification-card__title {
+    color: var(--text-80);
+  }
+
+  .notification-card__body--low .notification-card__preview {
+    color: var(--text-70);
   }
 
   .notification-card__title-row {
@@ -297,13 +328,21 @@
     min-width: 2.1rem;
     height: 1.5rem;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 24%, transparent);
-    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-danger) 85%, transparent);
+    color: var(--text-inverse);
     font-size: 0.78rem;
     font-weight: 600;
     display: grid;
     place-items: center;
     padding: 0 0.55rem;
+  }
+
+  .notification-card__dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--color-accent) 90%, transparent);
+    box-shadow: 0 0 0.35rem color-mix(in srgb, var(--color-accent) 45%, transparent);
   }
 
   .notification-card__meta {
@@ -313,6 +352,10 @@
     font-size: 0.78rem;
     color: var(--text-60);
     flex-wrap: wrap;
+  }
+
+  .notification-card--high .notification-card__meta {
+    color: color-mix(in srgb, var(--text-90) 90%, transparent);
   }
 
   .notification-card__meta::after {

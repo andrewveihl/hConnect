@@ -4,6 +4,7 @@ import {
   collection,
   doc,
   getCountFromServer,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -11,12 +12,27 @@ import {
   setDoc,
   where,
   limit,
-  getDoc,
   type Unsubscribe
 } from 'firebase/firestore';
-import type { Timestamp } from 'firebase/firestore';
+import type { DocumentData, DocumentSnapshot, Timestamp } from 'firebase/firestore';
+import { pickAuthor, pickMessageSnippet } from '$lib/utils/messagePreview';
 
-export type UnreadMap = Record<string, number>;
+export type HighPriorityReason = 'mention' | 'reply' | 'thread';
+
+export type ChannelPrioritySnapshot = {
+  total: number;
+  high: number;
+  low: number;
+  latestHigh?: {
+    id: string | null;
+    reason: HighPriorityReason;
+    author?: string | null;
+    snippet?: string | null;
+    timestamp?: number | null;
+  } | null;
+};
+
+export type UnreadMap = Record<string, ChannelPrioritySnapshot>;
 
 function keyFor(serverId: string, channelId: string) {
   return `${serverId}__${channelId}`;
@@ -43,9 +59,128 @@ export async function markChannelRead(
   );
 }
 
+type ChannelState = {
+  id: string;
+  lastReadAt: Timestamp | null;
+  recomputeRunning: boolean;
+  recomputeQueued: boolean;
+  stopLatest?: Unsubscribe;
+  stopRead?: Unsubscribe;
+};
+
+type HighEvent = {
+  id: string;
+  reason: HighPriorityReason;
+  author: string | null;
+  snippet: string | null;
+  timestamp: number | null;
+};
+
+function timestampToMillis(value: Timestamp | Date | number | null | undefined): number | null {
+  if (!value) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof (value as any)?.toMillis === 'function') {
+    try {
+      return (value as Timestamp).toMillis();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function buildHighEvent(
+  docSnap: DocumentSnapshot<DocumentData>,
+  reason: HighPriorityReason
+): HighEvent {
+  const data = docSnap.data() ?? {};
+  const snippet = pickMessageSnippet(data);
+  const author = pickAuthor(data);
+  const timestamp = timestampToMillis(data?.createdAt);
+  return {
+    id: docSnap.id,
+    reason,
+    author,
+    snippet,
+    timestamp
+  };
+}
+
+async function computeChannelSnapshot(options: {
+  db: ReturnType<typeof getDb>;
+  uid: string;
+  serverId: string;
+  channelId: string;
+  lastReadAt: Timestamp | null;
+}): Promise<ChannelPrioritySnapshot> {
+  const { db, uid, serverId, channelId, lastReadAt } = options;
+  const base = collection(db, 'servers', serverId, 'channels', channelId, 'messages');
+  const timeConstraint = lastReadAt ? [where('createdAt', '>', lastReadAt)] : [];
+
+  let total = 0;
+  try {
+    const agg = await getCountFromServer(query(base, ...timeConstraint));
+    total = agg.data().count ?? 0;
+  } catch (err) {
+    console.warn('[unread] total count failed', { serverId, channelId }, err);
+    return { total: 0, high: 0, low: 0, latestHigh: null };
+  }
+
+  if (total === 0) {
+    return { total: 0, high: 0, low: 0, latestHigh: null };
+  }
+
+  const highEvents = new Map<string, HighEvent>();
+
+  try {
+    const mentionQuery = query(
+      base,
+      ...timeConstraint,
+      where(`mentionsMap.${uid}`, '==', true)
+    );
+    const mentionSnap = await getDocs(mentionQuery);
+    mentionSnap.forEach((docSnap) => {
+      const event = buildHighEvent(docSnap, 'mention');
+      highEvents.set(docSnap.id, event);
+    });
+  } catch (err) {
+    console.warn('[unread] mention query failed', { serverId, channelId }, err);
+  }
+
+  try {
+    const replyQuery = query(
+      base,
+      ...timeConstraint,
+      where('replyTo.authorId', '==', uid)
+    );
+    const replySnap = await getDocs(replyQuery);
+    replySnap.forEach((docSnap) => {
+      if (highEvents.has(docSnap.id)) return;
+      const event = buildHighEvent(docSnap, 'reply');
+      highEvents.set(docSnap.id, event);
+    });
+  } catch (err) {
+    console.warn('[unread] reply query failed', { serverId, channelId }, err);
+  }
+
+  const highList = Array.from(highEvents.values()).sort(
+    (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0)
+  );
+  const highCount = highEvents.size;
+  const low = Math.max(total - highCount, 0);
+
+  return {
+    total,
+    high: highCount,
+    low,
+    latestHigh: highList[0] ?? null
+  };
+}
+
 /**
- * Watches each channel's latest message and returns per-channel unread counts.
- * Uses a lightweight latest-message listener + on-demand count query when needed.
+ * Watches each channel's latest message and returns per-channel unread counts,
+ * split into high priority (mentions/replies) and low priority buckets.
  */
 export function subscribeUnreadForServer(
   uid: string,
@@ -53,132 +188,117 @@ export function subscribeUnreadForServer(
   onUpdate: (map: UnreadMap) => void
 ): Unsubscribe {
   const db = getDb();
-
-  let stopChannels: Unsubscribe | null = null;
-  const perChannelStops = new Map<string, Unsubscribe>();
-  const lastRead: Record<string, Timestamp | null> = {};
+  const channelStates = new Map<string, ChannelState>();
   const counts: UnreadMap = {};
 
-  // Watch all channels in the server
-  stopChannels = onSnapshot(
-    query(collection(db, 'servers', serverId, 'channels'), orderBy('position')),
-    (chSnap) => {
-      const present = new Set<string>();
-      for (const ch of chSnap.docs) {
-        const channelId = ch.id;
-        present.add(channelId);
-        if (perChannelStops.has(channelId)) continue;
+  const emit = () => {
+    onUpdate({ ...counts });
+  };
 
-        // For each channel, watch the most recent message timestamp
-        // Latest message watcher (limit 1 for efficiency)
-        const stopLatest = onSnapshot(
-          query(
-            collection(db, 'servers', serverId, 'channels', channelId, 'messages'),
-            orderBy('createdAt', 'desc'),
-            limit(1)
-          ),
-          async (msgSnap) => {
-            const latest = msgSnap.docs[0]?.data() as any | undefined;
-            const latestTs: Timestamp | null = latest?.createdAt ?? null;
+  const scheduleRecompute = (channelId: string) => {
+    const state = channelStates.get(channelId);
+    if (!state) return;
+    if (state.recomputeRunning) {
+      state.recomputeQueued = true;
+      return;
+    }
+    state.recomputeRunning = true;
+    state.recomputeQueued = false;
+    computeChannelSnapshot({
+      db,
+      uid,
+      serverId,
+      channelId,
+      lastReadAt: state.lastReadAt
+    })
+      .then((snapshot) => {
+        counts[channelId] = snapshot;
+        emit();
+      })
+      .catch((err) => {
+        console.warn('[unread] failed to compute snapshot', { serverId, channelId }, err);
+      })
+      .finally(() => {
+        state.recomputeRunning = false;
+        if (state.recomputeQueued) {
+          state.recomputeQueued = false;
+          scheduleRecompute(channelId);
+        }
+      });
+  };
 
-            // If we don't have a read for this channel yet, fetch once
-            if (lastRead[channelId] === undefined) {
-              try {
-                const readDoc = await getDoc(doc(db, 'profiles', uid, 'reads', keyFor(serverId, channelId)));
-                lastRead[channelId] = (readDoc.data() as any)?.lastReadAt ?? null;
-              } catch {
-                lastRead[channelId] = null;
-              }
-            }
+  const detachChannel = (channelId: string) => {
+    const state = channelStates.get(channelId);
+    if (!state) return;
+    state.stopLatest?.();
+    state.stopRead?.();
+    channelStates.delete(channelId);
+    delete counts[channelId];
+    emit();
+  };
 
-            const lr = lastRead[channelId];
-            if (!latestTs) {
-              counts[channelId] = 0;
-              onUpdate({ ...counts });
-              return;
-            }
-            if (lr && latestTs.toMillis() <= lr.toMillis()) {
-              counts[channelId] = 0;
-              onUpdate({ ...counts });
-              return;
-            }
+  const attachChannel = (channelId: string) => {
+    if (channelStates.has(channelId)) return;
+    const state: ChannelState = {
+      id: channelId,
+      lastReadAt: null,
+      recomputeRunning: false,
+      recomputeQueued: false
+    };
+    channelStates.set(channelId, state);
 
-            try {
-              // On-demand count of messages newer than lastRead
-              const q = lr
-                ? query(
-                    collection(db, 'servers', serverId, 'channels', channelId, 'messages'),
-                    where('createdAt', '>', lr)
-                  )
-                : query(collection(db, 'servers', serverId, 'channels', channelId, 'messages'));
-              const agg = await getCountFromServer(q);
-              const n = agg.data().count ?? 0;
-              counts[channelId] = lr ? n : n; // if no lastRead, show total as unread
-              onUpdate({ ...counts });
-            } catch {
-              // Best-effort; if count fails, show 1+ when latest is newer than lastRead
-              counts[channelId] = lr ? 1 : (counts[channelId] ?? 0);
-              onUpdate({ ...counts });
-            }
-          }
-        );
+    state.stopLatest = onSnapshot(
+      query(
+        collection(db, 'servers', serverId, 'channels', channelId, 'messages'),
+        orderBy('createdAt', 'desc'),
+        limit(1)
+      ),
+      () => scheduleRecompute(channelId),
+      () => scheduleRecompute(channelId)
+    );
 
-        // Watch my read doc for this channel and recompute when it changes
-        const stopRead = onSnapshot(
-          doc(db, 'profiles', uid, 'reads', keyFor(serverId, channelId)),
-          async (readSnap) => {
-            const lr: Timestamp | null = (readSnap.data() as any)?.lastReadAt ?? null;
-            lastRead[channelId] = lr;
-            // Recompute quickly: if latest <= lr, clear; else fetch count
-            try {
-              if (!lr) {
-                const agg = await getCountFromServer(
-                  query(collection(db, 'servers', serverId, 'channels', channelId, 'messages'))
-                );
-                counts[channelId] = agg.data().count ?? 0;
-              } else {
-                const agg = await getCountFromServer(
-                  query(
-                    collection(db, 'servers', serverId, 'channels', channelId, 'messages'),
-                    where('createdAt', '>', lr)
-                  )
-                );
-                counts[channelId] = agg.data().count ?? 0;
-              }
-              onUpdate({ ...counts });
-            } catch {
-              counts[channelId] = 0;
-              onUpdate({ ...counts });
-            }
-          }
-        );
-
-        perChannelStops.set(
-          channelId,
-          () => {
-            stopLatest();
-            stopRead();
-          }
-        );
+    state.stopRead = onSnapshot(
+      doc(db, 'profiles', uid, 'reads', keyFor(serverId, channelId)),
+      (snap) => {
+        const data: any = snap.data() ?? {};
+        state.lastReadAt = data?.lastReadAt ?? null;
+        scheduleRecompute(channelId);
+      },
+      () => {
+        state.lastReadAt = null;
+        scheduleRecompute(channelId);
       }
+    );
 
-      // Cleanup removed channels
-      for (const [cid, stop] of perChannelStops) {
-        if (!present.has(cid)) {
-          stop();
-          perChannelStops.delete(cid);
-          delete lastRead[cid];
-          delete counts[cid];
+    scheduleRecompute(channelId);
+  };
+
+  const stopChannels = onSnapshot(
+    query(collection(db, 'servers', serverId, 'channels'), orderBy('position')),
+    (snap) => {
+      const present = new Set<string>();
+      snap.forEach((docSnap) => {
+        const channelId = docSnap.id;
+        present.add(channelId);
+        attachChannel(channelId);
+      });
+      for (const channelId of Array.from(channelStates.keys())) {
+        if (!present.has(channelId)) {
+          detachChannel(channelId);
         }
       }
-
-      onUpdate({ ...counts });
+    },
+    () => {
+      for (const channelId of Array.from(channelStates.keys())) {
+        detachChannel(channelId);
+      }
     }
   );
 
   return () => {
     stopChannels?.();
-    perChannelStops.forEach((s) => s());
-    perChannelStops.clear();
+    for (const channelId of Array.from(channelStates.keys())) {
+      detachChannel(channelId);
+    }
   };
 }

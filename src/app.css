@@ -79,6 +79,8 @@
   --text-08: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
   --text-07: color-mix(in srgb, var(--color-text-primary) 7%, transparent);
   --text-05: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+
+  --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 @layer utilities {
@@ -124,6 +126,8 @@
   --button-ghost-hover: rgba(24, 32, 38, 0.12);
   --button-ghost-border: rgba(24, 32, 38, 0.16);
   --button-ghost-text: var(--color-text-primary);
+
+  --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
 
   --input-bg: rgba(24, 32, 38, 0.06);
   --input-border: rgba(24, 32, 38, 0.14);
@@ -628,7 +632,7 @@ body {
   color: var(--color-text-primary);
   box-shadow: none;
   border-radius: 0;
-  padding-bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)));
 }
 
 .mobile-panel--dragging {
@@ -649,18 +653,20 @@ body {
 }
 
 .message-scroll-region .chat-scroll {
-  --chat-scroll-padding: calc(env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 0.3rem);
+  --chat-scroll-padding: calc(var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 0.3rem);
 }
 
 @media (max-width: 767px) {
   .chat-input-region {
-    bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px));
+    bottom: calc(
+      var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px)
+    );
     box-shadow: 0 -12px 28px rgba(5, 9, 16, 0.45);
   }
 
   .message-scroll-region .chat-scroll {
     --chat-scroll-padding: calc(
-      var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 2rem
+      var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 2rem
     );
   }
 }
@@ -805,6 +811,15 @@ body {
   display: grid;
   place-items: center;
   padding: 0 0.35rem;
+}
+
+.channel-teal-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 9999px;
+  background: var(--color-accent);
+  display: inline-block;
+  box-shadow: 0 0 0.35rem color-mix(in srgb, var(--color-accent) 45%, transparent);
 }
 
 .channel-voice-count {

@@ -14,8 +14,7 @@
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
-  import { subscribeUnreadForServer, type UnreadMap } from '$lib/firebase/unread';
-  import { notifications } from '$lib/stores/notifications';
+import { notifications, channelIndicators } from '$lib/stores/notifications';
 
   import {
     collection,
@@ -102,7 +101,6 @@
   let unsubChannels: Unsubscribe | null = null;
   let unsubServerMeta: Unsubscribe | null = null;
   let unsubMyMember: Unsubscribe | null = null;
-  let unsubUnread: Unsubscribe | null = null;
   let unsubPersonalOrder: Unsubscribe | null = null;
 
   let ownerId: string | null = null;
@@ -603,15 +601,6 @@
     workingOrder = [];
     orderError = null;
     savingOrder = false;
-    // Unread per channel
-    unsubUnread?.();
-    if ($user?.uid) {
-      unreadReady = false;
-      unsubUnread = subscribeUnreadForServer($user.uid, server, (map: UnreadMap) => {
-        unreadByChannel = map;
-        if (!unreadReady) { prevUnread = { ...map }; unreadReady = true; }
-      });
-    }
   }
 
 
@@ -621,7 +610,6 @@
     unsubChannels?.();
     unsubServerMeta?.();
     unsubMyMember?.();
-    unsubUnread?.();
     unsubPersonalOrder?.();
     resetVoiceWatchers();
     unsubscribeVoiceSession();
@@ -685,8 +673,9 @@
     onPickChannel(id);
     dispatch('pick', id);
     // Optimistically clear unread badge for picked channel
-    if (unreadByChannel[id] && unreadByChannel[id] > 0) {
-      unreadByChannel = { ...unreadByChannel, [id]: 0 };
+    const entry = unreadByChannel[id];
+    if (entry && (entry.high > 0 || entry.low > 0)) {
+      unreadByChannel = { ...unreadByChannel, [id]: { high: 0, low: 0 } };
     }
   }
 
@@ -756,7 +745,8 @@
   }
 
   // Unread state map
-  let unreadByChannel: Record<string, number> = $state({});
+  type ChannelIndicator = { high: number; low: number };
+  let unreadByChannel: Record<string, ChannelIndicator> = $state({});
   let prevUnread: Record<string, number> = $state({});
   let unreadReady = $state(false);
 
@@ -765,6 +755,12 @@
     $page.params.serverID ??
     ($page.params as any).serverId ??
     null);
+  run(() => {
+    const indicators = $channelIndicators ?? {};
+    const serverKey = computedServerId ?? null;
+    unreadByChannel = serverKey ? indicators[serverKey] ?? {} : {};
+    if (!unreadReady) unreadReady = true;
+  });
   run(() => {
     if (browser) {
       setVoiceDebugSection('serverSidebar.channels', {
@@ -873,10 +869,15 @@ run(() => {
     }
   });
   run(() => {
+    const totals: Record<string, number> = {};
+    for (const id in unreadByChannel) {
+      const entry = unreadByChannel[id];
+      totals[id] = (entry?.high ?? 0) + (entry?.low ?? 0);
+    }
     if (browser && unreadReady && document.visibilityState === 'hidden' && notifDesktopEnabled && notifAllMessages) {
       try {
-        for (const id in unreadByChannel) {
-          const curr = unreadByChannel[id] ?? 0;
+        for (const id in totals) {
+          const curr = totals[id] ?? 0;
           const prev = prevUnread[id] ?? 0;
           if (curr > prev && id !== activeChannelId) {
             const chan = channels.find((c) => c.id === id);
@@ -885,10 +886,8 @@ run(() => {
           }
         }
       } catch {}
-      prevUnread = { ...unreadByChannel };
-    } else {
-      prevUnread = { ...unreadByChannel };
     }
+    prevUnread = totals;
   });
 </script>
 
@@ -1030,10 +1029,15 @@ run(() => {
                 {#if mentionHighlights.has(c.id)}
                   <span class="channel-mention-pill" title="You were mentioned">@</span>
                 {/if}
-                {#if (unreadByChannel[c.id] ?? 0) > 0}
-                  <span class="channel-unread">
-                    {unreadByChannel[c.id] > 99 ? '99+' : unreadByChannel[c.id]}
+                {#if (unreadByChannel[c.id]?.high ?? 0) > 0}
+                  <span
+                    class="channel-unread"
+                    aria-label={`${unreadByChannel[c.id]?.high ?? 0} unread high priority messages`}
+                  >
+                    {(unreadByChannel[c.id]?.high ?? 0) > 99 ? '99+' : unreadByChannel[c.id]?.high}
                   </span>
+                {:else if (unreadByChannel[c.id]?.low ?? 0) > 0}
+                  <span class="channel-teal-dot" aria-hidden="true"></span>
                 {/if}
                 {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
                   <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>

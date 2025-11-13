@@ -214,7 +214,7 @@ import {
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = $state(false);
   let isPlaybackMuted = $state(false);
-  let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+let inactivityTimer: number | null = null;
   let voiceActivityUnsub: (() => void) | null = null;
   interface Props {
     layout?: 'standalone' | 'embedded';
