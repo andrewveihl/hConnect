@@ -14,8 +14,9 @@
   } from '$lib/utils/voiceDebugContext';
   import { copyTextToClipboard } from '$lib/utils/clipboard';
 import { resolveProfilePhotoURL } from '$lib/utils/profile';
-import { voiceSession } from '$lib/stores/voice';
+  import { voiceSession } from '$lib/stores/voice';
 import type { VoiceSession } from '$lib/stores/voice';
+  import { voiceActivity } from '$lib/stores/voiceActivity';
 import {
   PUBLIC_ENABLE_TURN_FALLBACK,
   PUBLIC_TURN_URLS,
@@ -41,6 +42,7 @@ import {
 
   const CALL_DOC_ID = 'live';
   const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
+  const INACTIVITY_TIMEOUT_MS = 5 * 60 * 60 * 1000;
   let serverId = $state<string | null>(null);
   let channelId = $state<string | null>(null);
   let sessionChannelName = $state('');
@@ -212,6 +214,8 @@ import {
   let shouldRestoreCameraOnShareEnd = false;
   let audioNeedsUnlock = $state(false);
   let isPlaybackMuted = $state(false);
+  let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+  let voiceActivityUnsub: (() => void) | null = null;
   interface Props {
     layout?: 'standalone' | 'embedded';
   }
@@ -1229,6 +1233,28 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       return null;
     }
     return audioContext;
+  }
+
+  function clearInactivityTimer() {
+    if (inactivityTimer) {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = null;
+    }
+  }
+
+  function scheduleInactivityTimeout(reason: string) {
+    if (!isJoined || !serverId || !channelId) return;
+    clearInactivityTimer();
+    inactivityTimer = window.setTimeout(() => {
+      voiceDebug('voice inactivity timeout', { reason, limit: INACTIVITY_TIMEOUT_MS });
+      statusMessage = 'Disconnected after 5 hours without activity.';
+      voiceSession.leave();
+    }, INACTIVITY_TIMEOUT_MS);
+  }
+
+  function emitVoiceActivity(reason: string) {
+    if (!serverId || !channelId) return;
+    voiceActivity.ping(serverId, channelId, reason);
   }
 
   function setParticipantSpeaking(uid: string, speaking: boolean) {
