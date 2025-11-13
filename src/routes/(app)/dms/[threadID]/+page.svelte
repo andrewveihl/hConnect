@@ -8,9 +8,10 @@
   import { getDb } from '$lib/firebase';
   import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 
-  import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
-  import MessageList from '$lib/components/chat/MessageList.svelte';
-  import ChatInput from '$lib/components/chat/ChatInput.svelte';
+import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
+import MessageList from '$lib/components/chat/MessageList.svelte';
+import ChatInput from '$lib/components/chat/ChatInput.svelte';
+import LeftPane from '$lib/components/app/LeftPane.svelte';
 
 import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
 import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -1240,7 +1241,7 @@ run(() => {
   </div>
 
   {#if showInfo}
-    <aside class="hidden lg:flex lg:w-72 xl:w-80 panel-muted border-l border-subtle overflow-y-auto">
+    <aside class="hidden lg:flex lg:w-80 panel-muted border-l border-subtle overflow-y-auto">
       <div class="p-4 w-full">
         <div class="flex items-center justify-between mb-4">
           <div class="text-sm uppercase tracking-wide text-white/60">Profile</div>
@@ -1292,83 +1293,134 @@ run(() => {
 </div>
 
 <!-- Mobile overlays -->
-<div
-  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  class:mobile-panel--dragging={leftSwipeActive}
-  style:transform={threadsTransform}
-  style:pointer-events={showThreads ? 'auto' : 'none'}
-  aria-label="Conversations"
->
-  <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
-      <i class="bx bx-chevron-left text-2xl"></i>
-    </button>
-    <div class="mobile-panel__title">Conversations</div>
+{#if showThreads || leftSwipeActive}
+  <div
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class:mobile-panel--dragging={leftSwipeActive}
+    style:transform={threadsTransform}
+    style:pointer-events={showThreads ? 'auto' : 'none'}
+    aria-label="Conversations"
+  >
+    <div class="mobile-panel__body">
+      <div class="mobile-panel__servers">
+        <LeftPane activeServerId={null} padForDock={false} showBottomActions={false} />
+      </div>
+      <div class="mobile-panel__list">
+        <div class="mobile-panel__header md:hidden">
+          <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
+            <i class="bx bx-chevron-left text-2xl"></i>
+          </button>
+          <div class="mobile-panel__title">Conversations</div>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          <DMsSidebar
+            bind:this={sidebarRefMobile}
+            activeThreadId={threadID}
+            on:select={() => (showThreads = false)}
+            on:delete={(e) => {
+              showThreads = false;
+              showInfo = false;
+              if (e.detail === threadID) void goto('/dms');
+            }}
+          />
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="flex-1 overflow-y-auto">
-    <DMsSidebar
-      bind:this={sidebarRefMobile}
-      activeThreadId={threadID}
-      on:select={() => (showThreads = false)}
-      on:delete={(e) => {
-        showThreads = false;
-        showInfo = false;
-        if (e.detail === threadID) void goto('/dms');
-      }}
-    />
-  </div>
-</div>
+{/if}
 
-<div
-  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  class:mobile-panel--dragging={rightSwipeActive}
-  style:transform={infoTransform}
-  style:pointer-events={showInfo ? 'auto' : 'none'}
-  aria-label="Profile"
->
-  <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showInfo = false)}>
-      <i class="bx bx-chevron-left text-2xl"></i>
-    </button>
-    <div class="mobile-panel__title">Profile</div>
-  </div>
+{#if showInfo || rightSwipeActive}
+  <div
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class:mobile-panel--dragging={rightSwipeActive}
+    style:transform={infoTransform}
+    style:pointer-events={showInfo ? 'auto' : 'none'}
+    aria-label="Profile"
+  >
+    <div class="mobile-panel__header md:hidden">
+      <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showInfo = false)}>
+        <i class="bx bx-chevron-left text-2xl"></i>
+      </button>
+      <div class="mobile-panel__title">Profile</div>
+    </div>
 
-  <div class="flex-1 overflow-y-auto p-4">
-    {#if metaLoading}
-      <div class="animate-pulse text-soft">Loading profile...</div>
-    {:else if otherProfile}
-      <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
-        <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
-          {#if otherProfile.photoURL}
-            <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+    <div class="flex-1 overflow-y-auto p-4">
+      {#if metaLoading}
+        <div class="animate-pulse text-soft">Loading profile...</div>
+      {:else if otherProfile}
+        <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
+          <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
+            {#if otherProfile.photoURL}
+              <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
+            {:else}
+              <div class="w-full h-full grid place-items-center text-3xl text-white/70">
+                <i class="bx bx-user"></i>
+              </div>
+            {/if}
+          </div>
+          <div class="text-lg font-semibold">{displayName}</div>
+          {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
+        </div>
+
+        <div class="mt-4 space-y-3 text-sm text-white/70">
+          {#if otherProfile.bio}
+            <p>{otherProfile.bio}</p>
           {:else}
-            <div class="w-full h-full grid place-items-center text-3xl text-white/70">
-              <i class="bx bx-user"></i>
-            </div>
+            <p>This user hasn't added a bio yet.</p>
+          {/if}
+          {#if otherProfile.email}
+            <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
+              <i class="bx bx-envelope"></i>
+              <span>Send email</span>
+            </a>
           {/if}
         </div>
-        <div class="text-lg font-semibold">{displayName}</div>
-        {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
-      </div>
-
-      <div class="mt-4 space-y-3 text-sm text-white/70">
-        {#if otherProfile.bio}
-          <p>{otherProfile.bio}</p>
-        {:else}
-          <p>This user hasn't added a bio yet.</p>
-        {/if}
-        {#if otherProfile.email}
-          <a class="inline-flex items-center gap-2 text-[#8da1ff] hover:text-white transition" href={`mailto:${otherProfile.email}`}>
-            <i class="bx bx-envelope"></i>
-            <span>Send email</span>
-          </a>
-        {/if}
-      </div>
-    {:else}
-      <div class="text-white/50">Profile unavailable.</div>
-    {/if}
+      {:else}
+        <div class="text-white/50">Profile unavailable.</div>
+      {/if}
+    </div>
   </div>
-</div>
+{/if}
+
+<style>
+  :global(.mobile-panel__body) {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    background: var(--color-panel);
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  :global(.mobile-panel__servers) {
+    width: 84px;
+    flex: 0 0 84px;
+    display: flex;
+    justify-content: center;
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-right: none;
+    overflow-y: auto;
+  }
+
+  :global(.mobile-panel__servers .app-rail) {
+    position: relative;
+    inset: auto;
+    width: 72px;
+    height: 100%;
+    min-height: 0;
+    padding-top: 0.5rem;
+    border-radius: 0;
+    box-shadow: none;
+    border-right: none !important;
+    background: transparent;
+  }
+
+  :global(.mobile-panel__list) {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+</style>
 
 
 

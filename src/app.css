@@ -162,6 +162,7 @@ html,
 body,
 #app {
   height: 100%;
+  min-height: 100%;
   margin: 0;
   overflow: hidden;
   background: var(--color-app-bg);
@@ -173,6 +174,127 @@ body {
   touch-action: manipulation;
   -ms-touch-action: manipulation;
   -webkit-text-size-adjust: 100%;
+}
+
+/* Wraps the entire UI so the background and safe-area padding stay consistent on iOS. */
+.app-root {
+  min-height: 100vh;
+  background: var(--color-app-bg);
+  color: var(--color-text-primary);
+  display: flex;
+  flex-direction: column;
+  padding-top: constant(safe-area-inset-top);
+  padding-top: env(safe-area-inset-top);
+  padding-right: constant(safe-area-inset-right);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: constant(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: constant(safe-area-inset-left);
+  padding-left: env(safe-area-inset-left);
+}
+
+/* Full-screen splash overlay shown while the client finishes bootstrapping. */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: constant(safe-area-inset-top);
+  padding-top: env(safe-area-inset-top);
+  padding-right: constant(safe-area-inset-right);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: constant(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: constant(safe-area-inset-left);
+  padding-left: env(safe-area-inset-left);
+  background: var(--color-app-bg);
+  color: var(--color-text-primary);
+}
+
+.splash-screen__gif {
+  width: min(210px, 35vw);
+  max-width: 100%;
+  height: auto;
+  border-radius: 0;
+  box-shadow: none;
+  object-fit: cover;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+.splash-screen__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Splash demo route helpers                                                  */
+/* -------------------------------------------------------------------------- */
+.splash-demo {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(1.5rem, 5vw, 3rem);
+}
+
+.splash-demo__panel {
+  width: min(480px, 100%);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+  border: 1px solid var(--color-border-subtle);
+  box-shadow: var(--shadow-elevated);
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.splash-demo__panel h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.splash-demo__panel p {
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.splash-demo__button {
+  align-self: center;
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.splash-demo__button:hover,
+.splash-demo__button:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.splash-demo__button:active {
+  transform: translateY(0);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -502,7 +624,7 @@ body {
 }
 
 .mobile-panel {
-  background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+  background: var(--color-panel);
   color: var(--color-text-primary);
   box-shadow: none;
   border-radius: 0;
@@ -527,7 +649,7 @@ body {
 }
 
 .message-scroll-region .chat-scroll {
-  --chat-scroll-padding: calc(env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 1rem);
+  --chat-scroll-padding: calc(env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 0.3rem);
 }
 
 @media (max-width: 767px) {
@@ -538,7 +660,7 @@ body {
 
   .message-scroll-region .chat-scroll {
     --chat-scroll-padding: calc(
-      var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 6rem
+      var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + var(--chat-keyboard-offset, 0px) + 2rem
     );
   }
 }

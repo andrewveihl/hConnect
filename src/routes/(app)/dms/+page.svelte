@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
+  import LeftPane from '$lib/components/app/LeftPane.svelte';
 
   let showThreads = $state(false);
 
@@ -121,8 +122,15 @@
   }
 
   onMount(() => {
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      showThreads = true;
+    if (typeof window !== 'undefined') {
+      try {
+        if (sessionStorage.getItem('dm-show-list') === '1') {
+          showThreads = true;
+          sessionStorage.removeItem('dm-show-list');
+        }
+      } catch {
+        // ignore storage errors
+      }
     }
     const cleanup = setupGestures();
     return cleanup;
@@ -168,27 +176,36 @@
   </div>
 </div>
 
-<div
-  class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
-  class:mobile-panel--dragging={swipeActive}
-  style:transform={panelTransform}
-  style:pointer-events={showThreads ? 'auto' : 'none'}
-  aria-label="Conversations"
->
-  <div class="mobile-panel__header md:hidden">
-    <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
-      <i class="bx bx-chevron-left text-2xl"></i>
-    </button>
-    <div class="mobile-panel__title">Conversations</div>
+{#if showThreads || swipeActive}
+  <div
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class:mobile-panel--dragging={swipeActive}
+    style:transform={panelTransform}
+    style:pointer-events={showThreads ? 'auto' : 'none'}
+    aria-label="Conversations"
+  >
+    <div class="mobile-panel__body">
+      <div class="mobile-panel__servers">
+        <LeftPane activeServerId={null} padForDock={false} showBottomActions={false} />
+      </div>
+      <div class="mobile-panel__list">
+        <div class="mobile-panel__header md:hidden">
+          <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
+            <i class="bx bx-chevron-left text-2xl"></i>
+          </button>
+          <div class="mobile-panel__title">Conversations</div>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          <DMsSidebar
+            activeThreadId={null}
+            on:select={() => (showThreads = false)}
+            on:delete={() => (showThreads = false)}
+          />
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="flex-1 overflow-y-auto">
-    <DMsSidebar
-      activeThreadId={null}
-      on:select={() => (showThreads = false)}
-      on:delete={() => (showThreads = false)}
-    />
-  </div>
-</div>
+{/if}
 
 <style>
   :global(.mobile-full-bleed) {
@@ -205,5 +222,43 @@
     :global(.mobile-panel) {
       border-radius: 0;
     }
+  }
+
+  :global(.mobile-panel__body) {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    background: var(--color-panel);
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  :global(.mobile-panel__servers) {
+    width: 84px;
+    flex: 0 0 84px;
+    display: flex;
+    justify-content: center;
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-right: none;
+    overflow-y: auto;
+  }
+
+  :global(.mobile-panel__servers .app-rail) {
+    position: relative;
+    inset: auto;
+    width: 72px;
+    height: 100%;
+    min-height: 0;
+    padding-top: 0.5rem;
+    border-radius: 0;
+    box-shadow: none;
+    border-right: none !important;
+    background: transparent;
+  }
+
+  :global(.mobile-panel__list) {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
   }
 </style>
