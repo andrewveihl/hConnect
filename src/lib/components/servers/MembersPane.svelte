@@ -15,9 +15,10 @@
   interface Props {
     serverId: string;
     showHeader?: boolean;
+    onHide?: (() => void) | null;
   }
 
-  let { serverId, showHeader = true }: Props = $props();
+  let { serverId, showHeader = true, onHide = null }: Props = $props();
 
   type MemberDoc = {
     uid: string;
@@ -95,8 +96,15 @@
   let canInviteMembers = $state(false);
   const INITIAL_MEMBER_BATCH = 60;
   const MEMBER_BATCH_SIZE = 40;
+  const LAZY_LOAD_THRESHOLD = 20;
   let visibleMemberCount = $state(INITIAL_MEMBER_BATCH);
-  let visibleRows: MemberRow[] = $state([]);
+  let shouldLazyLoad = $state(false);
+  let statusBuckets: Record<PresenceState, MemberRow[]> = $state({
+    online: [],
+    busy: [],
+    idle: [],
+    offline: []
+  });
   let visibleGroupMap: Record<PresenceState, MemberRow[]> = $state({
     online: [],
     busy: [],
@@ -152,31 +160,21 @@
   });
   run(() => {
     const total = rows.length;
-    if (total === 0) {
-      if (visibleMemberCount !== INITIAL_MEMBER_BATCH) {
-        visibleMemberCount = INITIAL_MEMBER_BATCH;
-      }
+    shouldLazyLoad = total > LAZY_LOAD_THRESHOLD;
+
+    if (!shouldLazyLoad) {
+      visibleMemberCount = total;
       allMembersVisible = true;
-    } else {
-      if (visibleMemberCount < 1) {
-        visibleMemberCount = Math.min(INITIAL_MEMBER_BATCH, total);
-      } else if (visibleMemberCount > total) {
-        visibleMemberCount = total;
-      }
-      allMembersVisible = visibleMemberCount >= total;
+      return;
     }
-  });
-  run(() => {
-    visibleRows = rows.slice(0, visibleMemberCount);
-  });
-  run(() => {
-    visibleGroupMap = statusOrder.reduce(
-      (acc, status) => {
-        acc[status] = visibleRows.filter((row) => row.status === status);
-        return acc;
-      },
-      { online: [], busy: [], idle: [], offline: [] } as Record<PresenceState, MemberRow[]>
-    );
+
+    if (visibleMemberCount < INITIAL_MEMBER_BATCH) {
+      visibleMemberCount = Math.min(INITIAL_MEMBER_BATCH, total);
+    } else if (visibleMemberCount > total) {
+      visibleMemberCount = total;
+    }
+
+    allMembersVisible = visibleMemberCount >= total;
   });
 
   function pickString(value: unknown): string | undefined {
@@ -293,32 +291,27 @@
     const manual = manualPresenceFrom(presence, profile, member);
     if (manual) return manual;
 
-    const booleanState =
-      typeof member?.online === 'boolean'
-        ? member.online
-      : typeof member?.isOnline === 'boolean'
-          ? member.isOnline
-          : typeof member?.active === 'boolean'
-            ? member.active
-      : typeof profile?.online === 'boolean'
-        ? profile.online
-      : typeof profile?.isOnline === 'boolean'
-        ? profile.isOnline
-      : typeof profile?.active === 'boolean'
-        ? profile.active
-      : typeof presence?.online === 'boolean'
-        ? presence.online
-      : typeof presence?.isOnline === 'boolean'
-        ? presence.isOnline
-      : typeof presence?.active === 'boolean'
-        ? presence.active
-        : null;
+    const booleanCandidates = [
+      member?.online,
+      member?.isOnline,
+      member?.active,
+      profile?.online,
+      profile?.isOnline,
+      profile?.active,
+      presence?.online,
+      presence?.isOnline,
+      presence?.active
+    ];
 
-    if (booleanState === true) {
-      return 'online';
+    let sawBoolean = false;
+
+    for (const candidate of booleanCandidates) {
+      if (typeof candidate !== 'boolean') continue;
+      sawBoolean = true;
+      if (candidate) {
+        return 'online';
+      }
     }
-
-    let offlineHint = booleanState === false;
 
     const rawStatus =
       pickString(member?.status) ??
@@ -338,7 +331,11 @@
       if (normalized === 'busy') return 'busy';
       if (normalized === 'online') return 'online';
       if (normalized === 'idle') return 'idle';
-      if (normalized === 'offline') offlineHint = true;
+      if (normalized === 'offline') return 'offline';
+    }
+
+    if (sawBoolean) {
+      return 'offline';
     }
 
     const lastActive =
@@ -357,12 +354,12 @@
       const seenOnline = isRecent(lastActive, ONLINE_WINDOW_MS);
       const seenIdle = isRecent(lastActive, IDLE_WINDOW_MS);
 
-      if (!offlineHint && seenOnline) return 'online';
+      if (seenOnline) return 'online';
       if (seenIdle) return 'idle';
       return 'offline';
     }
 
-    return offlineHint ? 'idle' : 'offline';
+    return 'offline';
   }
 
   const statusClass = (state: PresenceState) => {
@@ -377,6 +374,15 @@
         return 'presence-dot--offline';
     }
   };
+
+  function createBucketMap(): Record<PresenceState, MemberRow[]> {
+    return {
+      online: [],
+      busy: [],
+      idle: [],
+      offline: []
+    };
+  }
 
   function getUidFromMemberDoc(d: any, data?: any) {
     const docData = (data ?? d?.data?.() ?? {}) as any;
@@ -410,6 +416,50 @@
     );
   }
 
+  run(() => {
+    const buckets = createBucketMap();
+    for (const row of rows) {
+      const bucket = buckets[row.status] ?? buckets.offline;
+      bucket.push(row);
+    }
+    statusBuckets = buckets;
+    groupedRows = statusOrder.map((status) => ({
+      id: status,
+      label: statusLabels[status],
+      members: buckets[status]
+    }));
+  });
+
+  run(() => {
+    const buckets = statusBuckets;
+    if (!shouldLazyLoad) {
+      const clone = createBucketMap();
+      for (const status of statusOrder) {
+        clone[status] = buckets[status] ?? [];
+      }
+      visibleGroupMap = clone;
+      return;
+    }
+
+    let remaining = Math.max(0, visibleMemberCount);
+    if (remaining === 0) {
+      visibleGroupMap = createBucketMap();
+      return;
+    }
+
+    const limited = createBucketMap();
+    for (const status of statusOrder) {
+      if (remaining <= 0) break;
+      const list = buckets[status] ?? [];
+      if (!list.length) continue;
+      const slice = list.slice(0, remaining);
+      limited[status] = slice;
+      remaining -= slice.length;
+    }
+
+    visibleGroupMap = limited;
+  });
+
   onMount(() => {
     if (!browser) return;
     mediaQuery = window.matchMedia('(max-width: 640px)');
@@ -421,14 +471,6 @@
     return () => {
       mediaQuery?.removeEventListener('change', update);
     };
-  });
-
-  run(() => {
-    groupedRows = statusOrder.map((status) => ({
-      id: status,
-      label: statusLabels[status],
-      members: rows.filter((row) => row.status === status)
-    }));
   });
 
   function unsubscribePresence(uid: string) {
@@ -522,7 +564,7 @@
   }
 
   function loadMoreMembers() {
-    if (allMembersVisible) return;
+    if (!shouldLazyLoad || allMembersVisible) return;
     const next = Math.min(rows.length, visibleMemberCount + MEMBER_BATCH_SIZE);
     if (next !== visibleMemberCount) {
       visibleMemberCount = next;
@@ -535,7 +577,7 @@
   }
 
   function setupLoadObserver() {
-    if (!loadMoreSentinel) return;
+    if (!loadMoreSentinel || !shouldLazyLoad) return;
     loadObserver = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
@@ -554,7 +596,7 @@
   function refreshLoadObserver() {
     if (!browser) return;
     teardownLoadObserver();
-    if (loadMoreSentinel) {
+    if (loadMoreSentinel && shouldLazyLoad) {
       setupLoadObserver();
     }
   }
@@ -562,6 +604,7 @@
   run(() => {
     loadMoreSentinel;
     memberScrollContainer;
+    shouldLazyLoad;
     refreshLoadObserver();
   });
 
@@ -679,10 +722,12 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<div class="flex flex-col h-full w-full panel text-primary relative">
+<div class="members-pane flex flex-col h-full w-full panel text-primary relative">
   {#if showHeader}
-    <div class="flex items-center gap-3 px-3 py-3 border-b border-subtle text-soft sm:px-4">
-      <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
+    <div class="members-pane__header flex items-center gap-3 px-3 py-3 border-b border-subtle text-soft sm:px-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
+      </div>
       <div class="ml-auto flex flex-1 items-center justify-end gap-2">
         {#if canInviteMembers}
           <button
@@ -698,6 +743,16 @@
         <span class="inline-flex h-7 min-w-[3.5rem] items-center justify-center rounded-full bg-white/[0.08] px-3 text-xs font-semibold text-soft sm:h-8 sm:min-w-[4rem] sm:text-sm">
           {rows.length}
         </span>
+        {#if onHide}
+          <button
+            type="button"
+            class="members-pane__collapse"
+            aria-label="Hide members panel"
+            onclick={() => onHide?.()}
+          >
+            <i class="bx bx-chevron-right text-base" aria-hidden="true"></i>
+          </button>
+        {/if}
       </div>
     </div>
   {/if}
@@ -778,13 +833,15 @@
             </section>
           {/if}
         {/each}
-        <div class="members-pane__sentinel" bind:this={loadMoreSentinel} aria-hidden="true">
-          {#if allMembersVisible}
-            <span class="text-xs text-soft">Showing all {rows.length} members</span>
-          {:else}
-            <span class="text-xs text-soft">Showing {visibleMemberCount} of {rows.length} members...</span>
-          {/if}
-        </div>
+        {#if shouldLazyLoad}
+          <div class="members-pane__sentinel" bind:this={loadMoreSentinel} aria-hidden="true">
+            {#if allMembersVisible}
+              <span class="text-xs text-soft">Showing all {rows.length} members</span>
+            {:else}
+              <span class="text-xs text-soft">Showing {visibleMemberCount} of {rows.length} members...</span>
+            {/if}
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="text-xs text-soft px-2">No members yet.</div>
@@ -840,6 +897,35 @@
 <style>
   .members-pane__scroll {
     min-height: 0;
+  }
+
+  .members-pane {
+    border-radius: 0;
+  }
+
+  .members-pane__header {
+    min-height: 3rem;
+    padding: 0 1rem;
+  }
+
+  .members-pane__collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9rem;
+    height: 1.9rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+    color: var(--color-text-primary);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  .members-pane__collapse:hover,
+  .members-pane__collapse:focus-visible {
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
+    outline: none;
   }
 
   .member-row--placeholder {

@@ -894,10 +894,10 @@ run(() => {
 </script>
 
 <aside
-  class="h-dvh w-80 shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
+  class="server-sidebar h-dvh w-80 shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
   aria-label="Channels"
 >
-  <div class="h-12 px-3 flex items-center justify-between border-b border-subtle">
+  <div class="server-sidebar__header h-12 px-3 flex items-center justify-between border-b border-subtle">
     <div class="flex items-center gap-2 min-w-0">
       <div class="font-semibold truncate" title={serverName}>{serverName}</div>
       {#if isOwner}
@@ -1205,6 +1205,14 @@ run(() => {
 </aside>
 
 <style>
+  .server-sidebar__header {
+    min-height: 3rem;
+    height: 3rem;
+    padding: 0 1rem;
+    display: flex;
+    align-items: center;
+  }
+
   .channel-row {
     position: relative;
   }

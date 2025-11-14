@@ -86,6 +86,29 @@
 </header>
 
 <style>
+  .channel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    height: 3rem;
+    padding: 0 1.25rem;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+
+  .channel-header__left,
+  .channel-header__right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .channel-header__title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .channel-header__thread-name {
     font-size: 0.9rem;
     color: var(--text-70);
@@ -110,4 +133,5 @@
     background: color-mix(in srgb, var(--color-border-subtle) 20%, transparent);
     outline: none;
   }
+
 </style>
