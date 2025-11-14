@@ -17,7 +17,7 @@ import {
   type Timestamp,
   type Unsubscribe
 } from 'firebase/firestore';
-import type { MentionInput } from './messages';
+import { buildMessageDocument, type MessageInput, type MentionInput, type ReplyReferenceInput } from './messages';
 
 export type ThreadStatus = 'active' | 'archived';
 export type ThreadVisibility = 'inherit_parent_with_exceptions';
@@ -50,8 +50,27 @@ export type ChannelThread = {
 
 export type ThreadMessage = {
   id: string;
-  type: 'normal' | 'system';
+  type: 'text' | 'gif' | 'file' | 'poll' | 'form' | 'system';
   text?: string | null;
+  content?: string | null;
+  url?: string | null;
+  file?: {
+    name: string;
+    url: string;
+    size?: number;
+    contentType?: string | null;
+    storagePath?: string | null;
+  };
+  poll?: {
+    question: string;
+    options: string[];
+    votesByUser?: Record<string, number>;
+  };
+  form?: {
+    title: string;
+    questions: string[];
+    responses?: Record<string, any>;
+  };
   authorId?: string | null;
   authorName?: string | null;
   authorDisplay?: string | null;
@@ -60,6 +79,11 @@ export type ThreadMessage = {
   photoURL?: string | null;
   mentions?: MentionInput[];
   mentionUids?: string[];
+  mentionsMap?: Record<
+    string,
+    { handle: string | null; label: string | null; color?: string | null; kind?: 'member' | 'role' }
+  >;
+  replyTo?: ReplyReferenceInput | null;
   systemKind?: 'created' | 'member_added';
   createdAt?: Timestamp;
 };
@@ -91,9 +115,7 @@ type SendThreadMessageOptions = {
   serverId: string;
   channelId: string;
   threadId: string;
-  author: { uid: string; displayName?: string | null };
-  text: string;
-  mentions?: MentionInput[];
+  message: MessageInput;
   mentionProfiles?: ProfileNameMap;
 };
 
@@ -231,8 +253,13 @@ const toThreadMessage = (snap: DocumentSnapshot<any>): ThreadMessage => {
   const data = snap.data() ?? {};
   return {
     id: snap.id,
-    type: data.type ?? 'normal',
+    type: data.type ?? (data.systemKind ? 'system' : 'text'),
     text: data.text ?? null,
+    content: data.content ?? null,
+    url: data.url ?? null,
+    file: data.file ?? null,
+    poll: data.poll ?? null,
+    form: data.form ?? null,
     authorId: data.authorId ?? data.uid ?? null,
     authorName: data.authorName ?? data.displayName ?? null,
     authorDisplay: data.authorDisplay ?? data.authorName ?? data.displayName ?? null,
@@ -241,6 +268,8 @@ const toThreadMessage = (snap: DocumentSnapshot<any>): ThreadMessage => {
     photoURL: data.photoURL ?? null,
     mentions: Array.isArray(data.mentions) ? data.mentions : [],
     mentionUids: Array.isArray(data.mentionUids) ? data.mentionUids : [],
+    mentionsMap: data.mentionsMap ?? null,
+    replyTo: data.replyTo ?? null,
     systemKind: data.systemKind ?? null,
     createdAt: data.createdAt
   };
@@ -359,10 +388,8 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
   const serverId = normalizeText(options.serverId);
   const channelId = normalizeText(options.channelId);
   const threadId = normalizeText(options.threadId);
-  const authorId = normalizeUid(options.author?.uid);
-  const text = normalizeText(options.text);
 
-  if (!serverId || !channelId || !threadId || !authorId || !text) {
+  if (!serverId || !channelId || !threadId) {
     throw new Error('Missing thread message fields.');
   }
 
@@ -371,7 +398,13 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
   const ttlHours = Number(data.ttlHours) || THREAD_DEFAULT_TTL_HOURS;
   const memberUids: string[] = Array.isArray(data.memberUids) ? data.memberUids : [];
 
-  const mentions = sanitizeMentions(options.mentions);
+  const docData = buildMessageDocument(options.message) as Record<string, any>;
+  const authorId = normalizeUid(docData.uid);
+  if (!authorId) {
+    throw new Error('Thread message must include a sender.');
+  }
+
+  const mentions = sanitizeMentions(docData.mentions);
   const mentionUids = mentionUidList(mentions);
   const pendingAdds: string[] = [];
 
@@ -390,23 +423,23 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
   const autoArchiveAt = nextAutoArchiveAt(ttlHours);
   const messageRef = doc(threadMessagesCollection(db, serverId, channelId, threadId));
 
-  const batch = writeBatch(db);
-  batch.set(messageRef, {
-    type: 'normal',
-    text,
+  const payload: Record<string, any> = {
+    ...docData,
+    type: docData.type ?? 'text',
+    authorId,
+    authorName: docData.displayName ?? docData.authorName ?? null,
+    authorDisplay: docData.displayName ?? docData.authorName ?? null,
     mentions,
     mentionUids,
-    authorId,
-    authorName: defaultDisplayName(options.author?.displayName ?? data.memberDisplay?.[authorId]),
-    authorDisplay: defaultDisplayName(options.author?.displayName),
-    uid: authorId,
-    displayName: defaultDisplayName(options.author?.displayName),
     createdAt: now
-  });
+  };
+
+  const batch = writeBatch(db);
+  batch.set(messageRef, payload);
 
   const updatePayload: Record<string, unknown> = {
     lastMessageAt: now,
-    lastMessagePreview: text.slice(0, 120),
+    lastMessagePreview: deriveThreadPreview(payload),
     autoArchiveAt,
     status: 'active',
     archivedAt: null,
@@ -422,16 +455,19 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
 
   if (pendingAdds.length) {
     const names = describeNames(pendingAdds, options.mentionProfiles);
+    const authorDisplay = defaultDisplayName(
+      payload.displayName ?? payload.authorName ?? data.memberDisplay?.[authorId]
+    );
     const addText =
       names.length === 1
-        ? `${options.author?.displayName ?? 'Someone'} added ${names[0]} to the thread.`
-        : `${options.author?.displayName ?? 'Someone'} added ${names.join(', ')} to the thread.`;
+        ? `${authorDisplay} added ${names[0]} to the thread.`
+        : `${authorDisplay} added ${names.join(', ')} to the thread.`;
     const systemRef = doc(threadMessagesCollection(db, serverId, channelId, threadId));
     batch.set(systemRef, {
       ...systemMessage(addText, {
         systemKind: 'member_added',
         authorId,
-        authorName: defaultDisplayName(options.author?.displayName)
+        authorName: authorDisplay
       }),
       createdAt: now
     });
@@ -451,8 +487,24 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
   }
 
   await batch.commit();
+}
 
-  // Mention notifications are handled server-side; client cannot fan out to other users' inboxes.
+function deriveThreadPreview(payload: Record<string, any>): string {
+  switch (payload.type) {
+    case 'gif':
+      return 'Shared a GIF';
+    case 'file':
+      return payload.file?.name ? `Shared ${payload.file.name}` : 'Shared a file';
+    case 'poll':
+      return payload.poll?.question ? `Poll: ${payload.poll.question}` : 'Shared a poll';
+    case 'form':
+      return payload.form?.title ? `Form: ${payload.form.title}` : 'Shared a form';
+    case 'system':
+      return payload.text ?? 'System update';
+    case 'text':
+    default:
+      return (payload.text ?? payload.content ?? '').slice(0, 120);
+  }
 }
 
 export function streamChannelThreads(

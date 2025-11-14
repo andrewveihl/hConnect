@@ -171,7 +171,7 @@
     });
 
     const segments: Array<MentionSegment | TextSegment> = [];
-    const regex = /@[\p{L}\p{N}._-]+/gu;
+    const regex = /@[\p{L}\p{N}._-]+(?:[ \t]+[\p{L}\p{N}._-]+)*/gu;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(value))) {
@@ -345,6 +345,7 @@
 
   let hasHoverSupport = $state(true);
   let hoveredMessageId: string | null = $state(null);
+  let touchActionMessageId: string | null = $state(null);
   let hoveredMinuteKey: string | null = $state(null);
   let reactionMenuFor: string | null = $state(null);
   let reactionMenuAnchor: HTMLElement | null = null;
@@ -352,7 +353,6 @@
   let reactionMenuPosition = $state({ top: 0, left: 0 });
   let longPressTimer: number | null = null;
   let longPressStart: { x: number; y: number } | null = null;
-  let longPressTarget: HTMLElement | null = null;
 
   run(() => {
     if (messages.length !== lastLen) {
@@ -563,17 +563,16 @@
       longPressTimer = null;
     }
     longPressStart = null;
-    longPressTarget = null;
   }
 
   function handlePointerDown(event: PointerEvent, messageId: string) {
+    touchActionMessageId = null;
     if (event.pointerType !== 'touch') return;
     clearLongPressTimer();
     longPressStart = { x: event.clientX, y: event.clientY };
-    longPressTarget = event.currentTarget as HTMLElement;
     longPressTimer = window.setTimeout(() => {
       longPressTimer = null;
-      openReactionMenu(messageId, longPressTarget);
+      touchActionMessageId = messageId;
     }, LONG_PRESS_MS);
   }
 
@@ -1145,18 +1144,34 @@
     display: inline-flex;
     align-items: center;
     gap: 0.15rem;
-    color: var(--color-accent);
     font-weight: 600;
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
     border-radius: 999px;
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem 0.5rem;
     line-height: 1.2;
+    border: 1px solid transparent;
+    transition: color 150ms ease, background 150ms ease, text-shadow 150ms ease,
+      border-color 150ms ease;
+  }
+
+  .chat-mention--mine {
+    color: #fff;
+    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
+    text-shadow: 0 0 6px rgba(45, 212, 191, 0.9);
+  }
+
+  .chat-mention--other {
+    color: #2fd8c8;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    text-shadow: 0 0 9px rgba(47, 216, 200, 0.7);
+    padding: 0.1rem 0.3rem;
   }
 
   .chat-mention--role {
     font-weight: 700;
-    border-color: currentColor;
+    text-shadow: none;
   }
 
   .chat-link {
@@ -1632,7 +1647,7 @@
         currentUserId &&
         (
           (hasHoverSupport && hoveredMessageId === m.id) ||
-          reactionMenuFor === m.id
+          touchActionMessageId === m.id
         )
       )}
       {@const showTimestampMobile = !hasHoverSupport && reactionMenuFor === m.id}
@@ -1708,6 +1723,20 @@
                       <button
                         type="button"
                         class="message-action"
+                        aria-label="Reply"
+                        title="Reply"
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          event.preventDefault();
+                          handleReplyClick(event, m);
+                        }}
+                        onpointerdown={(event) => event.stopPropagation()}
+                      >
+                        <i class="bx bx-reply" aria-hidden="true"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="message-action"
                         aria-label="Start thread"
                         title="Start thread"
                         onclick={(event) => {
@@ -1715,6 +1744,7 @@
                           event.preventDefault();
                           openThread(m);
                         }}
+                        onpointerdown={(event) => event.stopPropagation()}
                       >
                         <i class="bx bx-message-square-add" aria-hidden="true"></i>
                       </button>
@@ -1777,7 +1807,7 @@
                       {#if isMentionSegment(segment)}
                         {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
                         <span
-                          class={`chat-mention ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
+                          class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
                           style={segment.data?.kind === 'role' && segment.data?.color
                             ? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
                             : undefined}

@@ -36,6 +36,7 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     threads?: Array<ChannelThread & { unread?: boolean }>;
     activeThreadId?: string | null;
     onPickThread?: (thread: { id: string; parentChannelId: string }) => void;
+    threadUnreadByChannel?: Record<string, boolean>;
   }
 
   let {
@@ -44,7 +45,8 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     onPickChannel = () => {},
     threads = [],
     activeThreadId = null,
-    onPickThread = () => {}
+    onPickThread = () => {},
+    threadUnreadByChannel = {}
   }: Props = $props();
   const dispatch = createEventDispatcher<{ pick: string }>();
 
@@ -1026,6 +1028,9 @@ run(() => {
               <i class="bx bx-hash" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
               <span class="channel-row__meta ml-auto">
+                {#if threadUnreadByChannel?.[c.id]}
+                  <span class="channel-thread-unread-dot" aria-hidden="true"></span>
+                {/if}
                 {#if mentionHighlights.has(c.id)}
                   <span class="channel-mention-pill" title="You were mentioned">@</span>
                 {/if}
@@ -1097,6 +1102,9 @@ run(() => {
               <i class="bx bx-headphone" aria-hidden="true"></i>
               <span class="truncate">{c.name}</span>
               <span class="channel-row__meta ml-auto">
+                {#if threadUnreadByChannel?.[c.id]}
+                  <span class="channel-thread-unread-dot" aria-hidden="true"></span>
+                {/if}
                 {#if (voicePresence[c.id]?.length ?? 0) > 0}
                   <span class="channel-voice-count">
                     {voicePresence[c.id].length}
@@ -1255,6 +1263,14 @@ run(() => {
     color: var(--color-accent);
     font-size: 0.68rem;
     font-weight: 700;
+  }
+
+  .channel-thread-unread-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--color-accent);
+    display: inline-flex;
   }
 
   .thread-list {

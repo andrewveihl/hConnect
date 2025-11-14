@@ -18,9 +18,15 @@
     onToggleMembers = null,
     onExitThread = null
   }: Props = $props();
+
+  let rootEl: HTMLElement | null = null;
+
+  export function focusHeader() {
+    rootEl?.focus();
+  }
 </script>
 
-<header class="channel-header">
+<header class="channel-header" bind:this={rootEl} tabindex="-1">
   <div class="channel-header__left">
     {#if !channelsVisible}
       <button

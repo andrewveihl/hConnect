@@ -1,7 +1,7 @@
 <svelte:options runes={false} />
 
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 
   import MessageList from './MessageList.svelte';
   import ChatInput from './ChatInput.svelte';
@@ -15,21 +15,6 @@
   } from '$lib/api/ai';
   import type { ChannelThread } from '$lib/firestore/threads';
 
-  interface Props {
-    root?: any | null;
-    messages?: any[];
-    users?: Record<string, any>;
-    currentUserId?: string | null;
-    mentionOptions?: MentionDirectoryEntry[];
-    pendingUploads?: PendingUploadPreview[];
-    aiAssistEnabled?: boolean;
-    threadLabel?: string | null;
-    conversationContext?: any[] | null;
-    replyTarget?: ReplyReferenceInput | null;
-    defaultSuggestionSource?: any | null;
-    members?: Array<{ uid: string; displayName?: string | null; photoURL?: string | null }>;
-    threadStatus?: ChannelThread['status'] | null;
-  }
   export let root: any | null = null;
   export let messages: any[] = [];
   export let users: Record<string, any> = {};
@@ -44,8 +29,21 @@
   export let members: Array<{ uid: string; displayName?: string | null; photoURL?: string | null }> =
     [];
   export let threadStatus: ChannelThread['status'] | null = null;
+  export let parentChannelName: string | null = null;
+  export let isMobileView = false;
+  export let popoutEnabled = true;
+  export let showCloseButton = true;
 
   const dispatch = createEventDispatcher();
+  const MAX_VISIBLE_MEMBERS = 4;
+
+  let summaryPanelOpen = false;
+  let summaryButtonEl: HTMLButtonElement | null = null;
+  let summaryPopoverEl: HTMLElement | null = null;
+
+  $: memberList = Array.isArray(members) ? members : [];
+  $: visibleMembers = memberList.slice(0, MAX_VISIBLE_MEMBERS);
+  $: extraMemberCount = Math.max(0, memberList.length - visibleMembers.length);
 
   let scrollSignal = 0;
   let summary: ThreadSummaryItem[] = [];
@@ -80,6 +78,40 @@
           'Someone'
       : '';
   };
+
+  function closeMenus() {
+    summaryPanelOpen = false;
+  }
+
+  function handleSummarizeToggle() {
+    summaryPanelOpen = !summaryPanelOpen;
+    if (summaryPanelOpen && !summary.length && !summaryLoading) {
+      void generateSummary();
+    }
+  }
+
+  function handleDocumentPointerDown(event: PointerEvent) {
+    const target = event.target as Node | null;
+    if (
+      summaryPanelOpen &&
+      target &&
+      !summaryPopoverEl?.contains(target) &&
+      !summaryButtonEl?.contains(target)
+    ) {
+      summaryPanelOpen = false;
+    }
+  }
+
+  onMount(() => {
+    document.addEventListener('pointerdown', handleDocumentPointerDown);
+    return () => {
+      document.removeEventListener('pointerdown', handleDocumentPointerDown);
+    };
+  });
+
+  $: if (isMobileView) {
+    summaryPanelOpen = false;
+  }
 
   const initialsFor = (value: string | null | undefined) => {
     const str = pickString(value) ?? '';
@@ -151,6 +183,7 @@
   });
 
   function handleClose() {
+    closeMenus();
     dispatch('close');
   }
 
@@ -224,69 +257,109 @@
 <section class="thread-pane" aria-label="Thread conversation">
   <div class="thread-pane__body">
     <header class="thread-pane__header">
-      <div>
-        <div class="thread-pane__eyebrow">Thread</div>
-        <div class="thread-pane__title">{rootPreview() || 'Conversation'}</div>
-        <div class="thread-pane__subtitle">Started by {rootAuthor() || 'someone'}</div>
+      <div class="thread-pane__header-left">
+        {#if isMobileView}
+          <button type="button" class="thread-pane__back" aria-label="Back to channel" onclick={handleClose}>
+            <i class="bx bx-chevron-left"></i>
+          </button>
+        {/if}
+        <div class="thread-pane__title-group">
+          <div class="thread-pane__title-row">
+            <h2 class="thread-pane__title-text">{threadLabel || rootPreview() || 'Thread'}</h2>
+            {#if parentChannelName}
+              <button type="button" class="thread-pane__parent-link" onclick={handleClose}>
+                <span>in</span>
+                <span class="thread-pane__parent-label">#{parentChannelName}</span>
+              </button>
+            {/if}
+          </div>
+          <div class="thread-pane__avatar-row" aria-label="Thread members">
+            {#each visibleMembers as member (member.uid)}
+              <div class="thread-pane__avatar" title={member.displayName ?? member.uid}>
+                {#if member.photoURL}
+                  <img src={member.photoURL} alt={member.displayName ?? member.uid} loading="lazy" />
+                {:else}
+                  <span>{initialsFor(member.displayName ?? member.uid)}</span>
+                {/if}
+              </div>
+            {/each}
+            {#if extraMemberCount > 0}
+              <div class="thread-pane__avatar thread-pane__avatar--extra">
+                +{extraMemberCount}
+              </div>
+            {/if}
+          </div>
+        </div>
       </div>
-      <div class="thread-pane__actions">
+      <div class="thread-pane__header-actions">
         {#if threadStatus === 'archived'}
           <span class="thread-status-badge">Archived</span>
         {/if}
-        <button type="button" class="thread-pane__close" aria-label="Back to channel" onclick={handleClose}>
-          <i class="bx bx-arrow-back"></i>
-          <span>Back</span>
+        <button
+          type="button"
+          class="thread-pane__action thread-pane__action-icon"
+          onclick={handleSummarizeToggle}
+          aria-pressed={summaryPanelOpen}
+          title="Summarize thread"
+          bind:this={summaryButtonEl}
+        >
+          <i class="bx bx-pen"></i>
+          <span class="sr-only">Summarize</span>
         </button>
+        {#if popoutEnabled && !isMobileView}
+          <button
+            type="button"
+            class="thread-pane__action thread-pane__action-icon"
+            onclick={() => dispatch('popout')}
+            title="Pop out thread"
+          >
+            <i class="bx bx-window-open"></i>
+            <span class="sr-only">Pop out</span>
+          </button>
+        {/if}
+        {#if showCloseButton}
+          <button type="button" class="thread-pane__close" aria-label="Close thread" onclick={handleClose}>
+            <i class="bx bx-x"></i>
+          </button>
+        {/if}
       </div>
     </header>
 
-    {#if members.length}
-      <div class="thread-pane__members" aria-label="Thread members">
-        {#each members as member (member.uid)}
-          <div class="thread-pane__member" title={member.displayName ?? member.uid}>
-            {#if member.photoURL}
-              <img src={member.photoURL} alt={member.displayName ?? member.uid} loading="lazy" />
-            {:else}
-              <span>{initialsFor(member.displayName ?? member.uid)}</span>
-            {/if}
+    {#if summaryPanelOpen}
+      <section class="thread-summary-popover" bind:this={summaryPopoverEl}>
+        <div class="thread-summary__header">
+          <div>
+            <div class="thread-summary__label">Smart summary</div>
+            <p>Catch up on the highlights after quiet hours.</p>
           </div>
-        {/each}
-      </div>
-    {/if}
-
-    <section class="thread-summary">
-      <div class="thread-summary__header">
-        <div>
-          <div class="thread-summary__label">Smart summary</div>
-          <p>Catch up on the highlights after quiet hours.</p>
+          <button
+            type="button"
+            class="thread-summary__action"
+            onclick={generateSummary}
+            disabled={summaryLoading}
+          >
+            {summaryLoading ? 'Summarizing…' : 'Summarize'}
+          </button>
         </div>
-        <button
-          type="button"
-          class="thread-summary__action"
-          onclick={generateSummary}
-          disabled={summaryLoading}
-        >
-          {summaryLoading ? 'Summarizing…' : 'Generate'}
-        </button>
-      </div>
-      {#if summaryError}
-        <div class="thread-summary__error">{summaryError}</div>
-      {/if}
-      {#if summary.length}
-        <ul class="thread-summary__list">
-          {#each summary as item, idx (item.messageId ?? `${idx}-${item.title ?? 'summary'}`)}
-            <li>
-              <button type="button" class="thread-summary__item" onclick={() => scrollToMessage(item.messageId)}>
-                <div class="thread-summary__item-title">{item.title}</div>
-                <div class="thread-summary__item-body">{item.details}</div>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {:else if shouldSuggestSummary && !summarySuggested}
-        <div class="thread-summary__hint">It’s been quiet for a while—tap generate to get a recap.</div>
-      {/if}
-    </section>
+        {#if summaryError}
+          <div class="thread-summary__error">{summaryError}</div>
+        {/if}
+        {#if summary.length}
+          <ul class="thread-summary__list">
+            {#each summary as item, idx (item.messageId ?? `${idx}-${item.title ?? 'summary'}`)}
+              <li>
+                <button type="button" class="thread-summary__item" onclick={() => scrollToMessage(item.messageId)}>
+                  <div class="thread-summary__item-title">{item.title}</div>
+                  <div class="thread-summary__item-body">{item.details}</div>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if shouldSuggestSummary && !summarySuggested}
+          <div class="thread-summary__hint">It’s been quiet for a while—tap summarize.</div>
+        {/if}
+      </section>
+    {/if}
 
     <div class="thread-pane__messages">
       <MessageList
@@ -330,6 +403,7 @@
     height: 100%;
     background: color-mix(in srgb, var(--color-panel) 98%, transparent);
     border-left: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    position: relative;
   }
 
   .thread-pane__body {
@@ -337,52 +411,159 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
   }
 
   .thread-pane__header {
     display: flex;
     justify-content: space-between;
     gap: 1rem;
-    padding: 1.25rem 1.5rem 0.75rem;
+    padding: 1rem 1.5rem;
     border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    align-items: center;
   }
 
-  .thread-pane__eyebrow {
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.25em;
-    color: var(--text-60);
-    margin-bottom: 0.2rem;
+  .thread-pane__header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    min-width: 0;
   }
 
-  .thread-pane__title {
+  .thread-pane__back {
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: transparent;
+    color: var(--color-text-primary);
+    display: grid;
+    place-items: center;
+  }
+
+  .thread-pane__back:hover,
+  .thread-pane__back:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
+    outline: none;
+  }
+
+  .thread-pane__title-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .thread-pane__title-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    align-items: baseline;
+  }
+
+  .thread-pane__title-text {
     font-size: clamp(1rem, 2vw, 1.25rem);
     font-weight: 700;
     color: var(--color-text-primary);
-    margin-bottom: 0.2rem;
+    margin: 0;
   }
 
-  .thread-pane__subtitle {
-    font-size: 0.85rem;
-    color: var(--text-60);
+  .thread-pane__parent-link {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    border: none;
+    background: transparent;
+    color: var(--text-65);
+    font-size: 0.9rem;
   }
 
-  .thread-pane__actions {
+  .thread-pane__parent-link:hover,
+  .thread-pane__parent-link:focus-visible {
+    color: var(--color-text-primary);
+    outline: none;
+  }
+
+  .thread-pane__parent-label {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .thread-pane__avatar-row {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .thread-pane__avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+    display: grid;
+    place-items: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-70);
+    background: color-mix(in srgb, var(--color-panel-muted) 90%, transparent);
+    overflow: hidden;
+  }
+
+  .thread-pane__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .thread-pane__avatar--extra {
+    background: transparent;
+    border-style: dashed;
+  }
+
+  .thread-pane__header-actions {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
-  .thread-pane__close {
+  .thread-pane__action {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
     background: transparent;
     color: var(--color-text-primary);
-    padding: 0.35rem 0.85rem;
+    padding: 0.3rem 0.85rem;
+    font-size: 0.85rem;
     font-weight: 600;
+  }
+
+  .thread-pane__action:hover,
+  .thread-pane__action:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
+    outline: none;
+  }
+
+  .thread-pane__action-icon {
+    width: 36px;
+    height: 36px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .thread-pane__close {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: transparent;
+    color: var(--color-text-primary);
+    display: grid;
+    place-items: center;
   }
 
   .thread-pane__close:hover,
@@ -391,36 +572,17 @@
     outline: none;
   }
 
-  .thread-pane__members {
-    display: flex;
-    gap: 0.35rem;
-    padding: 0.9rem 1.5rem 0;
-    flex-wrap: wrap;
-  }
-
-  .thread-pane__member {
-    width: 36px;
-    height: 36px;
-    border-radius: 999px;
+  .thread-summary-popover {
+    position: absolute;
+    top: 68px;
+    right: 1.5rem;
+    width: min(320px, calc(100% - 2rem));
+    background: color-mix(in srgb, var(--color-panel), transparent);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-    display: grid;
-    place-items: center;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--text-70);
-    background: color-mix(in srgb, var(--color-panel-muted) 90%, transparent);
-    overflow: hidden;
-  }
-
-  .thread-pane__member img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .thread-summary {
-    padding: 1rem 1.5rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    border-radius: 1rem;
+    box-shadow: 0 22px 60px rgba(6, 10, 25, 0.35);
+    padding: 1rem 1.2rem;
+    z-index: 20;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -526,6 +688,17 @@
   .thread-pane__composer {
     border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
     background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
   }
 
   .thread-compose-surface {

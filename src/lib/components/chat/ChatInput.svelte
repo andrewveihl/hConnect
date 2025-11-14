@@ -1186,8 +1186,11 @@
     const caret = inputEl?.selectionStart ?? text.length;
     const before = text.slice(0, mentionStart);
     const after = text.slice(caret);
-    const handleText = `@${option.handle}`;
-    text = `${before}${handleText} `;
+    const displayName = option.label?.trim()?.length ? option.label.trim() : option.handle;
+    const handleText = `@${displayName}`;
+    const needsSpaceBeforeAfter = after.length > 0 && !/^\s/.test(after);
+    const suffix = after.length ? `${needsSpaceBeforeAfter ? ' ' : ''}${after}` : ' ';
+    text = `${before}${handleText}${suffix}`;
     mentionDraft.set(option.uid, {
       uid: option.uid,
       handle: handleText,
@@ -1196,7 +1199,8 @@
       kind: option.kind
     });
     await tick();
-    const nextCaret = before.length + handleText.length + 1;
+    const insertedSpace = after.length === 0 || needsSpaceBeforeAfter ? 1 : 0;
+    const nextCaret = before.length + handleText.length + insertedSpace;
     inputEl?.setSelectionRange(nextCaret, nextCaret);
     closeMentionMenu();
     refreshMentionDraft();
