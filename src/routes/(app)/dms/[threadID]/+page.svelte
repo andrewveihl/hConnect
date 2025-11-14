@@ -706,28 +706,29 @@ run(() => {
   }
 });
 
-  run(() => {
-    if (threadID) {
-      loadThreadMeta();
-    }
-  });
+run(() => {
+  if (threadID) {
+    loadThreadMeta();
+  }
+});
 
-  run(() => {
-    if (threadID && threadID !== lastThreadID) {
-      lastThreadID = threadID;
-      syncInfoVisibility(false);
-      pendingReply = null;
-      messages = [];
-      messagesLoading = true;
-    }
-  });
+run(() => {
+  if (threadID && threadID !== lastThreadID) {
+    lastThreadID = threadID;
+    syncInfoVisibility(false);
+    pendingReply = null;
+    messages = [];
+    messagesLoading = true;
+    scrollResumeSignal = Date.now();
+  }
+});
 
-  run(() => {
-    if (resumeDmScroll && messages.length > 0) {
-      scrollResumeSignal = Date.now();
-      resumeDmScroll = false;
-    }
-  });
+run(() => {
+  if (resumeDmScroll && messages.length > 0) {
+    scrollResumeSignal = Date.now();
+    resumeDmScroll = false;
+  }
+});
 
   run(() => {
     const next: Record<string, any> = {};

@@ -2455,6 +2455,17 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     channelHeaderEl?.focusHeader?.();
   }
 
+  let lastScrollChannelId: string | null = null;
+  run(() => {
+    const currentChannelId = activeChannel?.id ?? null;
+    if (currentChannelId && currentChannelId !== lastScrollChannelId) {
+      lastScrollChannelId = currentChannelId;
+      triggerScrollToBottom();
+    } else if (!currentChannelId) {
+      lastScrollChannelId = null;
+    }
+  });
+
   function handleThreadReplySelect(event: CustomEvent<{ message: any }>) {
     const ref = buildReplyReference(event.detail?.message) ?? buildReplyReference(activeThreadRoot);
     threadReplyTarget = ref;
