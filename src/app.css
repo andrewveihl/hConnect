@@ -1343,7 +1343,8 @@ body {
 @media (max-width: 767px) {
   .chat-input-region {
     bottom: calc(
-      var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px)
+      var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) +
+      max(var(--mobile-dock-height, 0px) - 0.75rem, 0px)
     );
     box-shadow: 0 -12px 28px rgba(5, 9, 16, 0.45);
   }
@@ -1353,7 +1354,8 @@ body {
       max(
         var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
         0px
-      ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--mobile-dock-height, 0px) +
+      ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
+      max(var(--mobile-dock-height, 0px) - 0.75rem, 0px) +
       var(--chat-keyboard-offset, 0px) + 0.6rem
     );
   }
