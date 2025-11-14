@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import { pushState } from '$app/navigation';
 import { writable } from 'svelte/store';
 
 export type MobileOverlayId =
@@ -85,7 +86,7 @@ export function openOverlay(id: MobileOverlayId) {
   const entryId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : fallbackId(id);
   entryDirectory.set(entryId, id);
   const nextState = { ...(window.history.state ?? {}), [STATE_KEY]: entryId };
-  window.history.pushState(nextState, '', window.location.href);
+  pushState(window.location.href, { state: nextState });
   stackStore.update((stack) => [...stack, { id, entryId }]);
 }
 

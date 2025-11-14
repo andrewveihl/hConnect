@@ -15,9 +15,11 @@
   const dispatch = createEventDispatcher();
   let me: any = $state(null);
 
-  interface Props {
-    activeThreadId?: string | null;
-  }
+interface Props {
+  activeThreadId?: string | null;
+  showPersonalSection?: boolean;
+  navigateOnSelect?: boolean;
+}
 
   type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
@@ -54,7 +56,11 @@
     year: 'numeric'
   });
 
-  let { activeThreadId = $bindable(null) }: Props = $props();
+let {
+  activeThreadId = $bindable(null),
+  showPersonalSection = true,
+  navigateOnSelect = true
+}: Props = $props();
 
   export function updatePartnerMeta(meta: { uid: string; displayName?: string | null; name?: string | null; email?: string | null }) {
     const partner = meta?.uid?.trim?.();
@@ -581,7 +587,9 @@
     if (unreadMap[threadId] && unreadMap[threadId] > 0) {
       unreadMap = { ...unreadMap, [threadId]: 0 };
     }
-    void goto(`/dms/${threadId}`);
+    if (navigateOnSelect) {
+      void goto(`/dms/${threadId}`);
+    }
   }
 
   async function openOrStartDM(targetUid: string) {
@@ -773,7 +781,7 @@
   });
 </script>
 
-<aside class="relative w-80 shrink-0 sidebar-surface border-r border-subtle h-[100dvh] flex flex-col text-primary">
+<aside class="relative w-full md:w-80 shrink-0 sidebar-surface h-[100dvh] flex flex-col text-primary">
   <!-- Header -->
   <div class="px-4 py-3 flex items-center justify-between gap-2">
     <div class="text-base font-semibold">Direct Messages</div>
@@ -792,26 +800,28 @@
   </div>
 
 <div class="mt-4 flex-1 overflow-y-auto px-2 pb-4 space-y-6 touch-pan-y">
-    <section>
-      <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Personal</div>
-      <ul class="space-y-1 pr-1">
-        <li>
-          <a
-            href="/dms/notes"
-            class={`channel-row ${activeThreadId === '__notes' ? 'channel-row--active' : ''}`}
-            onclick={() => dispatch('select', { id: '__notes' })}
-          >
-            <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
-              <i class="bx bx-notepad text-lg"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-              <div class="text-sm font-medium leading-5 truncate">My Notes</div>
-              <div class="text-xs text-soft truncate">Private to you</div>
-            </div>
-          </a>
-        </li>
-      </ul>
-    </section>
+    {#if showPersonalSection}
+      <section>
+        <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Personal</div>
+        <ul class="space-y-1 pr-1">
+          <li>
+            <a
+              href="/dms/notes"
+              class={`channel-row ${activeThreadId === '__notes' ? 'channel-row--active' : ''}`}
+              onclick={() => dispatch('select', { id: '__notes' })}
+            >
+              <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center">
+                <i class="bx bx-notepad text-lg"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium leading-5 truncate">My Notes</div>
+                <div class="text-xs text-soft truncate">Private to you</div>
+              </div>
+            </a>
+          </li>
+        </ul>
+      </section>
+    {/if}
 
     <section>
       <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Messages</div>
@@ -860,8 +870,8 @@
                     {/if}
                   </div>
                   <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-2 min-w-0">
-                      <div class="text-sm font-medium leading-5 truncate flex-1 min-w-0">{otherOf(t)}</div>
+                    <div class="dm-thread__header-line">
+                      <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
                       {#if timestampLabel}
                         <span class="dm-thread__timestamp">{timestampLabel}</span>
                       {/if}
@@ -1017,11 +1027,19 @@
 
 
 <style>
+  .dm-thread__header-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    min-width: 0;
+    align-items: baseline;
+  }
+
   .dm-thread__timestamp {
     font-size: 0.7rem;
     color: var(--color-text-tertiary, rgba(255, 255, 255, 0.6));
     line-height: 1;
-    flex-shrink: 0;
+    justify-self: end;
   }
 
   .dm-thread__row {
@@ -1085,6 +1103,26 @@
   .dm-thread__delete-btn:focus-visible {
     background: color-mix(in srgb, white 10%, transparent);
     color: white;
+  }
+
+  @media (max-width: 640px) {
+    .dm-thread__button {
+      padding-right: 1rem;
+    }
+
+    .dm-thread__delete-btn {
+      opacity: 1;
+      pointer-events: auto;
+      right: -0.25rem;
+      transform: translate(65%, -50%);
+      background: color-mix(in srgb, #0f172a 30%, rgba(15, 23, 42, 0.2));
+      color: white;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+    }
+
+    .dm-thread__delete-btn i {
+      font-size: 0.85rem;
+    }
   }
 
   .dm-thread__avatar {
