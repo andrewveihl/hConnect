@@ -1195,6 +1195,8 @@ function sidebarThreadList() {
   let lastVoiceVisible = $state(false);
   let lastIsMobile = $state(false);
 let channelHeaderEl: { focusHeader?: () => void } | null = null;
+  const pendingChannelRedirect = $derived.by(() => Boolean(requestedChannelId && !activeChannel));
+  const channelPanelInteractive = $derived.by(() => showChannels && !pendingChannelRedirect);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 120;
@@ -1303,6 +1305,9 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     resetFloatingThreadDragListeners();
   }
   const channelsTransform = $derived.by(() => {
+    if (pendingChannelRedirect) {
+      return 'translate3d(-100%, 0, 0)';
+    }
     if (channelSwipeActive && channelSwipeMode && channelSwipeWidth > 0) {
       const progress = clamp(channelSwipeDelta / channelSwipeWidth, -1, 1);
       if (channelSwipeMode === 'open') {
@@ -1333,7 +1338,8 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
         const offset = clamp(100 + progress * 100, 0, 100);
         return `translate3d(${offset}%, 0, 0)`;
       }
-      const offset = clamp(progress * 100, 0, 100);
+      const offset =
+        progress >= 0 ? clamp(progress * 100, 0, 100) : clamp(progress * 100, -100, 0);
       return `translate3d(${offset}%, 0, 0)`;
     }
     return showThreadPanel ? 'translate3d(0, 0, 0)' : 'translate3d(100%, 0, 0)';
@@ -1524,7 +1530,9 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
         }
       } else if (swipeTarget === 'thread' && threadSwipeMode && threadSwipeWidth > 0) {
         const traveled =
-          threadSwipeMode === 'close' ? Math.max(0, threadSwipeDelta) : Math.max(0, -threadSwipeDelta);
+          threadSwipeMode === 'close'
+            ? Math.max(0, Math.abs(threadSwipeDelta))
+            : Math.max(0, -threadSwipeDelta);
         const ratio = traveled / threadSwipeWidth;
         if (traveled >= SWIPE || ratio >= SWIPE_RATIO) {
           if (threadSwipeMode === 'close') {
@@ -2708,8 +2716,12 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     if (serverId) {
       const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
       if (!isDesktop && !activeChannel) {
-        showChannels = true;
         showMembers = false;
+        if (requestedChannelId) {
+          showChannels = false;
+        } else {
+          showChannels = true;
+        }
       }
     }
   });
@@ -3174,7 +3186,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform"
   class:mobile-panel--dragging={channelSwipeActive}
   style:transform={channelsTransform}
-  style:pointer-events={showChannels ? 'auto' : 'none'}
+  style:pointer-events={channelPanelInteractive ? 'auto' : 'none'}
   aria-label="Servers and channels"
   style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >

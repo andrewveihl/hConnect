@@ -356,8 +356,9 @@
 
   run(() => {
     if (messages.length !== lastLen) {
+      const wasEmpty = lastLen === 0;
       lastLen = messages.length;
-      scrollToBottom('smooth');
+      scrollToBottom(wasEmpty ? 'auto' : 'smooth');
     }
     if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
       reactionMenuFor = null;

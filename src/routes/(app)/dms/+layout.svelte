@@ -1,7 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
-  import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
 
   import LeftPane from '$lib/components/app/LeftPane.svelte';
@@ -14,11 +12,7 @@
   let { children }: Props = $props();
 
   let stopNotify: (() => void) | null = null;
-  let currentPathname = $state(get(page)?.url?.pathname ?? '');
-  const showLeftPaneOnMobile = $derived.by(() => currentPathname === '/dms');
-  const leftPaneClasses = $derived.by(() =>
-    showLeftPaneOnMobile ? 'h-full flex lg:flex' : 'h-full hidden lg:flex'
-  );
+  const leftPaneClasses = 'h-full hidden lg:flex';
 
   onMount(() => {
     (async () => {
@@ -35,12 +29,7 @@
       else stopNotify = null;
     });
 
-    const unsubPage = page.subscribe(($page) => {
-      currentPathname = $page.url.pathname ?? '';
-    });
-
     return () => {
-      unsubPage();
       unsubUser();
       stopNotify?.();
     };

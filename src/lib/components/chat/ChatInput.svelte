@@ -159,6 +159,9 @@
   let fileEl: HTMLInputElement | null = $state(null);
   let inputEl: HTMLTextAreaElement | null = $state(null);
   let attachments: AttachmentDraft[] = $state([]);
+  let platform: 'desktop' | 'mobile' = $state('desktop');
+  const sendDisabled = $derived.by(() => disabled || (!text.trim() && attachments.length === 0));
+  const showMobileSend = $derived.by(() => platform === 'mobile' && text.trim().length > 0);
   let inputFocused = false;
   let keyboardInsetFrame: number | null = null;
   let syncKeyboardInset: (() => void) | null = null;
@@ -174,7 +177,6 @@
   let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
 
-  let platform: 'desktop' | 'mobile' = $state('desktop');
   let aiServiceAvailable = $state(true);
   let aiReplySuggestion = $state<string | null>(null);
   let aiReplyLoading = $state(false);
@@ -1698,6 +1700,7 @@
       {/if}
 
       <div class="chat-input__editor">
+        <div class="chat-input__textarea-wrapper">
         <textarea
           class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
           rows="1"
@@ -1836,11 +1839,24 @@
                     </span>
                   </button>
                 {/each}
-              </div>
             </div>
-          {/if}
+          </div>
+        {/if}
+
+        {#if showMobileSend}
+          <button
+            type="submit"
+            class="chat-input__mobile-send"
+            disabled={sendDisabled}
+            aria-label="Send message"
+            title="Send message"
+          >
+            <i class="bx bx-up-arrow-alt" aria-hidden="true"></i>
+          </button>
+        {/if}
         </div>
       </div>
+    </div>
 
       {#if mentionActive}
         <div class="mention-menu" role="listbox">
@@ -1910,7 +1926,7 @@
       <button
         class="chat-send-button"
         type="submit"
-        disabled={disabled || (!text.trim() && attachments.length === 0)}
+        disabled={sendDisabled}
         aria-label="Send message"
         title="Send"
       >
@@ -2098,21 +2114,21 @@
     color: var(--text-60);
   }
 
-  :global(:root[data-theme='light']) .chat-input-popover {
+  :global(:root[data-theme-tone='light']) .chat-input-popover {
     background: color-mix(in srgb, var(--color-panel) 98%, transparent);
     border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     box-shadow: 0 18px 32px rgba(25, 34, 42, 0.18);
   }
 
-  :global(:root[data-theme='light']) .chat-input-menu__item {
+  :global(:root[data-theme-tone='light']) .chat-input-menu__item {
     background: color-mix(in srgb, var(--color-panel) 96%, transparent);
   }
 
-  :global(:root[data-theme='light']) .chat-input-menu__item:hover {
+  :global(:root[data-theme-tone='light']) .chat-input-menu__item:hover {
     background: color-mix(in srgb, var(--color-panel) 100%, transparent);
   }
 
-  :global(:root[data-theme='light']) .chat-input-menu__icon {
+  :global(:root[data-theme-tone='light']) .chat-input-menu__icon {
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
   }
 
@@ -2464,7 +2480,12 @@
     position: relative;
   }
 
-  .chat-input__editor textarea {
+  .chat-input__textarea-wrapper {
+    position: relative;
+    width: 100%;
+  }
+
+  .chat-input__textarea-wrapper textarea {
     position: relative;
     z-index: 1;
   }
@@ -2582,7 +2603,7 @@
       gap: 0.45rem;
     }
 
-    .chat-input__editor textarea {
+    .chat-input__textarea-wrapper textarea {
       border-radius: 1.2rem;
       padding-inline: 1rem;
     }
@@ -2846,5 +2867,57 @@
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
+  }
+
+  .chat-input__mobile-send {
+    position: absolute;
+    right: 0.4rem;
+    bottom: 0.4rem;
+    width: 1.85rem;
+    height: 1.85rem;
+    border-radius: 999px;
+    border: none;
+    background: var(--color-accent);
+    color: var(--color-app-bg, #030712);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    box-shadow:
+      0 10px 20px rgba(6, 10, 20, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+    z-index: 3;
+  }
+
+  .chat-input__mobile-send:disabled {
+    opacity: 0.45;
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+
+  .chat-input__mobile-send:not(:disabled):active {
+    transform: scale(0.95);
+  }
+
+  .chat-input__mobile-send i {
+    line-height: 1;
+  }
+
+  @media (max-width: 767px) {
+    .chat-send-button {
+      display: none;
+    }
+
+    .chat-input__textarea-wrapper textarea {
+      padding-right: 3.95rem;
+      padding-bottom: 1.2rem;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .chat-input__mobile-send {
+      display: none;
+    }
   }
 </style>

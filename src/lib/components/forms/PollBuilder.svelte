@@ -230,11 +230,11 @@
     gap: 0.5rem;
   }
 
-  :global(:root[data-theme='light']) .poll-backdrop {
+  :global(:root[data-theme-tone='light']) .poll-backdrop {
     background: color-mix(in srgb, var(--color-app-overlay) 55%, transparent);
   }
 
-  :global(:root[data-theme='light']) .poll-panel {
+  :global(:root[data-theme-tone='light']) .poll-panel {
     background: color-mix(in srgb, var(--color-panel) 99%, transparent);
   }
 </style>
