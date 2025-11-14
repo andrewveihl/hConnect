@@ -677,6 +677,11 @@
 
 <style>
   .chat-scroll {
+    overflow-x: hidden;
+    overflow-y: auto;
+    touch-action: pan-y;
+    overscroll-behavior-inline: contain;
+    overscroll-behavior-x: contain;
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
