@@ -684,6 +684,11 @@
     gap: 0.18rem;
   }
 
+  .message-block--system {
+    align-items: center;
+    text-align: center;
+  }
+
   .chat-scroll,
   .message-block,
   .message-layout,
@@ -773,6 +778,7 @@
     font-size: 0.72rem;
     color: var(--text-55);
     line-height: 1;
+    white-space: nowrap;
     display: flex;
     align-items: center;
     transition: opacity 150ms ease, transform 150ms ease;
@@ -1082,6 +1088,7 @@
     font-size: 0.84rem;
     display: inline-block;
     margin-bottom: 0.3rem;
+    text-align: center;
   }
 
   .message-bubble--mine {
@@ -1634,25 +1641,38 @@
     </div>
   {:else}
     {#each messages as m, i (m.id)}
-      {@const mine = isMine(m)}
-      {@const continued = i > 0 && sameBlock(messages[i - 1], m)}
+      {@const isSystem = (m as any)?.type === 'system'}
+      {@const mine = !isSystem && isMine(m)}
+      {@const continued = !isSystem && i > 0 && sameBlock(messages[i - 1], m)}
       {@const firstInBlock = !continued}
-      {@const reactions = reactionsFor(m)}
+      {@const reactions = isSystem ? [] : reactionsFor(m)}
       {@const hasReactions = reactions.length > 0}
-      {@const sameMinuteAsPrev = i > 0 && sameMinute(messages[i - 1], m)}
-      {@const sameMinuteAsNext = i < messages.length - 1 && sameMinute(m, messages[i + 1])}
-      {@const minuteKey = minuteKeyFor(m)}
+      {@const sameMinuteAsPrev = !isSystem && i > 0 && sameMinute(messages[i - 1], m)}
+      {@const sameMinuteAsNext = !isSystem && i < messages.length - 1 && sameMinute(m, messages[i + 1])}
+      {@const minuteKey = isSystem ? null : minuteKeyFor(m)}
       {@const minuteHovered = minuteKey && hoveredMinuteKey === minuteKey}
-      {@const showAdd = Boolean(
+      {@const showAdd = !isSystem && Boolean(
         currentUserId &&
         (
           (hasHoverSupport && hoveredMessageId === m.id) ||
           touchActionMessageId === m.id
         )
       )}
-      {@const showTimestampMobile = !hasHoverSupport && reactionMenuFor === m.id}
+      {@const showTimestampMobile = !hasHoverSupport && !isSystem && reactionMenuFor === m.id}
       {@const replyRef = (m as any).replyTo ?? null}
       {@const threadMeta = threadStats?.[m.id]}
+      {#if isSystem}
+        <div class="flex w-full justify-center" data-message-id={m.id}>
+          <div
+            class={`message-block w-full max-w-3xl message-block--system ${minuteHovered ? 'is-minute-hovered' : ''}`}
+            style={`margin-top: ${(continued ? 0.1 : 0.6)}rem;`}
+          >
+            <div class="system-message">
+              <span>{(m as any).text ?? ''}</span>
+            </div>
+          </div>
+        </div>
+      {:else}
       <div
         class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
         data-message-id={m.id}
@@ -1797,10 +1817,6 @@
                       <span class="thread-preview-card__cta">View</span>
                     </div>
                   </div>
-                {:else if m.type === 'system'}
-                  <div class="system-message">
-                    <span>{(m as any).text ?? ''}</span>
-                  </div>
                 {:else if !m.type || m.type === 'text' || String(m.type) === 'normal'}
                   <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                     {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
@@ -1913,7 +1929,7 @@
                     </div>
                   </div>
                 {/if}
-                {#if (m as any).createdAt && !sameMinuteAsNext}
+                {#if !isSystem && (m as any).createdAt && !sameMinuteAsNext}
                   <div
                     class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
                     aria-hidden={!hasHoverSupport && !showTimestampMobile}
@@ -1923,7 +1939,7 @@
                 {/if}
               </div>
 
-                {#if reactions.length || currentUserId}
+                {#if !isSystem && (reactions.length || currentUserId)}
                   <div
                     class="reaction-row"
                     style={`margin-top: ${hasReactions ? (continued ? 0.15 : 0.4) : 0}rem;`}
@@ -1946,9 +1962,10 @@
                 {/if}
               </div>
             </div>
-          </div>
         </div>
       </div>
+    </div>
+      {/if}
     {/each}
   {/if}
   {#if pendingUploads.length}

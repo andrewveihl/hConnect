@@ -193,6 +193,8 @@
   let predictionTimer: ReturnType<typeof setTimeout> | null = null;
   let predictionScroll = $state(0);
   let predictionBoxStyle = $state('');
+  let predictionContentEl: HTMLDivElement | null = $state(null);
+  let predictionVerticalPadding = 0;
   let suggestedGhostEl: HTMLDivElement | null = $state(null);
   let suggestedGhostHeight = $state(0);
   let lastPredictionSeed = '';
@@ -501,7 +503,17 @@
     const ghostHeight = showSuggestionGhost
       ? Math.max(minHeight, Math.min(suggestedGhostHeight || 0, maxHeight))
       : 0;
-    const nextHeight = Math.max(textHeight, ghostHeight || 0);
+    const inlinePredictionHeight =
+      showInlinePrediction && aiInlineSuggestion && predictionContentEl
+        ? Math.max(
+            minHeight,
+            Math.min(
+              (predictionContentEl.scrollHeight || 0) + predictionVerticalPadding,
+              maxHeight
+            )
+          )
+        : 0;
+    const nextHeight = Math.max(textHeight, ghostHeight || 0, inlinePredictionHeight || 0);
     node.style.height = `${nextHeight}px`;
     if (scrollHeight > nextHeight) {
       node.style.overflowY = 'auto';
@@ -522,12 +534,23 @@
     syncPredictionOverlay();
   }
 
+  function schedulePredictionResize() {
+    if (typeof window === 'undefined') return;
+    void tick().then(() => {
+      syncTextareaSize();
+      syncPredictionOverlay();
+    });
+  }
+
   function syncPredictionBoxStyle() {
     if (typeof window === 'undefined' || !inputEl) {
       predictionBoxStyle = '';
       return;
     }
     const computed = window.getComputedStyle(inputEl);
+    const paddingTop = parseFloat(computed.paddingTop || '0') || 0;
+    const paddingBottom = parseFloat(computed.paddingBottom || '0') || 0;
+    predictionVerticalPadding = paddingTop + paddingBottom;
     const padding = `${computed.paddingTop} ${computed.paddingRight} ${computed.paddingBottom} ${computed.paddingLeft}`;
     predictionBoxStyle = [
       `padding:${padding}`,
@@ -821,6 +844,7 @@
     predictionAbort?.abort();
     predictionAbort = null;
     aiInlineSuggestion = '';
+    schedulePredictionResize();
   }
 
   function queuePrediction() {
@@ -865,6 +889,7 @@
       if (predictionAbort !== controller) return;
       lastPredictionSeed = seed;
       aiInlineSuggestion = showInlinePrediction ? suggestions[0] ?? '' : '';
+      schedulePredictionResize();
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       const message = error instanceof Error ? error.message : String(error);
@@ -889,6 +914,7 @@
     if (!aiInlineSuggestion) return;
     appendSuggestion(aiInlineSuggestion);
     aiInlineSuggestion = '';
+    schedulePredictionResize();
   }
 
   function insertSuggestionText(source: string | null) {
@@ -1758,6 +1784,7 @@
           >
             <div
               class="chat-input__prediction-content"
+              bind:this={predictionContentEl}
               style={`transform: translateY(-${predictionScroll}px);`}
             >
               <span class="chat-input__prediction-shadow">{overlayText}</span>

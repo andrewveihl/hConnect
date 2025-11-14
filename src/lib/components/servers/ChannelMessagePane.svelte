@@ -130,8 +130,8 @@
         on:submitForm={onSubmitForm}
         on:react={onReact}
         on:loadMore={onLoadMore}
-        on:reply={(event) => dispatch('reply', event.detail)}
-        on:thread={(event) => dispatch('thread', event.detail)}
+        on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
+        on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
       />
     {/key}
   </div>
