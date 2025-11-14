@@ -98,6 +98,7 @@ let threadReplyTarget: ReplyReferenceInput | null = $state(null);
 let threadConversationContext: any[] = $state([]);
 let threadDefaultSuggestionSource: any = $state(null);
 let threadUnreadMap: Record<string, boolean> = $state({});
+let channelThreadUnread: Record<string, boolean> = $state({});
 let latestInboundMessage: any = $state(null);
 let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
@@ -105,8 +106,12 @@ let replyTarget: ReplyReferenceInput | null = $state(null);
 let lastReplyChannelId: string | null = $state(null);
 let profiles: Record<string, any> = $state({});
 let pendingUploads: PendingUploadPreview[] = $state([]);
+let threadPendingUploads: PendingUploadPreview[] = $state([]);
+let floatingThreadPendingUploads: PendingUploadPreview[] = $state([]);
 let scrollToBottomSignal = $state(0);
 let lastPendingChannelId: string | null = $state(null);
+let lastThreadUploadThreadId: string | null = null;
+let lastFloatingUploadThreadId: string | null = null;
 let pendingThreadId: string | null = null;
 let pendingThreadRoot: any = null;
 const threadReadStops = new Map<string, Unsubscribe>();
@@ -115,6 +120,29 @@ let threadsUnsub: Unsubscribe | null = null;
 let threadMessagesUnsub: Unsubscribe | null = null;
 let lastThreadStreamChannel: string | null = null;
 let lastThreadStreamId: string | null = null;
+let threadReadTimer: number | null = null;
+const THREAD_PANE_MIN = 320;
+const THREAD_PANE_MAX = 1600;
+let threadPaneWidth = $state(360);
+let threadResizeActive = $state(false);
+let threadResizeStartX = 0;
+let threadResizeStartWidth = 360;
+let threadMembersContext = $state<'active' | 'floating'>('active');
+let floatingThreadVisible = $state(false);
+let floatingThread: { thread: ChannelThread | null; root: any } | null = $state(null);
+let floatingThreadMessages: ThreadMessage[] = $state([]);
+let floatingThreadReplyTarget: ReplyReferenceInput | null = $state(null);
+let floatingThreadConversationContext: any[] = $state([]);
+let floatingThreadDefaultSuggestionSource: any = $state(null);
+let floatingThreadStream: Unsubscribe | null = null;
+let floatingThreadLastServerId: string | null = null;
+let floatingThreadLastChannelId: string | null = null;
+let floatingThreadLastThreadId: string | null = null;
+let floatingThreadPosition = $state({ x: 0, y: 0 });
+let floatingThreadDragActive = $state(false);
+let floatingThreadDragStart = { x: 0, y: 0 };
+let floatingThreadWindowStart = { x: 0, y: 0 };
+let floatingHeaderPointerId: number | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
 let serverDisplayName = $state('Server');
   let serverMetaUnsub: Unsubscribe | null = $state(null);
@@ -131,6 +159,17 @@ let serverDisplayName = $state('Server');
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
+
+  const findChannelName = (channelId: string | null | undefined) => {
+    if (!channelId) return null;
+    const channel = channels.find((c) => c.id === channelId);
+    return channel?.name ?? null;
+  };
+
+  const parentChannelNameForThread = (thread: ChannelThread | null, fallbackChannel: Channel | null = activeChannel) => {
+    const channelId = thread?.parentChannelId ?? thread?.channelId ?? fallbackChannel?.id ?? null;
+    return findChannelName(channelId) ?? fallbackChannel?.name ?? null;
+  };
 
   function updateMentionOptionList() {
     mentionOptions = [...memberMentionOptions, ...roleMentionOptions];
@@ -428,6 +467,40 @@ let serverDisplayName = $state('Server');
     }
   }
 
+  function consumeThreadReply(explicit?: ReplyReferenceInput | null) {
+    const candidate =
+      explicit && explicit.messageId
+        ? explicit
+        : threadReplyTarget && threadReplyTarget.messageId
+          ? threadReplyTarget
+          : null;
+    threadReplyTarget = null;
+    return candidate && candidate.messageId ? candidate : null;
+  }
+
+  function restoreThreadReply(ref: ReplyReferenceInput | null) {
+    if (ref?.messageId) {
+      threadReplyTarget = ref;
+    }
+  }
+
+  function consumeFloatingThreadReply(explicit?: ReplyReferenceInput | null) {
+    const candidate =
+      explicit && explicit.messageId
+        ? explicit
+        : floatingThreadReplyTarget && floatingThreadReplyTarget.messageId
+          ? floatingThreadReplyTarget
+          : null;
+    floatingThreadReplyTarget = null;
+    return candidate && candidate.messageId ? candidate : null;
+  }
+
+  function restoreFloatingThreadReply(ref: ReplyReferenceInput | null) {
+    if (ref?.messageId) {
+      floatingThreadReplyTarget = ref;
+    }
+  }
+
   function toChatMessage(id: string, raw: any) {
     const uid = pickString(raw?.uid) ?? pickString(raw?.authorId) ?? 'unknown';
     const displayName =
@@ -528,7 +601,47 @@ let serverDisplayName = $state('Server');
     return Math.random().toString(36).slice(2);
   };
 
-  function registerPendingUpload(file: File): {
+  type PendingUploadScope = 'channel' | 'thread' | 'floatingThread';
+
+  function getPendingUploadList(scope: PendingUploadScope) {
+    switch (scope) {
+      case 'thread':
+        return threadPendingUploads;
+      case 'floatingThread':
+        return floatingThreadPendingUploads;
+      case 'channel':
+      default:
+        return pendingUploads;
+    }
+  }
+
+  function setPendingUploadList(scope: PendingUploadScope, next: PendingUploadPreview[]) {
+    switch (scope) {
+      case 'thread':
+        threadPendingUploads = next;
+        break;
+      case 'floatingThread':
+        floatingThreadPendingUploads = next;
+        break;
+      case 'channel':
+      default:
+        pendingUploads = next;
+        break;
+    }
+  }
+
+  function updatePendingUploadList(
+    scope: PendingUploadScope,
+    updater: (list: PendingUploadPreview[]) => PendingUploadPreview[]
+  ) {
+    const current = getPendingUploadList(scope);
+    setPendingUploadList(scope, updater(current));
+  }
+
+  function registerPendingUpload(
+    file: File,
+    scope: PendingUploadScope = 'channel'
+  ): {
     id: string;
     update(progress: number): void;
     finish(success: boolean): void;
@@ -552,13 +665,13 @@ let serverDisplayName = $state('Server');
       progress: currentProgress,
       previewUrl
     };
-    pendingUploads = [...pendingUploads, entry];
+    updatePendingUploadList(scope, (list) => [...list, entry]);
 
     const commitProgress = (value: number) => {
       if (!Number.isFinite(value)) return;
       currentProgress = Math.min(1, Math.max(currentProgress, value));
-      pendingUploads = pendingUploads.map((item) =>
-        item.id === id ? { ...item, progress: currentProgress } : item
+      updatePendingUploadList(scope, (list) =>
+        list.map((item) => (item.id === id ? { ...item, progress: currentProgress } : item))
       );
       if (currentProgress >= 0.99 && fallbackTimer) {
         clearInterval(fallbackTimer);
@@ -590,7 +703,7 @@ let serverDisplayName = $state('Server');
         if (success) {
           commitProgress(1);
         }
-        pendingUploads = pendingUploads.filter((item) => item.id !== id);
+        updatePendingUploadList(scope, (list) => list.filter((item) => item.id !== id));
         if (previewUrl) {
           try {
             URL.revokeObjectURL(previewUrl);
@@ -634,6 +747,7 @@ let serverDisplayName = $state('Server');
     clearThreadMessagesUnsub();
     clearThreadsUnsub();
     clearThreadReadSubs();
+    clearThreadReadTimer();
     channelThreads = [];
     threadStats = {};
     threadUnreadMap = {};
@@ -840,6 +954,16 @@ let serverDisplayName = $state('Server');
     }
     threadStats = aggregates;
     threadUnreadMap = unreadMap;
+    if (activeThread) {
+      const parentId = activeThread.parentChannelId ?? activeChannel?.id ?? null;
+      if (parentId && unreadMap[activeThread.id]) {
+        channelThreadUnread = { [parentId]: true };
+      } else {
+        channelThreadUnread = {};
+      }
+    } else {
+      channelThreadUnread = {};
+    }
   }
 
   function subscribeThreads(currServerId: string, channelId: string) {
@@ -888,42 +1012,22 @@ let serverDisplayName = $state('Server');
   }
 
 function sidebarThreadList() {
-  const combined: Array<ChannelThread & { unread?: boolean }> = [];
-  const cacheEntries = Object.values(threadsByChannel);
-  const seen = new Set<string>();
-  const viewer = $user?.uid ?? null;
-  const allowThread = (thread: ChannelThread | null | undefined) => {
-    if (!thread) return false;
-    if (!viewer) return true;
-    const members = Array.isArray(thread.memberUids) ? thread.memberUids : [];
-    return members.includes(viewer);
-  };
-  if (cacheEntries.length) {
-    for (const list of cacheEntries) {
-      for (const thread of list ?? []) {
-        if (!thread || thread.status === 'archived' || seen.has(thread.id) || !allowThread(thread)) continue;
-        seen.add(thread.id);
-        combined.push({
-          ...thread,
-          unread: threadUnreadMap[thread.id] ?? false
-        });
-      }
+  if (!activeThread || activeThread.status === 'archived') return [];
+  const parentId = activeThread.parentChannelId ?? activeChannel?.id ?? null;
+  if (!parentId) return [];
+  return [
+    {
+      ...activeThread,
+      parentChannelId: parentId,
+      unread: threadUnreadMap[activeThread.id] ?? false
     }
-  } else if (channelThreads.length) {
-    for (const thread of channelThreads) {
-      if (thread.status === 'archived' || !allowThread(thread)) continue;
-      combined.push({
-        ...thread,
-        unread: threadUnreadMap[thread.id] ?? false
-      });
-    }
-  }
-  return combined;
+  ];
 }
 
-  function resolveThreadMembers() {
-    if (!activeThread) return [];
-    return (activeThread.memberUids ?? []).map((uid) => {
+  function resolveThreadMembers(target: ChannelThread | null = activeThread) {
+    const sourceThread = target ?? floatingThread?.thread ?? null;
+    if (!sourceThread) return [];
+    return (sourceThread.memberUids ?? []).map((uid) => {
       const profile = profiles[uid] ?? {};
       return {
         uid,
@@ -937,12 +1041,12 @@ function sidebarThreadList() {
     });
   }
 
-  function resolveThreadTitle() {
+  function resolveThreadTitle(targetThread: ChannelThread | null = activeThread, rootMessage: any = activeThreadRoot) {
     return (
-      pickString(activeThreadRoot?.text) ??
-      pickString(activeThreadRoot?.content) ??
-      pickString(activeThreadRoot?.preview) ??
-      pickString(activeThread?.name) ??
+      pickString(rootMessage?.text) ??
+      pickString(rootMessage?.content) ??
+      pickString(rootMessage?.preview) ??
+      pickString(targetThread?.name) ??
       pickString(activeChannel?.name) ??
       ''
     );
@@ -967,16 +1071,47 @@ function sidebarThreadList() {
     lastThreadStreamId = thread.id;
     threadMessagesUnsub = streamThreadMessages(serverId, activeChannel.id, thread.id, (list) => {
       threadMessages = list;
-      if ($user?.uid && activeThread?.id === thread.id && serverId && activeChannel?.id) {
-        const last = list[list.length - 1];
-        const at = last?.createdAt ?? null;
-        const lastId = last?.id ?? null;
-        void markThreadReadThread($user.uid, serverId, activeChannel.id, thread.id, {
-          at,
-          lastMessageId: lastId
-        });
-      }
+      scheduleThreadRead();
     });
+  }
+
+  function clearThreadReadTimer() {
+    if (threadReadTimer) {
+      clearTimeout(threadReadTimer);
+      threadReadTimer = null;
+    }
+  }
+
+  function scheduleThreadRead() {
+    if (typeof window === 'undefined') return;
+    if (!activeThread || !serverId || !activeChannel?.id || !$user?.uid) return;
+    if (isMobile && !showThreadPanel) return;
+    const threadId = activeThread.id;
+    const latest = threadMessages[threadMessages.length - 1] ?? null;
+    const fallbackAt = latest?.createdAt ?? activeThread.lastMessageAt ?? null;
+    const fallbackId =
+      (latest as any)?.id ?? (latest as any)?.messageId ?? null;
+    clearThreadReadTimer();
+    threadReadTimer = window.setTimeout(() => {
+      threadReadTimer = null;
+      if (
+        !$user?.uid ||
+        !activeThread ||
+        activeThread.id !== threadId ||
+        !serverId ||
+        !activeChannel?.id
+      ) {
+        return;
+      }
+      const current = threadMessages[threadMessages.length - 1] ?? null;
+      const markAt = current?.createdAt ?? activeThread.lastMessageAt ?? fallbackAt ?? null;
+      const markId =
+        (current as any)?.id ?? (current as any)?.messageId ?? fallbackId ?? null;
+      void markThreadReadThread($user.uid, serverId, activeChannel.id, threadId, {
+        at: markAt ?? undefined,
+        lastMessageId: markId ?? undefined
+      });
+    }, 650);
   }
 
   function pickChannel(id: string) {
@@ -1046,6 +1181,8 @@ function sidebarThreadList() {
      =========================== */
   let showChannels = $state(false);
   let showMembers = $state(false);
+  let showThreadPanel = $state(false);
+  let showThreadMembersSheet = $state(false);
   let isMobile = $state(false);
   let mobileVoicePane: 'call' | 'chat' = $state('chat');
   let mobilePaneTracking = false;
@@ -1053,6 +1190,7 @@ function sidebarThreadList() {
   let mobilePaneStartY = 0;
   let lastVoiceVisible = $state(false);
   let lastIsMobile = $state(false);
+let channelHeaderEl: { focusHeader?: () => void } | null = null;
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 120;
@@ -1062,17 +1200,103 @@ function sidebarThreadList() {
   let tracking = false;
   let startX = 0;
   let startY = 0;
-  let swipeTarget: 'channels' | 'members' | null = null;
+  let swipeTarget: 'channels' | 'members' | 'thread' | null = null;
   let channelSwipeMode: 'open' | 'close' | null = null;
   let memberSwipeMode: 'open' | 'close' | null = null;
+  let threadSwipeMode: 'open' | 'close' | null = null;
   let channelSwipeWidth = $state(1);
   let memberSwipeWidth = $state(1);
+  let threadSwipeWidth = $state(1);
   let channelSwipeDelta = $state(0);
   let memberSwipeDelta = $state(0);
+  let threadSwipeDelta = $state(0);
   let channelSwipeActive = $state(false);
   let memberSwipeActive = $state(false);
+  let threadSwipeActive = $state(false);
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  const clampThreadWidth = (value: number) => clamp(value, THREAD_PANE_MIN, THREAD_PANE_MAX);
+
+  function handleThreadResizeStart(event: PointerEvent) {
+    if (!activeThread) return;
+    threadResizeActive = true;
+    threadResizeStartX = event.clientX;
+    threadResizeStartWidth = threadPaneWidth;
+    window.addEventListener('pointermove', handleThreadResizeMove);
+    window.addEventListener('pointerup', stopThreadResize);
+    event.preventDefault();
+  }
+
+  function handleThreadResizeMove(event: PointerEvent) {
+    if (!threadResizeActive) return;
+    const delta = threadResizeStartX - event.clientX;
+    threadPaneWidth = clampThreadWidth(threadResizeStartWidth + delta);
+  }
+
+  function stopThreadResize() {
+    if (!threadResizeActive) return;
+    threadResizeActive = false;
+    window.removeEventListener('pointermove', handleThreadResizeMove);
+    window.removeEventListener('pointerup', stopThreadResize);
+  }
+
+  function handleThreadResizeKeydown(event: KeyboardEvent) {
+    if (!activeThread) return;
+    const step = event.shiftKey ? 40 : 20;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      threadPaneWidth = clampThreadWidth(threadPaneWidth - step);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      threadPaneWidth = clampThreadWidth(threadPaneWidth + step);
+    }
+  }
+
+  function resetFloatingThreadDragListeners() {
+    window.removeEventListener('pointermove', handleFloatingHeaderPointerMove);
+    window.removeEventListener('pointerup', stopFloatingHeaderDrag);
+    window.removeEventListener('pointercancel', stopFloatingHeaderDrag);
+    floatingHeaderPointerId = null;
+  }
+
+  function handleFloatingHeaderPointerDown(event: PointerEvent) {
+    if (!floatingThreadVisible) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('.thread-popout-close')) return;
+    if (event.button !== 0) return;
+    floatingThreadDragActive = true;
+    floatingHeaderPointerId = event.pointerId;
+    floatingThreadDragStart = { x: event.clientX, y: event.clientY };
+    floatingThreadWindowStart = { ...floatingThreadPosition };
+    window.addEventListener('pointermove', handleFloatingHeaderPointerMove, { passive: false });
+    window.addEventListener('pointerup', stopFloatingHeaderDrag);
+    window.addEventListener('pointercancel', stopFloatingHeaderDrag);
+    event.preventDefault();
+  }
+
+  function handleFloatingHeaderPointerMove(event: PointerEvent) {
+    if (
+      !floatingThreadDragActive ||
+      floatingHeaderPointerId === null ||
+      event.pointerId !== floatingHeaderPointerId
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const dx = event.clientX - floatingThreadDragStart.x;
+    const dy = event.clientY - floatingThreadDragStart.y;
+    floatingThreadPosition = {
+      x: floatingThreadWindowStart.x + dx,
+      y: floatingThreadWindowStart.y + dy
+    };
+  }
+
+  function stopFloatingHeaderDrag(event?: PointerEvent) {
+    if (!floatingThreadDragActive) return;
+    if (event && floatingHeaderPointerId !== null && event.pointerId !== floatingHeaderPointerId) return;
+    floatingThreadDragActive = false;
+    resetFloatingThreadDragListeners();
+  }
   const channelsTransform = $derived.by(() => {
     if (channelSwipeActive && channelSwipeMode && channelSwipeWidth > 0) {
       const progress = clamp(channelSwipeDelta / channelSwipeWidth, -1, 1);
@@ -1097,6 +1321,18 @@ function sidebarThreadList() {
     }
     return showMembers ? 'translate3d(0, 0, 0)' : 'translate3d(100%, 0, 0)';
   });
+  const threadTransform = $derived.by(() => {
+    if (threadSwipeActive && threadSwipeMode && threadSwipeWidth > 0) {
+      const progress = clamp(threadSwipeDelta / threadSwipeWidth, -1, 1);
+      if (threadSwipeMode === 'open') {
+        const offset = clamp(100 + progress * 100, 0, 100);
+        return `translate3d(${offset}%, 0, 0)`;
+      }
+      const offset = clamp(progress * 100, 0, 100);
+      return `translate3d(${offset}%, 0, 0)`;
+    }
+    return showThreadPanel ? 'translate3d(0, 0, 0)' : 'translate3d(100%, 0, 0)';
+  });
 
   const inLeftEdgeZone = (value: number) => {
     if (isMobile) return true;
@@ -1109,6 +1345,15 @@ function sidebarThreadList() {
     const mdQuery = window.matchMedia('(min-width: 768px)');
     const lgQuery = window.matchMedia('(min-width: 1024px)');
 
+    const isTypingTarget = (target: EventTarget | null) => {
+      const node = (target as HTMLElement | null) ?? null;
+      if (!node) return false;
+      const tag = node.tagName?.toLowerCase?.() ?? '';
+      if (tag === 'input' || tag === 'textarea') return true;
+      if (node.isContentEditable) return true;
+      return Boolean(node.closest?.('input, textarea, [contenteditable="true"]'));
+    };
+
     const onMedia = () => {
       const nextIsMobile = !mdQuery.matches;
       isMobile = nextIsMobile;
@@ -1118,13 +1363,36 @@ function sidebarThreadList() {
         mobileVoicePane = 'call';
       }
       if (mdQuery.matches) showChannels = false;
-      if (lgQuery.matches) showMembers = false;
+      if (lgQuery.matches) {
+        showMembers = false;
+        showThreadPanel = false;
+      }
     };
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         showChannels = false;
         showMembers = false;
+        if (activeThread) {
+          closeThreadView();
+        } else {
+          showThreadPanel = false;
+        }
+      }
+      const key = e.key?.toLowerCase?.() ?? '';
+      if (
+        key === 't' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !e.repeat &&
+        !isMobile &&
+        !isTypingTarget(e.target)
+      ) {
+        if (openLatestThreadShortcut()) {
+          e.preventDefault();
+        }
       }
     };
 
@@ -1140,11 +1408,18 @@ function sidebarThreadList() {
       memberSwipeDelta = 0;
     };
 
+    const resetThreadSwipe = () => {
+      threadSwipeMode = null;
+      threadSwipeActive = false;
+      threadSwipeDelta = 0;
+    };
+
     const cancelSwipe = () => {
       tracking = false;
       swipeTarget = null;
       resetChannelSwipe();
       resetMemberSwipe();
+      resetThreadSwipe();
     };
 
     const onTouchStart = (e: TouchEvent) => {
@@ -1154,13 +1429,15 @@ function sidebarThreadList() {
       startY = touch.clientY;
       channelSwipeWidth = Math.max(window.innerWidth, 1);
       memberSwipeWidth = channelSwipeWidth;
+      threadSwipeWidth = channelSwipeWidth;
       resetChannelSwipe();
       resetMemberSwipe();
+      resetThreadSwipe();
       swipeTarget = null;
 
       const nearLeft = isMobile || inLeftEdgeZone(startX);
       const nearRight = isMobile || window.innerWidth - startX <= EDGE_ZONE;
-      tracking = showChannels || showMembers || nearLeft || nearRight;
+      tracking = showChannels || showMembers || showThreadPanel || nearLeft || nearRight;
       if (!tracking) return;
 
       if (showChannels) {
@@ -1169,6 +1446,9 @@ function sidebarThreadList() {
       } else if (showMembers) {
         swipeTarget = 'members';
         memberSwipeMode = 'close';
+      } else if (showThreadPanel) {
+        swipeTarget = 'thread';
+        threadSwipeMode = 'close';
       }
     };
 
@@ -1211,6 +1491,14 @@ function sidebarThreadList() {
           }
         }
         memberSwipeDelta = dx;
+      } else if (swipeTarget === 'thread') {
+        if (!threadSwipeActive) {
+          threadSwipeActive = true;
+          if (!threadSwipeMode) {
+            threadSwipeMode = dx < 0 ? 'open' : 'close';
+          }
+        }
+        threadSwipeDelta = dx;
       }
     };
 
@@ -1228,6 +1516,17 @@ function sidebarThreadList() {
         const ratio = traveled / memberSwipeWidth;
         if (traveled >= SWIPE || ratio >= SWIPE_RATIO) {
           showMembers = memberSwipeMode === 'open';
+        }
+      } else if (swipeTarget === 'thread' && threadSwipeMode && threadSwipeWidth > 0) {
+        const traveled =
+          threadSwipeMode === 'close' ? Math.max(0, threadSwipeDelta) : Math.max(0, -threadSwipeDelta);
+        const ratio = traveled / threadSwipeWidth;
+        if (traveled >= SWIPE || ratio >= SWIPE_RATIO) {
+          if (threadSwipeMode === 'close') {
+            closeThreadView();
+          } else {
+            showThreadPanel = true;
+          }
         }
       }
       cancelSwipe();
@@ -1255,72 +1554,6 @@ function sidebarThreadList() {
     const cleanup = setupGestures();
     return () => cleanup();
   });
-
-  let disposeThreadSwipe: (() => void) | null = null;
-
-  $effect(() => {
-    disposeThreadSwipe?.();
-    if (!isMobile || !activeThread || mobileVoicePane !== 'chat') {
-      disposeThreadSwipe = null;
-      return;
-    }
-    disposeThreadSwipe = registerThreadSwipeGestures();
-    return () => disposeThreadSwipe?.();
-  });
-
-  function registerThreadSwipeGestures() {
-    const THRESHOLD = 64;
-    let tracking = false;
-    let startX = 0;
-    let startY = 0;
-    let mode: 'close-thread' | 'open-members' | null = null;
-
-    const onTouchStart = (event: TouchEvent) => {
-      if (!activeThread || !isMobile || mobileVoicePane !== 'chat') return;
-      if (showChannels || showMembers) return;
-      if (event.touches.length !== 1) return;
-      const touch = event.touches[0];
-      startX = touch.clientX;
-      startY = touch.clientY;
-      tracking = true;
-      mode = null;
-    };
-
-    const onTouchMove = (event: TouchEvent) => {
-      if (!tracking || event.touches.length !== 1) return;
-      const touch = event.touches[0];
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      if (!mode) {
-        if (Math.abs(dy) > Math.abs(dx) * 1.2) {
-          tracking = false;
-          return;
-        }
-        mode = dx > 0 ? 'close-thread' : 'open-members';
-      }
-      if (mode === 'close-thread' && dx >= THRESHOLD) {
-        tracking = false;
-        closeThreadView();
-      } else if (mode === 'open-members' && dx <= -THRESHOLD) {
-        tracking = false;
-        showMembers = true;
-      }
-    };
-
-    const onTouchEnd = () => {
-      tracking = false;
-      mode = null;
-    };
-
-    window.addEventListener('touchstart', onTouchStart, { passive: true });
-    window.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onTouchEnd, { passive: true });
-    return () => {
-      window.removeEventListener('touchstart', onTouchStart);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onTouchEnd);
-    };
-  }
 
   function setMobileVoicePane(pane: 'call' | 'chat') {
     mobileVoicePane = pane;
@@ -1374,6 +1607,8 @@ function sidebarThreadList() {
     memberMentionOptions = [];
     roleMentionOptions = [];
     mentionOptions = [];
+    closeFloatingThread();
+    stopThreadResize();
   });
 
   // Persist read state when tab is hidden
@@ -1551,41 +1786,134 @@ function sidebarThreadList() {
     }
   }
 
-  async function handleThreadSend(payload: string | { text: string; mentions?: MentionSendRecord[] }) {
+  async function handleThreadSend(
+    payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }
+  ) {
     const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
     const trimmed = raw?.trim?.() ?? '';
     if (!trimmed) return;
-    if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    if (!activeThread) { alert('Open a thread before replying.'); return; }
+    const info = threadChannelInfo(activeThread, activeChannel?.id ?? null);
+    if (!info) { alert('Open a thread before replying.'); return; }
     if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeThreadReply(
+      typeof payload === 'object' ? payload?.replyTo ?? null : null
+    );
     const mentions = normalizeMentionSendList(
       typeof payload === 'object' ? payload?.mentions ?? [] : []
     );
     try {
       await sendThreadMessage({
-        serverId,
-        channelId: activeChannel.id,
-        threadId: activeThread.id,
-        author: {
+        serverId: info.serverId,
+        channelId: info.channelId,
+        threadId: info.thread.id,
+        message: {
+          type: 'text',
+          text: trimmed,
           uid: $user.uid,
-          displayName: deriveCurrentDisplayName()
+          displayName: deriveCurrentDisplayName(),
+          photoURL: deriveCurrentPhotoURL(),
+          mentions,
+          replyTo: replyRef ?? undefined
         },
-        text: trimmed,
-        mentions
+        mentionProfiles: profiles
       });
     } catch (err) {
+      restoreThreadReply(replyRef);
       console.error(err);
       alert(`Failed to send thread reply: ${err instanceof Error ? err.message : err}`);
     }
   }
 
-  async function handleThreadSendGif() {
-    alert('GIFs are not supported inside threads yet.');
+  async function handleThreadSendGif(
+    detail: string | { url: string; replyTo?: ReplyReferenceInput | null }
+  ) {
+    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
+    if (!trimmed) return;
+    const info = threadChannelInfo(activeThread, activeChannel?.id ?? null);
+    if (!info) { alert('Open a thread before replying.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeThreadReply(
+      typeof detail === 'object' ? detail?.replyTo ?? null : null
+    );
+    try {
+      await sendThreadMessage({
+        serverId: info.serverId,
+        channelId: info.channelId,
+        threadId: info.thread.id,
+        message: {
+          type: 'gif',
+          url: trimmed,
+          uid: $user.uid,
+          displayName: deriveCurrentDisplayName(),
+          photoURL: deriveCurrentPhotoURL(),
+          replyTo: replyRef ?? undefined
+        },
+        mentionProfiles: profiles
+      });
+    } catch (err) {
+      restoreThreadReply(replyRef);
+      console.error(err);
+      alert(`Failed to share GIF: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
-  async function handleThreadUploadFiles() {
-    alert('File uploads are not supported inside threads yet.');
+  async function handleThreadUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
+    const selection = Array.from(request?.files ?? []).filter(
+      (file): file is File => file instanceof File
+    );
+    if (!selection.length) return;
+    const info = threadChannelInfo(activeThread, activeChannel?.id ?? null);
+    if (!info) { alert('Open a thread before uploading.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumeThreadReply(request?.replyTo ?? null);
+    let replyUsed = false;
+    const identity = {
+      uid: $user.uid,
+      displayName: deriveCurrentDisplayName(),
+      photoURL: deriveCurrentPhotoURL()
+    };
+    for (const file of selection) {
+      const pending = registerPendingUpload(file, 'thread');
+      try {
+        const uploaded = await uploadChannelFile({
+          serverId: info.serverId,
+          channelId: info.channelId,
+          uid: $user.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendThreadMessage({
+          serverId: info.serverId,
+          channelId: info.channelId,
+          threadId: info.thread.id,
+          message: {
+            type: 'file',
+            file: {
+              name: file.name || uploaded.name,
+              url: uploaded.url,
+              size: file.size ?? uploaded.size,
+              contentType: file.type || uploaded.contentType,
+              storagePath: uploaded.storagePath
+            },
+            ...identity,
+            replyTo: !replyUsed && replyRef ? replyRef : undefined
+          },
+          mentionProfiles: profiles
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+      } catch (err) {
+        pending.finish(false);
+        if (replyRef && !replyUsed) {
+          restoreThreadReply(replyRef);
+        }
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
   }
 
   async function handleThreadCreatePoll() {
@@ -1593,6 +1921,239 @@ function sidebarThreadList() {
   }
 
   async function handleThreadCreateForm() {
+    alert('Forms are not supported inside threads yet.');
+  }
+
+  const threadChannelInfo = (thread: ChannelThread | null, fallbackChannelId: string | null = null) => {
+    if (!thread) return null;
+    const channelId = thread.parentChannelId ?? thread.channelId ?? fallbackChannelId;
+    const serverRef = thread.serverId ?? serverId;
+    if (!channelId || !serverRef) return null;
+    return {
+      serverId: serverRef,
+      channelId,
+      thread
+    };
+  };
+
+  function attachFloatingThreadStream(thread: ChannelThread | null) {
+    floatingThreadStream?.();
+    floatingThreadStream = null;
+    floatingThreadMessages = [];
+    floatingThreadLastServerId = null;
+    floatingThreadLastChannelId = null;
+    floatingThreadLastThreadId = null;
+    const info = threadChannelInfo(thread);
+    if (!info) return;
+    floatingThreadLastServerId = info.serverId;
+    floatingThreadLastChannelId = info.channelId;
+    floatingThreadLastThreadId = info.thread.id;
+    floatingThreadStream = streamThreadMessages(
+      info.serverId,
+      info.channelId,
+      info.thread.id,
+      (list) => {
+        floatingThreadMessages = list;
+        if ($user?.uid) {
+          const last = list[list.length - 1];
+          const at = last?.createdAt ?? null;
+          const lastId = last?.id ?? null;
+          void markThreadReadThread($user.uid, info.serverId, info.channelId, info.thread.id, {
+            at,
+            lastMessageId: lastId
+          });
+        }
+      }
+    );
+  }
+
+  function openThreadPopout() {
+    if (isMobile) return;
+    if (!activeThread || !activeThreadRoot) return;
+    floatingThread = { thread: activeThread, root: activeThreadRoot };
+    floatingThreadVisible = true;
+    floatingThreadReplyTarget = null;
+    floatingThreadPendingUploads = [];
+    floatingThreadDefaultSuggestionSource = null;
+    floatingThreadPosition = { x: 0, y: 0 };
+    attachFloatingThreadStream(activeThread);
+    closeThreadView();
+  }
+
+  function closeFloatingThread() {
+    floatingThreadVisible = false;
+    floatingThread = null;
+    floatingThreadMessages = [];
+    floatingThreadReplyTarget = null;
+    floatingThreadConversationContext = [];
+    floatingThreadPendingUploads = [];
+    floatingThreadDefaultSuggestionSource = null;
+    floatingThreadStream?.();
+    floatingThreadStream = null;
+    floatingThreadLastChannelId = null;
+    floatingThreadLastServerId = null;
+    floatingThreadLastThreadId = null;
+    floatingThreadPosition = { x: 0, y: 0 };
+    floatingThreadDragActive = false;
+    resetFloatingThreadDragListeners();
+  }
+
+  async function handleFloatingThreadSend(
+    payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }
+  ) {
+    const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
+    const trimmed = raw?.trim?.() ?? '';
+    if (!trimmed) return;
+    const info = threadChannelInfo(floatingThread?.thread ?? null);
+    if (!info) {
+      alert('Open a thread before replying.');
+      return;
+    }
+    if (!$user) {
+      alert('Sign in to send messages.');
+      return;
+    }
+    const replyRef = consumeFloatingThreadReply(
+      typeof payload === 'object' ? payload?.replyTo ?? null : null
+    );
+    const mentions = normalizeMentionSendList(
+      typeof payload === 'object' ? payload?.mentions ?? [] : []
+    );
+    try {
+      await sendThreadMessage({
+        serverId: info.serverId,
+        channelId: info.channelId,
+        threadId: info.thread.id,
+        message: {
+          type: 'text',
+          text: trimmed,
+          uid: $user.uid,
+          displayName: deriveCurrentDisplayName(),
+          photoURL: deriveCurrentPhotoURL(),
+          mentions,
+          replyTo: replyRef ?? undefined
+        },
+        mentionProfiles: profiles
+      });
+    } catch (err) {
+      restoreFloatingThreadReply(replyRef);
+      console.error(err);
+      alert(`Failed to send thread reply: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  async function handleFloatingThreadSendGif(
+    detail: string | { url: string; replyTo?: ReplyReferenceInput | null }
+  ) {
+    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
+    if (!trimmed) return;
+    const info = threadChannelInfo(floatingThread?.thread ?? null);
+    if (!info) {
+      alert('Open a thread before replying.');
+      return;
+    }
+    if (!$user) {
+      alert('Sign in to send messages.');
+      return;
+    }
+    const replyRef = consumeFloatingThreadReply(
+      typeof detail === 'object' ? detail?.replyTo ?? null : null
+    );
+    try {
+      await sendThreadMessage({
+        serverId: info.serverId,
+        channelId: info.channelId,
+        threadId: info.thread.id,
+        message: {
+          type: 'gif',
+          url: trimmed,
+          uid: $user.uid,
+          displayName: deriveCurrentDisplayName(),
+          photoURL: deriveCurrentPhotoURL(),
+          replyTo: replyRef ?? undefined
+        },
+        mentionProfiles: profiles
+      });
+    } catch (err) {
+      restoreFloatingThreadReply(replyRef);
+      console.error(err);
+      alert(`Failed to share GIF: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  async function handleFloatingThreadUploadFiles(request: {
+    files: File[];
+    replyTo?: ReplyReferenceInput | null;
+  }) {
+    const selection = Array.from(request?.files ?? []).filter(
+      (file): file is File => file instanceof File
+    );
+    if (!selection.length) return;
+    const info = threadChannelInfo(floatingThread?.thread ?? null);
+    if (!info) {
+      alert('Open a thread before uploading.');
+      return;
+    }
+    if (!$user) {
+      alert('Sign in to send messages.');
+      return;
+    }
+    const replyRef = consumeFloatingThreadReply(request?.replyTo ?? null);
+    let replyUsed = false;
+    const identity = {
+      uid: $user.uid,
+      displayName: deriveCurrentDisplayName(),
+      photoURL: deriveCurrentPhotoURL()
+    };
+    for (const file of selection) {
+      const pending = registerPendingUpload(file, 'floatingThread');
+      try {
+        const uploaded = await uploadChannelFile({
+          serverId: info.serverId,
+          channelId: info.channelId,
+          uid: $user.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendThreadMessage({
+          serverId: info.serverId,
+          channelId: info.channelId,
+          threadId: info.thread.id,
+          message: {
+            type: 'file',
+            file: {
+              name: file.name || uploaded.name,
+              url: uploaded.url,
+              size: file.size ?? uploaded.size,
+              contentType: file.type || uploaded.contentType,
+              storagePath: uploaded.storagePath
+            },
+            ...identity,
+            replyTo: !replyUsed && replyRef ? replyRef : undefined
+          },
+          mentionProfiles: profiles
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+      } catch (err) {
+        pending.finish(false);
+        if (replyRef && !replyUsed) {
+          restoreFloatingThreadReply(replyRef);
+        }
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
+  }
+
+  async function handleFloatingThreadCreatePoll() {
+    alert('Polls are not supported inside threads yet.');
+  }
+
+  async function handleFloatingThreadCreateForm() {
     alert('Forms are not supported inside threads yet.');
   }
 
@@ -1640,11 +2201,16 @@ function sidebarThreadList() {
   function activateThreadView(thread: ChannelThread, rootMessage: any) {
     activeThreadRoot = rootMessage;
     threadReplyTarget = null;
+    threadPendingUploads = [];
     activeThread = thread;
     pendingThreadId = null;
     pendingThreadRoot = null;
     attachThreadStream(thread);
     prefetchThreadMemberProfiles(thread);
+    if (isMobile && mobileVoicePane === 'chat') {
+      showThreadPanel = true;
+    }
+    scheduleThreadRead();
   }
 
   function prefetchThreadMemberProfiles(thread: ChannelThread | null) {
@@ -1763,6 +2329,17 @@ function sidebarThreadList() {
     }
   }
 
+  function openLatestThreadShortcut(): boolean {
+    if (!serverId || !activeChannel?.id || !channelThreads.length) return false;
+    const next = channelThreads.find((thread) => thread.status !== 'archived');
+    if (!next) return false;
+    void openThreadFromSidebar({
+      id: next.id,
+      parentChannelId: next.parentChannelId ?? activeChannel.id
+    });
+    return true;
+  }
+
   async function ensureChannelActive(channelId: string) {
     if (!channelId) return false;
     if (activeChannel?.id === channelId) return true;
@@ -1834,10 +2411,16 @@ function sidebarThreadList() {
     threadReplyTarget = null;
     threadMessages = [];
     threadConversationContext = [];
+    threadPendingUploads = [];
     threadDefaultSuggestionSource = null;
     pendingThreadId = null;
     pendingThreadRoot = null;
+    clearThreadReadTimer();
+    showThreadPanel = false;
+    showThreadMembersSheet = false;
     attachThreadStream(null);
+    stopThreadResize();
+    channelHeaderEl?.focusHeader?.();
   }
 
   function handleThreadReplySelect(event: CustomEvent<{ message: any }>) {
@@ -1848,11 +2431,43 @@ function sidebarThreadList() {
   function resetThreadReplyTarget() {
     threadReplyTarget = null;
   }
+
+  function handleFloatingThreadReplySelect(event: CustomEvent<{ message: any }>) {
+    const ref =
+      buildReplyReference(event.detail?.message) ??
+      buildReplyReference(floatingThread?.root ?? null);
+    floatingThreadReplyTarget = ref;
+  }
+
+  function resetFloatingThreadReplyTarget() {
+    floatingThreadReplyTarget = null;
+  }
   run(() => {
     const scope = serverId ?? null;
     if (scope !== threadServerScope) {
       threadServerScope = scope;
       resetThreadState({ resetCache: true });
+    }
+  });
+  run(() => {
+    if (floatingThreadVisible && !floatingThread?.thread) {
+      closeFloatingThread();
+    }
+  });
+  run(() => {
+    if (floatingThreadVisible && isMobile) {
+      closeFloatingThread();
+    }
+  });
+  run(() => {
+    const currentFloating = floatingThread;
+    if (!currentFloating?.thread) return;
+    const parentId = currentFloating.thread.parentChannelId ?? currentFloating.thread.channelId ?? null;
+    const updated =
+      channelThreads.find((thread) => thread.id === currentFloating.thread?.id) ??
+      (parentId ? (threadsByChannel[parentId] ?? []).find((thread) => thread.id === currentFloating.thread?.id) ?? null : null);
+    if (updated && currentFloating.thread !== updated) {
+      floatingThread = { ...currentFloating, thread: updated };
     }
   });
   run(() => {
@@ -1970,6 +2585,20 @@ function sidebarThreadList() {
     }
   });
   run(() => {
+    const threadId = activeThread?.id ?? null;
+    if (threadId !== lastThreadUploadThreadId) {
+      lastThreadUploadThreadId = threadId;
+      threadPendingUploads = [];
+    }
+  });
+  run(() => {
+    const floatingId = floatingThread?.thread?.id ?? null;
+    if (floatingId !== lastFloatingUploadThreadId) {
+      lastFloatingUploadThreadId = floatingId;
+      floatingThreadPendingUploads = [];
+    }
+  });
+  run(() => {
     const visible = !!(voiceState && voiceState.visible);
     if (visible !== lastVoiceVisible) {
       lastVoiceVisible = visible;
@@ -2028,6 +2657,18 @@ function sidebarThreadList() {
     }
   });
   run(() => {
+    if (!isMobile || mobileVoicePane !== 'chat' || !activeThread) {
+      if (showThreadPanel) {
+        showThreadPanel = false;
+      }
+      return;
+    }
+    if (!showThreadPanel) {
+      showThreadPanel = true;
+      scheduleThreadRead();
+    }
+  });
+  run(() => {
     if ($user?.uid) {
       const fallbackPhoto = pickString($user.photoURL) ?? null;
       updateProfileCache($user.uid, {
@@ -2080,9 +2721,51 @@ function sidebarThreadList() {
     threadDefaultSuggestionSource = latestAuthored;
   });
   run(() => {
+    if (!floatingThreadVisible || !floatingThread) {
+      floatingThreadConversationContext = [];
+      floatingThreadDefaultSuggestionSource = null;
+      return;
+    }
+    const contextSources = [floatingThread.root, ...floatingThreadMessages].filter(Boolean).slice(-10);
+    floatingThreadConversationContext = contextSources;
+    const latestAuthored =
+      [...floatingThreadMessages].reverse().find(
+        (msg) => (msg as any)?.authorId ?? (msg as any)?.uid
+      ) ?? (floatingThread.root?.uid ? floatingThread.root : null);
+    if (!latestAuthored) {
+      floatingThreadDefaultSuggestionSource = null;
+      return;
+    }
+    const latestUid =
+      (latestAuthored as any)?.authorId ??
+      (latestAuthored as any)?.uid ??
+      null;
+    if ($user?.uid && latestUid === $user.uid) {
+      floatingThreadDefaultSuggestionSource = null;
+      return;
+    }
+    floatingThreadDefaultSuggestionSource = latestAuthored;
+  });
+  run(() => {
     if (!activeThread) {
       threadReplyTarget = null;
+      showThreadMembersSheet = false;
     }
+  });
+  run(() => {
+    if (!activeThread) {
+      clearThreadReadTimer();
+    }
+  });
+  run(() => {
+    if (!showThreadMembersSheet) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        showThreadMembersSheet = false;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   });
   run(() => {
     if (serverId) {
@@ -2187,6 +2870,7 @@ function sidebarThreadList() {
           threads={sidebarThreadList()}
           activeThreadId={activeThread?.id ?? null}
           onPickThread={(thread) => void openThreadFromSidebar(thread)}
+          threadUnreadByChannel={channelThreadUnread}
         />
       {:else}
         <div class="p-4 text-white/70">Select a server from the left to view channels.</div>
@@ -2195,6 +2879,7 @@ function sidebarThreadList() {
 
     <div class="flex flex-1 min-w-0 flex-col panel" style="border-radius: var(--radius-sm);">
       <ChannelHeader
+        bind:this={channelHeaderEl}
         channel={activeChannel}
         thread={activeThread}
         channelsVisible={showChannels}
@@ -2210,7 +2895,8 @@ function sidebarThreadList() {
         onExitThread={() => closeThreadView()}
       />
 
-      <div class="flex-1 panel-muted flex flex-col min-h-0">
+      <div class="flex flex-1 min-h-0">
+        <div class="flex-1 panel-muted flex flex-col min-h-0">
         {#if isMobile && voiceState && voiceState.visible}
           <div class="mobile-call-wrapper md:hidden" ontouchstart={handleMobilePaneTouchStart} ontouchmove={handleMobilePaneTouchMove} ontouchend={handleMobilePaneTouchEnd}>
             <div class="mobile-call-tabs">
@@ -2240,69 +2926,43 @@ function sidebarThreadList() {
               </div>
             {:else}
               <div class="mobile-chat-card">
-                {#if activeThread}
-                  <ThreadPane
-                    root={activeThreadRoot}
-                    messages={threadMessages}
-                    users={profiles}
-                    currentUserId={$user?.uid ?? null}
-                    mentionOptions={mentionOptions}
-                    pendingUploads={[]}
-                    aiAssistEnabled={aiAssistEnabled}
-                    threadLabel={resolveThreadTitle()}
-                    conversationContext={threadConversationContext}
-                    replyTarget={threadReplyTarget}
-                    defaultSuggestionSource={threadDefaultSuggestionSource}
-                    members={resolveThreadMembers()}
-                    threadStatus={activeThread?.status ?? null}
-                    on:close={closeThreadView}
-                    on:send={(event) => handleThreadSend(event.detail)}
-                    on:sendGif={handleThreadSendGif}
-                    on:upload={handleThreadUploadFiles}
-                    on:createPoll={handleThreadCreatePoll}
-                    on:createForm={handleThreadCreateForm}
-                    on:reply={handleThreadReplySelect}
-                    on:cancelReply={resetThreadReplyTarget}
-                  />
-                {:else}
-                  <ChannelMessagePane
-                    hasChannel={Boolean(serverId && activeChannel)}
-                    channelName={activeChannel?.name ?? ''}
-                    {messages}
-                    {profiles}
-                    currentUserId={$user?.uid ?? null}
-                    {mentionOptions}
-                    {replyTarget}
-                    threadStats={threadStats}
-                    defaultSuggestionSource={latestInboundMessage}
-                    conversationContext={aiConversationContext}
-                    aiAssistEnabled={aiAssistEnabled}
-                    threadLabel={activeChannel?.name ?? ''}
-                    {pendingUploads}
-                    {scrollToBottomSignal}
-                    scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
-                    listClass="message-scroll-region flex-1 overflow-y-auto p-3"
-                    inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
-                    inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
-                    emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-                    onVote={handleVote}
-                    onSubmitForm={handleFormSubmit}
-                    onReact={handleReaction}
-                    onLoadMore={() => {
-                      if (serverId && activeChannel?.id) {
-                        loadOlderMessages(serverId, activeChannel.id);
-                      }
-                    }}
-                    onSend={handleSend}
-                    onSendGif={handleSendGif}
-                    onCreatePoll={handleCreatePoll}
-                    onCreateForm={handleCreateForm}
-                    onUploadFiles={handleUploadFiles}
-                    on:reply={handleReplyRequest}
-                    on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
-                    on:cancelReply={() => (replyTarget = null)}
-                  />
-                {/if}
+                <ChannelMessagePane
+                  hasChannel={Boolean(serverId && activeChannel)}
+                  channelName={activeChannel?.name ?? ''}
+                  {messages}
+                  {profiles}
+                  currentUserId={$user?.uid ?? null}
+                  {mentionOptions}
+                  {replyTarget}
+                  threadStats={threadStats}
+                  defaultSuggestionSource={latestInboundMessage}
+                  conversationContext={aiConversationContext}
+                  aiAssistEnabled={aiAssistEnabled}
+                  threadLabel={activeChannel?.name ?? ''}
+                  {pendingUploads}
+                  {scrollToBottomSignal}
+                  scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+                  listClass="message-scroll-region flex-1 overflow-y-auto p-3"
+                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
+                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                  emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+                  onVote={handleVote}
+                  onSubmitForm={handleFormSubmit}
+                  onReact={handleReaction}
+                  onLoadMore={() => {
+                    if (serverId && activeChannel?.id) {
+                      loadOlderMessages(serverId, activeChannel.id);
+                    }
+                  }}
+                  onSend={handleSend}
+                  onSendGif={handleSendGif}
+                  onCreatePoll={handleCreatePoll}
+                  onCreateForm={handleCreateForm}
+                  onUploadFiles={handleUploadFiles}
+                  on:reply={handleReplyRequest}
+                  on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+                  on:cancelReply={() => (replyTarget = null)}
+                />
               </div>
             {/if}
           </div>
@@ -2368,79 +3028,101 @@ function sidebarThreadList() {
             </div>
           {/if}
 
-          {#if activeThread}
-            <ThreadPane
-              root={activeThreadRoot}
-              messages={threadMessages}
-              users={profiles}
-              currentUserId={$user?.uid ?? null}
-              mentionOptions={mentionOptions}
-              pendingUploads={[]}
-              aiAssistEnabled={aiAssistEnabled}
-              threadLabel={resolveThreadTitle()}
-              conversationContext={threadConversationContext}
-              replyTarget={threadReplyTarget}
-              defaultSuggestionSource={threadDefaultSuggestionSource}
-              members={resolveThreadMembers()}
-              threadStatus={activeThread?.status ?? null}
-              on:close={closeThreadView}
-              on:send={(event) => handleThreadSend(event.detail)}
-              on:sendGif={handleThreadSendGif}
-              on:upload={handleThreadUploadFiles}
-              on:createPoll={handleThreadCreatePoll}
-              on:createForm={handleThreadCreateForm}
-              on:reply={handleThreadReplySelect}
-              on:cancelReply={resetThreadReplyTarget}
-            />
-          {:else}
-            <ChannelMessagePane
-              hasChannel={Boolean(serverId && activeChannel)}
-              channelName={activeChannel?.name ?? ''}
-              {messages}
-              {profiles}
-              currentUserId={$user?.uid ?? null}
-              {mentionOptions}
-              {replyTarget}
-              threadStats={threadStats}
-              defaultSuggestionSource={latestInboundMessage}
-              conversationContext={aiConversationContext}
-              aiAssistEnabled={aiAssistEnabled}
-              threadLabel={activeChannel?.name ?? ''}
-              {pendingUploads}
-              {scrollToBottomSignal}
-              scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
-              emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-              onVote={handleVote}
-              onSubmitForm={handleFormSubmit}
-              onReact={handleReaction}
-              onLoadMore={() => {
-                if (serverId && activeChannel?.id) {
-                  loadOlderMessages(serverId, activeChannel.id);
-                }
-              }}
-              onSend={handleSend}
-              onSendGif={handleSendGif}
-              onCreatePoll={handleCreatePoll}
-              onCreateForm={handleCreateForm}
-              onUploadFiles={handleUploadFiles}
-              on:reply={handleReplyRequest}
-              on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
-              on:cancelReply={() => (replyTarget = null)}
-            />
-          {/if}
+          <ChannelMessagePane
+            hasChannel={Boolean(serverId && activeChannel)}
+            channelName={activeChannel?.name ?? ''}
+            {messages}
+            {profiles}
+            currentUserId={$user?.uid ?? null}
+            {mentionOptions}
+            {replyTarget}
+            threadStats={threadStats}
+            defaultSuggestionSource={latestInboundMessage}
+            conversationContext={aiConversationContext}
+            aiAssistEnabled={aiAssistEnabled}
+            threadLabel={activeChannel?.name ?? ''}
+            {pendingUploads}
+            {scrollToBottomSignal}
+            scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+            emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+            onVote={handleVote}
+            onSubmitForm={handleFormSubmit}
+            onReact={handleReaction}
+            onLoadMore={() => {
+              if (serverId && activeChannel?.id) {
+                loadOlderMessages(serverId, activeChannel.id);
+              }
+            }}
+            onSend={handleSend}
+            onSendGif={handleSendGif}
+            onCreatePoll={handleCreatePoll}
+            onCreateForm={handleCreateForm}
+            onUploadFiles={handleUploadFiles}
+            on:reply={handleReplyRequest}
+            on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+            on:cancelReply={() => (replyTarget = null)}
+          />
         {/if}
-      </div>
-    </div>
+        </div>
 
-    <div class="hidden lg:flex lg:w-80 panel-muted border-l border-subtle overflow-y-auto">
-      {#if activeThread}
-        {@const threadMembers = resolveThreadMembers()}
-        <ThreadMembersPane members={threadMembers} threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'} />
-      {:else if serverId}
-        <MembersPane {serverId} />
-      {:else}
-        <div class="p-4 text-muted">No server selected.</div>
-      {/if}
+        <div class="hidden lg:flex items-stretch">
+          {#if activeThread}
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <div
+              class={`thread-resize-handle ${threadResizeActive ? 'is-active' : ''}`}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize thread pane"
+              tabindex="0"
+              onpointerdown={handleThreadResizeStart}
+              onkeydown={handleThreadResizeKeydown}
+            ></div>
+            <div class="thread-pane-desktop border-l border-subtle panel-muted" style={`width:${threadPaneWidth}px`}>
+              <ThreadPane
+                root={activeThreadRoot}
+                messages={threadMessages}
+                users={profiles}
+                currentUserId={$user?.uid ?? null}
+                mentionOptions={mentionOptions}
+                pendingUploads={threadPendingUploads}
+                aiAssistEnabled={aiAssistEnabled}
+                threadLabel={resolveThreadTitle()}
+                parentChannelName={parentChannelNameForThread(activeThread, activeChannel)}
+                isMobileView={false}
+                popoutEnabled={!isMobile}
+                showCloseButton={true}
+                conversationContext={threadConversationContext}
+                replyTarget={threadReplyTarget}
+                defaultSuggestionSource={threadDefaultSuggestionSource}
+                members={resolveThreadMembers()}
+                threadStatus={activeThread?.status ?? null}
+                on:close={closeThreadView}
+                on:popout={openThreadPopout}
+                on:send={(event) => handleThreadSend(event.detail)}
+                on:sendGif={(event) => handleThreadSendGif(event.detail)}
+                on:upload={(event) => handleThreadUploadFiles(event.detail)}
+                on:createPoll={handleThreadCreatePoll}
+                on:createForm={handleThreadCreateForm}
+                on:reply={handleThreadReplySelect}
+                on:cancelReply={resetThreadReplyTarget}
+                on:openMembers={() => {
+                  threadMembersContext = 'active';
+                  showThreadMembersSheet = true;
+                }}
+              />
+            </div>
+          {:else}
+            <div class="thread-pane-desktop border-l border-subtle panel-muted" style="width:320px">
+              {#if serverId}
+                <MembersPane {serverId} />
+              {:else}
+                <div class="p-4 text-muted">No server selected.</div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -2481,6 +3163,7 @@ function sidebarThreadList() {
             void openThreadFromSidebar(thread);
           }}
           on:pick={() => (showChannels = false)}
+          threadUnreadByChannel={channelThreadUnread}
         />
       {:else}
         <div class="p-4 text-white/70">Select a server to view channels.</div>
@@ -2521,6 +3204,132 @@ function sidebarThreadList() {
     {/if}
   </div>
 </div>
+
+<!-- Thread panel (slides from right) -->
+<div
+  class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform thread-panel"
+  class:mobile-panel--dragging={threadSwipeActive}
+  style:transform={threadTransform}
+  style:pointer-events={activeThread && showThreadPanel ? 'auto' : 'none'}
+  aria-label="Thread view"
+  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
+>
+  <div class="flex-1 panel-muted flex flex-col min-h-0">
+    {#if activeThread}
+      <ThreadPane
+        root={activeThreadRoot}
+        messages={threadMessages}
+        users={profiles}
+        currentUserId={$user?.uid ?? null}
+        mentionOptions={mentionOptions}
+        pendingUploads={threadPendingUploads}
+        aiAssistEnabled={aiAssistEnabled}
+        threadLabel={resolveThreadTitle()}
+        parentChannelName={parentChannelNameForThread(activeThread, activeChannel)}
+        isMobileView={true}
+        popoutEnabled={false}
+        showCloseButton={true}
+        conversationContext={threadConversationContext}
+        replyTarget={threadReplyTarget}
+        defaultSuggestionSource={threadDefaultSuggestionSource}
+        members={resolveThreadMembers()}
+        threadStatus={activeThread?.status ?? null}
+        on:close={closeThreadView}
+        on:send={(event) => handleThreadSend(event.detail)}
+        on:sendGif={(event) => handleThreadSendGif(event.detail)}
+        on:upload={(event) => handleThreadUploadFiles(event.detail)}
+        on:createPoll={handleThreadCreatePoll}
+        on:createForm={handleThreadCreateForm}
+        on:reply={handleThreadReplySelect}
+        on:cancelReply={resetThreadReplyTarget}
+        on:openMembers={() => {
+          threadMembersContext = 'active';
+          showThreadMembersSheet = true;
+        }}
+      />
+    {:else}
+      <div class="flex-1 flex items-center justify-center text-soft">
+        No thread selected.
+      </div>
+    {/if}
+  </div>
+</div>
+
+{#if floatingThreadVisible && floatingThread?.thread}
+  <div class="thread-popout-overlay">
+    <div
+      class="thread-popout-window"
+      style={`--thread-popout-x:${floatingThreadPosition.x}px; --thread-popout-y:${floatingThreadPosition.y}px;`}
+    >
+      <div
+        class="thread-popout-header"
+        onpointerdown={handleFloatingHeaderPointerDown}
+      >
+        <div class="thread-popout-title">
+          <span>{resolveThreadTitle(floatingThread.thread, floatingThread.root) || floatingThread.thread.name || 'Thread'}</span>
+        </div>
+        <button type="button" class="thread-popout-close" aria-label="Close floating thread" onclick={closeFloatingThread}>
+          <i class="bx bx-x"></i>
+        </button>
+      </div>
+      <ThreadPane
+        root={floatingThread.root}
+        messages={floatingThreadMessages}
+        users={profiles}
+        currentUserId={$user?.uid ?? null}
+        mentionOptions={mentionOptions}
+        pendingUploads={floatingThreadPendingUploads}
+        aiAssistEnabled={aiAssistEnabled}
+        threadLabel={resolveThreadTitle(floatingThread.thread, floatingThread.root)}
+        parentChannelName={parentChannelNameForThread(floatingThread.thread, activeChannel)}
+        isMobileView={false}
+        popoutEnabled={false}
+        showCloseButton={false}
+        conversationContext={floatingThreadConversationContext}
+        replyTarget={floatingThreadReplyTarget}
+        defaultSuggestionSource={floatingThreadDefaultSuggestionSource}
+        members={resolveThreadMembers(floatingThread.thread)}
+        threadStatus={floatingThread.thread?.status ?? null}
+        on:close={closeFloatingThread}
+        on:send={(event) => handleFloatingThreadSend(event.detail)}
+        on:sendGif={(event) => handleFloatingThreadSendGif(event.detail)}
+        on:upload={(event) => handleFloatingThreadUploadFiles(event.detail)}
+        on:createPoll={handleFloatingThreadCreatePoll}
+        on:createForm={handleFloatingThreadCreateForm}
+        on:reply={handleFloatingThreadReplySelect}
+        on:cancelReply={resetFloatingThreadReplyTarget}
+        on:openMembers={() => {
+          threadMembersContext = 'floating';
+          showThreadMembersSheet = true;
+        }}
+      />
+    </div>
+  </div>
+{/if}
+
+{#if showThreadMembersSheet && (activeThread || floatingThread?.thread)}
+  {@const sheetThread = threadMembersContext === 'floating' ? floatingThread?.thread ?? null : activeThread}
+  {@const sheetName = threadMembersContext === 'floating'
+    ? resolveThreadTitle(sheetThread, floatingThread?.root ?? null) || sheetThread?.name || 'Thread'
+    : resolveThreadTitle(sheetThread ?? activeThread, sheetThread === activeThread ? activeThreadRoot : null) || 'Thread'}
+  <div class="thread-members-sheet md:hidden" role="dialog" aria-modal="true">
+    <button
+      class="thread-members-sheet__backdrop"
+      type="button"
+      aria-label="Close members list"
+      onclick={() => (showThreadMembersSheet = false)}
+    ></button>
+    <div class="thread-members-sheet__body">
+      <div class="thread-members-sheet__header">
+        <span>Thread members</span>
+        <button type="button" class="thread-members-sheet__close" aria-label="Close" onclick={() => (showThreadMembersSheet = false)}>
+          <i class="bx bx-x"></i>
+        </button>
+      </div>
+      <ThreadMembersPane members={resolveThreadMembers(sheetThread)} threadName={sheetName} />
+    </div>
+  </div>
+{/if}
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
 <style>
@@ -2564,6 +3373,173 @@ function sidebarThreadList() {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .thread-pane-desktop {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .thread-resize-handle {
+    width: 12px;
+    cursor: col-resize;
+    position: relative;
+    background: transparent;
+    outline: none;
+    border: none;
+    padding: 0;
+  }
+
+  .thread-resize-handle::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    opacity: 0.6;
+  }
+
+  .thread-resize-handle:hover::after,
+  .thread-resize-handle:focus-visible::after,
+  .thread-resize-handle.is-active::after {
+    background: var(--color-accent);
+    opacity: 1;
+  }
+
+  .thread-panel {
+    background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+  }
+
+  .thread-panel :global(.thread-pane) {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .thread-members-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    justify-content: center;
+    align-items: flex-end;
+  }
+
+  .thread-members-sheet__backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(5, 8, 18, 0.45);
+  }
+
+  .thread-members-sheet__body {
+    position: relative;
+    width: 100%;
+    max-height: 80vh;
+    background: color-mix(in srgb, var(--color-panel), transparent);
+    border-top-left-radius: 1.5rem;
+    border-top-right-radius: 1.5rem;
+    padding: 1rem;
+    box-shadow: 0 -16px 36px rgba(5, 8, 20, 0.45);
+    overflow-y: auto;
+  }
+
+  .thread-members-sheet__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .thread-members-sheet__header span {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .thread-members-sheet__close {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: transparent;
+    color: var(--color-text-primary);
+  }
+
+  .thread-members-sheet__close:hover,
+  .thread-members-sheet__close:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
+    outline: none;
+  }
+
+  .thread-popout-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    pointer-events: none;
+  }
+
+  .thread-popout-window {
+    width: min(420px, calc(100vw - 2.5rem));
+    max-height: min(80vh, 720px);
+    background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    border-radius: 1rem;
+    box-shadow: 0 24px 60px rgba(5, 8, 20, 0.45);
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: absolute;
+    right: 1.25rem;
+    bottom: 1.25rem;
+    transform: translate(var(--thread-popout-x, 0px), var(--thread-popout-y, 0px));
+  }
+
+  .thread-popout-window :global(.thread-pane) {
+    border-left: none;
+  }
+
+  .thread-popout-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+
+  .thread-popout-header:active {
+    cursor: grabbing;
+  }
+
+  .thread-popout-title {
+    font-weight: 600;
+    color: var(--color-text-primary);
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .thread-popout-close {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: transparent;
+    color: var(--color-text-primary);
+  }
+
+  .thread-popout-close:hover,
+  .thread-popout-close:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
+    outline: none;
   }
 
   .mobile-panel__channels :global(.sidebar-surface) {
