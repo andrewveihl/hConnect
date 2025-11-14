@@ -175,6 +175,7 @@ let serverDisplayName = $state('Server');
     mentionOptions = [...memberMentionOptions, ...roleMentionOptions];
   }
 
+
   function buildRoleMentionEntry(roleId: string, data: any): MentionDirectoryEntry {
     const label = pickString(data?.name) ?? 'Role';
     const color = pickString(data?.color) ?? null;
@@ -1181,6 +1182,9 @@ function sidebarThreadList() {
      =========================== */
   let showChannels = $state(false);
   let showMembers = $state(false);
+  let desktopMembersVisible = $state(true);
+  let desktopMembersPreferred = $state(true);
+  let desktopMembersWideEnough = $state(true);
   let showThreadPanel = $state(false);
   let showThreadMembersSheet = $state(false);
   let isMobile = $state(false);
@@ -1196,6 +1200,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   const EDGE_ZONE = 120;
   const SWIPE = 48;
   const SWIPE_RATIO = 0.25;
+  const DESKTOP_MEMBERS_AUTO_COLLAPSE = 1280;
 
   let tracking = false;
   let startX = 0;
@@ -1550,9 +1555,28 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     };
   }
 
+  function setupDesktopMembersWatcher() {
+    if (typeof window === 'undefined') return () => {};
+    const query = window.matchMedia(`(min-width: ${DESKTOP_MEMBERS_AUTO_COLLAPSE}px)`);
+    const update = () => {
+      const wideEnough = query.matches;
+      desktopMembersWideEnough = wideEnough;
+      desktopMembersVisible = wideEnough ? desktopMembersPreferred : false;
+    };
+    query.addEventListener('change', update);
+    update();
+    return () => {
+      query.removeEventListener('change', update);
+    };
+  }
+
   onMount(() => {
-    const cleanup = setupGestures();
-    return () => cleanup();
+    const cleanupGestures = setupGestures();
+    const cleanupMembersWatcher = setupDesktopMembersWatcher();
+    return () => {
+      cleanupGestures();
+      cleanupMembersWatcher();
+    };
   });
 
   function setMobileVoicePane(pane: 'call' | 'chat') {
@@ -2856,12 +2880,12 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   - Mobile (<768px): hide the server rail until the nav drawer opens (swipe/right button), with members on the right swipe.
   - Desktop (>=1024px): server rail + channels stay pinned; members pane opens at large breakpoints.
 -->
-<div class="flex h-dvh app-bg text-primary overflow-hidden">
+<div class="server-workspace flex h-dvh app-bg text-primary overflow-hidden">
   <div class="hidden md:flex md:shrink-0">
     <LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
   </div>
-  <div class="flex flex-1 overflow-hidden panel-muted">
-    <div class="hidden md:flex md:w-80 xl:w-80 shrink-0 flex-col border-r border-subtle">
+  <div class="server-columns flex flex-1 overflow-hidden">
+    <div class="server-columns__sidebar hidden md:flex md:w-80 xl:w-80 shrink-0 flex-col">
       {#if serverId}
         <ServerSidebar
           serverId={serverId}
@@ -2877,26 +2901,32 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
       {/if}
     </div>
 
-    <div class="flex flex-1 min-w-0 flex-col panel" style="border-radius: var(--radius-sm);">
-      <ChannelHeader
-        bind:this={channelHeaderEl}
-        channel={activeChannel}
-        thread={activeThread}
-        channelsVisible={showChannels}
-        membersVisible={showMembers}
-        onToggleChannels={() => {
-          showChannels = true;
-          showMembers = false;
-        }}
-        onToggleMembers={() => {
-          showMembers = true;
-          showChannels = false;
-        }}
-        onExitThread={() => closeThreadView()}
-      />
+    <div class="server-columns__main flex flex-1 min-w-0 flex-col panel" style="border-radius: var(--radius-sm);">
+      <div class="flex flex-1 min-h-0 relative">
+        <div class="flex flex-1 min-h-0 flex-col">
+          <ChannelHeader
+            bind:this={channelHeaderEl}
+            channel={activeChannel}
+            thread={activeThread}
+            channelsVisible={showChannels}
+            membersVisible={isMobile ? showMembers : (!activeThread && desktopMembersVisible)}
+            onToggleChannels={() => {
+              showChannels = true;
+              showMembers = false;
+            }}
+            onToggleMembers={() => {
+              if (isMobile) {
+                showMembers = true;
+                showChannels = false;
+              } else if (!activeThread) {
+                desktopMembersPreferred = !desktopMembersPreferred;
+                desktopMembersVisible = desktopMembersWideEnough ? desktopMembersPreferred : false;
+              }
+            }}
+            onExitThread={() => closeThreadView()}
+          />
 
-      <div class="flex flex-1 min-h-0">
-        <div class="flex-1 panel-muted flex flex-col min-h-0">
+          <div class="flex-1 panel-muted flex flex-col min-h-0">
         {#if isMobile && voiceState && voiceState.visible}
           <div class="mobile-call-wrapper md:hidden" ontouchstart={handleMobilePaneTouchStart} ontouchmove={handleMobilePaneTouchMove} ontouchend={handleMobilePaneTouchEnd}>
             <div class="mobile-call-tabs">
@@ -3063,65 +3093,75 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
             on:cancelReply={() => (replyTarget = null)}
           />
         {/if}
+          </div>
         </div>
 
-        <div class="hidden lg:flex items-stretch">
-          {#if activeThread}
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-            <div
-              class={`thread-resize-handle ${threadResizeActive ? 'is-active' : ''}`}
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize thread pane"
-              tabindex="0"
-              onpointerdown={handleThreadResizeStart}
-              onkeydown={handleThreadResizeKeydown}
-            ></div>
-            <div class="thread-pane-desktop border-l border-subtle panel-muted" style={`width:${threadPaneWidth}px`}>
-              <ThreadPane
-                root={activeThreadRoot}
-                messages={threadMessages}
-                users={profiles}
-                currentUserId={$user?.uid ?? null}
-                mentionOptions={mentionOptions}
-                pendingUploads={threadPendingUploads}
-                aiAssistEnabled={aiAssistEnabled}
-                threadLabel={resolveThreadTitle()}
-                parentChannelName={parentChannelNameForThread(activeThread, activeChannel)}
-                isMobileView={false}
-                popoutEnabled={!isMobile}
-                showCloseButton={true}
-                conversationContext={threadConversationContext}
-                replyTarget={threadReplyTarget}
-                defaultSuggestionSource={threadDefaultSuggestionSource}
-                members={resolveThreadMembers()}
-                threadStatus={activeThread?.status ?? null}
-                on:close={closeThreadView}
-                on:popout={openThreadPopout}
-                on:send={(event) => handleThreadSend(event.detail)}
-                on:sendGif={(event) => handleThreadSendGif(event.detail)}
-                on:upload={(event) => handleThreadUploadFiles(event.detail)}
-                on:createPoll={handleThreadCreatePoll}
-                on:createForm={handleThreadCreateForm}
-                on:reply={handleThreadReplySelect}
-                on:cancelReply={resetThreadReplyTarget}
-                on:openMembers={() => {
-                  threadMembersContext = 'active';
-                  showThreadMembersSheet = true;
-                }}
-              />
-            </div>
-          {:else}
-            <div class="thread-pane-desktop border-l border-subtle panel-muted" style="width:320px">
-              {#if serverId}
-                <MembersPane {serverId} />
-              {:else}
-                <div class="p-4 text-muted">No server selected.</div>
-              {/if}
-            </div>
-          {/if}
-        </div>
+        {#if activeThread || desktopMembersVisible}
+          <div class="server-columns__members hidden lg:flex items-stretch">
+            {#if activeThread}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div
+                class={`thread-resize-handle ${threadResizeActive ? 'is-active' : ''}`}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize thread pane"
+                tabindex="0"
+                onpointerdown={handleThreadResizeStart}
+                onkeydown={handleThreadResizeKeydown}
+              ></div>
+              <div class="thread-pane-desktop panel-muted server-columns__members-pane" style={`width:${threadPaneWidth}px`}>
+                <ThreadPane
+                  root={activeThreadRoot}
+                  messages={threadMessages}
+                  users={profiles}
+                  currentUserId={$user?.uid ?? null}
+                  mentionOptions={mentionOptions}
+                  pendingUploads={threadPendingUploads}
+                  aiAssistEnabled={aiAssistEnabled}
+                  threadLabel={resolveThreadTitle()}
+                  parentChannelName={parentChannelNameForThread(activeThread, activeChannel)}
+                  isMobileView={false}
+                  popoutEnabled={!isMobile}
+                  showCloseButton={true}
+                  conversationContext={threadConversationContext}
+                  replyTarget={threadReplyTarget}
+                  defaultSuggestionSource={threadDefaultSuggestionSource}
+                  members={resolveThreadMembers()}
+                  threadStatus={activeThread?.status ?? null}
+                  on:close={closeThreadView}
+                  on:popout={openThreadPopout}
+                  on:send={(event) => handleThreadSend(event.detail)}
+                  on:sendGif={(event) => handleThreadSendGif(event.detail)}
+                  on:upload={(event) => handleThreadUploadFiles(event.detail)}
+                  on:createPoll={handleThreadCreatePoll}
+                  on:createForm={handleThreadCreateForm}
+                  on:reply={handleThreadReplySelect}
+                  on:cancelReply={resetThreadReplyTarget}
+                  on:openMembers={() => {
+                    threadMembersContext = 'active';
+                    showThreadMembersSheet = true;
+                  }}
+                />
+              </div>
+            {:else}
+              <div class="thread-pane-desktop panel-muted server-columns__members-pane" style="width:320px">
+                {#if serverId}
+                  <MembersPane
+                    {serverId}
+                    onHide={() => {
+                      desktopMembersPreferred = false;
+                      desktopMembersVisible = false;
+                    }}
+                  />
+                {:else}
+                  <div class="p-4 text-muted">No server selected.</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
       </div>
     </div>
   </div>
@@ -3204,6 +3244,21 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     {/if}
   </div>
 </div>
+
+{#if !isMobile && !activeThread && desktopMembersWideEnough && !desktopMembersVisible}
+  <button
+    type="button"
+    class="members-pane-handle hidden lg:flex"
+    aria-label="Show members panel"
+    title="Show members"
+    onclick={() => {
+      desktopMembersPreferred = true;
+      desktopMembersVisible = true;
+    }}
+  >
+    <i class="bx bx-chevron-left text-xl" aria-hidden="true"></i>
+  </button>
+{/if}
 
 <!-- Thread panel (slides from right) -->
 <div
@@ -3409,6 +3464,63 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   .thread-resize-handle.is-active::after {
     background: var(--color-accent);
     opacity: 1;
+  }
+
+  .members-pane-handle {
+    position: fixed;
+    top: calc(64px + env(safe-area-inset-top, 0px));
+    right: 1.75rem;
+    z-index: 60;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+    color: var(--color-text-primary);
+    box-shadow: 0 10px 25px rgba(5, 8, 15, 0.35);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .members-pane-handle:hover,
+  .members-pane-handle:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
+    outline: none;
+  }
+
+  .server-workspace :global(.panel),
+  .server-workspace :global(.panel-muted),
+  .server-workspace :global(.sidebar-surface),
+  .server-workspace :global(.channel-header) {
+    border-radius: 0;
+  }
+
+  .server-columns {
+    background: var(--color-panel-muted);
+  }
+
+  .server-columns__sidebar,
+  .server-columns__members,
+  .server-columns__main {
+    min-height: 0;
+  }
+
+  .server-columns__sidebar {
+    border-right: 1px solid var(--color-border-subtle);
+  }
+
+  .server-columns__sidebar :global(.server-sidebar) {
+    border-right: none !important;
+  }
+
+  .server-columns__main {
+    border-right: 1px solid var(--color-border-subtle);
+  }
+
+  .server-columns__members-pane {
+    border-left: none;
   }
 
   .thread-panel {
