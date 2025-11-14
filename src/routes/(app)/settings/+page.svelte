@@ -9,9 +9,8 @@
   import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
   import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
 
-  import LeftPane from '$lib/components/app/LeftPane.svelte';
-  import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
-  import InvitePanel from '$lib/components/app/InvitePanel.svelte';
+import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
+import InvitePanel from '$lib/components/app/InvitePanel.svelte';
 
   interface Props {
     serverId?: string | null;
@@ -77,8 +76,10 @@ let avatarError: string | null = $state(null);
   });
 
   const themeChoices: Array<{ id: ThemeMode; label: string; description: string }> = [
+    { id: 'light', label: 'Light', description: 'Bright panels and the same teal accent palette.' },
     { id: 'dark', label: 'Dark', description: 'Charcoal surfaces with teal highlights.' },
-    { id: 'light', label: 'Light', description: 'Bright panels and the same teal accent palette.' }
+    { id: 'midnight', label: 'Midnight', description: 'Pure black panels with neon teal glow.' },
+    { id: 'holiday', label: 'Holiday', description: 'Auto palette that mirrors major celebrations.' }
   ];
 
   let themeMode: ThemeMode = $state(get(themeStore));
@@ -140,8 +141,10 @@ let avatarError: string | null = $state(null);
       enabled: aiPrefs.enabled !== false
     };
 
-    const themePref = settings.theme as ThemeMode | undefined;
-    if (themePref === 'light' || themePref === 'dark') {
+    const themePref = settings.theme as ThemeMode | 'seasonal' | undefined;
+    if (themePref === 'seasonal') {
+      setTheme('holiday', { persist: true });
+    } else if (themePref === 'light' || themePref === 'dark' || themePref === 'midnight' || themePref === 'holiday') {
       setTheme(themePref, { persist: true });
     }
   }
@@ -301,10 +304,8 @@ let avatarError: string | null = $state(null);
   }
 </script>
 
-<div class="grid grid-cols-[72px_1fr] min-h-dvh app-bg text-primary">
-  <LeftPane activeServerId={null} />
-
-  <div class="settings-shell panel">
+<div class="settings-page app-bg text-primary">
+  <div class="settings-shell">
     <header class="settings-bar">
       <div>
         <h1 class="settings-title">Account settings</h1>
@@ -492,25 +493,36 @@ let avatarError: string | null = $state(null);
 </div>
 
 <style>
+  .settings-page {
+    min-height: 100dvh;
+    background: var(--surface-root);
+  }
+
   .settings-shell {
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
-    padding: calc(env(safe-area-inset-top, 0px) + 1.75rem) 2rem 1.75rem;
-    height: 100dvh;
+    gap: 1.25rem;
+    padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) clamp(1rem, 4vw, 1.75rem) 1.75rem;
+    min-height: 100dvh;
     max-height: 100dvh;
     overflow-y: auto;
     overscroll-behavior-y: contain;
     scroll-padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
-    -webkit-overflow-scrolling: touch;
+    max-width: 960px;
+    margin: 0 auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
 
   .settings-bar {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1.5rem;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: flex-start;
+  }
+
+  .settings-shell::-webkit-scrollbar {
+    display: none;
   }
 
   .settings-title {
@@ -535,23 +547,18 @@ let avatarError: string | null = $state(null);
   .settings-placeholder {
     color: var(--text-60);
     font-size: 0.95rem;
-    background: color-mix(in srgb, var(--color-panel) 60%, transparent);
     border-radius: var(--radius-lg);
-    padding: 1.25rem 1.5rem;
-    border: 1px solid var(--color-border-subtle);
+    padding: 1rem 1.25rem;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 98%, transparent);
     width: fit-content;
   }
 
   .settings-grid {
-    display: grid;
-    gap: 1.25rem;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      'profile'
-      'notifications'
-      'ai'
-      'appearance'
-      'invite';
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    width: 100%;
   }
 
   .settings-card--profile {
@@ -576,8 +583,9 @@ let avatarError: string | null = $state(null);
 
   .settings-ai-toggle {
     display: flex;
-    gap: 1rem;
-    align-items: center;
+    flex-direction: column;
+    gap: 0.9rem;
+    align-items: flex-start;
   }
 
   .settings-switch {
@@ -635,32 +643,14 @@ let avatarError: string | null = $state(null);
     line-height: 1.35;
   }
 
-  @media (min-width: 1024px) {
-    .settings-grid {
-      grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
-      grid-template-areas:
-        'profile profile'
-        'notifications invite'
-        'ai invite'
-        'appearance invite';
-      align-items: start;
-    }
-  }
-
-  @media (min-width: 1280px) {
-    .settings-grid {
-      grid-template-columns: minmax(0, 1.65fr) minmax(0, 1.05fr);
-    }
-  }
-
   .settings-card {
-    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
-    border-radius: calc(var(--radius-lg) * 0.9);
-    border: 1px solid var(--color-border-subtle);
-    box-shadow: var(--shadow-elevated);
-    padding: 1.3rem;
+    background: color-mix(in srgb, var(--surface-root) 96%, transparent);
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    box-shadow: none;
+    padding: 1.15rem;
     display: grid;
-    gap: 0.95rem;
+    gap: 0.85rem;
     min-width: 0;
   }
 
@@ -676,20 +666,8 @@ let avatarError: string | null = $state(null);
     font-size: 0.9rem;
   }
 
-  .settings-card--accent {
-    position: relative;
-    overflow: hidden;
-  }
-
   .settings-card--accent::after {
-    content: '';
-    position: absolute;
-    inset: auto 0 -40% 55%;
-    width: 12rem;
-    height: 12rem;
-    background: color-mix(in srgb, var(--color-accent) 24%, transparent);
-    filter: blur(120px);
-    pointer-events: none;
+    display: none;
   }
 
   .settings-profile {
@@ -825,24 +803,18 @@ let avatarError: string | null = $state(null);
   }
 
   .settings-notif-grid {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 0.75rem;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @media (max-width: 1024px) {
-    .settings-notif-grid {
-      grid-template-columns: minmax(0, 1fr);
-    }
   }
 
   .settings-notif-tile {
     border-radius: var(--radius-md);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 45%, transparent);
-    padding: 0.75rem 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 98%, transparent);
+    padding: 0.85rem 1rem;
     display: grid;
-    gap: 0.5rem;
+    gap: 0.45rem;
     min-width: 0;
   }
 
@@ -876,23 +848,22 @@ let avatarError: string | null = $state(null);
   .appearance-option {
     text-align: left;
     border-radius: var(--radius-md);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 45%, transparent);
-    padding: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 98%, transparent);
+    padding: 0.9rem;
     display: grid;
     gap: 0.5rem;
-    transition: border 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+    transition: border 0.2s ease, background 0.2s ease;
   }
 
   .appearance-option:hover {
     border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-elevated);
+    background: color-mix(in srgb, var(--surface-root) 100%, transparent);
   }
 
   .appearance-option--active {
     border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
-    box-shadow: 0 16px 55px rgba(12, 18, 30, 0.35);
+    box-shadow: none;
   }
 
   .appearance-swatch {
@@ -911,23 +882,26 @@ let avatarError: string | null = $state(null);
     background: linear-gradient(135deg, rgba(32, 36, 44, 0.95), rgba(12, 15, 22, 0.85));
   }
 
+  .appearance-swatch[data-theme='midnight'] {
+    background: linear-gradient(135deg, rgba(0, 2, 4, 0.96), rgba(3, 17, 33, 0.88));
+    box-shadow: inset 0 0 0 1px rgba(20, 229, 201, 0.25);
+  }
+
+  .appearance-swatch[data-theme='holiday'] {
+    background: linear-gradient(
+      120deg,
+      rgba(3, 6, 26, 0.95),
+      rgba(255, 126, 167, 0.8),
+      rgba(31, 191, 101, 0.8),
+      rgba(255, 138, 45, 0.9),
+      rgba(235, 84, 119, 0.85)
+    );
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  }
+
   @media (max-width: 1024px) {
     .settings-shell {
       padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) 1.5rem 1.5rem;
-    }
-
-    .settings-grid {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-areas:
-        'profile'
-        'notifications'
-        'ai'
-        'appearance'
-        'invite';
-    }
-
-    .settings-content {
-      max-height: none;
     }
   }
 
@@ -983,11 +957,6 @@ let avatarError: string | null = $state(null);
     .settings-chip {
       padding: 0.4rem 0.75rem;
       font-size: 0.82rem;
-    }
-
-    .settings-ai-toggle {
-      flex-direction: column;
-      align-items: flex-start;
     }
 
     .appearance-option {

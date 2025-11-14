@@ -302,15 +302,15 @@ const tenorApiKey = PUBLIC_TENOR_API_KEY;
     flex-wrap: wrap;
   }
 
-  :global(:root[data-theme='light']) .gif-backdrop {
+  :global(:root[data-theme-tone='light']) .gif-backdrop {
     background: color-mix(in srgb, var(--color-app-overlay) 55%, transparent);
   }
 
-  :global(:root[data-theme='light']) .gif-panel {
+  :global(:root[data-theme-tone='light']) .gif-panel {
     background: color-mix(in srgb, var(--color-panel) 99%, transparent);
   }
 
-  :global(:root[data-theme='light']) .gif-item {
+  :global(:root[data-theme-tone='light']) .gif-item {
     background: color-mix(in srgb, var(--color-panel) 96%, transparent);
   }
 </style>

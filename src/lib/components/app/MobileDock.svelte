@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
   import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
   import { user } from '$lib/stores/user';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { subscribeUserServers } from '$lib/firestore/servers';
 
   type Link = {
     href: string;
@@ -11,6 +14,16 @@
     icon: string;
     isActive: (path: string) => boolean;
   };
+
+  type ServerShortcut = {
+    id: string;
+    name?: string | null;
+    icon?: string | null;
+  };
+
+  const LAST_SERVER_KEY = 'hconnect:last-server';
+  const LAST_SERVER_CHANNEL_KEY = 'hconnect:last-server-channel';
+  type ChannelMemory = Record<string, string>;
 
   const links: Link[] = [
     {
@@ -34,6 +47,137 @@
   ];
 
   let currentPath = $derived($page?.url?.pathname ?? '/');
+  let lastServerShortcut: ServerShortcut | null = $state(null);
+  let serverRows: ServerShortcut[] = $state([]);
+  let stopServers: (() => void) | null = $state(null);
+  let stopUser: (() => void) | null = null;
+  let serverChannelMemory: ChannelMemory = $state({});
+  const shortcut = $derived(lastServerShortcut as ServerShortcut | null);
+  const serverActive = $derived(
+    shortcut ? currentPath?.startsWith(`/servers/${shortcut.id}`) ?? false : false
+  );
+  const serverHref = $derived.by(() => {
+    if (!shortcut) return '/servers';
+    const lastChannel = serverChannelMemory?.[shortcut.id];
+    if (lastChannel) {
+      return `/servers/${shortcut.id}?channel=${encodeURIComponent(lastChannel)}`;
+    }
+    return `/servers/${shortcut.id}`;
+  });
+
+  onMount(() => {
+    loadStoredLastServer();
+    loadStoredChannelMemory();
+    stopUser = user.subscribe((value) => {
+      stopServers?.();
+      serverRows = [];
+      if (value?.uid) {
+        stopServers = subscribeUserServers(value.uid, (rows) => {
+          serverRows = rows ?? [];
+          syncLastServerDetails();
+        });
+      } else {
+        clearLastServerShortcut();
+        clearServerChannelMemory();
+      }
+    });
+
+    return () => {
+      stopServers?.();
+      stopUser?.();
+    };
+  });
+
+  function loadStoredLastServer() {
+    if (!browser) return;
+    try {
+      const raw = localStorage.getItem(LAST_SERVER_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ServerShortcut | null;
+      if (parsed?.id) {
+        lastServerShortcut = parsed;
+      }
+    } catch {
+      // ignore storage read errors
+    }
+  }
+
+  function persistLastServer(info: ServerShortcut | null) {
+    if (!browser) return;
+    try {
+      if (!info) {
+        localStorage.removeItem(LAST_SERVER_KEY);
+        return;
+      }
+      localStorage.setItem(
+        LAST_SERVER_KEY,
+        JSON.stringify({
+          id: info.id,
+          name: info.name ?? null,
+          icon: info.icon ?? null
+        })
+      );
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function setLastServerShortcut(info: ServerShortcut) {
+    if (!info?.id) return;
+    const normalized: ServerShortcut = {
+      id: info.id,
+      name: info.name ?? lastServerShortcut?.name ?? null,
+      icon: info.icon ?? lastServerShortcut?.icon ?? null
+    };
+    if (
+      lastServerShortcut &&
+      lastServerShortcut.id === normalized.id &&
+      lastServerShortcut.name === normalized.name &&
+      lastServerShortcut.icon === normalized.icon
+    ) {
+      return;
+    }
+    lastServerShortcut = normalized;
+    persistLastServer(normalized);
+  }
+
+  function clearLastServerShortcut() {
+    if (!lastServerShortcut) return;
+    lastServerShortcut = null;
+    persistLastServer(null);
+  }
+
+  function syncLastServerDetails() {
+    if (!serverRows.length) return;
+    if (lastServerShortcut) {
+      const match = serverRows.find((row) => row.id === lastServerShortcut?.id);
+      if (match) {
+        setLastServerShortcut(match);
+        return;
+      }
+    }
+    setLastServerShortcut(serverRows[0]);
+  }
+
+  $effect(() => {
+    if (!browser) return;
+    const match = /^\/servers\/([^/]+)/.exec(currentPath ?? '');
+    if (!match) return;
+    const serverId = match[1];
+    const matchRow = serverRows.find((row) => row.id === serverId);
+    setLastServerShortcut(matchRow ?? { id: serverId });
+  });
+
+  $effect(() => {
+    if (!browser) return;
+    const match = /^\/servers\/([^/]+)/.exec(currentPath ?? '');
+    if (!match) return;
+    const channelId = $page?.url?.searchParams?.get('channel') ?? null;
+    if (channelId) {
+      rememberServerChannel(match[1], channelId);
+    }
+  });
+
 
   const formatBadge = (value: number): string => {
     if (!Number.isFinite(value)) return '';
@@ -52,6 +196,54 @@
     }
     goto(link.href);
   }
+
+  function loadStoredChannelMemory() {
+    if (!browser) return;
+    try {
+      const raw = localStorage.getItem(LAST_SERVER_CHANNEL_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      const next: ChannelMemory = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === 'string' && value.trim()) {
+          next[key] = value;
+        }
+      }
+      serverChannelMemory = next;
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function persistChannelMemory(map: ChannelMemory) {
+    if (!browser) return;
+    try {
+      const keys = Object.keys(map);
+      if (!keys.length) {
+        localStorage.removeItem(LAST_SERVER_CHANNEL_KEY);
+      } else {
+        localStorage.setItem(LAST_SERVER_CHANNEL_KEY, JSON.stringify(map));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function rememberServerChannel(serverId: string, channelId: string | null | undefined) {
+    if (!serverId || !channelId) return;
+    const existing = serverChannelMemory[serverId];
+    if (existing === channelId) return;
+    const next = { ...serverChannelMemory, [serverId]: channelId };
+    serverChannelMemory = next;
+    persistChannelMemory(next);
+  }
+
+  function clearServerChannelMemory() {
+    if (!Object.keys(serverChannelMemory).length) return;
+    serverChannelMemory = {};
+    persistChannelMemory({});
+  }
 </script>
 
 <nav
@@ -61,6 +253,34 @@
   aria-hidden={$mobileDockSuppressed ? 'true' : undefined}
 >
   <div class="mobile-dock__inner">
+    <a
+      href={serverHref}
+      onclick={(event) => {
+        event.preventDefault();
+        goto(serverHref);
+      }}
+      class={`mobile-dock__item mobile-dock__item--server ${serverActive ? 'is-active' : ''} ${shortcut ? '' : 'is-placeholder'}`}
+      aria-label={shortcut?.name ?? 'Servers'}
+      aria-current={serverActive ? 'page' : undefined}
+    >
+      {#if shortcut?.icon}
+        <img
+          src={shortcut.icon}
+          alt={shortcut.name ?? 'Server icon'}
+          class="mobile-dock__server-icon"
+          loading="lazy"
+        />
+      {:else if shortcut?.name}
+        <span class="mobile-dock__server-fallback">
+          {shortcut.name.slice(0, 1)}
+        </span>
+      {:else}
+        <span class="mobile-dock__server-placeholder">
+          <i class="bx bx-hash" aria-hidden="true"></i>
+        </span>
+      {/if}
+    </a>
+
     {#each links as link}
       {@const active = link.isActive(currentPath)}
       {@const badge =
@@ -74,11 +294,11 @@
         onclick={(event) => handleNav(event, link)}
         class={`mobile-dock__item ${active ? 'is-active' : ''}`}
         class:mobile-dock__item--alert={!active && badge > 0}
+        class:mobile-dock__item--notes={link.href === '/dms/notes'}
         aria-label={link.label}
         aria-current={active ? 'page' : undefined}
       >
         <i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
-        <span class="mobile-dock__label">{link.label}</span>
         {#if badge > 0}
           <span class="mobile-dock__badge">{formatBadge(badge)}</span>
         {/if}
@@ -99,7 +319,6 @@
       {:else}
         <i class="bx bx-user mobile-dock__icon" aria-hidden="true"></i>
       {/if}
-      <span class="mobile-dock__label">Me</span>
     </a>
   </div>
 </nav>
@@ -122,7 +341,7 @@
 
   .mobile-dock__inner {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 0.5rem;
   }
 
@@ -157,13 +376,6 @@
     line-height: 1;
   }
 
-  .mobile-dock__label {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
   .mobile-dock__badge {
     position: absolute;
     top: -0.2rem;
@@ -190,12 +402,54 @@
     padding-inline: 0.4rem;
   }
 
+  .mobile-dock__item--notes .mobile-dock__icon {
+    color: var(--color-accent);
+  }
+
+  .mobile-dock__item--profile .mobile-dock__icon {
+    color: var(--color-accent);
+  }
+
+  .mobile-dock__item--profile .mobile-dock__label {
+    color: var(--color-accent);
+  }
+
   .mobile-dock__avatar {
     width: 2rem;
     height: 2rem;
     border-radius: 999px;
     object-fit: cover;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+
+  .mobile-dock__item--server {
+    padding-inline: 0.4rem;
+  }
+
+  .mobile-dock__server-icon {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.85rem;
+    object-fit: cover;
     box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
+  }
+
+  .mobile-dock__server-fallback,
+  .mobile-dock__server-placeholder {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.85rem;
+    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+    color: var(--color-accent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+  }
+
+  .mobile-dock__server-placeholder {
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    color: var(--text-40);
   }
 
   .mobile-dock--hidden {
