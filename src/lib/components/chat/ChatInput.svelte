@@ -216,6 +216,7 @@
   let rewriteHoldTimer: ReturnType<typeof setTimeout> | null = null;
   let rewriteHoldTriggered = false;
   let suggestionTapPrimed = false;
+  let textareaExpanded = $state(false);
 
   const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
   const isDesktop = $derived(platform === 'desktop');
@@ -229,6 +230,7 @@
   const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
   const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
   const showInlinePrediction = $derived(Boolean(aiAssistAllowed));
+  const hasInlinePrediction = $derived(Boolean(showInlinePrediction && aiInlineSuggestion));
   const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
   const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
   const showRewriteCoach = $derived(
@@ -517,6 +519,7 @@
         : 0;
     const nextHeight = Math.max(textHeight, ghostHeight || 0, inlinePredictionHeight || 0);
     node.style.height = `${nextHeight}px`;
+    textareaExpanded = nextHeight > minHeight + 2;
     if (scrollHeight > nextHeight) {
       node.style.overflowY = 'auto';
     } else {
@@ -672,6 +675,7 @@
     inputFocused = true;
     syncKeyboardInset?.();
     engageDockSuppression();
+    dispatch('focusInput');
   }
 
   function handleTextareaBlur() {
@@ -679,6 +683,7 @@
     syncKeyboardInset?.();
     releaseDockSuppression();
     suggestionTapPrimed = false;
+    dispatch('blurInput');
   }
 
   function collectMentions(value: string): MentionRecord[] {
@@ -1776,23 +1781,39 @@
           </div>
         {/if}
 
-        {#if showInlinePrediction && aiInlineSuggestion}
-          {@const overlayText = text || '\u00a0'}
+        {#if hasInlinePrediction || showMobileSend}
           <div
             class="chat-input__prediction"
-            class:chat-input__prediction--touch={platform === 'mobile'}
-            aria-hidden={platform === 'mobile' ? undefined : 'true'}
+            class:chat-input__prediction--touch={hasInlinePrediction && platform === 'mobile'}
+            aria-hidden={hasInlinePrediction && platform !== 'mobile' ? 'true' : undefined}
             style={predictionBoxStyle}
             onpointerdown={handlePredictionPointer}
           >
-            <div
-              class="chat-input__prediction-content"
-              bind:this={predictionContentEl}
-              style={`transform: translateY(-${predictionScroll}px);`}
-            >
-              <span class="chat-input__prediction-shadow">{overlayText}</span>
-              <span class="chat-input__prediction-hint">{aiInlineSuggestion}</span>
-            </div>
+            {#if hasInlinePrediction}
+              {@const overlayText = text || '\u00a0'}
+              <div
+                class="chat-input__prediction-content"
+                bind:this={predictionContentEl}
+                style={`transform: translateY(-${predictionScroll}px);`}
+              >
+                <span class="chat-input__prediction-shadow">{overlayText}</span>
+                <span class="chat-input__prediction-hint">{aiInlineSuggestion}</span>
+              </div>
+            {/if}
+
+            {#if showMobileSend}
+              <button
+                type="submit"
+                class="chat-input__mobile-send"
+                class:chat-input__mobile-send--expanded={textareaExpanded}
+                disabled={sendDisabled}
+                aria-label="Send message"
+                title="Send message"
+                onpointerdown={(event) => event.stopPropagation()}
+              >
+                <i class="bx bx-up-arrow-alt" aria-hidden="true"></i>
+              </button>
+            {/if}
           </div>
         {/if}
 
@@ -1843,17 +1864,6 @@
           </div>
         {/if}
 
-        {#if showMobileSend}
-          <button
-            type="submit"
-            class="chat-input__mobile-send"
-            disabled={sendDisabled}
-            aria-label="Send message"
-            title="Send message"
-          >
-            <i class="bx bx-up-arrow-alt" aria-hidden="true"></i>
-          </button>
-        {/if}
         </div>
       </div>
     </div>
@@ -2871,10 +2881,11 @@
 
   .chat-input__mobile-send {
     position: absolute;
+    top: 50%;
     right: 0.4rem;
-    bottom: 0.4rem;
-    width: 1.85rem;
-    height: 1.85rem;
+    bottom: auto;
+    width: 1.65rem;
+    height: 1.65rem;
     border-radius: 999px;
     border: none;
     background: var(--color-accent);
@@ -2882,12 +2893,14 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 1rem;
+    font-size: 0.95rem;
     box-shadow:
       0 10px 20px rgba(6, 10, 20, 0.35),
       inset 0 1px 0 rgba(255, 255, 255, 0.25);
     transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
     z-index: 3;
+    pointer-events: auto;
+    transform: translateY(-50%);
   }
 
   .chat-input__mobile-send:disabled {
@@ -2896,8 +2909,18 @@
     cursor: not-allowed;
   }
 
+  .chat-input__mobile-send--expanded {
+    top: auto;
+    bottom: 0.6rem;
+    transform: translateY(0.25rem);
+  }
+
   .chat-input__mobile-send:not(:disabled):active {
-    transform: scale(0.95);
+    transform: translateY(-50%) scale(0.95);
+  }
+
+  .chat-input__mobile-send--expanded:not(:disabled):active {
+    transform: translateY(0.25rem) scale(0.95);
   }
 
   .chat-input__mobile-send i {
@@ -2910,7 +2933,7 @@
     }
 
     .chat-input__textarea-wrapper textarea {
-      padding-right: 3.95rem;
+      padding-right: 3.5rem;
       padding-bottom: 1.2rem;
     }
   }

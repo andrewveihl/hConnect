@@ -61,6 +61,8 @@ type MentionSendRecord = {
 let mentionOptions: MentionOption[] = $state([]);
 let resumeDmScroll = false;
 let scrollResumeSignal = $state(0);
+let composerFocusSignal = $state(0);
+const combinedScrollSignal = $derived(scrollResumeSignal + composerFocusSignal);
 let lastPendingThreadId: string | null = null;
 
 onMount(() => {
@@ -1122,6 +1124,10 @@ run(() => {
     handleSend(e.detail ?? '');
   }
 
+  function handleComposerFocus() {
+    composerFocusSignal += 1;
+  }
+
   run(() => {
     otherMessageUser = otherUid ? messageUsers[otherUid] ?? null : null;
   });
@@ -1246,7 +1252,7 @@ run(() => {
               users={messageUsers}
               currentUserId={me?.uid ?? null}
               {pendingUploads}
-              scrollToBottomSignal={scrollResumeSignal}
+              scrollToBottomSignal={combinedScrollSignal}
               on:vote={handleVote}
               on:submitForm={handleFormSubmit}
               on:react={handleReaction}
@@ -1278,6 +1284,7 @@ run(() => {
         on:createPoll={(e: CustomEvent<any>) => handleCreatePoll(e.detail)}
         on:createForm={(e: CustomEvent<any>) => handleCreateForm(e.detail)}
         on:cancelReply={() => (pendingReply = null)}
+        on:focusInput={handleComposerFocus}
       />
     </div>
   </div>

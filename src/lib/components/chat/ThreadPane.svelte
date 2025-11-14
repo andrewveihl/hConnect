@@ -46,6 +46,7 @@
   $: extraMemberCount = Math.max(0, memberList.length - visibleMembers.length);
 
   let scrollSignal = 0;
+  let focusScrollSignal = 0;
   let summary: ThreadSummaryItem[] = [];
   let summaryLoading = false;
   let summaryError: string | null = null;
@@ -89,6 +90,10 @@
       void generateSummary();
     }
   }
+
+  const handleComposerFocus = () => {
+    focusScrollSignal += 1;
+  };
 
   function handleDocumentPointerDown(event: PointerEvent) {
     const target = event.target as Node | null;
@@ -367,7 +372,7 @@
         {users}
         {currentUserId}
         hideReplyPreview={true}
-        scrollToBottomSignal={scrollSignal}
+        scrollToBottomSignal={scrollSignal + focusScrollSignal}
         pendingUploads={pendingUploads}
         threadStats={{}}
         on:reply={handleReply}
@@ -391,6 +396,7 @@
         on:createPoll={handleCreatePoll}
         on:createForm={handleCreateForm}
         on:cancelReply={handleCancelReply}
+        on:focusInput={handleComposerFocus}
       />
     </div>
   </div>

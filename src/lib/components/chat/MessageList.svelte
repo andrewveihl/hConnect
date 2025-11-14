@@ -342,6 +342,7 @@
   const QUICK_REACTIONS = ['\u{1F44D}', '\u{1F389}', '\u2764\uFE0F', '\u{1F602}', '\u{1F525}', '\u{1F44F}'];
   const LONG_PRESS_MS = 450;
   const LONG_PRESS_MOVE_THRESHOLD = 10;
+  const SWIPE_INPUT_BLUR_THRESHOLD = 18;
 
   let hasHoverSupport = $state(true);
   let hoveredMessageId: string | null = $state(null);
@@ -353,6 +354,8 @@
   let reactionMenuPosition = $state({ top: 0, left: 0 });
   let longPressTimer: number | null = null;
   let longPressStart: { x: number; y: number } | null = null;
+  type SwipeState = { pointerId: number | null; startX: number; startY: number; blurred: boolean };
+  let swipeState: SwipeState = $state({ pointerId: null, startX: 0, startY: 0, blurred: false });
 
   run(() => {
     if (messages.length !== lastLen) {
@@ -400,6 +403,49 @@
     }
     return () => {};
   });
+
+  function resetSwipeState() {
+    swipeState = { pointerId: null, startX: 0, startY: 0, blurred: false };
+  }
+
+  function maybeBlurActiveComposer() {
+    if (typeof document === 'undefined') return;
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return;
+    const isInput =
+      active.tagName === 'TEXTAREA' ||
+      active.tagName === 'INPUT' ||
+      active.isContentEditable ||
+      active.getAttribute('role') === 'textbox';
+    if (isInput) active.blur();
+  }
+
+  function handleSwipePointerDown(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    swipeState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      blurred: false
+    };
+  }
+
+  function handleSwipePointerMove(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    if (swipeState.pointerId !== event.pointerId || swipeState.blurred) return;
+    const deltaY = Math.abs(event.clientY - swipeState.startY);
+    if (deltaY >= SWIPE_INPUT_BLUR_THRESHOLD) {
+      maybeBlurActiveComposer();
+      swipeState = { ...swipeState, blurred: true };
+    }
+  }
+
+  function handleSwipePointerEnd(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    if (swipeState.pointerId === event.pointerId) {
+      resetSwipeState();
+    }
+  }
 
   function sanitizeEmoji(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -1631,6 +1677,10 @@
   class="h-full overflow-auto px-3 sm:px-4 py-4 space-y-2 chat-scroll"
   style:padding-bottom="var(--chat-scroll-padding, calc(env(safe-area-inset-bottom, 0px) + 1rem))"
   onscroll={handleScroll}
+  onpointerdown={handleSwipePointerDown}
+  onpointermove={handleSwipePointerMove}
+  onpointerup={handleSwipePointerEnd}
+  onpointercancel={handleSwipePointerEnd}
 >
   {#if messages.length === 0}
     <div class="h-full grid place-items-center">

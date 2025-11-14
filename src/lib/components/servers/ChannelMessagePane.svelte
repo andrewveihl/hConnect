@@ -81,6 +81,12 @@
   let composerObserver: ResizeObserver | null = null;
   let mounted = false;
   let lastComposerEl: HTMLDivElement | null = null;
+  let focusScrollSignal = $state(0);
+  const combinedScrollSignal = $derived(scrollToBottomSignal + focusScrollSignal);
+
+  function handleComposerFocus() {
+    focusScrollSignal += 1;
+  }
 
   function attachComposerObserver() {
     if (!mounted) return;
@@ -125,7 +131,7 @@
         {currentUserId}
         threadStats={threadStats}
         {pendingUploads}
-        {scrollToBottomSignal}
+        scrollToBottomSignal={combinedScrollSignal}
         on:vote={onVote}
         on:submitForm={onSubmitForm}
         on:react={onReact}
@@ -155,6 +161,7 @@
         onCreateForm={onCreateForm}
         onUpload={onUploadFiles}
         on:cancelReply={() => dispatch('cancelReply')}
+        on:focusInput={handleComposerFocus}
       />
     </div>
   {/if}
