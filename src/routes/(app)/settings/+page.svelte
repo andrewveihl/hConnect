@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
+import { run } from 'svelte/legacy';
 
-  import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
-  import { user } from '$lib/stores/user';
-  import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
-  import { db } from '$lib/firestore';
-  import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
-  import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
+import { onMount } from 'svelte';
+import { get } from 'svelte/store';
+import { goto } from '$app/navigation';
+import { user } from '$lib/stores/user';
+import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
+import { db } from '$lib/firestore';
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 import InvitePanel from '$lib/components/app/InvitePanel.svelte';
@@ -302,16 +303,36 @@ let avatarError: string | null = $state(null);
       console.warn('Failed to persist theme preference', error);
     }
   }
+
+  function exitSettings() {
+    if (typeof window !== 'undefined' && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    if (serverId) {
+      void goto(`/servers/${serverId}`);
+    } else {
+      void goto('/');
+    }
+  }
 </script>
 
 <div class="settings-page app-bg text-primary">
   <div class="settings-shell">
     <header class="settings-bar">
-      <div>
-        <h1 class="settings-title">Account settings</h1>
-        <p class="settings-subtitle">Manage your profile, appearance, and notifications.</p>
+      <div class="settings-bar__row">
+        <div class="settings-bar__left">
+          <button type="button" class="settings-back" onclick={exitSettings} aria-label="Back to app">
+            <i class="bx bx-chevron-left" aria-hidden="true"></i>
+            <span>Back</span>
+          </button>
+          <div>
+            <h1 class="settings-title">Account settings</h1>
+            <p class="settings-subtitle">Manage your profile, appearance, and notifications.</p>
+          </div>
+        </div>
+        <SignOutButton />
       </div>
-      <SignOutButton />
     </header>
 
     <main class="settings-content">
@@ -519,6 +540,45 @@ let avatarError: string | null = $state(null);
     flex-direction: column;
     gap: 0.5rem;
     align-items: flex-start;
+  }
+
+  .settings-bar__row {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: flex-start;
+  }
+
+  .settings-bar__left {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .settings-back {
+    display: none;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: transparent;
+    color: var(--text-70);
+    padding: 0.35rem 0.95rem;
+    font-weight: 600;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  }
+
+  .settings-back:hover,
+  .settings-back:focus-visible {
+    color: var(--color-text-primary);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+    outline: none;
+  }
+
+  .settings-back i {
+    font-size: 1.15rem;
   }
 
   .settings-shell::-webkit-scrollbar {
@@ -902,6 +962,22 @@ let avatarError: string | null = $state(null);
   @media (max-width: 1024px) {
     .settings-shell {
       padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) 1.5rem 1.5rem;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .settings-back {
+      display: inline-flex;
+    }
+
+    .settings-bar__row {
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .settings-bar__left {
+      align-items: center;
     }
   }
 
