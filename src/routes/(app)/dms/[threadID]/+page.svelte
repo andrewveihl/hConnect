@@ -12,6 +12,7 @@ import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
 import LeftPane from '$lib/components/app/LeftPane.svelte';
+import { openOverlay, closeOverlay, registerOverlayHandler, type MobileOverlayId } from '$lib/stores/mobileNav';
 
 import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
 import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -126,6 +127,7 @@ onMount(() => {
 
 let showThreads = $state(false);
 let showInfo = $state(false);
+let swipeSurface: HTMLDivElement | null = null;
 let lastThreadID: string | null = null;
 let pendingReply: ReplyReferenceInput | null = $state(null);
 let replySourceMessage: any = $state(null);
@@ -171,8 +173,39 @@ $effect(() => {
 
 const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 
-  const SWIPE_THRESHOLD = 64;
-  const SWIPE_RATIO = 0.28;
+const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
+
+// Keep overlays and browser history synchronized so native edge swipes pop the same stack as our buttons.
+const syncThreadsVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 'history' } = {}) => {
+  if (showThreads === next) return;
+  showThreads = next;
+  if (!browser || !useMobileShell()) return;
+  if (next) {
+    openOverlay(THREADS_OVERLAY_ID);
+  } else if (source !== 'history') {
+    closeOverlay(THREADS_OVERLAY_ID);
+  }
+};
+
+// Mirror the same pop-stack behavior for the info sheet on the right.
+const syncInfoVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 'history' } = {}) => {
+  if (showInfo === next) return;
+  showInfo = next;
+  if (!browser || !useMobileShell()) return;
+  if (next) {
+    openOverlay(INFO_OVERLAY_ID);
+  } else if (source !== 'history') {
+    closeOverlay(INFO_OVERLAY_ID);
+  }
+};
+
+  const SWIPE_THRESHOLD = 72; // bump to increase swipe distance required to toggle panels
+  const SWIPE_RATIO = 0.24; // proportional fallback ensures smaller phones remain usable
+  const EDGE_DEAD_ZONE = 18; // keep our gestures away from OS edge swipes
+  const PANEL_DURATION = 260;
+  const PANEL_EASING = 'cubic-bezier(0.32, 0.72, 0, 1)';
+  const THREADS_OVERLAY_ID: MobileOverlayId = 'dm-list';
+  const INFO_OVERLAY_ID: MobileOverlayId = 'dm-info';
 
   let tracking = false;
   let startX = 0;
@@ -647,7 +680,7 @@ run(() => {
   run(() => {
     if (threadID && threadID !== lastThreadID) {
       lastThreadID = threadID;
-      showInfo = false;
+      syncInfoVisibility(false);
       pendingReply = null;
       messages = [];
       messagesLoading = true;
@@ -725,13 +758,13 @@ run(() => {
     );
   });
 
-  function setupGestures() {
-    if (typeof window === 'undefined') return () => {};
+  function setupGestures(target: HTMLDivElement | null) {
+    if (typeof window === 'undefined' || !target) return () => {};
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        showThreads = false;
-        showInfo = false;
+        syncThreadsVisibility(false);
+        syncInfoVisibility(false);
         pendingReply = null;
       }
     };
@@ -755,14 +788,20 @@ run(() => {
       resetInfoSwipe();
     };
 
-    const canHandle = () => typeof window !== 'undefined' && window.innerWidth < 768;
+    const canHandle = () => useMobileShell();
 
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1 || !canHandle()) return;
       const t = e.touches[0];
+      const surfaceWidth = target.clientWidth || window.innerWidth;
+      const nearEdge = t.clientX <= EDGE_DEAD_ZONE || t.clientX >= surfaceWidth - EDGE_DEAD_ZONE;
+      if (nearEdge) {
+        tracking = false;
+        return;
+      }
       startX = t.clientX;
       startY = t.clientY;
-      leftSwipeWidth = Math.max(window.innerWidth, 1);
+      leftSwipeWidth = Math.max(surfaceWidth, 1);
       rightSwipeWidth = leftSwipeWidth;
       swipeTarget = null;
       resetThreadsSwipe();
@@ -848,13 +887,13 @@ run(() => {
         const traveled = leftSwipeMode === 'close' ? Math.max(0, -leftSwipeDelta) : Math.max(0, leftSwipeDelta);
         const ratio = traveled / leftSwipeWidth;
         if (traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO) {
-          showThreads = leftSwipeMode === 'open';
+          syncThreadsVisibility(leftSwipeMode === 'open');
         }
       } else if (swipeTarget === 'info' && rightSwipeMode && rightSwipeWidth > 0) {
         const traveled = rightSwipeMode === 'close' ? Math.max(0, rightSwipeDelta) : Math.max(0, -rightSwipeDelta);
         const ratio = traveled / rightSwipeWidth;
         if (traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO) {
-          showInfo = rightSwipeMode === 'open';
+          syncInfoVisibility(rightSwipeMode === 'open');
         }
       }
       cancelSwipe();
@@ -864,23 +903,23 @@ run(() => {
     const lgMq = window.matchMedia('(min-width: 1024px)');
 
     const onMedia = () => {
-      if (mdMq.matches) showThreads = false;
-      if (lgMq.matches) showInfo = false;
+      if (mdMq.matches) syncThreadsVisibility(false);
+      if (lgMq.matches) syncInfoVisibility(false);
     };
 
     window.addEventListener('keydown', onKey);
-    window.addEventListener('touchstart', onTouchStart, { passive: true });
-    window.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    target.addEventListener('touchstart', onTouchStart, { passive: true });
+    target.addEventListener('touchmove', onTouchMove, { passive: true });
+    target.addEventListener('touchend', onTouchEnd, { passive: true });
     mdMq.addEventListener('change', onMedia);
     lgMq.addEventListener('change', onMedia);
     onMedia();
 
     return () => {
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('touchstart', onTouchStart);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onTouchEnd);
+      target.removeEventListener('touchstart', onTouchStart);
+      target.removeEventListener('touchmove', onTouchMove);
+      target.removeEventListener('touchend', onTouchEnd);
       mdMq.removeEventListener('change', onMedia);
       lgMq.removeEventListener('change', onMedia);
     };
@@ -888,11 +927,15 @@ run(() => {
 
   onMount(() => {
     mounted = true;
-    const cleanupGestures = setupGestures();
+    const cleanupGestures = setupGestures(swipeSurface);
+    const overlayThreads = registerOverlayHandler(THREADS_OVERLAY_ID, () => syncThreadsVisibility(false, { source: 'history' }));
+    const overlayInfo = registerOverlayHandler(INFO_OVERLAY_ID, () => syncInfoVisibility(false, { source: 'history' }));
     return () => {
       mounted = false;
       unsub?.();
-      cleanupGestures();
+      cleanupGestures?.();
+      overlayThreads?.();
+      overlayInfo?.();
       for (const uid in profileUnsubs) profileUnsubs[uid]?.();
     };
   });
@@ -1183,15 +1226,15 @@ run(() => {
     (otherProfile || otherMessageUser ? otherUid ?? 'Member' : 'Direct Message'));
 </script>
 
-<div class="flex flex-1 overflow-hidden panel-muted">
+<div class="flex flex-1 overflow-hidden panel-muted gesture-pad-x" bind:this={swipeSurface}>
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle panel-muted">
     <DMsSidebar
       bind:this={sidebarRef}
       activeThreadId={threadID}
-      on:select={() => (showThreads = false)}
+      on:select={() => syncThreadsVisibility(false)}
       on:delete={(e) => {
         if (e.detail === threadID) {
-          showInfo = false;
+          syncInfoVisibility(false);
           void goto('/dms');
         }
       }}
@@ -1204,7 +1247,7 @@ run(() => {
         <button
           class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
           aria-label="Open conversations"
-          onclick={() => (showThreads = true)}
+          onclick={() => syncThreadsVisibility(true)}
         >
           <i class="bx bx-menu text-2xl"></i>
         </button>
@@ -1212,7 +1255,7 @@ run(() => {
           class="flex items-center gap-3 min-w-0 flex-1 text-left px-1 py-1 rounded hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 transition"
           type="button"
           aria-label="View participant profile"
-          onclick={() => (showInfo = true)}
+          onclick={() => syncInfoVisibility(true)}
         >
           <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
             {#if otherProfile?.photoURL}
@@ -1230,7 +1273,7 @@ run(() => {
       <button
         class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
         aria-label="View profile"
-        onclick={() => (showInfo = true)}
+        onclick={() => syncInfoVisibility(true)}
       >
         <i class="bx bx-user-circle text-2xl"></i>
       </button>
@@ -1238,7 +1281,7 @@ run(() => {
 
     <main class="flex-1 overflow-hidden panel-muted">
       <div class="h-full flex flex-col">
-        <div class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4" style={scrollRegionStyle}>
+        <div class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4 touch-pan-y" style={scrollRegionStyle}>
           {#if messagesLoading}
             <div class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/40 backdrop-blur-sm text-soft">
               <div class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin" aria-hidden="true"></div>
@@ -1298,7 +1341,7 @@ run(() => {
             class="p-2 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition"
             type="button"
             aria-label="Close profile panel"
-            onclick={() => (showInfo = false)}
+            onclick={() => syncInfoVisibility(false)}
           >
             <i class="bx bx-x text-2xl"></i>
           </button>
@@ -1344,9 +1387,11 @@ run(() => {
 <!-- Mobile overlays -->
 {#if showThreads || leftSwipeActive}
   <div
-    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
     class:mobile-panel--dragging={leftSwipeActive}
     style:transform={threadsTransform}
+    style:transition-duration={`${PANEL_DURATION}ms`}
+    style:transitionTimingFunction={PANEL_EASING}
     style:pointer-events={showThreads ? 'auto' : 'none'}
     aria-label="Conversations"
   >
@@ -1356,19 +1401,19 @@ run(() => {
       </div>
       <div class="mobile-panel__list">
         <div class="mobile-panel__header md:hidden">
-          <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
+          <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => syncThreadsVisibility(false)}>
             <i class="bx bx-chevron-left text-2xl"></i>
           </button>
           <div class="mobile-panel__title">Conversations</div>
         </div>
-        <div class="flex-1 overflow-y-auto">
+        <div class="flex-1 overflow-y-auto touch-pan-y">
           <DMsSidebar
             bind:this={sidebarRefMobile}
             activeThreadId={threadID}
-            on:select={() => (showThreads = false)}
+            on:select={() => syncThreadsVisibility(false)}
             on:delete={(e) => {
-              showThreads = false;
-              showInfo = false;
+              syncThreadsVisibility(false);
+              syncInfoVisibility(false);
               if (e.detail === threadID) void goto('/dms');
             }}
           />
@@ -1380,20 +1425,22 @@ run(() => {
 
 {#if showInfo || rightSwipeActive}
   <div
-    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
     class:mobile-panel--dragging={rightSwipeActive}
     style:transform={infoTransform}
+    style:transition-duration={`${PANEL_DURATION}ms`}
+    style:transitionTimingFunction={PANEL_EASING}
     style:pointer-events={showInfo ? 'auto' : 'none'}
     aria-label="Profile"
   >
     <div class="mobile-panel__header md:hidden">
-      <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showInfo = false)}>
+      <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => syncInfoVisibility(false)}>
         <i class="bx bx-chevron-left text-2xl"></i>
       </button>
       <div class="mobile-panel__title">Profile</div>
     </div>
 
-    <div class="flex-1 overflow-y-auto p-4">
+    <div class="flex-1 overflow-y-auto p-4 touch-pan-y">
       {#if metaLoading}
         <div class="animate-pulse text-soft">Loading profile...</div>
       {:else if otherProfile}

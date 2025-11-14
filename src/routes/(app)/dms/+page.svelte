@@ -1,11 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { browser } from '$app/environment';
   import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
+  import { openOverlay, closeOverlay, registerOverlayHandler, type MobileOverlayId } from '$lib/stores/mobileNav';
 
   let showThreads = $state(false);
+  let gestureSurface: HTMLDivElement | null = null;
 
-  const SWIPE_THRESHOLD = 64;
-  const SWIPE_RATIO = 0.28;
+  // Swipe distance in px before we toggle the drawer; bump if gestures feel too sensitive.
+  const SWIPE_THRESHOLD = 72;
+  // Allow toggling based on distance travelled relative to the viewport width.
+  const SWIPE_RATIO = 0.24;
+  // Ignore touches that begin within this many px of the screen edges to avoid system gestures.
+  const EDGE_DEAD_ZONE = 18;
+  // Keep drawer motion consistent with the rest of the shell.
+  const PANEL_DURATION = 260;
+  const PANEL_EASING = 'cubic-bezier(0.32, 0.72, 0, 1)';
+  const DM_OVERLAY_ID: MobileOverlayId = 'dm-list';
 
   let tracking = false;
   let startX = 0;
@@ -14,6 +25,8 @@
   let swipeWidth = $state(1);
   let swipeDelta = $state(0);
   let swipeActive = $state(false);
+
+  const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   const panelTransform = $derived.by(() => {
@@ -29,11 +42,23 @@
     return showThreads ? 'translate3d(0, 0, 0)' : 'translate3d(-100%, 0, 0)';
   });
 
-  function setupGestures() {
-    if (typeof window === 'undefined') return () => {};
+  // Keep the in-app toggle and browser history aligned so the system back gesture closes the drawer first.
+  const syncThreadsVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 'history' } = {}) => {
+    if (showThreads === next) return;
+    showThreads = next;
+    if (!browser || !useMobileShell()) return;
+    if (next) {
+      openOverlay(DM_OVERLAY_ID);
+    } else if (source !== 'history') {
+      closeOverlay(DM_OVERLAY_ID);
+    }
+  };
+
+  function setupGestures(target: HTMLDivElement | null) {
+    if (typeof window === 'undefined' || !target) return () => {};
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') showThreads = false;
+      if (e.key === 'Escape') syncThreadsVisibility(false);
     };
 
     const resetSwipe = () => {
@@ -43,14 +68,20 @@
       swipeDelta = 0;
     };
 
-    const canHandle = () => typeof window !== 'undefined' && window.innerWidth < 768;
+    const canHandle = () => useMobileShell();
 
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1 || !canHandle()) return;
       const t = e.touches[0];
+      const surfaceWidth = target.clientWidth || window.innerWidth;
+      const nearEdge = t.clientX <= EDGE_DEAD_ZONE || t.clientX >= surfaceWidth - EDGE_DEAD_ZONE;
+      if (nearEdge) {
+        tracking = false;
+        return;
+      }
       startX = t.clientX;
       startY = t.clientY;
-      swipeWidth = Math.max(window.innerWidth, 1);
+      swipeWidth = Math.max(surfaceWidth, 1);
       swipeDelta = 0;
       swipeActive = false;
       tracking = true;
@@ -93,7 +124,7 @@
         const ratio = traveled / swipeWidth;
         const shouldToggle = traveled >= SWIPE_THRESHOLD || ratio >= SWIPE_RATIO;
         if (shouldToggle) {
-          showThreads = swipeMode === 'open';
+          syncThreadsVisibility(swipeMode === 'open');
         }
       }
       resetSwipe();
@@ -101,21 +132,21 @@
 
     const mdMq = window.matchMedia('(min-width: 768px)');
     const onMedia = () => {
-      if (mdMq.matches) showThreads = false;
+      if (mdMq.matches) syncThreadsVisibility(false);
     };
 
     window.addEventListener('keydown', onKey);
-    window.addEventListener('touchstart', onTouchStart, { passive: true });
-    window.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    target.addEventListener('touchstart', onTouchStart, { passive: true });
+    target.addEventListener('touchmove', onTouchMove, { passive: true });
+    target.addEventListener('touchend', onTouchEnd, { passive: true });
     mdMq.addEventListener('change', onMedia);
     onMedia();
 
     return () => {
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('touchstart', onTouchStart);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onTouchEnd);
+      target.removeEventListener('touchstart', onTouchStart);
+      target.removeEventListener('touchmove', onTouchMove);
+      target.removeEventListener('touchend', onTouchEnd);
       mdMq.removeEventListener('change', onMedia);
     };
   }
@@ -124,19 +155,23 @@
     if (typeof window !== 'undefined') {
       try {
         if (sessionStorage.getItem('dm-show-list') === '1') {
-          showThreads = true;
+          syncThreadsVisibility(true);
           sessionStorage.removeItem('dm-show-list');
         }
       } catch {
         // ignore storage errors
       }
     }
-    const cleanup = setupGestures();
-    return cleanup;
+    const cleanupGestures = setupGestures(gestureSurface);
+    const overlayCleanup = registerOverlayHandler(DM_OVERLAY_ID, () => syncThreadsVisibility(false, { source: 'history' }));
+    return () => {
+      cleanupGestures?.();
+      overlayCleanup?.();
+    };
   });
 </script>
 
-<div class="flex flex-1 overflow-hidden panel-muted mobile-full-bleed">
+<div class="flex flex-1 overflow-hidden panel-muted mobile-full-bleed gesture-pad-x" bind:this={gestureSurface}>
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle">
     <DMsSidebar activeThreadId={null} />
   </div>
@@ -149,7 +184,7 @@
             class="channel-header__toggle md:hidden"
             type="button"
             aria-label="Open conversations"
-            onclick={() => (showThreads = true)}
+            onclick={() => syncThreadsVisibility(true)}
           >
             <i class="bx bx-chevron-left text-xl"></i>
           </button>
@@ -177,25 +212,27 @@
 
 {#if showThreads || swipeActive}
   <div
-    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform duration-300 will-change-transform"
+    class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
     class:mobile-panel--dragging={swipeActive}
     style:transform={panelTransform}
+    style:transition-duration={`${PANEL_DURATION}ms`}
+    style:transitionTimingFunction={PANEL_EASING}
     style:pointer-events={showThreads ? 'auto' : 'none'}
     aria-label="Conversations"
   >
       <div class="mobile-panel__body">
         <div class="mobile-panel__list">
           <div class="mobile-panel__header md:hidden">
-            <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => (showThreads = false)}>
+            <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => syncThreadsVisibility(false)}>
               <i class="bx bx-chevron-left text-2xl"></i>
             </button>
             <div class="mobile-panel__title">Conversations</div>
           </div>
-          <div class="flex-1 overflow-y-auto">
+          <div class="flex-1 overflow-y-auto touch-pan-y">
             <DMsSidebar
               activeThreadId={null}
-              on:select={() => (showThreads = false)}
-              on:delete={() => (showThreads = false)}
+              on:select={() => syncThreadsVisibility(false)}
+              on:delete={() => syncThreadsVisibility(false)}
             />
           </div>
         </div>
