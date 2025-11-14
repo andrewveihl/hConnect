@@ -78,13 +78,17 @@
     hideReplyPreview = false
   }: Props = $props();
 
-  let scroller = $state<HTMLDivElement | null>(null);
-  let isRequestingMore = false;
-  let lastScrollSignal = $state(0);
+let scroller = $state<HTMLDivElement | null>(null);
+let isRequestingMore = false;
+let lastScrollSignal = $state(0);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
-  };
+const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+  scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
+};
+
+onMount(() => {
+  tick().then(() => scrollToBottom('auto'));
+});
 
   function formatTime(ts: any) {
     try {
