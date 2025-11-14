@@ -757,7 +757,7 @@
     </div>
   {/if}
     <div
-      class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
+    class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 touch-pan-y"
     bind:this={memberScrollContainer}
   >
     {#if rows.length}
@@ -872,7 +872,7 @@
           <i class="bx bx-x text-xl"></i>
         </button>
       </div>
-      <div class="members-pane__invite-body">
+      <div class="members-pane__invite-body touch-pan-y">
         <InvitePanel {serverId} embedded />
       </div>
     </div>
@@ -918,7 +918,7 @@
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
     background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
     color: var(--color-text-primary);
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 160ms ease;
   }
 
   .members-pane__collapse:hover,
@@ -926,6 +926,10 @@
     background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
     border-color: color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
     outline: none;
+  }
+
+  .members-pane__collapse:active {
+    transform: scale(0.92);
   }
 
   .member-row--placeholder {

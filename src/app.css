@@ -90,6 +90,24 @@
     padding-left: 0.75rem;
     padding-right: 0.75rem;
   }
+
+  @utility touch-pan-y {
+    touch-action: pan-y;
+  }
+
+  @utility touch-pan-x {
+    touch-action: pan-x;
+  }
+
+  @utility touch-none {
+    touch-action: none;
+  }
+
+  @utility gesture-pad-x {
+    /* Pad horizontal surfaces so swipes begin away from the bezel. */
+    padding-left: clamp(0.5rem, 4vw, 1.25rem);
+    padding-right: clamp(0.5rem, 4vw, 1.25rem);
+  }
 }
 
 :root[data-theme='light'] {

@@ -791,7 +791,7 @@
     </div>
   </div>
 
-  <div class="mt-4 flex-1 overflow-y-auto px-2 pb-4 space-y-6">
+<div class="mt-4 flex-1 overflow-y-auto px-2 pb-4 space-y-6 touch-pan-y">
     <section>
       <div class="text-xs uppercase tracking-wide text-soft px-2 mb-1">Personal</div>
       <ul class="space-y-1 pr-1">

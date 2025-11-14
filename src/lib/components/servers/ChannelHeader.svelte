@@ -134,4 +134,12 @@
     outline: none;
   }
 
+  .channel-header__toggle {
+    transition: background 150ms ease, border 150ms ease, color 150ms ease, transform 160ms ease;
+    touch-action: manipulation;
+  }
+
+  .channel-header__toggle:active {
+    transform: scale(0.92);
+  }
 </style>

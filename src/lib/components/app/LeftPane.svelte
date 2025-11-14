@@ -329,7 +329,7 @@
 
   <div class="rail-divider"></div>
 
-  <div class="flex-1 w-full overflow-y-auto">
+  <div class="flex-1 w-full overflow-y-auto touch-pan-y">
     <div class="rail-server-stack pb-4">
       {#each servers as s (s.id)}
         <a
@@ -503,6 +503,15 @@
 <NewServerModal bind:open={localCreateOpen} onClose={() => (localCreateOpen = false)} />
 
 <style>
+  :global(.rail-button) {
+    transition: transform 160ms cubic-bezier(0.2, 0.65, 0.25, 1), background 150ms ease, border 150ms ease;
+    will-change: transform;
+  }
+
+  :global(.rail-button:active) {
+    transform: scale(0.94);
+  }
+
   @media (max-width: 767px) {
     :global(.app-rail .rail-bottom) {
       display: none;
