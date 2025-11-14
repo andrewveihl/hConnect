@@ -124,6 +124,10 @@
     const cleanup = setupGestures();
     return cleanup;
   });
+
+  function handleThreadSelect() {
+    showThreads = false;
+  }
 </script>
 
 <div class="flex flex-1 overflow-hidden panel-muted">
@@ -134,16 +138,6 @@
   <div class="flex flex-1 flex-col panel">
     <header class="channel-header">
       <div class="channel-header__left">
-        {#if !showThreads}
-          <button
-            class="channel-header__toggle md:hidden"
-            type="button"
-            aria-label="Show conversations"
-            onclick={() => (showThreads = true)}
-          >
-            <i class="bx bx-chevron-left text-xl"></i>
-          </button>
-        {/if}
         <div class="channel-header__title">
           <span class="channel-header__badge">
             <i class="bx bx-notepad" aria-hidden="true"></i>
@@ -184,20 +178,13 @@
   aria-label="Conversations"
 >
   <div class="mobile-panel__header md:hidden">
-    <button
-      class="mobile-panel__close -ml-2"
-      aria-label="Close"
-      type="button"
-      onclick={() => (showThreads = false)}
-    >
-      <i class="bx bx-chevron-left text-2xl"></i>
-    </button>
     <div class="mobile-panel__title">Conversations</div>
   </div>
   <div class="flex-1 overflow-y-auto">
     <DMsSidebar
       activeThreadId="__notes"
-      on:select={() => (showThreads = false)}
+      showPersonalSection={false}
+      on:select={handleThreadSelect}
       on:delete={() => (showThreads = false)}
     />
   </div>

@@ -11,7 +11,6 @@
 import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
-import LeftPane from '$lib/components/app/LeftPane.svelte';
 import { openOverlay, closeOverlay, registerOverlayHandler, type MobileOverlayId } from '$lib/stores/mobileNav';
 
 import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
@@ -176,9 +175,28 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
 
 // Keep overlays and browser history synchronized so native edge swipes pop the same stack as our buttons.
+let routeSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
 const syncThreadsVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 'history' } = {}) => {
   if (showThreads === next) return;
   showThreads = next;
+
+  if (browser && useMobileShell()) {
+    const target = next ? '/dms' : threadID ? `/dms/${threadID}` : '/dms';
+
+    if (routeSyncTimer) {
+      clearTimeout(routeSyncTimer);
+      routeSyncTimer = null;
+    }
+
+    routeSyncTimer = setTimeout(() => {
+      if (window.location.pathname !== target) {
+        void goto(target, { replaceState: true, noScroll: true, keepFocus: true });
+      }
+      routeSyncTimer = null;
+    }, Math.min(PANEL_DURATION + 50, 320));
+  }
+
   if (!browser || !useMobileShell()) return;
   if (next) {
     openOverlay(THREADS_OVERLAY_ID);
@@ -198,6 +216,23 @@ const syncInfoVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 
     closeOverlay(INFO_OVERLAY_ID);
   }
 };
+
+const resolveThreadId = (detail: unknown): string | null => {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && 'id' in detail) {
+    const candidate = (detail as { id?: unknown }).id;
+    return typeof candidate === 'string' ? candidate : null;
+  }
+  return null;
+};
+
+function handleSidebarSelect(event: CustomEvent<any>) {
+  const targetId = resolveThreadId(event?.detail);
+  syncThreadsVisibility(false);
+  syncInfoVisibility(false);
+  if (!targetId || targetId === threadID) return;
+  if (targetId === '__notes') return;
+}
 
   const SWIPE_THRESHOLD = 72; // bump to increase swipe distance required to toggle panels
   const SWIPE_RATIO = 0.24; // proportional fallback ensures smaller phones remain usable
@@ -1231,7 +1266,7 @@ run(() => {
     <DMsSidebar
       bind:this={sidebarRef}
       activeThreadId={threadID}
-      on:select={() => syncThreadsVisibility(false)}
+      on:select={handleSidebarSelect}
       on:delete={(e) => {
         if (e.detail === threadID) {
           syncInfoVisibility(false);
@@ -1396,21 +1431,16 @@ run(() => {
     aria-label="Conversations"
   >
     <div class="mobile-panel__body">
-      <div class="mobile-panel__servers">
-        <LeftPane activeServerId={null} padForDock={false} showBottomActions={false} />
-      </div>
       <div class="mobile-panel__list">
         <div class="mobile-panel__header md:hidden">
-          <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => syncThreadsVisibility(false)}>
-            <i class="bx bx-chevron-left text-2xl"></i>
-          </button>
           <div class="mobile-panel__title">Conversations</div>
         </div>
         <div class="flex-1 overflow-y-auto touch-pan-y">
           <DMsSidebar
             bind:this={sidebarRefMobile}
             activeThreadId={threadID}
-            on:select={() => syncThreadsVisibility(false)}
+            showPersonalSection={false}
+            on:select={handleSidebarSelect}
             on:delete={(e) => {
               syncThreadsVisibility(false);
               syncInfoVisibility(false);
@@ -1485,29 +1515,6 @@ run(() => {
     min-height: 0;
     background: var(--color-panel);
     border-top: 1px solid var(--color-border-subtle);
-  }
-
-  :global(.mobile-panel__servers) {
-    width: 84px;
-    flex: 0 0 84px;
-    display: flex;
-    justify-content: center;
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    border-right: none;
-    overflow-y: auto;
-  }
-
-  :global(.mobile-panel__servers .app-rail) {
-    position: relative;
-    inset: auto;
-    width: 72px;
-    height: 100%;
-    min-height: 0;
-    padding-top: 0.5rem;
-    border-radius: 0;
-    box-shadow: none;
-    border-right: none !important;
-    background: transparent;
   }
 
   :global(.mobile-panel__list) {

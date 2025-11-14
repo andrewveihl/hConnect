@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
   import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
-  import { openOverlay, closeOverlay, registerOverlayHandler, type MobileOverlayId } from '$lib/stores/mobileNav';
 
   let showThreads = $state(false);
   let gestureSurface: HTMLDivElement | null = null;
@@ -16,8 +15,6 @@
   // Keep drawer motion consistent with the rest of the shell.
   const PANEL_DURATION = 260;
   const PANEL_EASING = 'cubic-bezier(0.32, 0.72, 0, 1)';
-  const DM_OVERLAY_ID: MobileOverlayId = 'dm-list';
-
   let tracking = false;
   let startX = 0;
   let startY = 0;
@@ -27,6 +24,13 @@
   let swipeActive = $state(false);
 
   const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
+  let forceMobileList = $state(browser && useMobileShell());
+
+  $effect(() => {
+    if (forceMobileList) {
+      showThreads = true;
+    }
+  });
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   const panelTransform = $derived.by(() => {
@@ -42,16 +46,16 @@
     return showThreads ? 'translate3d(0, 0, 0)' : 'translate3d(-100%, 0, 0)';
   });
 
-  // Keep the in-app toggle and browser history aligned so the system back gesture closes the drawer first.
-  const syncThreadsVisibility = (next: boolean, { source = 'ui' }: { source?: 'ui' | 'history' } = {}) => {
+  // Toggle the drawer when we're not forcing the list to stay visible on mobile.
+  const syncThreadsVisibility = (next: boolean) => {
+    if (forceMobileList) {
+      if (!showThreads) {
+        showThreads = true;
+      }
+      return;
+    }
     if (showThreads === next) return;
     showThreads = next;
-    if (!browser || !useMobileShell()) return;
-    if (next) {
-      openOverlay(DM_OVERLAY_ID);
-    } else if (source !== 'history') {
-      closeOverlay(DM_OVERLAY_ID);
-    }
   };
 
   function setupGestures(target: HTMLDivElement | null) {
@@ -132,7 +136,13 @@
 
     const mdMq = window.matchMedia('(min-width: 768px)');
     const onMedia = () => {
-      if (mdMq.matches) syncThreadsVisibility(false);
+      const isMobile = !mdMq.matches;
+      forceMobileList = isMobile;
+      if (isMobile) {
+        showThreads = true;
+      } else {
+        showThreads = false;
+      }
     };
 
     window.addEventListener('keydown', onKey);
@@ -163,32 +173,24 @@
       }
     }
     const cleanupGestures = setupGestures(gestureSurface);
-    const overlayCleanup = registerOverlayHandler(DM_OVERLAY_ID, () => syncThreadsVisibility(false, { source: 'history' }));
     return () => {
       cleanupGestures?.();
-      overlayCleanup?.();
     };
   });
+
+  function handleThreadSelect() {
+    syncThreadsVisibility(false);
+  }
 </script>
 
 <div class="flex flex-1 overflow-hidden panel-muted mobile-full-bleed gesture-pad-x" bind:this={gestureSurface}>
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle">
-    <DMsSidebar activeThreadId={null} />
+    <DMsSidebar activeThreadId={null} on:select={handleThreadSelect} />
   </div>
 
-  <div class="flex flex-1 flex-col panel">
+  <div class="flex flex-1 flex-col panel dm-placeholder">
     <header class="channel-header">
       <div class="channel-header__left">
-        {#if !showThreads}
-          <button
-            class="channel-header__toggle md:hidden"
-            type="button"
-            aria-label="Open conversations"
-            onclick={() => syncThreadsVisibility(true)}
-          >
-            <i class="bx bx-chevron-left text-xl"></i>
-          </button>
-        {/if}
         <div class="channel-header__title">
           <span class="channel-header__badge">
             <i class="bx bx-message-dots" aria-hidden="true"></i>
@@ -223,17 +225,15 @@
       <div class="mobile-panel__body">
         <div class="mobile-panel__list">
           <div class="mobile-panel__header md:hidden">
-            <button class="mobile-panel__close -ml-2" aria-label="Close" type="button" onclick={() => syncThreadsVisibility(false)}>
-              <i class="bx bx-chevron-left text-2xl"></i>
-            </button>
             <div class="mobile-panel__title">Conversations</div>
           </div>
           <div class="flex-1 overflow-y-auto touch-pan-y">
-            <DMsSidebar
-              activeThreadId={null}
-              on:select={() => syncThreadsVisibility(false)}
-              on:delete={() => syncThreadsVisibility(false)}
-            />
+          <DMsSidebar
+            activeThreadId={null}
+            showPersonalSection={false}
+            on:select={handleThreadSelect}
+            on:delete={() => syncThreadsVisibility(false)}
+          />
           </div>
         </div>
       </div>
@@ -246,6 +246,10 @@
   }
 
   @media (max-width: 767px) {
+    .dm-placeholder {
+      display: none;
+    }
+
     :global(.mobile-full-bleed),
     :global(.mobile-full-bleed .panel),
     :global(.mobile-full-bleed .panel-muted) {
