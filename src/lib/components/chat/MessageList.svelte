@@ -94,6 +94,9 @@ let previewAttachment = $state<ImagePreviewDetails | null>(null);
 let previewOverlayEl = $state<HTMLDivElement | null>(null);
 let isRequestingMore = false;
 let lastScrollSignal = $state(0);
+let shouldStickToBottom = true;
+let pendingPrependAdjustment: { height: number; top: number } | null = null;
+let lastFirstMessageId: string | null = null;
 
 const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
   scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
@@ -430,11 +433,29 @@ run(() => {
   let swipeState: SwipeState = $state({ pointerId: null, startX: 0, startY: 0, blurred: false });
 
   run(() => {
+    const currentFirstId = messages[0]?.id ?? null;
     if (messages.length !== lastLen) {
       const wasEmpty = lastLen === 0;
+      const lengthIncreased = messages.length > lastLen;
       lastLen = messages.length;
-      scrollToBottom(wasEmpty ? 'auto' : 'smooth');
+
+      if (pendingPrependAdjustment && lengthIncreased && currentFirstId !== lastFirstMessageId && scroller) {
+        const snapshot = pendingPrependAdjustment;
+        pendingPrependAdjustment = null;
+        tick().then(() => {
+          if (!scroller) return;
+          const diff = scroller.scrollHeight - snapshot.height;
+          const nextTop = snapshot.top + diff;
+          scroller.scrollTop = Math.max(nextTop, 0);
+        });
+      } else {
+        pendingPrependAdjustment = null;
+        if (shouldStickToBottom || wasEmpty) {
+          scrollToBottom(wasEmpty ? 'auto' : 'smooth');
+        }
+      }
     }
+    lastFirstMessageId = currentFirstId;
     if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
       reactionMenuFor = null;
     }
@@ -718,10 +739,19 @@ run(() => {
   function handleScroll() {
     if (reactionMenuFor) closeReactionMenu();
     if (!scroller) return;
-    if (scroller.scrollTop <= 64 && !isRequestingMore) {
+    const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+    shouldStickToBottom = distanceFromBottom < 120;
+
+    if (scroller.scrollTop <= 24 && !isRequestingMore) {
+      pendingPrependAdjustment = {
+        height: scroller.scrollHeight,
+        top: scroller.scrollTop
+      };
       isRequestingMore = true;
       dispatch('loadMore');
-      setTimeout(() => (isRequestingMore = false), 500);
+      setTimeout(() => {
+        isRequestingMore = false;
+      }, 500);
     }
   }
 
@@ -1689,6 +1719,24 @@ run(() => {
   align-items: flex-end;
 }
 
+.message-thread-stack--indented {
+  margin-left: clamp(1.5rem, 4vw, 2.8rem);
+}
+
+.message-thread-stack--mine.message-thread-stack--indented {
+  margin-left: 0;
+  margin-right: clamp(1.5rem, 4vw, 2.8rem);
+}
+
+.thread-preview--indented {
+  margin-left: clamp(1.5rem, 4vw, 3rem);
+}
+
+.thread-preview--mine.thread-preview--indented {
+  margin-left: 0;
+  margin-right: clamp(1.5rem, 4vw, 3rem);
+}
+
 .thread-preview {
   position: relative;
   margin-top: 0.2rem;
@@ -2153,7 +2201,11 @@ run(() => {
                       </button>
                     </div>
                   {/if}
-                <div class={`message-thread-stack ${mine ? 'message-thread-stack--mine' : ''}`}>
+                <div
+                  class={`message-thread-stack ${mine ? 'message-thread-stack--mine' : ''} ${
+                    replyRef ? 'message-thread-stack--indented' : ''
+                  }`}
+                >
                   {#if !m.type || m.type === 'text' || String(m.type) === 'normal'}
                     <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                       {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
@@ -2279,7 +2331,7 @@ run(() => {
                     {@const previewTime = formatThreadTimestamp(threadMeta.lastAt ?? (m as any).createdAt ?? null)}
                     {@const previewAvatar = avatarUrlFor(m)}
                     <div
-                      class={`thread-preview ${threadMeta.unread ? 'thread-preview--unread' : ''} ${mine ? 'thread-preview--mine' : ''}`}
+                      class={`thread-preview ${threadMeta.unread ? 'thread-preview--unread' : ''} ${mine ? 'thread-preview--mine' : ''} thread-preview--indented`}
                       role="button"
                       tabindex="0"
                       aria-label={`Open thread (${threadMeta.count ?? 0} messages)`}
