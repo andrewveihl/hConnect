@@ -149,6 +149,10 @@
 
   let text = $state('');
   let popOpen = $state(false);
+  let mobileRewriteExpanded = $state(false);
+  let plusTriggerEl: HTMLButtonElement | null = $state(null);
+  let popoverEl: HTMLDivElement | null = $state(null);
+  let popoverOutsideCleanup: (() => void) | null = null;
   let showGif = $state(false);
   let showPoll = $state(false);
   let showForm = $state(false);
@@ -640,6 +644,20 @@
   $effect(() => {
     if (!showSuggestionGhost) {
       suggestionTapPrimed = false;
+    }
+  });
+
+  $effect(() => {
+    if (platform === 'mobile' && rewriteMenuOpen) {
+      closeRewriteMenu();
+    }
+  });
+
+  $effect(() => {
+    popoverOutsideCleanup?.();
+    popoverOutsideCleanup = popOpen ? registerPopoverOutsideWatcher() : null;
+    if (!popOpen) {
+      mobileRewriteExpanded = false;
     }
   });
 
@@ -1329,6 +1347,17 @@
     return () => document.removeEventListener('pointerdown', handler);
   }
 
+  function registerPopoverOutsideWatcher() {
+    if (typeof document === 'undefined') return null;
+    const handler = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (popoverEl?.contains(target) || plusTriggerEl?.contains(target)) return;
+      popOpen = false;
+    };
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
+  }
+
 
   onMount(() => {
     if (typeof window === 'undefined') return;
@@ -1429,6 +1458,8 @@
       dockSuppressionActive = false;
       mobileDockSuppressed.release();
     }
+    popoverOutsideCleanup?.();
+    popoverOutsideCleanup = null;
   });
 
   function onEsc(e: KeyboardEvent) {
@@ -1622,66 +1653,172 @@
     </div>
   {/if}
 
-  <form onsubmit={preventDefault(submit)} class="relative flex items-center gap-2">
-    <div class="relative">
-      <button
-        type="button"
-        class="rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
-        aria-haspopup="menu"
-        aria-expanded={popOpen}
-        aria-label="Add to message"
-        title="Add to message"
-        onclick={() => (popOpen = !popOpen)}
-        disabled={disabled}
-      >
-        <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
-      </button>
+  <form onsubmit={preventDefault(submit)} class="relative flex items-center gap-2 chat-input__form">
+    <div class="chat-input__action-column">
+      <div class="chat-input__primary-action">
+        <button
+          type="button"
+          class="rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
+          aria-haspopup="menu"
+          aria-expanded={popOpen}
+          aria-label="Add to message"
+          title="Add to message"
+          onclick={() => (popOpen = !popOpen)}
+          disabled={disabled}
+          bind:this={plusTriggerEl}
+        >
+          <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
+        </button>
 
-      {#if popOpen}
-        <div class="chat-input-popover" role="menu">
-          <div class="chat-input-popover__header">Add to message</div>
-          <div class="chat-input-menu">
-            <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
-              <span class="chat-input-menu__icon">
-                <i class="bx bx-film" aria-hidden="true"></i>
-              </span>
-              <div class="chat-input-menu__content">
-                <span class="chat-input-menu__title">Add GIF</span>
-                <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
-              </div>
-            </button>
-            <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
-              <span class="chat-input-menu__icon">
-                <i class="bx bx-paperclip" aria-hidden="true"></i>
-              </span>
-              <div class="chat-input-menu__content">
-                <span class="chat-input-menu__title">Upload files</span>
-                <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
-              </div>
-            </button>
-            <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
-              <span class="chat-input-menu__icon">
-                <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
-              </span>
-              <div class="chat-input-menu__content">
-                <span class="chat-input-menu__title">Create poll</span>
-                <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
-              </div>
-            </button>
-            <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
-              <span class="chat-input-menu__icon">
-                <i class="bx bx-detail" aria-hidden="true"></i>
-              </span>
-              <div class="chat-input-menu__content">
-                <span class="chat-input-menu__title">Create form</span>
-                <span class="chat-input-menu__subtitle">Collect structured responses.</span>
-              </div>
-            </button>
+        {#if popOpen}
+          <div
+            class="chat-input-popover"
+            class:chat-input-popover--mobile={platform === 'mobile'}
+            bind:this={popoverEl}
+            role="menu"
+            style:--chat-popover-offset={platform === 'mobile' ? '8rem' : undefined}
+          >
+            <div class="chat-input-popover__header">Add to message</div>
+            <div class="chat-input-menu">
+              <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
+                <span class="chat-input-menu__icon">
+                  <i class="bx bx-film" aria-hidden="true"></i>
+                </span>
+                <div class="chat-input-menu__content">
+                  <span class="chat-input-menu__title">Add GIF</span>
+                  <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
+                </div>
+              </button>
+              <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
+                <span class="chat-input-menu__icon">
+                  <i class="bx bx-paperclip" aria-hidden="true"></i>
+                </span>
+                <div class="chat-input-menu__content">
+                  <span class="chat-input-menu__title">Upload files</span>
+                  <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
+                </div>
+              </button>
+              <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
+                <span class="chat-input-menu__icon">
+                  <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
+                </span>
+                <div class="chat-input-menu__content">
+                  <span class="chat-input-menu__title">Create poll</span>
+                  <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
+                </div>
+              </button>
+              <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
+                <span class="chat-input-menu__icon">
+                  <i class="bx bx-detail" aria-hidden="true"></i>
+                </span>
+                <div class="chat-input-menu__content">
+                  <span class="chat-input-menu__title">Create form</span>
+                  <span class="chat-input-menu__subtitle">Collect structured responses.</span>
+                </div>
+              </button>
+              {#if platform === 'mobile'}
+                <div class="chat-input-menu__section">
+                  <button
+                    type="button"
+                    class="chat-input-menu__section-toggle"
+                    aria-expanded={mobileRewriteExpanded}
+                    onclick={() => (mobileRewriteExpanded = !mobileRewriteExpanded)}
+                  >
+                    <span class="chat-input-menu__section-label">
+                      <span class="chat-input-menu__section-icon">
+                        <i class="bx bx-wand" aria-hidden="true"></i>
+                      </span>
+                      <span class="chat-input-menu__section-title">Sound-check message</span>
+                    </span>
+                    <i class="bx bx-chevron-down" aria-hidden="true"></i>
+                  </button>
+                  {#if mobileRewriteExpanded}
+                    {#if !aiAssistAllowed}
+                      <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
+                    {:else if !rewriteEligible}
+                      <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
+                    {:else}
+                      <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
+                    {/if}
+                    <div class="chat-input-menu__rewrite">
+                      {#each rewriteActions as action}
+                        {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="rewrite-menu__item chat-input-menu__rewrite-item"
+                          onclick={() => handleRewriteAction(action.id)}
+                          disabled={!rewriteEligible || actionBusy}
+                        >
+                          <span class="rewrite-menu__icon">
+                            <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                          </span>
+                          <span class="rewrite-menu__content">
+                            <span class="rewrite-menu__title">{action.label}</span>
+                            <span class="rewrite-menu__description">{action.description}</span>
+                          </span>
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
           </div>
+        {/if}
+
+        <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
+      </div>
+
+      {#if platform !== 'mobile'}
+        <div class="rewrite-trigger rewrite-trigger--stacked">
+          <button
+            type="button"
+            class="rewrite-button rewrite-button--stacked"
+            onclick={handleRewriteClick}
+            onpointerdown={handleRewritePointerDown}
+            onpointerup={handleRewritePointerUp}
+            onpointerleave={handleRewritePointerLeave}
+            onpointercancel={handleRewritePointerLeave}
+            disabled={disabled || !aiAssistAllowed}
+            aria-haspopup="menu"
+            aria-expanded={rewriteMenuOpen}
+            aria-label={`Rewrite message (${rewriteModeLabel})`}
+            bind:this={rewriteMenuButton}
+          >
+            <span class="rewrite-button__sparkle" aria-hidden="true"></span>
+            <i class="bx bx-pencil" aria-hidden="true"></i>
+          </button>
+          {#if rewriteMenuOpen}
+            <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
+              <div class="rewrite-menu__header">Sound-check message</div>
+              {#if !rewriteEligible}
+                <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
+              {/if}
+              <div class="rewrite-menu__list">
+                {#each rewriteActions as action}
+                  {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
+                    onclick={() => handleRewriteAction(action.id)}
+                    disabled={!rewriteEligible || actionBusy}
+                  >
+                    <span class="rewrite-menu__icon">
+                      <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                    </span>
+                    <span class="rewrite-menu__content">
+                      <span class="rewrite-menu__title">{action.label}</span>
+                      <span class="rewrite-menu__description">{action.description}</span>
+                    </span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
-
-      <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
     </div>
 
     <div class="flex-1 relative chat-input__field">
