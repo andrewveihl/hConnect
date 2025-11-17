@@ -47,6 +47,16 @@
     | (BaseChatMessage & { form: { title: string; questions: string[] }; type: 'form' })
     | (BaseChatMessage & { text?: string; type: 'system' });
 
+  type ImagePreviewDetails = {
+    url: string;
+    name?: string | null;
+    contentType?: string | null;
+    sizeLabel?: string | null;
+    author?: string | null;
+    timestamp?: string | null;
+    downloadUrl?: string | null;
+  };
+
   interface Props {
     messages?: ChatMessage[];
     users?: Record<string, any>;
@@ -63,6 +73,7 @@
         archived?: boolean;
         name?: string | null;
         preview?: string | null;
+        unread?: boolean;
       }
     >;
     hideReplyPreview?: boolean;
@@ -79,6 +90,8 @@
   }: Props = $props();
 
 let scroller = $state<HTMLDivElement | null>(null);
+let previewAttachment = $state<ImagePreviewDetails | null>(null);
+let previewOverlayEl = $state<HTMLDivElement | null>(null);
 let isRequestingMore = false;
 let lastScrollSignal = $state(0);
 
@@ -88,6 +101,12 @@ const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
 
 onMount(() => {
   tick().then(() => scrollToBottom('auto'));
+});
+
+run(() => {
+  if (previewAttachment && previewOverlayEl) {
+    tick().then(() => previewOverlayEl?.focus());
+  }
 });
 
   function formatTime(ts: any) {
@@ -199,6 +218,55 @@ onMount(() => {
       segments.push({ type: 'text', value: value.slice(lastIndex) });
     }
     return segments;
+  }
+
+  const resolveDate = (value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value === 'number') return new Date(value);
+    if (typeof value?.toDate === 'function') {
+      try {
+        return value.toDate();
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  function formatThreadTimestamp(value: any): string {
+    try {
+      const date = resolveDate(value);
+      if (!date) return '';
+      return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    } catch {
+      return '';
+    }
+  }
+
+  function openImagePreview(file: { url: string; name?: string | null; contentType?: string | null; size?: number }, message: ChatMessage) {
+    if (!file?.url) return;
+    const sizeLabel = typeof file.size === 'number' ? formatBytes(file.size) : null;
+    previewAttachment = {
+      url: file.url,
+      name: file.name ?? 'Image attachment',
+      contentType: file.contentType ?? null,
+      sizeLabel,
+      author: nameFor(message),
+      timestamp: message?.createdAt ? formatTime(message.createdAt) : null,
+      downloadUrl: file.url
+    };
+  }
+
+  function closePreview() {
+    previewAttachment = null;
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && previewAttachment) {
+      event.preventDefault();
+      closePreview();
+    }
   }
 
   function isMentionSegment(
@@ -678,6 +746,8 @@ onMount(() => {
 
   const formInputId = (mId: string, idx: number) => `form-${mId}-${idx}`;
 </script>
+
+<svelte:window on:keydown={handleWindowKeydown} />
 
 <style>
   .chat-scroll {
@@ -1609,74 +1679,312 @@ onMount(() => {
     }
   }
 
-.thread-preview-card {
-  margin-top: 0.4rem;
+.message-thread-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.message-thread-stack--mine {
+  align-items: flex-end;
+}
+
+.thread-preview {
+  position: relative;
+  margin-top: 0.2rem;
   border-radius: 1rem;
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-  background: color-mix(in srgb, var(--color-panel-muted) 92%, transparent);
-  padding: 0.65rem 0.85rem 0.75rem;
+  background: color-mix(in srgb, var(--color-panel-muted) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  cursor: pointer;
+  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+  padding: 0.95rem 1.1rem 1rem calc(1.1rem + 16px);
+  max-width: min(520px, 100%);
+}
+
+.thread-preview--mine {
+  align-self: flex-end;
+  padding-left: 1.1rem;
+  padding-right: calc(1.1rem + 16px);
+}
+
+.thread-preview::after {
+  content: '';
+  position: absolute;
+  top: 0.9rem;
+  bottom: 0.9rem;
+  left: 1.1rem;
+  width: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+}
+
+.thread-preview--mine::after {
+  left: auto;
+  right: 1.1rem;
+}
+
+.thread-preview::before {
+  content: '';
+  position: absolute;
+  width: 26px;
+  height: 18px;
+  top: -16px;
+  left: 1.1rem;
+  border-left: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
+  border-bottom-left-radius: 14px;
+}
+
+.thread-preview--mine::before {
+  left: auto;
+  right: 1.1rem;
+  border-left: 0;
+  border-bottom-left-radius: 0;
+  border-right: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
+  border-bottom-right-radius: 14px;
+}
+
+.thread-preview--unread::after,
+.thread-preview--unread::before {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.thread-preview__content {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  cursor: pointer;
-  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+  padding-left: 0.5rem;
 }
 
-.thread-preview-card__title {
+.thread-preview--mine .thread-preview__content {
+  padding-left: 0;
+  padding-right: 0.5rem;
+}
+
+.thread-preview__header {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.45rem;
   font-size: 0.85rem;
+}
+
+.thread-preview__author {
   font-weight: 600;
   color: var(--color-text-primary);
 }
 
-.thread-preview-card__title i {
-  color: var(--color-accent);
-  font-size: 1rem;
-}
-
-.thread-preview-card__label {
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  font-size: 0.65rem;
-  color: var(--text-60);
-}
-
-.thread-preview-card__name {
-  flex: 1;
-  font-weight: 600;
-}
-
-.thread-preview-card__preview {
-  font-size: 0.85rem;
-  color: var(--text-65);
-  line-height: 1.4;
-  max-height: 2.8rem;
-  overflow: hidden;
-}
-
-.thread-preview-card__meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.thread-preview__time {
   font-size: 0.78rem;
   color: var(--text-60);
 }
 
-.thread-preview-card__cta {
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-accent);
+.thread-preview__snippet {
+  color: var(--color-text-primary);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  line-clamp: 2;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.thread-preview-card:hover,
-.thread-preview-card:focus-visible {
+.thread-preview__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-65);
+}
+
+.thread-preview__avatars {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.thread-preview__avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+  display: grid;
+  place-items: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow: hidden;
+}
+
+.thread-preview__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thread-preview__avatar--ghost {
+  background: rgba(255, 255, 255, 0.05);
+  border-style: dashed;
+  color: var(--text-60);
+}
+
+.thread-preview__count {
+  text-transform: lowercase;
+}
+
+.thread-preview:hover,
+.thread-preview:focus-visible {
   border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--color-panel) 94%, transparent);
   transform: translateY(-1px);
   outline: none;
-  background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 5, 5, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 80;
+  overflow: hidden;
+}
+
+.image-preview-dismiss {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  z-index: 0;
+}
+
+.image-preview-panel {
+  position: relative;
+  z-index: 1;
+  width: min(960px, 100%);
+  max-height: calc(100vh - 2rem);
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 15, 18, 0.98);
+  color: #fff;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  padding: clamp(1rem, 3vw, 1.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.image-preview-close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  align-self: flex-end;
+  font-size: 1.5rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.image-preview-close:hover,
+.image-preview-close:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+}
+
+.image-preview-media {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  min-height: 220px;
+}
+
+.image-preview-media img {
+  max-width: 100%;
+  max-height: 70vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 0.5rem;
+}
+
+.image-preview-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.image-preview-name {
+  font-weight: 600;
+  font-size: 1.1rem;
+  word-break: break-word;
+}
+
+.image-preview-subtext {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.image-preview-subtext--secondary {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.image-preview-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.image-preview-button {
+  border-radius: 999px;
+  padding: 0.55rem 1.5rem;
+  text-decoration: none;
+  font-weight: 500;
+  text-align: center;
+  flex: 1;
+  min-width: 140px;
+}
+
+.image-preview-button.accent {
+  background: var(--color-accent, #6366f1);
+  color: #fff;
+}
+
+.image-preview-button.subtle {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+@media (max-width: 640px) {
+  .image-preview-panel {
+    height: auto;
+    max-height: calc(100vh - 1rem);
+  }
+
+  .image-preview-actions {
+    flex-direction: column;
+  }
+
+  .image-preview-button {
+    width: 100%;
+    flex: none;
+  }
 }
 
 </style>
@@ -1845,150 +2153,177 @@ onMount(() => {
                       </button>
                     </div>
                   {/if}
-                {#if threadMeta}
-                  <div
-                    class="thread-preview-card"
-                    role="button"
-                    tabindex="0"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      event.preventDefault();
-                      openThread(m);
-                    }}
-                    onkeydown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
+                <div class={`message-thread-stack ${mine ? 'message-thread-stack--mine' : ''}`}>
+                  {#if !m.type || m.type === 'text' || String(m.type) === 'normal'}
+                    <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
+                      {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
+                        {#if isMentionSegment(segment)}
+                          {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
+                          <span
+                            class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
+                            style={segment.data?.kind === 'role' && segment.data?.color
+                              ? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
+                              : undefined}
+                          >
+                            {label}
+                          </span>
+                        {:else}
+                          {#each linkifyText(segment.value) as chunk, chunkIdx (chunkIdx)}
+                            {#if chunk.type === 'link'}
+                              <a
+                                class="chat-link"
+                                href={chunk.href}
+                                target="_blank"
+                                rel="noreferrer noopener nofollow"
+                              >
+                                {chunk.value}
+                              </a>
+                            {:else}
+                              {chunk.value}
+                            {/if}
+                          {/each}
+                        {/if}
+                      {/each}
+                    </div>
+                  {:else if m.type === 'gif' && (m as any).url}
+                    <img
+                      class={`chat-gif ${mine ? 'mine' : ''}`}
+                      src={(m as any).url}
+                      alt="GIF"
+                      loading="lazy"
+                    />
+                  {:else if m.type === 'file' && (m as any).file?.url}
+                    {@const file = (m as any).file}
+                    {@const isImageFile = looksLikeImage({ name: file.name, type: file.contentType })}
+                    <div class={`chat-file ${mine ? 'chat-file--mine' : ''} ${isImageFile ? 'chat-file--image' : 'chat-file--document'}`}>
+                      <a
+                        class={`chat-file__card ${isImageFile ? 'chat-file__card--image' : 'chat-file__card--generic'}`}
+                        href={file.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        download={file.name ?? undefined}
+                        onclick={(event) => {
+                          if (isImageFile) {
+                            event.preventDefault();
+                            openImagePreview(file, m);
+                          }
+                        }}
+                      >
+                        {#if isImageFile}
+                          <div class="chat-file__preview">
+                            <img src={file.url} alt={file.name ?? 'Image attachment'} loading="lazy" />
+                          </div>
+                        {:else}
+                          <div class="chat-file__icon" aria-hidden="true">
+                            <i class="bx bx-paperclip"></i>
+                          </div>
+                        {/if}
+                        <div class="chat-file__details">
+                          <div class="chat-file__name">{file.name ?? 'Download file'}</div>
+                          <div class="chat-file__subtext">
+                            {#if file.contentType}<span>{file.contentType}</span>{/if}
+                            {#if file.contentType && file.size}
+                              <span aria-hidden="true">&bull;</span>
+                            {/if}
+                            {#if file.size}
+                              {@const label = formatBytes(file.size)}
+                              {#if label}<span>{label}</span>{/if}
+                            {/if}
+                          </div>
+                        </div>
+                        <span class="chat-file__cta">{isImageFile ? 'Preview' : 'Download'}</span>
+                      </a>
+                    </div>
+                  {:else if m.type === 'poll' && (m as any).poll}
+                    {#await Promise.resolve((m as any).poll) then poll}
+                      <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                        <div class="font-medium mb-2">Poll: {poll.question}</div>
+                        {#each poll.options as opt, idx}
+                          <div class="rounded-lg border border-white/10 p-2 bg-white/5 mb-2">
+                            <div class="flex items-center justify-between gap-2">
+                              <div>{opt}</div>
+                              <div class="text-sm text-soft">{pct(poll.votes, idx)}%</div>
+                            </div>
+                            <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
+                            <div class="mt-2 text-right">
+                              <button class="rounded-full px-3 py-1 hover:bg-white/10" onclick={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
+                            </div>
+                          </div>
+                        {/each}
+                        <div class="text-xs text-soft mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
+                      </div>
+                    {/await}
+                  {:else if m.type === 'form' && (m as any).form}
+                    <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
+                      <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
+                      {#each (m as any).form.questions as q, qi}
+                        {#key `${m.id}-${qi}`}
+                          <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
+                          <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
+                        {/key}
+                      {/each}
+                      <div class="flex justify-end">
+                        <button
+                          class="rounded-full px-4 py-2 accent-button"
+                          onclick={() => submitForm(m)}
+                        >
+                          Submit
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+
+                  {#if threadMeta}
+                    {@const previewText = threadMeta.preview ?? 'Open thread'}
+                    {@const previewAuthor = nameFor(m)}
+                    {@const previewTime = formatThreadTimestamp(threadMeta.lastAt ?? (m as any).createdAt ?? null)}
+                    {@const previewAvatar = avatarUrlFor(m)}
+                    <div
+                      class={`thread-preview ${threadMeta.unread ? 'thread-preview--unread' : ''} ${mine ? 'thread-preview--mine' : ''}`}
+                      role="button"
+                      tabindex="0"
+                      aria-label={`Open thread (${threadMeta.count ?? 0} messages)`}
+                      onclick={(event) => {
+                        event.stopPropagation();
                         event.preventDefault();
                         openThread(m);
-                      }
-                    }}
-                  >
-                    <div class="thread-preview-card__title">
-                      <i class="bx bx-message-square-dots" aria-hidden="true"></i>
-                      <span class="thread-preview-card__label">Thread</span>
-                      <span class="thread-preview-card__name">{threadMeta.name || 'Conversation'}</span>
-                    </div>
-                    <div class="thread-preview-card__preview">
-                      {(m as any).text ?? (m as any).content ?? threadMeta.preview ?? 'Tap to view'}
-                    </div>
-                    <div class="thread-preview-card__meta">
-                      <span>
-                        {threadMeta.count ?? 0} {threadMeta.count === 1 ? 'message' : 'messages'}
-                      </span>
-                      <span class="thread-preview-card__cta">View</span>
-                    </div>
-                  </div>
-                {:else if !m.type || m.type === 'text' || String(m.type) === 'normal'}
-                  <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
-                    {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
-                      {#if isMentionSegment(segment)}
-                        {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
-                        <span
-                          class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
-                          style={segment.data?.kind === 'role' && segment.data?.color
-                            ? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
-                            : undefined}
-                        >
-                          {label}
-                        </span>
-                      {:else}
-                        {#each linkifyText(segment.value) as chunk, chunkIdx (chunkIdx)}
-                          {#if chunk.type === 'link'}
-                            <a
-                              class="chat-link"
-                              href={chunk.href}
-                              target="_blank"
-                              rel="noreferrer noopener nofollow"
-                            >
-                              {chunk.value}
-                            </a>
-                          {:else}
-                            {chunk.value}
-                          {/if}
-                        {/each}
-                      {/if}
-                    {/each}
-                  </div>
-                {:else if m.type === 'gif' && (m as any).url}
-                  <img
-                    class={`chat-gif ${mine ? 'mine' : ''}`}
-                    src={(m as any).url}
-                    alt="GIF"
-                    loading="lazy"
-                  />
-                {:else if m.type === 'file' && (m as any).file?.url}
-                  {@const file = (m as any).file}
-                  {@const isImageFile = looksLikeImage({ name: file.name, type: file.contentType })}
-                  <div class={`chat-file ${mine ? 'chat-file--mine' : ''} ${isImageFile ? 'chat-file--image' : 'chat-file--document'}`}>
-                    <a
-                      class={`chat-file__card ${isImageFile ? 'chat-file__card--image' : 'chat-file__card--generic'}`}
-                      href={file.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      download={file.name ?? undefined}
+                      }}
+                      onkeydown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          openThread(m);
+                        }
+                      }}
                     >
-                      {#if isImageFile}
-                        <div class="chat-file__preview">
-                          <img src={file.url} alt={file.name ?? 'Image attachment'} loading="lazy" />
-                        </div>
-                      {:else}
-                        <div class="chat-file__icon" aria-hidden="true">
-                          <i class="bx bx-paperclip"></i>
-                        </div>
-                      {/if}
-                      <div class="chat-file__details">
-                        <div class="chat-file__name">{file.name ?? 'Download file'}</div>
-                        <div class="chat-file__subtext">
-                          {#if file.contentType}<span>{file.contentType}</span>{/if}
-                          {#if file.contentType && file.size}
-                            <span aria-hidden="true">&bull;</span>
+                      <div class="thread-preview__content">
+                        <div class="thread-preview__header">
+                          <span class="thread-preview__author">{previewAuthor}</span>
+                          {#if previewTime}
+                            <span class="thread-preview__time">{previewTime}</span>
                           {/if}
-                          {#if file.size}
-                            {@const label = formatBytes(file.size)}
-                            {#if label}<span>{label}</span>{/if}
-                          {/if}
+                        </div>
+                        <div class="thread-preview__snippet">{previewText}</div>
+                        <div class="thread-preview__footer">
+                          <div class="thread-preview__avatars" aria-hidden="true">
+                            <div class="thread-preview__avatar">
+                              {#if previewAvatar}
+                                <img src={previewAvatar} alt={previewAuthor} loading="lazy" />
+                              {:else}
+                                <span>{initialsFor(previewAuthor)}</span>
+                              {/if}
+                            </div>
+                            <div class="thread-preview__avatar thread-preview__avatar--ghost">
+                              <i class="bx bx-message-detail" aria-hidden="true"></i>
+                            </div>
+                          </div>
+                          <div class="thread-preview__count">
+                            {threadMeta.count ?? 0} {threadMeta.count === 1 ? 'message' : 'messages'}
+                          </div>
                         </div>
                       </div>
-                      <span class="chat-file__cta">{isImageFile ? 'Open' : 'Download'}</span>
-                    </a>
-                  </div>
-                {:else if m.type === 'poll' && (m as any).poll}
-                  {#await Promise.resolve((m as any).poll) then poll}
-                    <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
-                      <div class="font-medium mb-2">Poll: {poll.question}</div>
-                      {#each poll.options as opt, idx}
-                        <div class="rounded-lg border border-white/10 p-2 bg-white/5 mb-2">
-                          <div class="flex items-center justify-between gap-2">
-                            <div>{opt}</div>
-                            <div class="text-sm text-soft">{pct(poll.votes, idx)}%</div>
-                          </div>
-                          <div class="bar mt-2" style="color: var(--color-accent)"><i style="width: {pct(poll.votes, idx)}%"></i></div>
-                          <div class="mt-2 text-right">
-                            <button class="rounded-full px-3 py-1 hover:bg-white/10" onclick={() => dispatch('vote', { messageId: m.id, optionIndex: idx })}>Vote</button>
-                          </div>
-                        </div>
-                      {/each}
-                      <div class="text-xs text-soft mt-1">{totalVotes(poll.votes)} vote{totalVotes(poll.votes) === 1 ? '' : 's'}</div>
                     </div>
-                  {/await}
-                {:else if m.type === 'form' && (m as any).form}
-                  <div class={`rounded-xl border border-white/10 p-3 bg-white/5 max-w-md ${mine ? 'ml-auto text-left' : ''}`}>
-                    <div class="font-medium mb-2">Form: {(m as any).form.title}</div>
-                    {#each (m as any).form.questions as q, qi}
-                      {#key `${m.id}-${qi}`}
-                        <label class="block text-sm mb-1" for={formInputId(m.id, qi)}>{qi + 1}. {q}</label>
-                        <input id={formInputId(m.id, qi)} class="input w-full mb-3" bind:value={formDrafts[m.id][qi]} />
-                      {/key}
-                    {/each}
-                    <div class="flex justify-end">
-                      <button
-                        class="rounded-full px-4 py-2 accent-button"
-                        onclick={() => submitForm(m)}
-                      >
-                        Submit
-                      </button>
-                    </div>
-                  </div>
-                {/if}
+                  {/if}
+                </div>
                 {#if !isSystem && (m as any).createdAt && !sameMinuteAsNext}
                   <div
                     class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
@@ -2105,6 +2440,63 @@ onMount(() => {
       {#each QUICK_REACTIONS as emoji}
         <button type="button" class="reaction-button" onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
       {/each}
+    </div>
+  </div>
+{/if}
+
+{#if previewAttachment}
+  <div
+    class="image-preview-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Image preview"
+    tabindex="-1"
+    bind:this={previewOverlayEl}
+  >
+    <button type="button" class="image-preview-dismiss" aria-label="Close preview" onclick={closePreview}></button>
+    <div class="image-preview-panel">
+      <button type="button" class="image-preview-close" aria-label="Close preview" onclick={closePreview}>
+        <i class="bx bx-x" aria-hidden="true"></i>
+      </button>
+      <div class="image-preview-media">
+        <img src={previewAttachment.url} alt={previewAttachment.name ?? 'Image preview'} loading="eager" />
+      </div>
+      <div class="image-preview-meta">
+        <div class="image-preview-name">{previewAttachment.name ?? 'Image attachment'}</div>
+        <div class="image-preview-subtext">
+          {#if previewAttachment.contentType}<span>{previewAttachment.contentType}</span>{/if}
+          {#if previewAttachment.contentType && previewAttachment.sizeLabel}
+            <span aria-hidden="true">&bull;</span>
+          {/if}
+          {#if previewAttachment.sizeLabel}<span>{previewAttachment.sizeLabel}</span>{/if}
+        </div>
+        {#if previewAttachment.author || previewAttachment.timestamp}
+          <div class="image-preview-subtext image-preview-subtext--secondary">
+            {#if previewAttachment.author}<span>Shared by {previewAttachment.author}</span>{/if}
+            {#if previewAttachment.author && previewAttachment.timestamp}
+              <span aria-hidden="true">&bull;</span>
+            {/if}
+            {#if previewAttachment.timestamp}<span>{previewAttachment.timestamp}</span>{/if}
+          </div>
+        {/if}
+        <div class="image-preview-actions">
+          <a
+            class="image-preview-button accent"
+            href={previewAttachment.downloadUrl ?? previewAttachment.url}
+            download={previewAttachment.name ?? undefined}
+          >
+            Download
+          </a>
+          <a
+            class="image-preview-button subtle"
+            href={previewAttachment.downloadUrl ?? previewAttachment.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open original
+          </a>
+        </div>
+      </div>
     </div>
   </div>
 {/if}

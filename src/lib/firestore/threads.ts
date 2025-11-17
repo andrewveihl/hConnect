@@ -35,6 +35,7 @@ export type ChannelThread = {
   createdBy: string;
   name: string;
   preview?: string | null;
+  lastMessagePreview?: string | null;
   createdAt?: Timestamp;
   lastMessageAt?: Timestamp;
   archivedAt?: Timestamp | null;
@@ -235,6 +236,7 @@ const toThread = (snap: DocumentSnapshot<any>): ChannelThread => {
     createdFromMessageId: data.createdFromMessageId,
     name: data.name,
     preview: data.preview ?? data.rootPreview ?? null,
+    lastMessagePreview: data.lastMessagePreview ?? null,
     createdAt: data.createdAt,
     lastMessageAt: data.lastMessageAt,
     archivedAt: data.archivedAt ?? null,
