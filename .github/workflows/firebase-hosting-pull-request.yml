@@ -5,6 +5,7 @@ on:
       - opened
       - synchronize
       - reopened
+      - closed
 
 permissions:
   checks: write
@@ -13,7 +14,7 @@ permissions:
 
 jobs:
   build_and_preview:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     environment: hConnect
     env:
@@ -56,3 +57,37 @@ jobs:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_HCONNECT_6212B }}
           projectId: hconnect-6212b
+
+  cleanup_preview_channel:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'closed' }}
+    runs-on: ubuntu-latest
+    environment: hConnect
+    env:
+      CHANNEL_ID: pr${{ github.event.pull_request.number }}
+      PROJECT_ID: hconnect-6212b
+    steps:
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_HCONNECT_6212B }}
+
+      - name: Ensure Node is available
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Delete Firebase preview channel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking for preview channel ${CHANNEL_ID} in ${PROJECT_ID}"
+          CHANNEL_FOUND="$(npx firebase-tools@latest hosting:channel:list --project "${PROJECT_ID}" --limit 200 --json | jq -er --arg CHANNEL_ID "${CHANNEL_ID}" '.result[] | select(.channelId == $CHANNEL_ID) | .channelId' || true)"
+
+          if [[ -z "${CHANNEL_FOUND}" ]]; then
+            echo "Channel ${CHANNEL_ID} already removed or expired."
+            exit 0
+          fi
+
+          echo "Deleting channel ${CHANNEL_ID} to free Firebase Hosting preview quota."
+          npx firebase-tools@latest hosting:channel:delete "${CHANNEL_ID}" --project "${PROJECT_ID}" --force

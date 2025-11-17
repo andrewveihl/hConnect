@@ -79,6 +79,7 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
     name?: string;
     unread?: boolean;
     archived?: boolean;
+    preview?: string | null;
   };
 
 let channels: Channel[] = $state([]);
@@ -949,7 +950,8 @@ let serverDisplayName = $state('Server');
         status: thread.status,
         name: thread.name,
         unread,
-        archived: thread.status === 'archived'
+        archived: thread.status === 'archived',
+        preview: thread.lastMessagePreview ?? thread.preview ?? null
       };
       unreadMap[thread.id] = unread;
     }

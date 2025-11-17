@@ -20,7 +20,19 @@
     inputPaddingBottom?: string;
     emptyMessage?: string;
     hideInput?: boolean;
-    threadStats?: Record<string, { count?: number; lastAt?: number; threadId?: string; status?: string; archived?: boolean }>;
+    threadStats?: Record<
+      string,
+      {
+        count?: number;
+        lastAt?: number;
+        threadId?: string;
+        status?: string;
+        archived?: boolean;
+        name?: string | null;
+        preview?: string | null;
+        unread?: boolean;
+      }
+    >;
     defaultSuggestionSource?: any | null;
     aiAssistEnabled?: boolean;
     threadLabel?: string | null;
