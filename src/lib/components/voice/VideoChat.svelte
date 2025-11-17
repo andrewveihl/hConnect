@@ -42,7 +42,7 @@ import {
 
   const CALL_DOC_ID = 'live';
   const CALL_DOC_SDP_RESET_THRESHOLD = 800_000;
-  const INACTIVITY_TIMEOUT_MS = 5 * 60 * 60 * 1000;
+  const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
   let serverId = $state<string | null>(null);
   let channelId = $state<string | null>(null);
   let sessionChannelName = $state('');
@@ -211,11 +211,12 @@ import {
   let screenStream: MediaStream | null = null;
   let isScreenSharing = $state(false);
   let isScreenSharePending = $state(false);
-  let shouldRestoreCameraOnShareEnd = false;
-  let audioNeedsUnlock = $state(false);
-  let isPlaybackMuted = $state(false);
+let shouldRestoreCameraOnShareEnd = false;
+let audioNeedsUnlock = $state(false);
+let isPlaybackMuted = $state(false);
 let inactivityTimer: number | null = null;
-  let voiceActivityUnsub: (() => void) | null = null;
+let voiceActivityUnsub: (() => void) | null = null;
+let visibilityUnsub: (() => void) | null = null;
   interface Props {
     layout?: 'standalone' | 'embedded';
   }
@@ -1247,7 +1248,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     clearInactivityTimer();
     inactivityTimer = window.setTimeout(() => {
       voiceDebug('voice inactivity timeout', { reason, limit: INACTIVITY_TIMEOUT_MS });
-      statusMessage = 'Disconnected after 5 hours without activity.';
+      statusMessage = 'Disconnected after 5 minutes without activity.';
       voiceSession.leave();
     }, INACTIVITY_TIMEOUT_MS);
   }
@@ -1255,6 +1256,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   function emitVoiceActivity(reason: string) {
     if (!serverId || !channelId) return;
     voiceActivity.ping(serverId, channelId, reason);
+    scheduleInactivityTimeout(reason);
   }
 
   function setParticipantSpeaking(uid: string, speaking: boolean) {
@@ -1740,6 +1742,15 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         debugPanelPosition = clampDebugPanelPosition(debugPanelPosition.x, debugPanelPosition.y, rect.width, rect.height);
       }
     };
+    const onVisibilityChange = () => {
+      if (!browser || typeof document === 'undefined') return;
+      if (!isJoined) return;
+      if (document.hidden) {
+        scheduleInactivityTimeout('document-hidden');
+      } else {
+        emitVoiceActivity('document-visible');
+      }
+    };
 
     if (browser && typeof window !== 'undefined') {
       let storedDebug = false;
@@ -1785,6 +1796,10 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       window.addEventListener('pointerdown', onPointerDown);
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('resize', onResize);
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        visibilityUnsub = () => document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
       compactMediaQuery = window.matchMedia('(max-width: 780px)');
       handleCompactChange = (event: MediaQueryListEvent) => {
         compactMatch = event.matches;
@@ -1798,6 +1813,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         window.removeEventListener('pointerdown', onPointerDown);
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('resize', onResize);
+        visibilityUnsub?.();
+        visibilityUnsub = null;
         if (compactMediaQuery && handleCompactChange) {
           compactMediaQuery.removeEventListener('change', handleCompactChange);
           compactMediaQuery = null;
@@ -3500,6 +3517,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     if (!participantDocRef) return;
     const current = get(user);
     if (!current?.uid) return;
+    emitVoiceActivity('presence-update');
 
     const info = identity ?? computeSelfIdentity();
 
@@ -3854,6 +3872,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       await updateParticipantPresence({ joinedAt: serverTimestamp(), status: 'active' as const });
       isJoined = true;
       statusMessage = 'Waiting for others to join...';
+      emitVoiceActivity('joined');
       voiceDebug('joinChannel ready', { joinRole, isOfferer });
     callUnsub = onSnapshot(docRef, (snapshot) => {
 
@@ -4135,6 +4154,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const { cleanupDoc = true, resetError = true } = options;
 
     clearReconnectTimer();
+    clearInactivityTimer();
     lastPresencePayload = null;
     lastParticipantsSnapshot = null;
     if (presenceDebounce) {
