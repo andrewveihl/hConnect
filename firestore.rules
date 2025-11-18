@@ -209,6 +209,18 @@ service cloud.firestore {
         allow read, write: if isSignedIn() && request.auth.uid == uid;
       }
 
+      match /devices/{deviceId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /notificationSettings/{docId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /activity/{activityId} {
+        allow read, write, delete: if isSignedIn() && request.auth.uid == uid;
+      }
+
       match /notes/{noteId} {
         allow read, write: if isSignedIn() && request.auth.uid == uid;
       }
@@ -441,8 +453,15 @@ service cloud.firestore {
       allow write: if isSuperAdminUser();
     }
 
+    /* ---------------- Admin telemetry ---------------- */
     match /logs/{logId} {
       allow read, write: if isSuperAdminUser();
+    }
+
+    match /clientErrors/{logId} {
+      allow create: if isSignedIn();
+      allow read: if isSuperAdminUser();
+      allow update, delete: if false;
     }
 
     /* ---------------- Archive collections ---------------- */

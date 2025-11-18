@@ -72,36 +72,43 @@
   };
 </script>
 
-<div class="grid gap-6 lg:grid-cols-[2fr,1fr]">
+<section class="admin-page h-full w-full grid gap-6 lg:grid-cols-[2fr,1fr]">
+  <div class="super-admin-panel">
   <AdminCard title="Super Admins" description="Allow list of emails with total control.">
-    <AdminTable headers={[{ label: 'Account' }, { label: 'Actions' }]}>
-      {#if adminEntries.length === 0}
-        <tr>
-          <td class="px-4 py-5 text-sm text-[color:var(--text-60,#6b7280)]" colspan="2">No Super Admins configured.</td>
-        </tr>
-      {:else}
-        {#each adminEntries as entry}
-          <tr class="hover:bg-[color-mix(in_srgb,var(--surface-panel)85%,transparent)]">
-            <td class="px-4 py-4">
-              <p class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">{entry.displayName ?? entry.email}</p>
-              <p class="text-xs text-[color:var(--text-60,#6b7280)]">{entry.email}</p>
-            </td>
-            <td class="px-4 py-4 text-right">
-              <button
-                type="button"
-                class="rounded-full border border-rose-300/60 px-4 py-2 text-sm font-semibold text-rose-100 disabled:opacity-50"
-                onclick={() => (pendingRemoval = entry.email)}
-                disabled={cannotRemove(entry.email)}
-              >
-                Remove
-              </button>
-            </td>
-          </tr>
-        {/each}
-      {/if}
-    </AdminTable>
+    <div class="flex h-full flex-col">
+      <div class="flex-1 overflow-y-auto">
+        <AdminTable headers={[{ label: 'Account' }, { label: 'Actions' }]}>
+          {#if adminEntries.length === 0}
+            <tr>
+              <td class="px-4 py-5 text-sm text-[color:var(--text-60,#6b7280)]" colspan="2">No Super Admins configured.</td>
+            </tr>
+          {:else}
+            {#each adminEntries as entry}
+              <tr class="hover:bg-[color-mix(in_srgb,var(--surface-panel)85%,transparent)]">
+                <td class="px-4 py-4">
+                  <p class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">{entry.displayName ?? entry.email}</p>
+                  <p class="text-xs text-[color:var(--text-60,#6b7280)]">{entry.email}</p>
+                </td>
+                <td class="px-4 py-4 text-right">
+                  <button
+                    type="button"
+                    class="rounded-full border border-rose-300/60 px-4 py-2 text-sm font-semibold text-rose-100 disabled:opacity-50"
+                    onclick={() => (pendingRemoval = entry.email)}
+                    disabled={cannotRemove(entry.email)}
+                  >
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          {/if}
+        </AdminTable>
+      </div>
+    </div>
   </AdminCard>
+  </div>
 
+  <div class="super-admin-panel">
   <AdminCard title="Add Super Admin" description="Grant full access by email.">
     <div class="space-y-4">
       <label class="block text-sm font-semibold text-[color:var(--text-70,#475569)]">
@@ -127,7 +134,27 @@
       </button>
     </div>
   </AdminCard>
-</div>
+  </div>
+</section>
+
+<style>
+  .super-admin-panel {
+    min-height: 0;
+  }
+
+  .super-admin-panel :global(section) {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .super-admin-panel :global(section > div:last-child) {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+</style>
 
 <ConfirmDialog
   open={Boolean(pendingRemoval)}

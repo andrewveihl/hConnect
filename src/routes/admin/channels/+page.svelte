@@ -148,12 +148,12 @@ $effect(() => {
             href="/admin/servers"
             class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-teal-500 to-cyan-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow hover:opacity-90"
           >
-          <span aria-hidden="true">&larr;</span>
-          Back to servers
-        </a>
-        <span class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">
-          {selectedServer ? `Managing ${selectedServer.name}` : 'Pick a server to load channels.'}
-        </span>
+            <span aria-hidden="true">&larr;</span>
+            Back to servers
+          </a>
+          <span class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">
+            {selectedServer ? `Managing ${selectedServer.name}` : 'Pick a server to load channels.'}
+          </span>
         </div>
       </div>
       <div class="flex flex-col gap-3 md:flex-row md:items-center">
@@ -188,51 +188,51 @@ $effect(() => {
       {:else}
         <AdminTable headers={[{ label: 'Channel' }, { label: 'Type' }, { label: 'Preset' }, { label: 'Created' }, { label: 'Actions' }]}>
           {#if channels.length === 0}
-          <tr>
-            <td class="px-4 py-5 text-sm text-[color:var(--text-60,#6b7280)]" colspan="5">
-              {loading ? 'Loading…' : 'No channels found'}
-            </td>
-          </tr>
-        {:else}
-          {#each channels as channel}
-            <tr class="hover:bg-[color-mix(in_srgb,var(--surface-panel)92%,transparent)]">
-              <td class="px-4 py-4">
-                <p class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">{channel.name}</p>
-                <p class="text-xs text-[color:var(--text-60,#6b7280)]">{channel.id}</p>
-              </td>
-              <td class="px-4 py-4 text-sm text-[color:var(--text-60,#6b7280)]">{channel.type}</td>
-              <td class="px-4 py-4 text-sm">
-                <div class="flex flex-wrap gap-2">
-                  {#each (['normal', 'readOnly', 'locked'] as ChannelPreset[]) as preset}
-                    <button
-                      type="button"
-                      class="preset-chip"
-                      class:preset-chip--active={channel.adminPreset === preset}
-                      onclick={() => applyPreset(channel, preset)}
-                      disabled={presetBusy}
-                    >
-                      {preset}
-                    </button>
-                  {/each}
-                </div>
-              </td>
-              <td class="px-4 py-4 text-sm text-[color:var(--text-60,#6b7280)]">
-                {channel.createdAt ? channel.createdAt.toLocaleString() : '--'}
-              </td>
-              <td class="px-4 py-4 text-right">
-                <button
-                  type="button"
-                  class="rounded-full border border-[color:color-mix(in_srgb,#f59e0b_40%,transparent)] px-3 py-1 text-xs font-semibold text-[color-mix(in_srgb,#b45309_90%,white)]"
-                  onclick={() => (pendingArchive = channel)}
-                >
-                  Archive
-                </button>
+            <tr>
+              <td class="px-4 py-5 text-sm text-[color:var(--text-60,#6b7280)]" colspan="5">
+                {loading ? 'Loading…' : 'No channels found'}
               </td>
             </tr>
-          {/each}
-        {/if}
-      </AdminTable>
-    {/if}
+          {:else}
+            {#each channels as channel}
+              <tr class="hover:bg-[color-mix(in_srgb,var(--surface-panel)92%,transparent)]">
+                <td class="px-4 py-4">
+                  <p class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">{channel.name}</p>
+                  <p class="text-xs text-[color:var(--text-60,#6b7280)]">{channel.id}</p>
+                </td>
+                <td class="px-4 py-4 text-sm text-[color:var(--text-60,#6b7280)]">{channel.type}</td>
+                <td class="px-4 py-4 text-sm">
+                  <div class="flex flex-wrap gap-2">
+                    {#each (['normal', 'readOnly', 'locked'] as ChannelPreset[]) as preset}
+                      <button
+                        type="button"
+                        class="preset-chip"
+                        class:preset-chip--active={channel.adminPreset === preset}
+                        onclick={() => applyPreset(channel, preset)}
+                        disabled={presetBusy}
+                      >
+                        {preset}
+                      </button>
+                    {/each}
+                  </div>
+                </td>
+                <td class="px-4 py-4 text-sm text-[color:var(--text-60,#6b7280)]">
+                  {channel.createdAt ? channel.createdAt.toLocaleString() : '--'}
+                </td>
+                <td class="px-4 py-4 text-right">
+                  <button
+                    type="button"
+                    class="rounded-full border border-[color:color-mix(in_srgb,#f59e0b_40%,transparent)] px-3 py-1 text-xs font-semibold text-[color-mix(in_srgb,#b45309_90%,white)]"
+                    onclick={() => (pendingArchive = channel)}
+                  >
+                    Archive
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          {/if}
+        </AdminTable>
+      {/if}
     </div>
   </AdminCard>
 </section>

@@ -3,6 +3,9 @@
   import AdminShell from '$lib/admin/components/AdminShell.svelte';
   import { ADMIN_NAV_ITEMS } from '$lib/admin/types';
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
+  import { startAuthListener } from '$lib/firebase';
+  import { startPresenceService } from '$lib/firebase/presence';
 
   interface Props {
     data: LayoutData;
@@ -13,8 +16,13 @@
 
   const navItems = ADMIN_NAV_ITEMS;
   const currentPath = $derived($page?.url?.pathname ?? '/admin');
+  const navHighlightPath = $derived(
+    currentPath.startsWith('/admin/settings') ? '/admin/archive' : currentPath
+  );
   const activeItem =
-    $derived(navItems.find((item) => currentPath === item.href || currentPath.startsWith(`${item.href}/`)));
+    $derived(
+      navItems.find((item) => navHighlightPath === item.href || navHighlightPath.startsWith(`${item.href}/`))
+    );
 
   const descriptions: Record<string, string> = {
     '/admin': 'Full visibility into hConnect.',
@@ -30,14 +38,33 @@
     '/admin/settings': 'Tune retention and safety preferences.'
   };
 
-  const resolvedDescription = $derived(descriptions[activeItem?.href ?? '/admin'] ?? 'Super Admin area.');
+  const manualTitles: Record<string, string> = {
+    '/admin/settings': 'Settings',
+    '/admin/super-admins': 'Super Admins'
+  };
+
+  const fallbackDescription = $derived(descriptions[currentPath] ?? 'Super Admin area.');
+  const resolvedDescription = $derived(
+    activeItem?.href ? descriptions[activeItem.href] ?? fallbackDescription : fallbackDescription
+  );
+  const resolvedTitle = $derived(activeItem?.label ?? manualTitles[currentPath] ?? 'Admin');
+
+  onMount(() => {
+    const stopAuth = startAuthListener();
+    const stopPresence = startPresenceService();
+
+    return () => {
+      stopAuth?.();
+      stopPresence?.();
+    };
+  });
 </script>
 
 <AdminShell
-  title={activeItem?.label ?? 'Admin'}
+  title={resolvedTitle}
   description={resolvedDescription}
   userEmail={data.userEmail}
-  currentPath={currentPath}
+  currentPath={navHighlightPath}
   navItems={navItems}
 >
   {@render children?.()}

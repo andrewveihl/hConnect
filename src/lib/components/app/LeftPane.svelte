@@ -3,8 +3,10 @@
 
   import { onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
+  import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
+  import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
   import { subscribeUserServers } from '$lib/firestore/servers';
   import { db } from '$lib/firestore';
   import { doc, onSnapshot, setDoc, deleteField, Timestamp } from 'firebase/firestore';
@@ -74,6 +76,18 @@ const isSuperAdmin = $derived(
   const handleCreateClick = () => {
     if (onCreateServer) onCreateServer();
     else localCreateOpen = true;
+  };
+  const handleLogoClick = (event: MouseEvent) => {
+    if (!currentPath.startsWith('/admin')) return;
+    event.preventDefault();
+    if (browser) {
+      try {
+        localStorage.removeItem(LAST_LOCATION_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+    }
+    goto('/', { keepFocus: true, noScroll: true, replaceState: true });
   };
 
   const formatBadge = (value: number): string => {
@@ -337,7 +351,7 @@ const isSuperAdmin = $derived(
 >
   <div class="h-4 shrink-0"></div>
 
-  <a href="/" class="rail-logo" aria-label="Activity">
+  <a href="/" class="rail-logo" aria-label="Activity" onclick={handleLogoClick}>
     <img src={logoMarkUrl} alt="hConnect" class="rail-logo__image" />
   </a>
 
@@ -449,17 +463,6 @@ const isSuperAdmin = $derived(
           </button>
         {/if}
 
-        {#if isSuperAdmin}
-          <button
-            type="button"
-            class="rail-button rail-button--admin"
-            aria-label="Admin"
-            title="Admin"
-            onclick={() => goto('/admin')}
-          >
-            <i class="bx bx-shield-quarter text-xl leading-none"></i>
-          </button>
-        {/if}
       </div>
 
       <div class="rail-profile-wrapper">
@@ -552,17 +555,6 @@ const isSuperAdmin = $derived(
 
   :global(.rail-button:active) {
     transform: scale(0.94);
-  }
-
-  :global(.rail-button--admin) {
-    background: linear-gradient(135deg, rgba(56, 189, 248, 0.95), rgba(14, 165, 233, 0.9));
-    border: 1px solid rgba(14, 165, 233, 0.4);
-    color: white;
-    box-shadow: 0 10px 25px rgba(14, 165, 233, 0.25);
-  }
-
-  :global(.rail-button--admin:hover) {
-    border-color: rgba(255, 255, 255, 0.6);
   }
 
   :global(.rail-button--disabled) {

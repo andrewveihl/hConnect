@@ -4,6 +4,7 @@
   import AdminToasts from './AdminToasts.svelte';
   import type { AdminNavItem } from '$lib/admin/types';
   import { ADMIN_NAV_ITEMS } from '$lib/admin/types';
+  import LeftPane from '$lib/components/app/LeftPane.svelte';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -31,7 +32,12 @@
   const resolvedPath = $derived(currentPath || $page?.url?.pathname || '/admin');
   const hasToolbar = $derived(Boolean(toolbar));
 
-  const isActive = (href: string) => resolvedPath === href || resolvedPath.startsWith(`${href}/`);
+  const isActive = (href: string) => {
+    if (href === '/admin') {
+      return resolvedPath === '/admin';
+    }
+    return resolvedPath === href || resolvedPath.startsWith(`${href}/`);
+  };
 
   const handleNavigate = (href: string) => {
     mobileNavOpen = false;
@@ -41,9 +47,12 @@
   const goBackToApp = () => goto('/');
 </script>
 
-<div class="flex min-h-screen" style="background: var(--surface-root); color: var(--color-text-primary);">
+<div class="flex h-screen overflow-hidden" style="background: var(--surface-root); color: var(--color-text-primary);">
+  <div class="hidden md:flex md:shrink-0">
+    <LeftPane activeServerId={null} padForDock={false} showBottomActions={true} />
+  </div>
   <aside
-    class="hidden w-64 flex-col text-[color:var(--color-text-primary,#f8fafc)] shadow-2xl md:flex"
+    class="hidden h-full w-64 flex-col overflow-y-auto text-[color:var(--color-text-primary,#f8fafc)] shadow-2xl md:flex"
     style="background: color-mix(in srgb, var(--surface-panel) 92%, transparent);"
   >
     <div class="px-6 py-5">
@@ -68,8 +77,8 @@
     </nav>
   </aside>
 
-  <div class="flex flex-1 flex-col">
-    <header class="sticky top-0 z-40 flex items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-4 py-4 shadow-sm backdrop-blur md:hidden">
+  <div class="flex flex-1 flex-col h-full overflow-hidden">
+    <header class="sticky top-0 z-40 flex shrink-0 items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-4 py-4 shadow-sm backdrop-blur md:hidden">
       <div class="flex items-center gap-3">
         <button
           type="button"
@@ -98,35 +107,13 @@
         </svg>
       </button>
     </header>
-    <main class="flex-1 overflow-y-auto overflow-x-hidden">
-      <section class="admin-shell__body">
-        <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div class="flex flex-col gap-3 text-[color:var(--color-text-primary,#0f172a)]">
-            <button
-              type="button"
-              class="inline-flex w-fit items-center gap-2 rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)85%,transparent)] px-4 py-1.5 text-xs font-semibold text-[color:var(--color-text-primary,#0f172a)] shadow-sm transition hover:bg-[color-mix(in_srgb,var(--surface-panel)90%,transparent)]"
-              aria-label="Back to hConnect"
-              onclick={goBackToApp}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6 4.5 12m0 0 6 6m-6-6H21" />
-              </svg>
-              Back to app
-            </button>
-            <p class="text-xs font-semibold uppercase tracking-[0.25em] text-[color:var(--text-60,#6b7280)]">
-              Super Admin Center
-            </p>
-            <h1 class="text-3xl font-semibold text-[color:var(--color-text-primary,#0f172a)]">{title}</h1>
-            {#if description}
-              <p class="mt-1 text-sm text-[color:var(--color-text-secondary,#4b5563)]">{description}</p>
-            {/if}
+    <main class="flex-1 overflow-y-auto min-h-0">
+      <section class="admin-shell__body w-full max-w-screen-2xl px-4 sm:px-6 lg:px-8 mx-auto">
+        {#if hasToolbar}
+          <div class="flex items-center justify-end gap-2">
+            {@render toolbar?.()}
           </div>
-          {#if hasToolbar}
-            <div class="flex items-center gap-2">
-              {@render toolbar?.()}
-            </div>
-          {/if}
-        </div>
+        {/if}
         {@render children?.()}
       </section>
     </main>
@@ -190,12 +177,15 @@
   }
 
   :global(.admin-page) {
-    width: min(100%, 76rem);
+    width: 100%;
+    max-width: min(100%, 80rem);
+    height: 100%;
+    min-height: 0;
     margin: 0 auto;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     gap: clamp(1.25rem, 3vw, 2rem);
-    padding: 0;
   }
 
   :global(.admin-page.admin-page--split) {
@@ -213,21 +203,38 @@
       grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
       gap: 1.75rem;
     }
+
+    :global(.admin-page.admin-page--stack) {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto;
+    }
+  }
+
+  @media (min-width: 768px) {
+    :global(.admin-page.admin-page--stack) {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .admin-shell__body {
-    width: min(100%, 78rem);
+    width: 100%;
+    max-width: min(100%, 80rem);
+    height: 100%;
+    min-height: 0;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: clamp(1.5rem, 4vw, 3rem);
-    padding: clamp(0.75rem, 2vw, 2.5rem);
-    min-height: calc(100vh - 88px);
+    padding-top: clamp(0.75rem, 2vw, 2.5rem);
+    padding-bottom: clamp(2rem, 6vh, 4rem);
   }
 
   @media (max-width: 640px) {
     .admin-shell__body {
-      padding: 0.75rem;
+      height: auto;
+      min-height: auto;
+      padding-top: 1.25rem;
+      padding-bottom: 3.5rem;
       gap: 1.25rem;
     }
   }
