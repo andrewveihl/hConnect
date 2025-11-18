@@ -149,7 +149,6 @@
 
   let text = $state('');
   let popOpen = $state(false);
-  let mobileRewriteExpanded = $state(false);
   let plusTriggerEl: HTMLButtonElement | null = $state(null);
   let popoverEl: HTMLDivElement | null = $state(null);
   let popoverOutsideCleanup: (() => void) | null = null;
@@ -206,9 +205,6 @@
   let lastPredictionSeed = '';
   let aiContextWindow: ReplyMessageContext[] = $state([]);
   let rewriteMenuOpen = $state(false);
-  let rewriteMenuEl: HTMLDivElement | null = $state(null);
-  let rewriteMenuButton: HTMLButtonElement | null = $state(null);
-  let disposeRewriteOutside: (() => void) | null = $state(null);
   let rewriteMode: RewriteMode | null = $state(null);
   let rewriteDefaultMode: RewriteMode = $state('rephrase');
   let rewriteOptions: string[] = $state([]);
@@ -217,8 +213,6 @@
   let rewriteError: string | null = $state(null);
   let rewriteAbort: AbortController | null = null;
   let rewriteSeed = '';
-  let rewriteHoldTimer: ReturnType<typeof setTimeout> | null = null;
-  let rewriteHoldTriggered = false;
   let suggestionTapPrimed = false;
   let textareaExpanded = $state(false);
 
@@ -648,16 +642,10 @@
   });
 
   $effect(() => {
-    if (platform === 'mobile' && rewriteMenuOpen) {
-      closeRewriteMenu();
-    }
-  });
-
-  $effect(() => {
     popoverOutsideCleanup?.();
     popoverOutsideCleanup = popOpen ? registerPopoverOutsideWatcher() : null;
     if (!popOpen) {
-      mobileRewriteExpanded = false;
+      closeRewriteMenu();
     }
   });
 
@@ -1008,8 +996,6 @@
 
   function closeRewriteMenu() {
     rewriteMenuOpen = false;
-    rewriteHoldTriggered = false;
-    clearRewriteHoldTimer();
   }
 
   function clearRewriteState(clearMode = false) {
@@ -1084,48 +1070,6 @@
         rewriteLoading = false;
       }
     }
-  }
-
-  function clearRewriteHoldTimer() {
-    if (rewriteHoldTimer) {
-      clearTimeout(rewriteHoldTimer);
-      rewriteHoldTimer = null;
-    }
-  }
-
-  function handleRewritePointerDown() {
-    if (disabled || !aiAssistAllowed) return;
-    rewriteHoldTriggered = false;
-    clearRewriteHoldTimer();
-    rewriteHoldTimer = setTimeout(() => {
-      rewriteHoldTimer = null;
-      rewriteHoldTriggered = true;
-      rewriteMenuOpen = true;
-    }, 450);
-  }
-
-  function handleRewritePointerUp() {
-    clearRewriteHoldTimer();
-  }
-
-  function handleRewritePointerLeave() {
-    clearRewriteHoldTimer();
-  }
-
-  function handleRewriteClick(event: MouseEvent) {
-    if (rewriteHoldTriggered) {
-      rewriteHoldTriggered = false;
-      event.preventDefault();
-      return;
-    }
-    if (!aiAssistAllowed) {
-      event.preventDefault();
-      return;
-    }
-    const mode = rewriteDefaultMode ?? 'rephrase';
-    rewriteMode = mode;
-    void runRewrite(mode, true);
-    rewriteMenuOpen = false;
   }
 
   function acceptRewrite() {
@@ -1336,17 +1280,6 @@
     return () => document.removeEventListener('pointerdown', handler);
   }
 
-  function registerRewriteOutsideWatcher() {
-    if (typeof document === 'undefined') return null;
-    const handler = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (rewriteMenuEl?.contains(target) || rewriteMenuButton?.contains(target)) return;
-      rewriteMenuOpen = false;
-    };
-    document.addEventListener('pointerdown', handler);
-    return () => document.removeEventListener('pointerdown', handler);
-  }
-
   function registerPopoverOutsideWatcher() {
     if (typeof document === 'undefined') return null;
     const handler = (event: MouseEvent) => {
@@ -1444,8 +1377,6 @@
     cancelGeneralSuggestion();
     clearPredictions();
     clearRewriteState(true);
-    disposeRewriteOutside?.();
-    clearRewriteHoldTimer();
     if (predictionTimer) {
       clearTimeout(predictionTimer);
       predictionTimer = null;
@@ -1503,11 +1434,6 @@
       .map((entry) => buildMessagePayload(entry))
       .filter((entry): entry is ReplyMessageContext => Boolean(entry));
     aiContextWindow = normalized.slice(-MAX_AI_CONTEXT);
-  });
-
-  run(() => {
-    disposeRewriteOutside?.();
-    disposeRewriteOutside = rewriteMenuOpen ? registerRewriteOutsideWatcher() : null;
   });
 
   run(() => {
@@ -1654,11 +1580,15 @@
   {/if}
 
   <form onsubmit={preventDefault(submit)} class="relative flex items-center gap-2 chat-input__form">
-    <div class="chat-input__action-column">
+    <div
+      class="chat-input__action-column"
+      class:chat-input__action-column--mobile={platform === 'mobile'}
+      class:chat-input__action-column--mobile-anchored={platform === 'mobile' && textareaExpanded}
+    >
       <div class="chat-input__primary-action">
         <button
           type="button"
-          class="rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
+          class="chat-input__plus-button rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
           aria-haspopup="menu"
           aria-expanded={popOpen}
           aria-label="Add to message"
@@ -1716,53 +1646,51 @@
                   <span class="chat-input-menu__subtitle">Collect structured responses.</span>
                 </div>
               </button>
-              {#if platform === 'mobile'}
-                <div class="chat-input-menu__section">
-                  <button
-                    type="button"
-                    class="chat-input-menu__section-toggle"
-                    aria-expanded={mobileRewriteExpanded}
-                    onclick={() => (mobileRewriteExpanded = !mobileRewriteExpanded)}
-                  >
-                    <span class="chat-input-menu__section-label">
-                      <span class="chat-input-menu__section-icon">
-                        <i class="bx bx-wand" aria-hidden="true"></i>
-                      </span>
-                      <span class="chat-input-menu__section-title">Sound-check message</span>
+              <div class="chat-input-menu__section">
+                <button
+                  type="button"
+                  class="chat-input-menu__section-toggle"
+                  aria-expanded={rewriteMenuOpen}
+                  onclick={() => (rewriteMenuOpen = !rewriteMenuOpen)}
+                >
+                  <span class="chat-input-menu__section-label">
+                    <span class="chat-input-menu__section-icon">
+                      <i class="bx bx-pencil" aria-hidden="true"></i>
                     </span>
-                    <i class="bx bx-chevron-down" aria-hidden="true"></i>
-                  </button>
-                  {#if mobileRewriteExpanded}
-                    {#if !aiAssistAllowed}
-                      <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
-                    {:else if !rewriteEligible}
-                      <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
-                    {:else}
-                      <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
-                    {/if}
-                    <div class="chat-input-menu__rewrite">
-                      {#each rewriteActions as action}
-                        {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="rewrite-menu__item chat-input-menu__rewrite-item"
-                          onclick={() => handleRewriteAction(action.id)}
-                          disabled={!rewriteEligible || actionBusy}
-                        >
-                          <span class="rewrite-menu__icon">
-                            <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                          </span>
-                          <span class="rewrite-menu__content">
-                            <span class="rewrite-menu__title">{action.label}</span>
-                            <span class="rewrite-menu__description">{action.description}</span>
-                          </span>
-                        </button>
-                      {/each}
-                    </div>
+                    <span class="chat-input-menu__section-title">Sound-check message</span>
+                  </span>
+                  <i class={`bx ${rewriteMenuOpen ? 'bx-chevron-up' : 'bx-chevron-down'}`} aria-hidden="true"></i>
+                </button>
+                {#if rewriteMenuOpen}
+                  {#if !aiAssistAllowed}
+                    <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
+                  {:else if !rewriteEligible}
+                    <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
+                  {:else}
+                    <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
                   {/if}
-                </div>
-              {/if}
+                  <div class="chat-input-menu__rewrite">
+                    {#each rewriteActions as action}
+                      {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="rewrite-menu__item chat-input-menu__rewrite-item"
+                        onclick={() => handleRewriteAction(action.id)}
+                        disabled={!rewriteEligible || actionBusy}
+                      >
+                        <span class="rewrite-menu__icon">
+                          <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                        </span>
+                        <span class="rewrite-menu__content">
+                          <span class="rewrite-menu__title">{action.label}</span>
+                          <span class="rewrite-menu__description">{action.description}</span>
+                        </span>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             </div>
           </div>
         {/if}
@@ -1770,55 +1698,6 @@
         <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
       </div>
 
-      {#if platform !== 'mobile'}
-        <div class="rewrite-trigger rewrite-trigger--stacked">
-          <button
-            type="button"
-            class="rewrite-button rewrite-button--stacked"
-            onclick={handleRewriteClick}
-            onpointerdown={handleRewritePointerDown}
-            onpointerup={handleRewritePointerUp}
-            onpointerleave={handleRewritePointerLeave}
-            onpointercancel={handleRewritePointerLeave}
-            disabled={disabled || !aiAssistAllowed}
-            aria-haspopup="menu"
-            aria-expanded={rewriteMenuOpen}
-            aria-label={`Rewrite message (${rewriteModeLabel})`}
-            bind:this={rewriteMenuButton}
-          >
-            <span class="rewrite-button__sparkle" aria-hidden="true"></span>
-            <i class="bx bx-pencil" aria-hidden="true"></i>
-          </button>
-          {#if rewriteMenuOpen}
-            <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
-              <div class="rewrite-menu__header">Sound-check message</div>
-              {#if !rewriteEligible}
-                <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
-              {/if}
-              <div class="rewrite-menu__list">
-                {#each rewriteActions as action}
-                  {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
-                    onclick={() => handleRewriteAction(action.id)}
-                    disabled={!rewriteEligible || actionBusy}
-                  >
-                    <span class="rewrite-menu__icon">
-                      <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                    </span>
-                    <span class="rewrite-menu__content">
-                      <span class="rewrite-menu__title">{action.label}</span>
-                      <span class="rewrite-menu__description">{action.description}</span>
-                    </span>
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-        </div>
-      {/if}
     </div>
 
     <div class="flex-1 relative chat-input__field">
@@ -1954,54 +1833,6 @@
           </div>
         {/if}
 
-        <div class="rewrite-trigger rewrite-trigger--inline">
-          <button
-            type="button"
-            class="rewrite-button rewrite-button--inline"
-            onclick={handleRewriteClick}
-            onpointerdown={handleRewritePointerDown}
-            onpointerup={handleRewritePointerUp}
-            onpointerleave={handleRewritePointerLeave}
-            onpointercancel={handleRewritePointerLeave}
-            disabled={disabled || !aiAssistAllowed}
-            aria-haspopup="menu"
-            aria-expanded={rewriteMenuOpen}
-            aria-label={`Rewrite message (${rewriteModeLabel})`}
-            bind:this={rewriteMenuButton}
-          >
-            <span class="rewrite-button__sparkle" aria-hidden="true"></span>
-            <i class="bx bx-pencil" aria-hidden="true"></i>
-          </button>
-          {#if rewriteMenuOpen}
-            <div class="rewrite-menu" bind:this={rewriteMenuEl} role="menu">
-              <div class="rewrite-menu__header">Sound-check message</div>
-              {#if !rewriteEligible}
-                <div class="rewrite-menu__hint">Type a few more words to unlock rewrites.</div>
-              {/if}
-              <div class="rewrite-menu__list">
-                {#each rewriteActions as action}
-                  {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class={`rewrite-menu__item ${!rewriteEligible ? 'is-disabled' : ''} ${actionBusy ? 'is-busy' : ''}`}
-                    onclick={() => handleRewriteAction(action.id)}
-                    disabled={!rewriteEligible || actionBusy}
-                  >
-                    <span class="rewrite-menu__icon">
-                      <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                    </span>
-                    <span class="rewrite-menu__content">
-                      <span class="rewrite-menu__title">{action.label}</span>
-                      <span class="rewrite-menu__description">{action.description}</span>
-                    </span>
-                  </button>
-                {/each}
-            </div>
-          </div>
-        {/if}
-
-        </div>
       </div>
     </div>
 
@@ -2051,7 +1882,10 @@
 
     </div>
 
-    <div class="chat-input__actions">
+    <div
+      class="chat-input__actions"
+      class:chat-input__actions--anchored={textareaExpanded}
+    >
       {#if emojiSupported}
         <div class="emoji-trigger" bind:this={emojiTriggerEl}>
           <button
@@ -2072,6 +1906,7 @@
 
       <button
         class="chat-send-button"
+        class:chat-send-button--anchored={textareaExpanded}
         type="submit"
         disabled={sendDisabled}
         aria-label="Send message"
@@ -2306,6 +2141,25 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+  }
+
+  .chat-input__action-column {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    transition: align-self 120ms ease, transform 120ms ease;
+  }
+
+  .chat-input__primary-action {
+    position: relative;
+    display: flex;
+  }
+
+  .chat-input__plus-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .reply-banner {
@@ -2635,6 +2489,14 @@
   .chat-input__textarea-wrapper textarea {
     position: relative;
     z-index: 1;
+    padding-top: 0.45rem;
+    padding-bottom: 0.45rem;
+    min-height: 2.65rem;
+    line-height: 1.4;
+  }
+
+  .chat-input__textarea-wrapper textarea::placeholder {
+    line-height: 1.4;
   }
 
   .chat-input__prediction {
@@ -2773,13 +2635,6 @@
       gap: 0.4rem;
     }
 
-    .rewrite-menu {
-      width: min(10rem, 58vw);
-      padding: 0.4rem;
-      border-radius: 0.65rem;
-      right: 0.15rem;
-    }
-
     .rewrite-menu__item {
       gap: 0.45rem;
       padding: 0.35rem 0.4rem;
@@ -2797,113 +2652,14 @@
     display: flex;
     align-items: center;
     gap: 0.45rem;
+    align-self: center;
+    transition: align-self 120ms ease, padding-bottom 120ms ease;
   }
 
-  .rewrite-trigger {
-    position: relative;
-  }
-
-  .rewrite-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    color: var(--text-70);
-    font-weight: 600;
-    font-size: 0.85rem;
-    padding: 0.4rem 0.9rem;
-    position: relative;
-    overflow: visible;
-  }
-
-  .rewrite-trigger--inline {
-    position: absolute;
-    top: -0.5rem;
-    right: -0.2rem;
-    left: auto;
-    z-index: 6;
-    pointer-events: none;
-  }
-
-  .rewrite-button--inline {
-    width: 1.75rem;
-    height: 1.75rem;
-    padding: 0;
-    border-radius: 999px;
-    justify-content: center;
-    box-shadow:
-      0 4px 10px rgba(0, 0, 0, 0.35),
-      0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 97%, transparent);
-    color: var(--color-accent);
-    pointer-events: auto;
-  }
-
-  .rewrite-button__sparkle {
-    position: absolute;
-    width: 0.5rem;
-    height: 0.5rem;
-    background: radial-gradient(circle, var(--color-accent) 55%, transparent 70%);
-    top: 0.1rem;
-    left: 0.55rem;
-    border-radius: 999px;
-    opacity: 0.55;
-  }
-
-  .rewrite-button--inline i {
-    font-size: 0.8rem;
-    position: relative;
-  }
-
-  .rewrite-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .rewrite-button:not(:disabled):hover,
-  .rewrite-button:not(:disabled):focus-visible {
-    background: color-mix(in srgb, var(--color-panel-muted) 95%, transparent);
-    outline: none;
-  }
-
-  .rewrite-menu {
-    position: absolute;
-    top: auto;
-    bottom: calc(100% + 0.45rem);
-    right: 0;
-    left: auto;
-    width: min(12rem, 55vw);
-    border-radius: 0.8rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
-    padding: 0.55rem;
-    z-index: 60;
-    box-shadow:
-      0 14px 26px rgba(0, 0, 0, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.07);
-    transform-origin: top right;
-  }
-
-  .rewrite-menu__header {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-55);
-    margin-bottom: 0.4rem;
-  }
-
-  .rewrite-menu__hint {
-    font-size: 0.78rem;
-    color: var(--text-60);
-    margin-bottom: 0.4rem;
-  }
-
-  .rewrite-menu__list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
+  .chat-input__actions--anchored {
+    align-self: flex-end;
+    align-items: flex-end;
+    padding-bottom: 0.2rem;
   }
 
   .rewrite-menu__item {
@@ -3000,7 +2756,18 @@
     color: var(--button-primary-text);
     font-weight: 600;
     padding: 0.55rem 1.4rem;
-    transition: background 150ms ease, transform 120ms ease;
+    transition:
+      background 150ms ease,
+      transform 120ms ease,
+      margin 120ms ease;
+    align-self: center;
+    transform: translateY(-0.15rem);
+  }
+
+  .chat-send-button--anchored {
+    align-self: flex-end;
+    transform: translateY(0);
+    margin-bottom: 0.12rem;
   }
 
   .chat-send-button:hover:not(:disabled),
@@ -3037,7 +2804,7 @@
     transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
     z-index: 3;
     pointer-events: auto;
-    transform: translateY(-50%);
+    transform: translateY(calc(-50% - 0.08rem));
   }
 
   .chat-input__mobile-send:disabled {
@@ -3049,15 +2816,15 @@
   .chat-input__mobile-send--expanded {
     top: auto;
     bottom: 0.6rem;
-    transform: translateY(0.25rem);
+    transform: translateY(calc(0.25rem - 0.08rem));
   }
 
   .chat-input__mobile-send:not(:disabled):active {
-    transform: translateY(-50%) scale(0.95);
+    transform: translateY(calc(-50% - 0.08rem)) scale(0.95);
   }
 
   .chat-input__mobile-send--expanded:not(:disabled):active {
-    transform: translateY(0.25rem) scale(0.95);
+    transform: translateY(calc(0.25rem - 0.08rem)) scale(0.95);
   }
 
   .chat-input__mobile-send i {
@@ -3069,9 +2836,40 @@
       display: none;
     }
 
+    .chat-input__action-column--mobile {
+      position: static;
+      align-self: center;
+      display: flex;
+      align-items: center;
+      padding-right: 0.15rem;
+      z-index: 5;
+      transition: align-self 120ms ease, padding-bottom 120ms ease, transform 120ms ease;
+      transform: translateY(-0.15rem);
+    }
+
+    .chat-input__action-column--mobile-anchored {
+      align-self: flex-end;
+      padding-bottom: 0.15rem;
+      transform: translateY(0);
+    }
+
+    .chat-input__action-column--mobile .chat-input__primary-action {
+      width: auto;
+      height: auto;
+    }
+
+    .chat-input__action-column--mobile .chat-input__plus-button {
+      width: 2.6rem;
+      height: 2.6rem;
+      padding: 0.35rem;
+    }
+
     .chat-input__textarea-wrapper textarea {
+      padding-top: 0.35rem;
+      padding-bottom: 0.35rem;
       padding-right: 3.5rem;
-      padding-bottom: 1.2rem;
+      min-height: 2.25rem;
+      line-height: 1.35;
     }
   }
 
