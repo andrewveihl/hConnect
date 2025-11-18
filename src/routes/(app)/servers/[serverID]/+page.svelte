@@ -821,11 +821,11 @@ let serverDisplayName = $state('Server');
     };
   }
 
-  function subscribeServerThreads(currServerId: string) {
+  function subscribeServerThreads(currServerId: string, uid: string) {
     const database = db();
     const q = query(collectionGroup(database, 'threads'), where('serverId', '==', currServerId));
     clearServerThreads();
-    serverThreadsScope = currServerId;
+    serverThreadsScope = `${currServerId}:${uid}`;
     serverThreadsUnsub = onSnapshot(
       q,
       (snap) => {
@@ -2840,9 +2840,11 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     return () => window.removeEventListener('keydown', handler);
   });
   run(() => {
-    if (serverId) {
-      if (serverThreadsScope !== serverId) {
-        subscribeServerThreads(serverId);
+    const uid = $user?.uid ?? null;
+    if (serverId && uid) {
+      const scopeKey = `${serverId}:${uid}`;
+      if (serverThreadsScope !== scopeKey) {
+        subscribeServerThreads(serverId, uid);
       }
     } else {
       clearServerThreads();

@@ -19,7 +19,13 @@ import {
   type Unsubscribe
 } from 'firebase/firestore';
 import { SPECIAL_MENTION_IDS, isSpecialMentionId } from '$lib/data/specialMentions';
-import { buildMessageDocument, type MessageInput, type MentionInput, type ReplyReferenceInput } from './messages';
+import {
+  buildMessageDocument,
+  type MessageDocument,
+  type MessageInput,
+  type MentionInput,
+  type ReplyReferenceInput
+} from './messages';
 
 export type ThreadStatus = 'active' | 'archived';
 export type ThreadVisibility = 'inherit_parent_with_exceptions';
@@ -412,7 +418,17 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
   const ttlHours = Number(data.ttlHours) || THREAD_DEFAULT_TTL_HOURS;
   const memberUids: string[] = Array.isArray(data.memberUids) ? data.memberUids : [];
 
-  const docData = buildMessageDocument(options.message) as Record<string, any>;
+  const baseDoc = buildMessageDocument(options.message);
+  const docData: MessageDocument & {
+    serverId: string;
+    channelId: string;
+    threadId: string;
+  } = {
+    ...baseDoc,
+    serverId,
+    channelId,
+    threadId
+  };
   const authorId = normalizeUid(docData.uid);
   if (!authorId) {
     throw new Error('Thread message must include a sender.');

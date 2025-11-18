@@ -1,19 +1,20 @@
 /* firebase-messaging-sw.js
- * Background handler for Firebase Cloud Messaging + basic config bootstrap.
- * Uses compat builds via importScripts to avoid bundling.
+ * Handles Firebase Cloud Messaging push events, notification presentation,
+ * and deep links into the hConnect client for both browser and installed PWAs.
  */
 
-// Load compat libraries (match major version in package.json; use latest minor)
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-messaging-compat.js');
 
-self.addEventListener('install', (e) => {
-  // Activate immediately
-  self.skipWaiting();
+const DEFAULT_ICON = '/Logo_transparent.png';
+const CLIENT_MESSAGE = 'HCONNECT_PUSH_DEEP_LINK';
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(self.skipWaiting());
 });
 
-self.addEventListener('activate', (e) => {
-  self.clients.claim();
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
 });
 
 let initialized = false;
@@ -21,14 +22,12 @@ let messagingInstance = null;
 
 async function ensureFirebaseInit() {
   if (initialized) return;
-  // Try config injected by page
   const cfg = self.__FIREBASE_CONFIG || null;
-  if (cfg && cfg.apiKey) {
+  if (cfg?.apiKey) {
     firebase.initializeApp(cfg);
     initialized = true;
     return;
   }
-  // Try to fetch Hosting-provided config (works on Firebase Hosting)
   try {
     const res = await fetch('/__/firebase/init.json', { cache: 'no-store' });
     if (res.ok) {
@@ -38,10 +37,11 @@ async function ensureFirebaseInit() {
         initialized = true;
       }
     }
-  } catch {}
+  } catch {
+    // Hosting bootstrap may be unavailable (local dev) �?" rely on page message below.
+  }
 }
 
-// Accept config from the page after registration
 self.addEventListener('message', (event) => {
   const data = event?.data || {};
   if (data?.type === 'FIREBASE_CONFIG' && data?.config && !initialized) {
@@ -50,7 +50,7 @@ self.addEventListener('message', (event) => {
       firebase.initializeApp(data.config);
       initialized = true;
     } catch (err) {
-      // ignore
+      console.warn('firebase config relay failed', err);
     }
   }
 });
@@ -61,11 +61,11 @@ async function getMessaging() {
   if (messagingInstance) return messagingInstance;
   try {
     messagingInstance = firebase.messaging();
+    return messagingInstance;
   } catch (err) {
     console.warn('firebase messaging init failed', err);
     return null;
   }
-  return messagingInstance;
 }
 
 function readPayloadFromPush(event) {
@@ -81,25 +81,96 @@ function readPayloadFromPush(event) {
   }
 }
 
-async function showNotificationForPayload(payload) {
-  if (!payload) return;
-  const title = payload?.notification?.title || payload?.data?.title || 'New message';
-  const body = payload?.notification?.body || payload?.data?.body || '';
-  const tag = payload?.data?.tag || undefined;
-  const icon = payload?.notification?.icon || '/Logo_transparent.png';
-  const badgeCount = Number(payload?.data?.badge ?? payload?.notification?.badge ?? 0);
+function deriveDeepLink(data = {}) {
+  const origin = data.origin || 'push';
+  if (data.dmId) {
+    const params = new URLSearchParams({ origin, dm: data.dmId });
+    if (data.messageId) params.set('messageId', data.messageId);
+    return `/dms/${encodeURIComponent(data.dmId)}?${params}`;
+  }
+  if (data.serverId && data.channelId) {
+    const params = new URLSearchParams({ origin, channel: data.channelId });
+    if (data.threadId) params.set('thread', data.threadId);
+    if (data.messageId) params.set('messageId', data.messageId);
+    return `/servers/${encodeURIComponent(data.serverId)}?${params}`;
+  }
+  return `/?origin=${encodeURIComponent(origin)}`;
+}
 
-  await self.registration.showNotification(title, {
+function coercePayloadData(payload) {
+  const data = payload?.data ? { ...payload.data } : {};
+  const notification = payload?.notification || {};
+  if (!data.title && notification.title) data.title = notification.title;
+  if (!data.body && notification.body) data.body = notification.body;
+  if (!data.icon && notification.icon) data.icon = notification.icon;
+  data.targetUrl = data.targetUrl || deriveDeepLink(data);
+  data.origin = data.origin || 'push';
+  return data;
+}
+
+async function showNotification(payload) {
+  if (!payload) return;
+  const data = coercePayloadData(payload);
+  const title = data.title || 'New message';
+  const body = data.body || '';
+  const mentionType = data.mentionType || 'direct';
+  const icon = data.icon || DEFAULT_ICON;
+  const badgeCount = Number(data.badge ?? 0);
+  const tagParts = [data.serverId, data.channelId, data.threadId, data.dmId, mentionType].filter(Boolean);
+  const tag = tagParts.length ? tagParts.join(':') : `hconnect:${mentionType}`;
+  const options = {
     body,
     icon,
+    badge: data.badgeIcon || undefined,
+    image: data.image || undefined,
     tag,
-    data: payload?.data || {}
-  });
-
-  if (typeof self.registration.setAppBadge === 'function') {
+    renotify: mentionType === 'direct' || mentionType === 'dm',
+    requireInteraction: mentionType !== 'ambient',
+    data,
+    actions: Array.isArray(data.actions) ? data.actions : undefined
+  };
+  await self.registration.showNotification(title, options);
+  if (typeof self.registration.setAppBadge === 'function' && badgeCount >= 0) {
     Promise.resolve()
-      .then(() => self.registration.setAppBadge(badgeCount > 0 ? badgeCount : 1))
+      .then(() => self.registration.setAppBadge(badgeCount || 1))
       .catch(() => {});
+  }
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function focusOrOpenClient(data) {
+  const targetUrl = data.targetUrl || deriveDeepLink(data);
+  const payload = { ...data, targetUrl, origin: data.origin || 'push', clickedAt: Date.now() };
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of clients) {
+    if (client.url) {
+      try {
+        await client.focus();
+      } catch {
+        // fallback to navigate if focus fails
+        if (typeof client.navigate === 'function') {
+          try {
+            await client.navigate(targetUrl);
+          } catch {}
+        }
+      }
+      client.postMessage({ type: CLIENT_MESSAGE, payload });
+      return;
+    }
+  }
+  const created = await self.clients.openWindow(targetUrl);
+  if (created) {
+    await delay(800);
+    try {
+      created.postMessage({ type: CLIENT_MESSAGE, payload });
+    } catch {
+      // Window might not be ready yet; wait again
+      await delay(800);
+      try {
+        created.postMessage({ type: CLIENT_MESSAGE, payload });
+      } catch {}
+    }
   }
 }
 
@@ -108,7 +179,7 @@ self.addEventListener('push', (event) => {
     (async () => {
       const payload = readPayloadFromPush(event);
       if (payload) {
-        await showNotificationForPayload(payload);
+        await showNotification(payload);
       }
     })()
   );
@@ -122,7 +193,9 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       try {
         const token = await messaging.getToken();
         const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-        clients.forEach((client) => client.postMessage({ type: 'FCM_TOKEN_REFRESHED', token }));
+        clients.forEach((client) =>
+          client.postMessage({ type: 'FCM_TOKEN_REFRESHED', token: token || null })
+        );
       } catch (err) {
         console.warn('push subscription refresh failed', err);
       }
@@ -131,24 +204,16 @@ self.addEventListener('pushsubscriptionchange', (event) => {
 });
 
 self.addEventListener('notificationclick', (event) => {
-  const target = event.notification?.data?.link || event.notification?.data?.url || '/';
   event.notification.close();
+  const data = event.notification?.data || {};
   event.waitUntil(
-    self.clients
-      .matchAll({ type: 'window', includeUncontrolled: true })
-      .then((clients) => {
-        for (const client of clients) {
-          if ('focus' in client) {
-            client.navigate(target).catch(() => {});
-            return client.focus();
-          }
-        }
-        return self.clients.openWindow(target);
-      })
-      .finally(() => {
-        if (typeof self.registration.clearAppBadge === 'function') {
-          self.registration.clearAppBadge().catch(() => {});
-        }
-      })
+    (async () => {
+      await focusOrOpenClient(data);
+      if (typeof self.registration.clearAppBadge === 'function') {
+        try {
+          await self.registration.clearAppBadge();
+        } catch {}
+      }
+    })()
   );
 });

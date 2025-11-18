@@ -3,7 +3,8 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
+import { dmUnreadCount } from '$lib/stores/notifications';
+import { activityUnreadCount } from '$lib/stores/activityFeed';
 import { user } from '$lib/stores/user';
 import { mobileDockSuppressed } from '$lib/stores/ui';
 import { subscribeUserServers } from '$lib/firestore/servers';
@@ -300,7 +301,7 @@ const showAdminLink = $derived(
           link.href === '/dms'
             ? $dmUnreadCount
             : link.href === '/'
-              ? $notificationCount
+              ? $activityUnreadCount
               : 0}
         <a
           href={link.href}

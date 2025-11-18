@@ -1,14 +1,16 @@
 ﻿<script lang="ts">
   import LeftPane from '$lib/components/app/LeftPane.svelte';
+  import { channelUnreadCount, dmUnreadCount } from '$lib/stores/notifications';
   import {
-    notifications,
-    notificationsReady,
-    notificationCount,
-    channelUnreadCount,
-    dmUnreadCount
-  } from '$lib/stores/notifications';
+    activityEntries,
+    activityReady,
+    activityUnreadCount,
+    type ActivityEntry
+  } from '$lib/stores/activityFeed';
   import type { NotificationItem } from '$lib/stores/notifications';
-  import { goto } from '$app/navigation';
+  import { enablePushForUser } from '$lib/notify/push';
+  import { handleDeepLinkPayload, type DeepLinkPayload } from '$lib/notify/deepLink';
+  import { user } from '$lib/stores/user';
 
   const formatCount = (value: number): string => {
     if (!Number.isFinite(value)) return '0';
@@ -52,10 +54,6 @@
     return relativeFormatter.format(diffYear, 'year');
   };
 
-  const goTo = (href: string) => {
-    goto(href, { keepFocus: true, noScroll: true });
-  };
-
   type SmartBucket = 'signal' | 'priority' | 'ambient';
 
   type SmartNotification = NotificationItem & {
@@ -63,6 +61,8 @@
     bucket: SmartBucket;
     aiReason: string;
   };
+
+  type SmartActivityNotification = SmartNotification & { entry: ActivityEntry };
 
   type FeedFilter = 'all' | 'signals' | 'mentions' | 'dms';
 
@@ -135,8 +135,47 @@
     };
   };
 
-  const smartFeed = $derived.by((): SmartNotification[] =>
-    $notifications.map(decorateNotification)
+  const entryToNotification = (entry: ActivityEntry): NotificationItem => {
+    const kind = entry.context.dmId
+      ? 'dm'
+      : entry.context.threadId
+        ? 'thread'
+        : 'channel';
+    const priority: 'high' | 'low' =
+      entry.mentionType === 'dm' || entry.mentionType === 'direct' ? 'high' : 'low';
+    const contextLabel =
+      entry.context.serverName && entry.context.channelName
+        ? `${entry.context.serverName} • #${entry.context.channelName}`
+        : entry.context.serverName ??
+          (entry.context.channelName ? `#${entry.context.channelName}` : 'Activity');
+    const reason = kind === 'dm' ? null : ('mention' as NotificationItem['reason']);
+    return {
+      id: entry.id,
+      kind,
+      priority,
+      serverId: entry.context.serverId ?? undefined,
+      channelId: entry.context.channelId ?? undefined,
+      threadId: entry.context.threadId ?? undefined,
+      title: entry.title,
+      context: contextLabel,
+      preview: entry.body,
+      unread: entry.status.unread ? 1 : 0,
+      highCount: entry.status.unread ? 1 : 0,
+      lowCount: 0,
+      lastActivity: entry.messageInfo.createdAt ?? entry.createdAt ?? Date.now(),
+      href: entry.deepLink,
+      isMention: kind !== 'dm',
+      reason
+    };
+  };
+
+  const entryNotifications = $derived.by(() =>
+    $activityEntries.map((entry) => ({ entry, item: entryToNotification(entry) }))
+  );
+
+  const smartFeed = $derived.by(
+    (): SmartActivityNotification[] =>
+      entryNotifications.map(({ entry, item }) => ({ ...decorateNotification(item), entry }))
   );
 
   const sortByRecency = (a: SmartNotification, b: SmartNotification) => {
@@ -149,7 +188,7 @@
     return bTime - aTime;
   };
 
-  const smartHighlights = $derived.by((): SmartNotification[] => {
+  const smartHighlights = $derived.by((): SmartActivityNotification[] => {
     const highlightPool = smartFeed.filter((item) => item.bucket !== 'ambient');
     highlightPool.sort((a, b) => {
       if (a.score === b.score) return sortByRecency(a, b);
@@ -158,7 +197,7 @@
     return highlightPool.slice(0, 4);
   });
 
-  const filterMatchers: Record<FeedFilter, (item: SmartNotification) => boolean> = {
+  const filterMatchers: Record<FeedFilter, (item: SmartActivityNotification) => boolean> = {
     all: () => true,
     signals: (item) => item.bucket === 'signal',
     mentions: (item) => item.reason === 'mention' || item.reason === 'thread',
@@ -171,7 +210,7 @@
     ambient: 'Background'
   };
 
-  const filteredFeed = $derived.by((): SmartNotification[] => {
+  const filteredFeed = $derived.by((): SmartActivityNotification[] => {
     const pool = smartFeed.filter((item) => filterMatchers[activeFilter](item));
     pool.sort((a, b) =>
       activeFilter === 'signals'
@@ -180,6 +219,55 @@
     );
     return pool;
   });
+
+  const payloadFromEntry = (entry: ActivityEntry): DeepLinkPayload => ({
+    activityId: entry.id,
+    serverId: entry.context.serverId ?? undefined,
+    channelId: entry.context.channelId ?? undefined,
+    threadId: entry.context.threadId ?? undefined,
+    dmId: entry.context.dmId ?? undefined,
+    messageId: entry.messageInfo.messageId ?? undefined,
+    origin: 'activity',
+    targetUrl: entry.deepLink
+  });
+
+  const openActivity = (entry: ActivityEntry) => {
+    void handleDeepLinkPayload(payloadFromEntry(entry));
+  };
+
+  const detectPermission = (): 'default' | 'denied' | 'granted' | 'unsupported' => {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') return 'unsupported';
+    return Notification.permission;
+  };
+
+  let pushPermission = $state<'default' | 'denied' | 'granted' | 'unsupported'>(detectPermission());
+  let pushRequestState = $state<'idle' | 'loading' | 'success' | 'error'>('idle');
+  let pushError: string | null = $state(null);
+
+  const shouldShowPushPrompt = $derived(
+    pushPermission !== 'unsupported' && pushPermission !== 'granted'
+  );
+
+  async function requestPushEnable() {
+    if (!$user?.uid) {
+      pushRequestState = 'error';
+      pushError = 'Sign in to enable push notifications.';
+      return;
+    }
+    pushRequestState = 'loading';
+    pushError = null;
+    const token = await enablePushForUser($user.uid, { prompt: true });
+    pushPermission = detectPermission();
+    if (token) {
+      pushRequestState = 'success';
+    } else {
+      pushRequestState = 'error';
+      pushError =
+        pushPermission === 'denied'
+          ? 'Notifications are blocked in your browser settings.'
+          : 'Could not enable push notifications on this device.';
+    }
+  }
 </script>
 
 <div class="flex h-dvh app-bg text-primary overflow-hidden mobile-full-bleed">
@@ -193,19 +281,38 @@
         <p class="activity-hero__eyebrow">Smart signals</p>
         <h1>Activity</h1>
         <div class="activity-hero__metrics">
-          {#if $notificationCount === 0}
+          {#if $activityUnreadCount === 0}
             <span>You're all caught up.</span>
           {:else}
-            <span>{formatCount($notificationCount)} alerts</span>
+            <span>{formatCount($activityUnreadCount)} alerts</span>
             <span>{formatCount($channelUnreadCount)} channels</span>
             <span>{formatCount($dmUnreadCount)} DMs</span>
           {/if}
         </div>
       </div>
+      {#if shouldShowPushPrompt}
+        <div class="push-cta">
+          <div>
+            <p class="push-cta__eyebrow">Enable push alerts</p>
+            <h3>Never miss a mention</h3>
+            <p>
+              We'll only alert you for DMs, @mentions, and priority threads on this device.
+              {#if pushRequestState === 'success'}
+                <strong>Push enabled.</strong>
+              {:else if pushError}
+                <strong>{pushError}</strong>
+              {/if}
+            </p>
+          </div>
+          <button class="btn btn-primary" aria-busy={pushRequestState === 'loading'} onclick={requestPushEnable}>
+            {pushRequestState === 'loading' ? 'Enabling…' : 'Enable push'}
+          </button>
+        </div>
+      {/if}
     </header>
 
     <main class="activity-main">
-      {#if !$notificationsReady}
+      {#if !$activityReady}
         <div class="activity-placeholder">
           <div class="spinner"></div>
           <p>Syncing your servers&hellip;</p>
@@ -236,7 +343,7 @@
                 <button
                   type="button"
                   class={`smart-card smart-card--${item.bucket}`}
-                  onclick={() => goTo(item.href)}
+                  onclick={() => openActivity(item.entry)}
                 >
                   <div class="smart-card__badge">
                     {bucketCopy[item.bucket]} &middot; {item.score}%
@@ -289,7 +396,7 @@
                   <button
                     type="button"
                     class={`feed-card feed-card--${item.bucket}`}
-                    onclick={() => goTo(item.href)}
+                    onclick={() => openActivity(item.entry)}
                     aria-label={`Open ${item.title}`}
                   >
                     <div class="feed-card__avatar">
@@ -389,6 +496,39 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  }
+
+  .push-cta {
+    flex: 1;
+    min-width: 240px;
+    background: color-mix(in srgb, var(--surface-panel) 85%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    border-radius: 1.2rem;
+    padding: 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+
+  .push-cta__eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 0.72rem;
+    color: var(--text-60);
+  }
+
+  .push-cta h3 {
+    margin-bottom: 0.2rem;
+  }
+
+  .push-cta p {
+    color: var(--text-70);
+    font-size: 0.92rem;
+    margin: 0;
+  }
+
+  .push-cta button {
+    align-self: flex-start;
   }
 
   .activity-main {

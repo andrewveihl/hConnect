@@ -196,7 +196,8 @@ export function buildMessageDocument(payload: MessageInput) {
       extras = {
         type: 'text',
         text,
-        content: text
+        content: text,
+        plainTextContent: text
       };
       break;
     }
@@ -205,7 +206,8 @@ export function buildMessageDocument(payload: MessageInput) {
       if (!url) throw new Error('GIF message requires a URL.');
       extras = {
         type: 'gif',
-        url
+        url,
+        plainTextContent: 'Shared a GIF'
       };
       break;
     }
@@ -228,7 +230,8 @@ export function buildMessageDocument(payload: MessageInput) {
           size,
           contentType,
           storagePath
-        })
+        }),
+        plainTextContent: `Shared ${name}`
       };
       break;
     }
@@ -247,7 +250,8 @@ export function buildMessageDocument(payload: MessageInput) {
           question,
           options,
           votesByUser: {}
-        }
+        },
+        plainTextContent: `Poll: ${question}`
       };
       break;
     }
@@ -266,7 +270,8 @@ export function buildMessageDocument(payload: MessageInput) {
           title,
           questions,
           responses: {}
-        }
+        },
+        plainTextContent: `Form: ${title}`
       };
       break;
     }
@@ -306,13 +311,25 @@ export function buildMessageDocument(payload: MessageInput) {
     };
   }
 
+  const plainTextContent =
+    typeof extras.plainTextContent === 'string'
+      ? extras.plainTextContent
+      : typeof extras.text === 'string'
+        ? extras.text
+        : typeof extras.content === 'string'
+          ? extras.content
+          : null;
+
   return {
     ...compactRecord(base),
     ...compactRecord(extras),
+    plainTextContent: plainTextContent ?? null,
     ...(replyTo ? { replyTo } : {}),
     createdAt: serverTimestamp()
-  };
+  } as MessageDocument;
 }
+
+export type MessageDocument = Record<string, any>;
 
 export async function sendChannelMessage(
   serverId: string,
@@ -325,7 +342,17 @@ export async function sendChannelMessage(
   if (!cleanChannel) throw new Error('Missing channel id.');
 
   const db = getDb();
-  const docData = buildMessageDocument(payload);
+  const baseDoc = buildMessageDocument(payload);
+  const docData: MessageDocument & {
+    serverId: string;
+    channelId: string;
+    threadId: string | null;
+  } = {
+    ...baseDoc,
+    serverId: cleanServer,
+    channelId: cleanChannel,
+    threadId: null
+  };
 
   await addDoc(
     collection(db, 'servers', cleanServer, 'channels', cleanChannel, 'messages'),
