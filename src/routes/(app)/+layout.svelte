@@ -7,6 +7,12 @@
   import { browser } from '$app/environment';
   import { afterNavigate, goto } from '$app/navigation';
   import { registerFirebaseMessagingSW } from '$lib/notify/push';
+  import {
+    clearDeepLinkParams,
+    extractDeepLinkFromURL,
+    handleDeepLinkPayload,
+    startDeepLinkListener
+  } from '$lib/notify/deepLink';
   import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import MobileDock from '$lib/components/app/MobileDock.svelte';
@@ -29,6 +35,8 @@
 
   let hasAttemptedRestore = false;
   let pendingInitialUrl: URL | null = null;
+  let skipResumeRestore = false;
+  let stopDeepLinkListener: (() => void) | null = null;
 
   const persistLastLocation = (url: URL | null | undefined) => {
     if (!browser || !url) return;
@@ -61,7 +69,7 @@
     `${loc.pathname}${loc.search ?? ''}${loc.hash ?? ''}`;
 
   async function resumeLastLocation() {
-    if (!browser) return;
+    if (!browser || skipResumeRestore) return;
     const stored = readStoredLocation();
     if (!stored?.pathname) return;
     const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -95,6 +103,11 @@
     const stopPresence = startPresenceService();
     let detachGestureGuards: (() => void) | null = null;
 
+    stopDeepLinkListener = startDeepLinkListener((payload) => {
+      skipResumeRestore = true;
+      handleDeepLinkPayload(payload).catch(() => {});
+    });
+
     if (browser) {
       (window as any).__DEBUG = true;
       // Set once on first client paint
@@ -112,15 +125,32 @@
         window.removeEventListener('gesturechange', preventGesture);
         window.removeEventListener('gestureend', preventGesture);
       };
-      resumeLastLocation()
-        .catch(() => {})
-        .finally(() => {
-          hasAttemptedRestore = true;
-          if (pendingInitialUrl) {
-            persistLastLocation(pendingInitialUrl);
-            pendingInitialUrl = null;
-          }
-        });
+
+      const currentUrl = new URL(window.location.href);
+      const initialDeepLink = extractDeepLinkFromURL(currentUrl);
+      if (initialDeepLink) {
+        skipResumeRestore = true;
+        clearDeepLinkParams(currentUrl);
+        handleDeepLinkPayload(initialDeepLink)
+          .catch(() => {})
+          .finally(() => {
+            hasAttemptedRestore = true;
+            if (pendingInitialUrl) {
+              persistLastLocation(pendingInitialUrl);
+              pendingInitialUrl = null;
+            }
+          });
+      } else {
+        resumeLastLocation()
+          .catch(() => {})
+          .finally(() => {
+            hasAttemptedRestore = true;
+            if (pendingInitialUrl) {
+              persistLastLocation(pendingInitialUrl);
+              pendingInitialUrl = null;
+            }
+          });
+      }
     } else {
       hasAttemptedRestore = true;
     }
@@ -129,6 +159,7 @@
       stopPresence?.();
       stopAuth?.();
       detachGestureGuards?.();
+      stopDeepLinkListener?.();
     };
   });
 

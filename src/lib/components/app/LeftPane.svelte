@@ -9,12 +9,13 @@
   import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
   import { subscribeUserServers } from '$lib/firestore/servers';
   import { db } from '$lib/firestore';
-  import { doc, onSnapshot, setDoc, deleteField, Timestamp } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } from 'firebase/firestore';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
   import logoMarkUrl from '$lib/assets/Logo_transparent.png';
 import { dmUnreadCount, notifications } from '$lib/stores/notifications';
 import type { NotificationItem } from '$lib/stores/notifications';
+import { streamMyDMs } from '$lib/firestore/dms';
 import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 import { featureFlags } from '$lib/stores/featureFlags';
 
@@ -27,6 +28,15 @@ import { featureFlags } from '$lib/stores/featureFlags';
 
   type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
   type StatusSelection = 'auto' | PresenceState;
+  type DmAlert = {
+    id: string;
+    threadId: string;
+    title: string;
+    photoURL: string | null;
+    unread: number;
+    href: string;
+    lastActivity: number;
+  };
 
   let {
     activeServerId = null,
@@ -48,6 +58,8 @@ import { featureFlags } from '$lib/stores/featureFlags';
   let statusButtonEl: HTMLButtonElement | null = $state(null);
   let statusMenuEl: HTMLDivElement | null = $state(null);
   let presenceUnsub: (() => void) | null = $state(null);
+  let dmRailUnsub: Unsubscribe | null = $state(null);
+  let dmMetadata: Record<string, { title: string; photoURL: string | null }> = $state({});
 const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
 const featureFlagStore = featureFlags;
 const enableVoice = $derived(Boolean($featureFlagStore.enableVoice));
@@ -72,6 +84,7 @@ const isSuperAdmin = $derived(
   });
 
   onDestroy(() => unsub?.());
+  onDestroy(() => dmRailUnsub?.());
 
   const handleCreateClick = () => {
     if (onCreateServer) onCreateServer();
@@ -122,9 +135,58 @@ const isSuperAdmin = $derived(
   const IDLE_WINDOW_MS = 60 * 60 * 1000;
   const DEFAULT_OVERRIDE_MS = 24 * 60 * 60 * 1000;
 
-  let unreadDMs: NotificationItem[] = $state([]);
+  const dmAlerts = $derived.by(() => {
+    const list = ($notifications ?? [])
+      .filter((item: NotificationItem) => item?.kind === 'dm' && (item.unread ?? 0) > 0)
+      .map((item) => {
+        const threadId = item.threadId ?? item.id.replace(/^dm:/, '');
+        const meta = dmMetadata[threadId];
+        const title =
+          meta?.title ??
+          item.title ??
+          item.preview ??
+          item.context ??
+          'Direct message';
+        const photoURL = meta?.photoURL ?? item.photoURL ?? null;
+        const unread = item.unread ?? item.highCount ?? 0;
+        const lastActivity = item.lastActivity ?? Date.now();
+        return {
+          id: item.id,
+          threadId,
+          title,
+          photoURL,
+          unread,
+          href: item.href,
+          lastActivity
+        } satisfies DmAlert;
+      });
+    list.sort((a, b) => b.lastActivity - a.lastActivity);
+    return list;
+  });
+
   run(() => {
-    unreadDMs = ($notifications ?? []).filter((item) => item?.kind === 'dm' && item.unread > 0);
+    dmRailUnsub?.();
+    dmMetadata = {};
+    const uid = $user?.uid;
+    if (!uid) return;
+    dmRailUnsub = streamMyDMs(uid, (rows) => {
+      const next: Record<string, { title: string; photoURL: string | null }> = {};
+      rows.forEach((row) => {
+        const data = row as Record<string, any>;
+        const rawName =
+          typeof data.otherDisplayName === 'string' ? data.otherDisplayName.trim() : '';
+        const rawEmail = typeof data.otherEmail === 'string' ? data.otherEmail.trim() : '';
+        const title = rawName || rawEmail || 'Direct message';
+        next[row.id] = {
+          title,
+          photoURL:
+            typeof data.otherPhotoURL === 'string' && data.otherPhotoURL.length
+              ? data.otherPhotoURL
+              : null
+        };
+      });
+      dmMetadata = next;
+    });
   });
 
   run(() => {
@@ -401,9 +463,9 @@ const isSuperAdmin = $derived(
         ? '1rem'
         : 'calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.25rem)'}
     >
-      {#if unreadDMs.length}
+      {#if dmAlerts.length}
         <div class="flex flex-col items-center gap-2 w-full" aria-label="Unread direct messages">
-          {#each unreadDMs as dm (dm.id)}
+          {#each dmAlerts as dm (dm.id)}
             <a
               href={dm.href}
               class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}

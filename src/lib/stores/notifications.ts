@@ -21,7 +21,8 @@ import {
   type Unsubscribe
 } from 'firebase/firestore';
 import type { Timestamp } from 'firebase/firestore';
-import { enablePushForUser, registerFirebaseMessagingSW } from '$lib/notify/push';
+import { registerFirebaseMessagingSW, setActivePushUser, syncDeviceRegistration } from '$lib/notify/push';
+import { ensureNotificationSettings } from '$lib/firebase/notifications';
 import {
   extractMentionedUids,
   formatPreview,
@@ -724,6 +725,7 @@ function cleanupAll() {
   dmCounts.clear();
   stopThreadWatchers();
 
+  setActivePushUser(null);
   activeUid = null;
   notificationsInternal.set([]);
   notificationCountInternal.set(0);
@@ -932,16 +934,20 @@ if (browser) {
     const uid = value?.uid ?? null;
     if (uid === activeUid) return;
     cleanupAll();
+    setActivePushUser(uid);
     if (!uid) return;
+    ensureNotificationSettings(uid).catch(() => {});
     activeUid = uid;
     if (!pushSetupFor.has(uid)) {
       pushSetupFor.add(uid);
       Promise.resolve()
         .then(() => registerFirebaseMessagingSW())
-        .then(() => enablePushForUser(uid))
+        .then(() => syncDeviceRegistration(uid))
         .catch(() => {
           pushSetupFor.delete(uid);
         });
+    } else {
+      void syncDeviceRegistration(uid);
     }
     startServerRail(uid);
     startDMWatchers(uid);

@@ -2,9 +2,34 @@
 import { browser } from '$app/environment';
 import { PUBLIC_FCM_VAPID_KEY } from '$env/static/public';
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
-import { collection, doc, serverTimestamp, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+
+const DEVICE_COLLECTION = 'devices';
+const DEVICE_ID_STORAGE_KEY = 'hconnect_device_id';
+
+type DevicePlatform =
+  | 'web_chrome'
+  | 'web_firefox'
+  | 'web_edge'
+  | 'web_safari'
+  | 'web'
+  | 'ios_browser'
+  | 'ios_pwa'
+  | 'android_browser'
+  | 'android_pwa';
+
+type DevicePermission = NotificationPermission | 'unsupported';
+
+type DeviceDocUpdate = {
+  token?: string | null;
+  permission?: DevicePermission;
+  enabled?: boolean;
+};
 
 let swReg: ServiceWorkerRegistration | null = null;
+let cachedDeviceId: string | null = null;
+let activeDeviceUid: string | null = null;
+let swMessageHandler: ((event: MessageEvent) => void) | null = null;
 
 export async function registerFirebaseMessagingSW() {
   if (!browser || !('serviceWorker' in navigator)) return null;
@@ -12,18 +37,17 @@ export async function registerFirebaseMessagingSW() {
   try {
     swReg = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
       scope: '/',
-      type: 'classic' // file is non-ESM using importScripts
+      type: 'classic'
     });
-    // Try to pass Firebase config to the SW so it can initialize off-host
     const { app } = await ensureFirebaseReady();
     const cfg = (app as any)?.options ?? null;
-    const post = () => navigator.serviceWorker.controller?.postMessage({ type: 'FIREBASE_CONFIG', config: cfg });
-    // Wait for controller
+    const postConfig = () =>
+      navigator.serviceWorker.controller?.postMessage({ type: 'FIREBASE_CONFIG', config: cfg });
     if (!navigator.serviceWorker.controller) {
       await navigator.serviceWorker.ready;
-      navigator.serviceWorker.addEventListener('controllerchange', () => post());
+      navigator.serviceWorker.addEventListener('controllerchange', () => postConfig());
     } else {
-      post();
+      postConfig();
     }
     return swReg;
   } catch (err) {
@@ -43,72 +67,158 @@ export async function requestNotificationPermission(): Promise<boolean> {
   }
 }
 
-export type TokenRecord = {
-  token: string;
-  platform?: 'ios' | 'android' | 'mac' | 'windows' | 'linux' | 'web';
-  userAgent?: string | null;
-  enabled?: boolean;
-  createdAt?: any;
-  updatedAt?: any;
-};
+export function setActivePushUser(uid: string | null) {
+  activeDeviceUid = uid;
+  if (!browser || !('serviceWorker' in navigator)) return;
+  if (!swMessageHandler) {
+    swMessageHandler = (event: MessageEvent) => {
+      if (event?.data?.type === 'FCM_TOKEN_REFRESHED') {
+        const token = event.data?.token ?? null;
+        if (token && activeDeviceUid) {
+          void persistDeviceDoc(activeDeviceUid, { token, permission: resolvePermission() });
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', swMessageHandler);
+  }
+  if (uid) {
+    void syncDeviceRegistration(uid).catch(() => {});
+  }
+}
 
-export async function enablePushForUser(uid: string): Promise<string | null> {
+export async function syncDeviceRegistration(uid: string) {
+  if (!browser || !('serviceWorker' in navigator)) return;
+  await registerFirebaseMessagingSW();
+  await persistDeviceDoc(uid, { permission: resolvePermission() });
+}
+
+export async function enablePushForUser(
+  uid: string,
+  { prompt = true }: { prompt?: boolean } = {}
+): Promise<string | null> {
   if (!browser) return null;
-  const perm = await requestNotificationPermission();
-  if (!perm) return null;
+  let permission = resolvePermission();
+  if (permission === 'denied') {
+    await persistDeviceDoc(uid, { permission, token: null });
+    return null;
+  }
+  if (permission === 'default' && prompt) {
+    const granted = await requestNotificationPermission();
+    permission = resolvePermission();
+    if (!granted) {
+      await persistDeviceDoc(uid, { permission: permission ?? 'default', token: null });
+      return null;
+    }
+  } else if (permission === 'default') {
+    await persistDeviceDoc(uid, { permission, token: null });
+    return null;
+  }
 
   const sw = await registerFirebaseMessagingSW();
-  if (!sw) return null;
-
-  const { app } = await ensureFirebaseReady();
-  const vapid = PUBLIC_FCM_VAPID_KEY ?? '';
-  if (!vapid) {
-    console.warn('No PUBLIC_FCM_VAPID_KEY set; push will be limited to foreground notifications.');
+  if (!sw) {
+    await persistDeviceDoc(uid, { permission, token: null });
+    return null;
   }
 
   try {
-    // Lazy import messaging to avoid SSR issues
-    const m = await import('firebase/messaging');
-    const messaging = m.getMessaging(app);
-    const token = await m.getToken(messaging, {
+    const { app } = await ensureFirebaseReady();
+    const vapid = PUBLIC_FCM_VAPID_KEY ?? '';
+    const messagingSdk = await import('firebase/messaging');
+    const messaging = messagingSdk.getMessaging(app);
+    const token = await messagingSdk.getToken(messaging, {
       vapidKey: vapid || undefined,
       serviceWorkerRegistration: sw
     });
-    if (!token) return null;
-
-    const db = getDb();
-    const ref = doc(collection(db, 'profiles', uid, 'fcmTokens'), token);
-    const rec: TokenRecord = {
-      token,
-      platform: derivePlatform(),
-      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
-      enabled: true,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    };
-    await setDoc(ref, rec, { merge: true });
+    if (!token) {
+      await persistDeviceDoc(uid, { permission, token: null });
+      return null;
+    }
+    await persistDeviceDoc(uid, { permission: 'granted', token, enabled: true });
     return token;
   } catch (err) {
     console.error('Failed to obtain FCM token', err);
+    await persistDeviceDoc(uid, { permission, token: null });
     return null;
   }
 }
 
-export async function disablePushForUser(uid: string, token: string) {
-  try {
-    const db = getDb();
-    await deleteDoc(doc(db, 'profiles', uid, 'fcmTokens', token));
-  } catch {}
+export async function disablePushForUser(uid: string) {
+  if (!browser) return;
+  await persistDeviceDoc(uid, { token: null, enabled: false });
 }
 
-function derivePlatform(): TokenRecord['platform'] {
+function resolvePermission(): DevicePermission {
+  if (!browser || typeof Notification === 'undefined') return 'unsupported';
+  return Notification.permission;
+}
+
+function ensureDeviceId(): string | null {
+  if (!browser) return null;
+  if (cachedDeviceId) return cachedDeviceId;
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (existing) {
+      cachedDeviceId = existing;
+      return existing;
+    }
+    const next =
+      typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `dev_${Date.now()}`;
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, next);
+    cachedDeviceId = next;
+    return next;
+  } catch (err) {
+    console.warn('Failed to read/write device id', err);
+    return null;
+  }
+}
+
+function detectPlatform(): DevicePlatform {
   if (typeof navigator === 'undefined') return 'web';
   const ua = navigator.userAgent || '';
-  if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
-  if (/Android/i.test(ua)) return 'android';
-  if (/Windows/i.test(ua)) return 'windows';
-  if (/Macintosh/i.test(ua)) return 'mac';
-  if (/Linux/i.test(ua)) return 'linux';
+  const standalone = isStandalone();
+  if (/iPhone|iPad|iPod/i.test(ua)) {
+    return standalone ? 'ios_pwa' : 'ios_browser';
+  }
+  if (/Android/i.test(ua)) {
+    return standalone ? 'android_pwa' : 'android_browser';
+  }
+  if (/Edg\//i.test(ua)) return 'web_edge';
+  if (/Firefox\//i.test(ua)) return 'web_firefox';
+  if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) return 'web_safari';
+  if (/Chrome|Chromium/i.test(ua)) return 'web_chrome';
   return 'web';
+}
+
+function isStandalone() {
+  if (!browser) return false;
+  const nav = navigator as Navigator & { standalone?: boolean };
+  if (typeof nav?.standalone === 'boolean') return nav.standalone;
+  return typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
+}
+
+async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
+  const deviceId = ensureDeviceId();
+  if (!deviceId) return;
+  await ensureFirebaseReady();
+  const db = getDb();
+  const now = serverTimestamp();
+  const ref = doc(collection(db, 'profiles', uid, DEVICE_COLLECTION), deviceId);
+  const payload: Record<string, unknown> = {
+    deviceId,
+    platform: detectPlatform(),
+    isStandalone: isStandalone(),
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+    permission: update.permission ?? resolvePermission(),
+    lastSeen: now,
+    updatedAt: now
+  };
+  if (update.token !== undefined) {
+    payload.token = update.token || null;
+    payload.tokenUpdatedAt = now;
+  }
+  if (update.enabled !== undefined) {
+    payload.enabled = update.enabled;
+  }
+  await setDoc(ref, payload, { merge: true });
 }
 

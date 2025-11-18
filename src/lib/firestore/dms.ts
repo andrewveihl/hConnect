@@ -6,7 +6,12 @@ import {
   orderBy, query, serverTimestamp, setDoc, updateDoc,
   where, limit, deleteField, runTransaction, type Unsubscribe
 } from 'firebase/firestore';
-import { buildMessageDocument, reactionKeyFromEmoji, type MessageInput } from './messages';
+import {
+  buildMessageDocument,
+  type MessageDocument,
+  reactionKeyFromEmoji,
+  type MessageInput
+} from './messages';
 
 /* ===========================
    Types
@@ -352,7 +357,11 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 
   const db = getDb();
   const messagesCol = collection(db, COL_DMS, cleanThreadId, SUB_MESSAGES);
-  const docData = buildMessageDocument(payload);
+  const baseDoc = buildMessageDocument(payload);
+  const docData: MessageDocument & { dmId: string } = {
+    ...baseDoc,
+    dmId: cleanThreadId
+  };
 
   await addDoc(messagesCol, docData);
 
