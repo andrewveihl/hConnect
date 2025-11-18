@@ -123,6 +123,42 @@ function normalizeUid(value: unknown): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+function normalizeUidList(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  const set = new Set<string>();
+  for (const value of values) {
+    const uid = normalizeUid(value);
+    if (uid) set.add(uid);
+  }
+  return Array.from(set);
+}
+
+function normalizeUidMap(mapLike: unknown): string[] {
+  if (!mapLike || typeof mapLike !== 'object') return [];
+  const set = new Set<string>();
+  const entries = Object.entries(mapLike as Record<string, unknown>);
+  for (const [key, value] of entries) {
+    if (!value) continue;
+    const uid = normalizeUid(key);
+    if (uid) set.add(uid);
+  }
+  return Array.from(set);
+}
+
+function resolveDmParticipants(dm: DmDoc | null): string[] {
+  if (!dm) return [];
+  const sources: string[][] = [
+    normalizeUidList(dm.participants),
+    normalizeUidList(dm.participantUids),
+    normalizeUidMap(dm.participantsMap),
+    typeof dm.key === 'string' ? normalizeUidList(dm.key.split('_')) : []
+  ];
+  for (const list of sources) {
+    if (list.length) return list;
+  }
+  return [];
+}
+
 function extractMentions(message: RawMessage): MentionEntry[] {
   if (Array.isArray(message?.mentions) && message.mentions.length) {
     return message.mentions;
@@ -504,6 +540,30 @@ async function deliverToRecipients(
   );
 }
 
+export async function sendTestPushForUid(
+  uid: string
+): Promise<{ sent: number; reason?: string }> {
+  const tokens = await fetchDeviceTokens(uid);
+  if (!tokens.length) {
+    return { sent: 0, reason: 'no_tokens' };
+  }
+  const title = 'hConnect test notification';
+  const body = 'Push notifications are working on this device.';
+  await sendPushToTokens(tokens, {
+    title,
+    body,
+    data: {
+      title,
+      body,
+      origin: 'push',
+      mentionType: 'direct',
+      targetUrl: '/?origin=push',
+      messageId: `test-${Date.now()}`
+    }
+  });
+  return { sent: tokens.length };
+}
+
 type ChannelMessageEvent = FirestoreEvent<
   QueryDocumentSnapshot | undefined,
   { serverId: string; channelId: string; messageId: string }
@@ -624,7 +684,7 @@ export async function handleThreadMessage(event: ThreadMessageEvent) {
 }
 
 function computeDmCandidates(dm: DmDoc | null, authorId: string | null): CandidateTarget[] {
-  const participants = Array.isArray(dm?.participants) ? dm?.participants : [];
+  const participants = resolveDmParticipants(dm);
   return participants
     .map((uid) => normalizeUid(uid))
     .filter((uid): uid is string => Boolean(uid) && uid !== authorId)

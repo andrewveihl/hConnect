@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.sendTestPushForUid = sendTestPushForUid;
 exports.handleServerMessage = handleServerMessage;
 exports.handleThreadMessage = handleThreadMessage;
 exports.handleDmMessage = handleDmMessage;
@@ -80,6 +81,46 @@ function normalizeUid(value) {
         return null;
     const trimmed = value.trim();
     return trimmed.length ? trimmed : null;
+}
+function normalizeUidList(values) {
+    if (!Array.isArray(values))
+        return [];
+    const set = new Set();
+    for (const value of values) {
+        const uid = normalizeUid(value);
+        if (uid)
+            set.add(uid);
+    }
+    return Array.from(set);
+}
+function normalizeUidMap(mapLike) {
+    if (!mapLike || typeof mapLike !== 'object')
+        return [];
+    const set = new Set();
+    const entries = Object.entries(mapLike);
+    for (const [key, value] of entries) {
+        if (!value)
+            continue;
+        const uid = normalizeUid(key);
+        if (uid)
+            set.add(uid);
+    }
+    return Array.from(set);
+}
+function resolveDmParticipants(dm) {
+    if (!dm)
+        return [];
+    const sources = [
+        normalizeUidList(dm.participants),
+        normalizeUidList(dm.participantUids),
+        normalizeUidMap(dm.participantsMap),
+        typeof dm.key === 'string' ? normalizeUidList(dm.key.split('_')) : []
+    ];
+    for (const list of sources) {
+        if (list.length)
+            return list;
+    }
+    return [];
 }
 function extractMentions(message) {
     if (Array.isArray(message?.mentions) && message.mentions.length) {
@@ -429,6 +470,27 @@ async function deliverToRecipients(recipients, message, context) {
         await sendPushToTokens(tokens, { title, body, data });
     }));
 }
+async function sendTestPushForUid(uid) {
+    const tokens = await (0, settings_1.fetchDeviceTokens)(uid);
+    if (!tokens.length) {
+        return { sent: 0, reason: 'no_tokens' };
+    }
+    const title = 'hConnect test notification';
+    const body = 'Push notifications are working on this device.';
+    await sendPushToTokens(tokens, {
+        title,
+        body,
+        data: {
+            title,
+            body,
+            origin: 'push',
+            mentionType: 'direct',
+            targetUrl: '/?origin=push',
+            messageId: `test-${Date.now()}`
+        }
+    });
+    return { sent: tokens.length };
+}
 function messageFromEvent(event) {
     const data = event.data?.data();
     return data ? data : null;
@@ -535,7 +597,7 @@ async function handleThreadMessage(event) {
     });
 }
 function computeDmCandidates(dm, authorId) {
-    const participants = Array.isArray(dm?.participants) ? dm?.participants : [];
+    const participants = resolveDmParticipants(dm);
     return participants
         .map((uid) => normalizeUid(uid))
         .filter((uid) => Boolean(uid) && uid !== authorId)

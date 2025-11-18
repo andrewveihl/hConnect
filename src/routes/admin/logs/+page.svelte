@@ -299,24 +299,25 @@
           </div>
           <div class="critical-grid">
             {#each criticalLogs as log (log.id)}
-              <article
-                class="critical-card"
-                role="button"
-                tabindex="0"
-                onclick={() => (selectedClientError = log)}
-                onkeydown={(event) => handleCriticalCardKeydown(event, log)}
-              >
-                <div class="critical-card__meta">
-                  <span class="critical-card__pill">{log.severity ?? 'error'}</span>
-                  <time>{formatDate(log.createdAt)}</time>
-                </div>
-                <h4>{log.message}</h4>
-                {#if log.path}
-                  <p class="critical-card__context">Path: {log.path}</p>
-                {/if}
-                {#if log.userId}
-                  <p class="critical-card__context">User: {log.userId}</p>
-                {/if}
+              <article class="critical-card">
+                <button
+                  type="button"
+                  class="critical-card__overview"
+                  onclick={() => (selectedClientError = log)}
+                  onkeydown={(event) => handleCriticalCardKeydown(event, log)}
+                >
+                  <div class="critical-card__meta">
+                    <span class="critical-card__pill">{log.severity ?? 'error'}</span>
+                    <time>{formatDate(log.createdAt)}</time>
+                  </div>
+                  <h4>{log.message}</h4>
+                  {#if log.path}
+                    <p class="critical-card__context">Path: {log.path}</p>
+                  {/if}
+                  {#if log.userId}
+                    <p class="critical-card__context">User: {log.userId}</p>
+                  {/if}
+                </button>
                 <div class="critical-card__actions">
                   <button
                     type="button"
@@ -486,7 +487,23 @@
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
+  }
+
+  .critical-card__overview {
+    border: none;
+    background: transparent;
+    padding: 0;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
     cursor: pointer;
+    color: inherit;
+  }
+
+  .critical-card__overview:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent, #0ea5e9) 70%, transparent);
+    outline-offset: 3px;
   }
 
   .critical-card__meta {

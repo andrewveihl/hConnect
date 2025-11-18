@@ -27,6 +27,7 @@ import {
   getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel, type Firestore
 } from 'firebase/firestore';
 import { getStorage, type FirebaseStorage } from 'firebase/storage';
+import { getFunctions, type Functions } from 'firebase/functions';
 
 import { user as userStore } from '$lib/stores/user';
 
@@ -90,6 +91,7 @@ let app: FirebaseApp | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
 let storage: FirebaseStorage | undefined;
+let functionsInstance: Functions | undefined;
 
 // Promise to ensure we only resolve config once per session
 let configPromise: Promise<Record<string, any>> | null = null;
@@ -109,7 +111,7 @@ async function ensureApp(): Promise<FirebaseApp> {
 /* Public getters ---------------------------------------------------- */
 export function getFirebase() {
   // returns lazy placeholders; real init happens in ensureReady()
-  return { app, auth, db, storage };
+  return { app, auth, db, storage, functions: functionsInstance };
 }
 
 /** Call this at app start (e.g., in +layout.svelte onMount) */
@@ -138,7 +140,10 @@ export async function ensureFirebaseReady() {
   if (!storage) {
     storage = storageBucketUrl ? getStorage(_app, storageBucketUrl) : getStorage(_app);
   }
-  return { app: _app, auth: auth!, db: db!, storage: storage! };
+  if (!functionsInstance) {
+    functionsInstance = getFunctions(_app);
+  }
+  return { app: _app, auth: auth!, db: db!, storage: storage!, functions: functionsInstance };
 }
 
 // ---- Firestore getter -------------------------------------------------
@@ -157,6 +162,14 @@ export function getStorageInstance(): FirebaseStorage {
     throw new Error('Storage not initialized. Call ensureFirebaseReady() early (e.g., in +layout onMount).');
   }
   return storage;
+}
+
+export async function getFunctionsClient(): Promise<Functions> {
+  await ensureFirebaseReady();
+  if (!functionsInstance) {
+    throw new Error('Functions not initialized. Call ensureFirebaseReady() early (e.g., in +layout onMount).');
+  }
+  return functionsInstance;
 }
 
 // (Optional) keep compatibility with code that does `import getDb from '$lib/firebase'`

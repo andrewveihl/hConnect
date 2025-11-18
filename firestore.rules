@@ -36,7 +36,7 @@ service cloud.firestore {
       return isSuperAdminUser() || isServerOwner(serverId) || hasPerm(serverId, "manageServer");
     }
 
-    function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels"); }
+    function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels") || isMember(serverId); }
     function canSendInChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "sendMessages"); }
     function canConnectVoice(serverId) {
       return isServerAdmin(serverId)

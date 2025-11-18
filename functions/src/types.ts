@@ -41,6 +41,9 @@ export type ThreadDoc = {
 
 export type DmDoc = {
   participants?: string[];
+  participantUids?: string[];
+  participantsMap?: Record<string, boolean | null | undefined>;
+  key?: string | null;
   name?: string | null;
   title?: string | null;
   lastMessage?: string | null;

@@ -8,7 +8,8 @@ import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
 import { db } from '$lib/firestore';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
+  import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
+  import { triggerTestPush } from '$lib/notify/testPush';
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 import InvitePanel from '$lib/components/app/InvitePanel.svelte';
@@ -288,6 +289,38 @@ let avatarError: string | null = $state(null);
     alert('Push notifications enabled on this device.');
   }
 
+  let testPushState = $state<'idle' | 'loading' | 'success' | 'error'>('idle');
+  let testPushMessage: string | null = $state(null);
+
+  async function sendTestPushNotification() {
+    if (!$user?.uid) {
+      testPushState = 'error';
+      testPushMessage = 'Sign in to send a test notification.';
+      return;
+    }
+    testPushState = 'loading';
+    testPushMessage = null;
+    try {
+      const result = await triggerTestPush();
+      if (result.ok) {
+        testPushState = 'success';
+        const count = result.tokens ?? 0;
+        const suffix = count === 1 ? 'device' : 'devices';
+        testPushMessage = count > 0 ? `Sent to ${count} ${suffix}.` : 'Test push sent.';
+      } else {
+        testPushState = 'error';
+        testPushMessage =
+          result.reason === 'no_tokens'
+            ? 'No push-enabled devices found. Enable push first.'
+            : 'Test push failed.';
+      }
+    } catch (err) {
+      console.warn('Test push failed', err);
+      testPushState = 'error';
+      testPushMessage = 'Could not send test notification.';
+    }
+  }
+
   async function updateThemePreference(mode: ThemeMode) {
     const current = get(themeStore);
     if (current === mode) return;
@@ -429,7 +462,23 @@ let avatarError: string | null = $state(null);
                 </div>
                 <div class="settings-notif-tile__actions">
                   <button class="settings-chip" onclick={enablePush}>Enable on this device</button>
+                  <button
+                    class="settings-chip settings-chip--secondary"
+                    aria-busy={testPushState === 'loading'}
+                    onclick={sendTestPushNotification}
+                  >
+                    Send test push
+                  </button>
                 </div>
+                {#if testPushMessage}
+                  <p
+                    class="settings-notif-status"
+                    class:settings-notif-status--success={testPushState === 'success'}
+                    class:settings-notif-status--error={testPushState === 'error'}
+                  >
+                    {testPushMessage}
+                  </p>
+                {/if}
               </div>
 
               <div class="settings-notif-tile">
@@ -812,6 +861,15 @@ let avatarError: string | null = $state(null);
     background: var(--color-accent-strong);
   }
 
+  .settings-chip--secondary {
+    border-color: color-mix(in srgb, var(--color-border-strong) 60%, transparent);
+    color: var(--text-80);
+  }
+
+  .settings-chip--secondary:hover {
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+  }
+
   .settings-field {
     display: grid;
     gap: 0.4rem;
@@ -898,6 +956,20 @@ let avatarError: string | null = $state(null);
     flex-wrap: wrap;
     align-items: center;
     justify-content: flex-start;
+  }
+
+  .settings-notif-status {
+    margin: 0.6rem 0 0;
+    font-size: 0.85rem;
+    color: var(--text-60);
+  }
+
+  .settings-notif-status--success {
+    color: color-mix(in srgb, var(--color-success, #22c55e) 80%, var(--text-60));
+  }
+
+  .settings-notif-status--error {
+    color: color-mix(in srgb, var(--color-danger, #f87171) 85%, var(--text-60));
   }
 
   .settings-notif-list {

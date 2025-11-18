@@ -4,6 +4,7 @@
   import SplashScreen from '$lib/components/app/SplashScreen.svelte';
   import { initMobileNavigation } from '$lib/stores/mobileNav';
   import SuperAdminFab from '$lib/components/app/SuperAdminFab.svelte';
+  import TestPushFab from '$lib/components/app/TestPushFab.svelte';
   import { initClientErrorReporting, teardownClientErrorReporting } from '$lib/telemetry/clientErrors';
 
   interface Props {
@@ -77,6 +78,7 @@
       {@render children?.()}
     </div>
   </div>
+  <TestPushFab />
   <SuperAdminFab />
 </div>
 
