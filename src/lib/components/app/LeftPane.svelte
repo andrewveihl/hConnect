@@ -11,8 +11,10 @@
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
   import logoMarkUrl from '$lib/assets/Logo_transparent.png';
-  import { dmUnreadCount, notifications } from '$lib/stores/notifications';
-  import type { NotificationItem } from '$lib/stores/notifications';
+import { dmUnreadCount, notifications } from '$lib/stores/notifications';
+import type { NotificationItem } from '$lib/stores/notifications';
+import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+import { featureFlags } from '$lib/stores/featureFlags';
 
   interface Props {
     activeServerId?: string | null;
@@ -44,7 +46,19 @@
   let statusButtonEl: HTMLButtonElement | null = $state(null);
   let statusMenuEl: HTMLDivElement | null = $state(null);
   let presenceUnsub: (() => void) | null = $state(null);
-  const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
+const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
+const featureFlagStore = featureFlags;
+const enableVoice = $derived(Boolean($featureFlagStore.enableVoice));
+const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
+const enableServerCreation = $derived(Boolean($featureFlagStore.enableServerCreation));
+const superAdminEmails = superAdminEmailsStore();
+const isSuperAdmin = $derived(
+  (() => {
+    const email = $user?.email ? $user.email.toLowerCase() : null;
+    if (!email) return false;
+    return Array.isArray($superAdminEmails) ? $superAdminEmails.includes(email) : false;
+  })()
+);
 
   run(() => {
     if ($user) {
@@ -357,7 +371,9 @@
         class="rail-button rail-button--create"
         onclick={handleCreateClick}
         aria-label="Create server"
-        title="Create server"
+        title={enableServerCreation ? 'Create server' : 'Server creation disabled'}
+        disabled={!enableServerCreation}
+        aria-disabled={!enableServerCreation}
       >
         <i class="bx bx-plus text-2xl leading-none"></i>
       </button>
@@ -399,25 +415,51 @@
       {/if}
 
       <div class="w-full flex flex-col items-center gap-2 pt-1">
-        <VoiceRailItem />
+        {#if enableVoice}
+          <VoiceRailItem />
+        {/if}
 
-        <a
-          href="/dms"
-          onclick={(event) => {
-            event.preventDefault();
-            goto('/dms');
-          }}
-          class="rail-button rail-button--primary relative"
-          class:rail-button--active={dmsActive}
-          class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
-          aria-label="Home / DMs"
-          title="Home / DMs"
-        >
-          <i class="bx bx-message-dots text-xl leading-none"></i>
-          {#if $dmUnreadCount}
-            <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
-          {/if}
-        </a>
+        {#if enableDMs}
+          <a
+            href="/dms"
+            onclick={(event) => {
+              event.preventDefault();
+              goto('/dms');
+            }}
+            class="rail-button rail-button--primary relative"
+            class:rail-button--active={dmsActive}
+            class:rail-button--alert={$dmUnreadCount > 0 && !dmsActive}
+            aria-label="Home / DMs"
+            title="Home / DMs"
+          >
+            <i class="bx bx-message-dots text-xl leading-none"></i>
+            {#if $dmUnreadCount}
+              <span class="rail-badge">{formatBadge($dmUnreadCount)}</span>
+            {/if}
+          </a>
+        {:else}
+          <button
+            type="button"
+            class="rail-button rail-button--disabled"
+            disabled
+            aria-label="Direct messages disabled"
+            title="Direct messages disabled"
+          >
+            <i class="bx bx-message-square-x text-xl leading-none"></i>
+          </button>
+        {/if}
+
+        {#if isSuperAdmin}
+          <button
+            type="button"
+            class="rail-button rail-button--admin"
+            aria-label="Admin"
+            title="Admin"
+            onclick={() => goto('/admin')}
+          >
+            <i class="bx bx-shield-quarter text-xl leading-none"></i>
+          </button>
+        {/if}
       </div>
 
       <div class="rail-profile-wrapper">
@@ -510,6 +552,24 @@
 
   :global(.rail-button:active) {
     transform: scale(0.94);
+  }
+
+  :global(.rail-button--admin) {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.95), rgba(14, 165, 233, 0.9));
+    border: 1px solid rgba(14, 165, 233, 0.4);
+    color: white;
+    box-shadow: 0 10px 25px rgba(14, 165, 233, 0.25);
+  }
+
+  :global(.rail-button--admin:hover) {
+    border-color: rgba(255, 255, 255, 0.6);
+  }
+
+  :global(.rail-button--disabled) {
+    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
+    color: var(--text-40);
+    cursor: not-allowed;
   }
 
   @media (max-width: 767px) {

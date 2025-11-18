@@ -8,27 +8,32 @@ service cloud.firestore {
     }
 
     function isMember(serverId) {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid));
+      return isSuperAdminUser()
+        || (isSignedIn()
+          && exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)));
     }
 
     // Owner: accept ownerId or (legacy) owner
     function isServerOwner(serverId) {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/servers/$(serverId))
-        && (
-          get(/databases/$(database)/documents/servers/$(serverId)).data.ownerId == request.auth.uid ||
-          get(/databases/$(database)/documents/servers/$(serverId)).data.owner == request.auth.uid
-        );
+      return isSuperAdminUser()
+        || (isSignedIn()
+          && exists(/databases/$(database)/documents/servers/$(serverId))
+          && (
+            get(/databases/$(database)/documents/servers/$(serverId)).data.ownerId == request.auth.uid ||
+            get(/databases/$(database)/documents/servers/$(serverId)).data.owner == request.auth.uid
+          ));
     }
 
     function hasPerm(serverId, perm) {
-      return isMember(serverId)
-        && get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.perms[perm] == true;
+      return isSuperAdminUser()
+        || (
+          isMember(serverId)
+            && get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.perms[perm] == true
+        );
     }
 
     function isServerAdmin(serverId) {
-      return isServerOwner(serverId) || hasPerm(serverId, "manageServer");
+      return isSuperAdminUser() || isServerOwner(serverId) || hasPerm(serverId, "manageServer");
     }
 
     function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels"); }
@@ -42,6 +47,29 @@ service cloud.firestore {
       return isServerAdmin(serverId)
         || hasPerm(serverId, "speakVoice")
         || canConnectVoice(serverId);
+    }
+
+    function currentUserEmail() {
+      return isSignedIn() && request.auth.token.email is string
+        ? request.auth.token.email
+        : null;
+    }
+
+    function superAdminEmails() {
+      return exists(/databases/$(database)/documents/appConfig/superAdmins)
+        && get(/databases/$(database)/documents/appConfig/superAdmins).data.emails is map
+        ? get(/databases/$(database)/documents/appConfig/superAdmins).data.emails
+        : {};
+    }
+
+    function isDefaultSuperAdminEmail(email) {
+      return email != null && email.matches('(?i)^andrew@healthspaces\\.com$');
+    }
+
+    function isSuperAdminUser() {
+      let email = currentUserEmail();
+      return email != null
+        && (isDefaultSuperAdminEmail(email) || superAdminEmails()[email] == true);
     }
 
     match /notifications/{uid} {
@@ -192,11 +220,13 @@ service cloud.firestore {
 
     /* ---------------- Servers tree ---------------- */
     match /servers/{serverId} {
-      allow read: if resource.data.isPublic == true
+      allow read: if isSuperAdminUser()
+                  || (resource != null && resource.data.isPublic == true)
                   || isMember(serverId)
                   || (isSignedIn() && exists(/databases/$(database)/documents/profiles/$(request.auth.uid)/servers/$(serverId)));
-      allow create: if isSignedIn()
-        && (request.resource.data.ownerId == request.auth.uid || request.resource.data.owner == request.auth.uid);
+      allow create: if isSuperAdminUser()
+        || (isSignedIn()
+        && (request.resource.data.ownerId == request.auth.uid || request.resource.data.owner == request.auth.uid));
       allow update, delete: if isServerOwner(serverId);
 
       match /roles/{roleId} {
@@ -289,28 +319,31 @@ service cloud.firestore {
 
     /* ---------------- Direct Messages (deterministic id tolerant) ---------------- */
     match /dms/{threadId} {
-      allow read, update: if dmHasParticipantOrKey_resource(request.auth.uid)
+      allow read, update: if isSuperAdminUser()
+        || dmHasParticipantOrKey_resource(request.auth.uid)
         || (
           !exists(/databases/$(database)/documents/dms/$(threadId)) &&
           keyContainsUid(threadId, request.auth.uid)
         );
 
-      allow create: if newDMIsValidCreate(request.resource.data);
+      allow create: if isSuperAdminUser() || newDMIsValidCreate(request.resource.data);
 
-      allow delete: if false;
+      allow delete: if isSuperAdminUser();
 
       match /messages/{messageId} {
-        allow read: if dmHasParticipantOrKey_byId(threadId, request.auth.uid);
-        allow create: if isSignedIn()
+        allow read: if isSuperAdminUser() || dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow create: if isSuperAdminUser()
+          || (isSignedIn()
           && request.resource.data.uid == request.auth.uid
-          && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
-        allow update, delete: if false;
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
+        allow update, delete: if isSuperAdminUser();
       }
 
       match /reads/{uid} {
-        allow read, write: if isSignedIn()
+        allow read, write: if isSuperAdminUser()
+          || (isSignedIn()
           && uid == request.auth.uid
-          && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
       }
     }
 
@@ -400,6 +433,33 @@ service cloud.firestore {
       match /{document=**} {
         allow read, create, update, delete: if isSignedIn();
       }
+    }
+
+    /* ---------------- App Config / Super Admin ---------------- */
+    match /appConfig/{configId} {
+      allow read: if isSignedIn() && (configId == "superAdmins" || isSuperAdminUser());
+      allow write: if isSuperAdminUser();
+    }
+
+    match /logs/{logId} {
+      allow read, write: if isSuperAdminUser();
+    }
+
+    /* ---------------- Archive collections ---------------- */
+    match /archivedServers/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedChannels/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedMessages/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedDMs/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedAttachments/{docId} {
+      allow read, write: if isSuperAdminUser();
     }
 
   } // /documents
