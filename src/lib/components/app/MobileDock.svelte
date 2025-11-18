@@ -3,10 +3,12 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
-  import { user } from '$lib/stores/user';
-  import { mobileDockSuppressed } from '$lib/stores/ui';
-  import { subscribeUserServers } from '$lib/firestore/servers';
+import { notificationCount, dmUnreadCount } from '$lib/stores/notifications';
+import { user } from '$lib/stores/user';
+import { mobileDockSuppressed } from '$lib/stores/ui';
+import { subscribeUserServers } from '$lib/firestore/servers';
+import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+import { featureFlags } from '$lib/stores/featureFlags';
 
   type Link = {
     href: string;
@@ -56,14 +58,24 @@
   const serverActive = $derived(
     shortcut ? currentPath?.startsWith(`/servers/${shortcut.id}`) ?? false : false
   );
-  const serverHref = $derived.by(() => {
-    if (!shortcut) return '/servers';
-    const lastChannel = serverChannelMemory?.[shortcut.id];
-    if (lastChannel) {
-      return `/servers/${shortcut.id}?channel=${encodeURIComponent(lastChannel)}`;
-    }
-    return `/servers/${shortcut.id}`;
-  });
+const serverHref = $derived.by(() => {
+  if (!shortcut) return '/servers';
+  const lastChannel = serverChannelMemory?.[shortcut.id];
+  if (lastChannel) {
+    return `/servers/${shortcut.id}?channel=${encodeURIComponent(lastChannel)}`;
+  }
+  return `/servers/${shortcut.id}`;
+});
+const superAdminEmails = superAdminEmailsStore();
+const featureFlagStore = featureFlags;
+const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
+const showAdminLink = $derived(
+  (() => {
+    const email = $user?.email ? $user.email.toLowerCase() : null;
+    if (!email) return false;
+    return Array.isArray($superAdminEmails) ? $superAdminEmails.includes(email) : false;
+  })()
+);
 
   onMount(() => {
     loadStoredLastServer();
@@ -282,28 +294,44 @@
     </a>
 
     {#each links as link}
-      {@const active = link.isActive(currentPath)}
-      {@const badge =
-        link.href === '/dms'
-          ? $dmUnreadCount
-          : link.href === '/'
-            ? $notificationCount
-            : 0}
-      <a
-        href={link.href}
-        onclick={(event) => handleNav(event, link)}
-        class={`mobile-dock__item ${active ? 'is-active' : ''}`}
-        class:mobile-dock__item--alert={!active && badge > 0}
-        class:mobile-dock__item--notes={link.href === '/dms/notes'}
-        aria-label={link.label}
-        aria-current={active ? 'page' : undefined}
-      >
-        <i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
-        {#if badge > 0}
-          <span class="mobile-dock__badge">{formatBadge(badge)}</span>
-        {/if}
-      </a>
+      {#if link.href !== '/dms' || enableDMs}
+        {@const active = link.isActive(currentPath)}
+        {@const badge =
+          link.href === '/dms'
+            ? $dmUnreadCount
+            : link.href === '/'
+              ? $notificationCount
+              : 0}
+        <a
+          href={link.href}
+          onclick={(event) => handleNav(event, link)}
+          class={`mobile-dock__item ${active ? 'is-active' : ''}`}
+          class:mobile-dock__item--alert={!active && badge > 0}
+          class:mobile-dock__item--notes={link.href === '/dms/notes'}
+          aria-label={link.label}
+          aria-current={active ? 'page' : undefined}
+        >
+          <i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
+          {#if badge > 0}
+            <span class="mobile-dock__badge">{formatBadge(badge)}</span>
+          {/if}
+        </a>
+      {/if}
     {/each}
+    {#if showAdminLink}
+      <a
+        href="/admin"
+        onclick={(event) => {
+          event.preventDefault();
+          goto('/admin');
+        }}
+        class={`mobile-dock__item mobile-dock__item--admin ${currentPath.startsWith('/admin') ? 'is-active' : ''}`}
+        aria-label="Admin"
+        aria-current={currentPath.startsWith('/admin') ? 'page' : undefined}
+      >
+        <i class="bx bx-shield-quarter mobile-dock__icon" aria-hidden="true"></i>
+      </a>
+    {/if}
     <a
       href="/settings"
       onclick={(event) => {
@@ -374,6 +402,17 @@
   .mobile-dock__icon {
     font-size: 1.55rem;
     line-height: 1;
+  }
+
+  .mobile-dock__item--admin {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.95), rgba(14, 165, 233, 0.9));
+    color: white;
+    border: 1px solid rgba(14, 165, 233, 0.45);
+    box-shadow: 0 12px 24px rgba(14, 165, 233, 0.35);
+  }
+
+  .mobile-dock__item--admin .mobile-dock__icon {
+    color: white;
   }
 
   .mobile-dock__badge {
