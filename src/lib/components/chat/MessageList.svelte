@@ -4,15 +4,17 @@
   import { createEventDispatcher, onMount, tick } from 'svelte';
   import type { PendingUploadPreview } from './types';
   import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
+  import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
+  import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 
-  const dispatch = createEventDispatcher();
+const dispatch = createEventDispatcher();
 
   type MentionView = {
     uid: string;
     handle?: string | null;
     label?: string | null;
     color?: string | null;
-    kind?: 'member' | 'role';
+    kind?: 'member' | 'role' | 'special';
   };
 
   type MentionSegment = { type: 'mention'; value: string; data?: MentionView };
@@ -112,6 +114,10 @@ run(() => {
   }
 });
 
+const SPECIAL_MENTION_LOOKUP = new Map(
+  SPECIAL_MENTIONS.map((entry) => [`@${entry.handle.toLowerCase()}`, entry])
+);
+
   function formatTime(ts: any) {
     try {
       const value =
@@ -171,7 +177,8 @@ run(() => {
   function mentionSegments(text: string, mentions?: MentionView[]): Array<MentionSegment | TextSegment> {
     const value = typeof text === 'string' ? text : '';
     if (!value) return [{ type: 'text', value: '' }];
-    if (!mentions?.length) return [{ type: 'text', value }];
+    const mentionList = buildMentionList(value, mentions);
+    if (!mentionList.length) return [{ type: 'text', value }];
     const lookup = new Map<string, MentionView>();
 
     const register = (raw: string | null | undefined, mention: MentionView) => {
@@ -186,7 +193,7 @@ run(() => {
       lookup.set(canonical, mention);
     };
 
-    mentions.forEach((mention) => {
+    mentionList.forEach((mention) => {
       register(mention.handle ?? null, mention);
       if (mention.label) {
         register(mention.label, mention);
@@ -207,8 +214,21 @@ run(() => {
       }
       const token = match[0];
       const canonicalKey = `@${canonicalMentionToken(token)}`;
-      const mention =
-        lookup.get(token.toLowerCase()) ?? lookup.get(token) ?? lookup.get(canonicalKey);
+      const lowered = token.toLowerCase();
+      let mention =
+        lookup.get(lowered) ?? lookup.get(token) ?? lookup.get(canonicalKey);
+      if (!mention) {
+        const special = SPECIAL_MENTION_LOOKUP.get(lowered);
+        if (special) {
+          mention = {
+            uid: special.uid,
+            handle: `@${special.handle}`,
+            label: special.label,
+            color: special.color ?? null,
+            kind: 'special'
+          };
+        }
+      }
       if (mention) {
         const display = mention.label ? `@${mention.label}` : mention.handle ?? token;
         segments.push({ type: 'mention', value: display, data: mention });
@@ -222,6 +242,39 @@ run(() => {
     }
     return segments;
   }
+
+  function buildMentionList(value: string, mentions?: MentionView[]) {
+    const list = Array.isArray(mentions) ? [...mentions] : [];
+    const existingIds = new Set(list.map((entry) => entry.uid));
+    const normalized = value.toLowerCase();
+    SPECIAL_MENTIONS.forEach((entry) => {
+      if (existingIds.has(entry.uid)) return;
+      const token = `@${entry.handle.toLowerCase()}`;
+      if (!normalized.includes(token)) return;
+      list.push({
+        uid: entry.uid,
+        handle: `@${entry.handle}`,
+        label: entry.label,
+        color: entry.color ?? null,
+        kind: 'special'
+      });
+    });
+    return list;
+  }
+
+  const mentionHighlightClass = (mention?: MentionView) => {
+    if (!mention?.uid) return '';
+    if (mention.uid === SPECIAL_MENTION_IDS.EVERYONE) {
+      return 'chat-mention--special chat-mention--special-everyone';
+    }
+    if (mention.uid === SPECIAL_MENTION_IDS.HERE) {
+      return 'chat-mention--special chat-mention--special-here';
+    }
+    if (mention.kind === 'special') {
+      return 'chat-mention--special';
+    }
+    return '';
+  };
 
   const resolveDate = (value: any): Date | null => {
     if (!value) return null;
@@ -2210,9 +2263,11 @@ run(() => {
                     <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
                       {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                         {#if isMentionSegment(segment)}
-                          {@const label = segment.data?.label ?? segment.value.replace(/^@/, '')}
+                          {@const baseLabel = segment.data?.label ?? segment.value.replace(/^@/, '')}
+                          {@const label =
+                            segment.data?.kind === 'special' ? `@${baseLabel}` : baseLabel}
                           <span
-                            class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}
+                            class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''} ${mentionHighlightClass(segment.data)}`}
                             style={segment.data?.kind === 'role' && segment.data?.color
                               ? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
                               : undefined}
@@ -2552,9 +2607,5 @@ run(() => {
     </div>
   </div>
 {/if}
-
-
-
-
 
 

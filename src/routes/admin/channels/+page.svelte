@@ -139,19 +139,22 @@ $effect(() => {
   };
 </script>
 
-  <div class="border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)]">
-    <div class="flex flex-col gap-4 px-6 py-4">
-      <div class="flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-60,#6b7280)]">
-        <a
-          href="/admin/servers"
-          class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-teal-500 to-cyan-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow hover:opacity-90"
-        >
+<section class="admin-page admin-page--single">
+  <AdminCard title="Channel controls" description="Update presets or archive channels." padded={false}>
+    <div class="border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)]">
+      <div class="flex flex-col gap-4 px-6 py-4">
+        <div class="flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-60,#6b7280)]">
+          <a
+            href="/admin/servers"
+            class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-teal-500 to-cyan-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow hover:opacity-90"
+          >
           <span aria-hidden="true">&larr;</span>
           Back to servers
         </a>
         <span class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">
           {selectedServer ? `Managing ${selectedServer.name}` : 'Pick a server to load channels.'}
         </span>
+        </div>
       </div>
       <div class="flex flex-col gap-3 md:flex-row md:items-center">
         <input
@@ -179,15 +182,12 @@ $effect(() => {
         {/if}
       </div>
     </div>
-  </div>
-    </div>
-  </div>
-  <div class="p-6">
-    {#if !selectedServerId}
-      <p class="text-sm text-[color:var(--text-60,#6b7280)]">Select a server to view channels.</p>
-    {:else}
-      <AdminTable headers={[{ label: 'Channel' }, { label: 'Type' }, { label: 'Preset' }, { label: 'Created' }, { label: 'Actions' }]}>
-        {#if channels.length === 0}
+    <div class="p-6">
+      {#if !selectedServerId}
+        <p class="text-sm text-[color:var(--text-60,#6b7280)]">Select a server to view channels.</p>
+      {:else}
+        <AdminTable headers={[{ label: 'Channel' }, { label: 'Type' }, { label: 'Preset' }, { label: 'Created' }, { label: 'Actions' }]}>
+          {#if channels.length === 0}
           <tr>
             <td class="px-4 py-5 text-sm text-[color:var(--text-60,#6b7280)]" colspan="5">
               {loading ? 'Loading…' : 'No channels found'}
@@ -233,8 +233,8 @@ $effect(() => {
         {/if}
       </AdminTable>
     {/if}
-  </div>
-</AdminCard>
+    </div>
+  </AdminCard>
 </section>
 
 <ConfirmDialog
@@ -265,6 +265,7 @@ $effect(() => {
     box-shadow: 0 12px 24px rgba(6, 182, 212, 0.2);
   }
 </style>
+
 
 
 

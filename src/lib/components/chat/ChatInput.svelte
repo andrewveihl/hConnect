@@ -11,6 +11,7 @@
   import { requestReplySuggestion, requestPredictions, requestRewriteSuggestions } from '$lib/api/ai';
   import type { ReplyMessageContext } from '$lib/api/ai';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 
   type MentionCandidate = {
     uid: string;
@@ -19,7 +20,7 @@
     avatar: string | null;
     search: string;
     aliases: string[];
-    kind?: 'member' | 'role';
+    kind?: 'member' | 'role' | 'special';
     color?: string | null;
   };
 
@@ -28,7 +29,7 @@
     handle: string;
     label: string;
     color?: string | null;
-    kind?: 'member' | 'role';
+    kind?: 'member' | 'role' | 'special';
   };
 
   type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
@@ -107,6 +108,7 @@
       if (aliasHit) score += 3;
     }
     if (option.kind === 'member') score += 0.1;
+    if (option.kind === 'special') score += 12;
     return score;
   }
 
@@ -1843,18 +1845,20 @@
             {#each mentionFiltered as option, idx}
               <button
                 type="button"
-                class={`mention-menu__item ${option.kind === 'role' ? 'mention-menu__item--role' : ''} ${idx === mentionIndex ? 'is-active' : ''}`}
+                class={`mention-menu__item ${option.kind === 'role' ? 'mention-menu__item--role' : ''} ${option.kind === 'special' ? 'mention-menu__item--special' : ''} ${idx === mentionIndex ? 'is-active' : ''}`}
                 role="option"
                 aria-selected={idx === mentionIndex}
                 onmousedown={preventDefault(() => insertMention(option))}
                 onmouseenter={() => (mentionIndex = idx)}
               >
-                <span class={`mention-menu__avatar ${option.kind === 'role' ? 'mention-menu__avatar--role' : ''}`}>
+                <span class={`mention-menu__avatar ${option.kind === 'role' ? 'mention-menu__avatar--role' : ''} ${option.kind === 'special' ? 'mention-menu__avatar--special' : ''}`}>
                   {#if option.kind === 'role'}
                     <span
                       class="mention-menu__role-swatch"
                       style={`background:${option.color ?? 'var(--color-accent)'}`}
                     ></span>
+                  {:else if option.kind === 'special'}
+                    <span class="mention-menu__avatar-special">@</span>
                   {:else if option.avatar}
                     <img src={option.avatar} alt={option.label} loading="lazy" />
                   {:else}
@@ -1871,8 +1875,17 @@
                       >
                         Role
                       </span>
+                    {:else if option.kind === 'special'}
+                      <span class="mention-menu__pill mention-menu__pill--special">Broadcast</span>
                     {/if}
                   </span>
+                  {#if option.kind === 'special'}
+                    <span class="mention-menu__hint">
+                      {option.uid === SPECIAL_MENTION_IDS.EVERYONE
+                        ? 'Alerts everyone and adds them to the thread.'
+                        : 'Alerts everyone without enrolling them in the thread.'}
+                    </span>
+                  {/if}
                 </span>
               </button>
             {/each}
@@ -2442,11 +2455,26 @@
     padding: 0.2rem;
   }
 
+  .mention-menu__avatar--special {
+    background: linear-gradient(140deg, rgba(56, 189, 248, 0.18), rgba(249, 115, 22, 0.28));
+    border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  }
+
+  .mention-menu__avatar-special {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: color-mix(in srgb, var(--color-accent) 90%, #fff);
+  }
+
   .mention-menu__role-swatch {
     width: 100%;
     height: 100%;
     border-radius: inherit;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+  }
+
+  .mention-menu__item--special {
+    background: color-mix(in srgb, var(--color-accent) 6%, transparent);
   }
 
   .mention-menu__meta {
@@ -2469,6 +2497,21 @@
     font-weight: 600;
     text-transform: uppercase;
     margin-left: 0.35rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  }
+
+  .mention-menu__pill--special {
+    color: #fff;
+    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+  }
+
+  .mention-menu__hint {
+    font-size: 0.7rem;
+    color: var(--text-60);
+    line-height: 1.2;
   }
 
   .chat-input__field {

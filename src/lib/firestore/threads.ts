@@ -4,6 +4,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   increment,
   limit,
   onSnapshot,
@@ -17,6 +18,7 @@ import {
   type Timestamp,
   type Unsubscribe
 } from 'firebase/firestore';
+import { SPECIAL_MENTION_IDS, isSpecialMentionId } from '$lib/data/specialMentions';
 import { buildMessageDocument, type MessageInput, type MentionInput, type ReplyReferenceInput } from './messages';
 
 export type ThreadStatus = 'active' | 'archived';
@@ -82,7 +84,7 @@ export type ThreadMessage = {
   mentionUids?: string[];
   mentionsMap?: Record<
     string,
-    { handle: string | null; label: string | null; color?: string | null; kind?: 'member' | 'role' }
+    { handle: string | null; label: string | null; color?: string | null; kind?: 'member' | 'role' | 'special' }
   >;
   replyTo?: ReplyReferenceInput | null;
   systemKind?: 'created' | 'member_added';
@@ -209,7 +211,9 @@ const sanitizeMentions = (mentions?: MentionInput[]): MentionInput[] => {
 };
 
 const mentionUidList = (mentions?: MentionInput[]) =>
-  sanitizeMentions(mentions).map((mention) => mention.uid);
+  sanitizeMentions(mentions)
+    .map((mention) => mention.uid)
+    .filter((uid): uid is string => Boolean(uid) && !isSpecialMentionId(uid));
 
 const systemMessage = (
   text: string,
@@ -385,6 +389,14 @@ async function fetchThreadData(
   return { ref, data: snap.data() as any };
 }
 
+async function fetchServerMemberIds(db: Firestore, serverId: string): Promise<string[]> {
+  const membersRef = collection(db, 'servers', serverId, 'members');
+  const snap = await getDocs(membersRef);
+  return snap.docs
+    .map((docSnap) => docSnap.id)
+    .filter((uid): uid is string => typeof uid === 'string' && uid.trim().length > 0);
+}
+
 export async function sendThreadMessage(options: SendThreadMessageOptions) {
   const db = getDb();
   const serverId = normalizeText(options.serverId);
@@ -408,6 +420,8 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
 
   const mentions = sanitizeMentions(docData.mentions);
   const mentionUids = mentionUidList(mentions);
+  const mentionedIds = new Set(mentions.map((mention) => mention.uid));
+  const hasEveryoneMention = mentionedIds.has(SPECIAL_MENTION_IDS.EVERYONE);
   const pendingAdds: string[] = [];
 
   const missingAuthor = !memberUids.includes(authorId);
@@ -419,6 +433,25 @@ export async function sendThreadMessage(options: SendThreadMessageOptions) {
     if (memberUids.includes(uid) || pendingAdds.includes(uid)) continue;
     if (memberUids.length + pendingAdds.length >= maxMembers) break;
     pendingAdds.push(uid);
+  }
+
+  if (hasEveryoneMention && memberUids.length + pendingAdds.length < maxMembers) {
+    try {
+      const serverMemberIds = await fetchServerMemberIds(db, serverId);
+      for (const uid of serverMemberIds) {
+        if (
+          !uid ||
+          memberUids.includes(uid) ||
+          pendingAdds.includes(uid) ||
+          memberUids.length + pendingAdds.length >= maxMembers
+        ) {
+          continue;
+        }
+        pendingAdds.push(uid);
+      }
+    } catch (err) {
+      console.warn('[threads] failed to extend thread membership for @everyone mention', err);
+    }
   }
 
   const now = serverTimestamp();

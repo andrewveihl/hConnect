@@ -9,7 +9,7 @@ export type MentionDirectoryEntry = {
   avatar: string | null;
   search: string;
   aliases: string[];
-  kind?: 'member' | 'role';
+  kind?: 'member' | 'role' | 'special';
   color?: string | null;
   roleId?: string | null;
 };

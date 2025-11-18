@@ -25,6 +25,7 @@ import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, 
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+  import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 import {
     createChannelThread,
     sendThreadMessage,
@@ -69,7 +70,7 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
     handle: string | null;
     label: string | null;
     color?: string | null;
-    kind?: 'member' | 'role';
+    kind?: 'member' | 'role' | 'special';
   };
   type ThreadPreviewMeta = {
     threadId: string;
@@ -173,7 +174,7 @@ let serverDisplayName = $state('Server');
   };
 
   function updateMentionOptionList() {
-    mentionOptions = [...memberMentionOptions, ...roleMentionOptions];
+    mentionOptions = [...SPECIAL_MENTIONS, ...memberMentionOptions, ...roleMentionOptions];
   }
 
 
@@ -545,22 +546,44 @@ let serverDisplayName = $state('Server');
     const mentionArray: MentionSendRecord[] = Array.isArray(raw?.mentions)
       ? raw.mentions
       : raw?.mentionsMap && typeof raw.mentionsMap === 'object'
-        ? Object.entries(raw.mentionsMap).map(([key, value]) => ({
-            uid: pickString(key) ?? '',
-            handle: pickString((value as any)?.handle) ?? null,
-            label: pickString((value as any)?.label) ?? null,
-            color: pickString((value as any)?.color) ?? null,
-            kind: (value as any)?.kind === 'role' ? 'role' : (value as any)?.kind === 'member' ? 'member' : undefined
-          }))
+        ? Object.entries(raw.mentionsMap).map(([key, value]) => {
+            const rawKind = (value as any)?.kind;
+            const kind =
+              rawKind === 'role'
+                ? 'role'
+                : rawKind === 'member'
+                  ? 'member'
+                  : rawKind === 'special'
+                    ? 'special'
+                    : undefined;
+            return {
+              uid: pickString(key) ?? '',
+              handle: pickString((value as any)?.handle) ?? null,
+              label: pickString((value as any)?.label) ?? null,
+              color: pickString((value as any)?.color) ?? null,
+              kind
+            };
+          })
         : [];
     const mentions = mentionArray
-      .map((entry) => ({
-        uid: pickString(entry?.uid) ?? '',
-        handle: pickString((entry as any)?.handle) ?? null,
-        label: pickString((entry as any)?.label) ?? null,
-        color: pickString((entry as any)?.color) ?? null,
-        kind: (entry as any)?.kind === 'role' ? 'role' : (entry as any)?.kind === 'member' ? 'member' : undefined
-      }))
+      .map((entry) => {
+        const rawKind = (entry as any)?.kind;
+        const kind =
+          rawKind === 'role'
+            ? 'role'
+            : rawKind === 'member'
+              ? 'member'
+              : rawKind === 'special'
+                ? 'special'
+                : undefined;
+        return {
+          uid: pickString(entry?.uid) ?? '',
+          handle: pickString((entry as any)?.handle) ?? null,
+          label: pickString((entry as any)?.label) ?? null,
+          color: pickString((entry as any)?.color) ?? null,
+          kind
+        };
+      })
       .filter((entry) => entry.uid);
     if (mentions.length) {
       message.mentions = mentions;
