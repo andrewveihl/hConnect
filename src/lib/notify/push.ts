@@ -6,6 +6,7 @@ import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 
 const DEVICE_COLLECTION = 'devices';
 const DEVICE_ID_STORAGE_KEY = 'hconnect_device_id';
+const AUTO_PROMPT_STORAGE_KEY = 'hconnect_push_prompted_v1';
 
 type DevicePlatform =
   | 'web_chrome'
@@ -88,8 +89,18 @@ export function setActivePushUser(uid: string | null) {
 
 export async function syncDeviceRegistration(uid: string) {
   if (!browser || !('serviceWorker' in navigator)) return;
+  const permission = resolvePermission();
+  if (permission === 'granted') {
+    await enablePushForUser(uid, { prompt: false });
+    return;
+  }
+  if (permission === 'default' && shouldAutoPromptForPush()) {
+    markAutoPromptedForPush();
+    await enablePushForUser(uid, { prompt: true });
+    return;
+  }
   await registerFirebaseMessagingSW();
-  await persistDeviceDoc(uid, { permission: resolvePermission() });
+  await persistDeviceDoc(uid, { permission });
 }
 
 export async function enablePushForUser(
@@ -169,6 +180,24 @@ function ensureDeviceId(): string | null {
   } catch (err) {
     console.warn('Failed to read/write device id', err);
     return null;
+  }
+}
+
+function shouldAutoPromptForPush() {
+  if (!browser) return false;
+  try {
+    return localStorage.getItem(AUTO_PROMPT_STORAGE_KEY) !== '1';
+  } catch {
+    return false;
+  }
+}
+
+function markAutoPromptedForPush() {
+  if (!browser) return;
+  try {
+    localStorage.setItem(AUTO_PROMPT_STORAGE_KEY, '1');
+  } catch {
+    // ignore
   }
 }
 

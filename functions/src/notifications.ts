@@ -543,24 +543,34 @@ async function deliverToRecipients(
 export async function sendTestPushForUid(
   uid: string
 ): Promise<{ sent: number; reason?: string }> {
+  logger.info('[testPush] Fetching device tokens', { uid });
   const tokens = await fetchDeviceTokens(uid);
+  logger.info('[testPush] Device token check complete', { uid, count: tokens.length });
   if (!tokens.length) {
+    logger.warn('[testPush] No tokens found for user', { uid });
     return { sent: 0, reason: 'no_tokens' };
   }
   const title = 'hConnect test notification';
   const body = 'Push notifications are working on this device.';
-  await sendPushToTokens(tokens, {
-    title,
-    body,
-    data: {
+  try {
+    logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
+    await sendPushToTokens(tokens, {
       title,
       body,
-      origin: 'push',
-      mentionType: 'direct',
-      targetUrl: '/?origin=push',
-      messageId: `test-${Date.now()}`
-    }
-  });
+      data: {
+        title,
+        body,
+        origin: 'push',
+        mentionType: 'direct',
+        targetUrl: '/?origin=push',
+        messageId: `test-${Date.now()}`
+      }
+    });
+    logger.info('[testPush] Push send call completed', { uid, count: tokens.length });
+  } catch (error) {
+    logger.error('[testPush] Failed to send push payload', { uid, error });
+    throw error;
+  }
   return { sent: tokens.length };
 }
 

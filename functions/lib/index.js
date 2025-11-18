@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendTestPush = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = void 0;
+const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
 const notifications_1 = require("./notifications");
@@ -15,13 +16,16 @@ exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)('dms/{threadID}/
 });
 exports.sendTestPush = (0, https_1.onCall)({
     region: 'us-central1',
+    invoker: 'public',
     cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
 }, async (request) => {
     const uid = request.auth?.uid;
     if (!uid) {
         throw new https_1.HttpsError('unauthenticated', 'Sign in to test push notifications.');
     }
+    firebase_functions_1.logger.info('[sendTestPush] Invoked', { uid });
     const result = await (0, notifications_1.sendTestPushForUid)(uid);
+    firebase_functions_1.logger.info('[sendTestPush] Completed', { uid, sent: result.sent, reason: result.reason ?? null });
     if (!result.sent) {
         return { ok: false, reason: result.reason ?? 'no_tokens' };
     }
