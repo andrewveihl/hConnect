@@ -18,6 +18,10 @@ export const load: PageLoad = async () => {
     query(collection(database, 'servers'), orderBy('createdAt', 'desc'), limit(5))
   );
 
+  const baseLogs = await fetchLogs({ limit: 25 });
+  const recentLogs = baseLogs.slice(0, 10);
+  const recentErrorLogs = baseLogs.filter((log) => log.level === 'error').slice(0, 8);
+
   return {
     stats: {
       servers: serversAgg.data().count ?? 0,
@@ -35,6 +39,7 @@ export const load: PageLoad = async () => {
         createdAt: payload.createdAt?.toDate?.() ?? null
       };
     }),
-    recentLogs: await fetchLogs({ limit: 10 })
+    recentLogs,
+    recentErrorLogs
   };
 };

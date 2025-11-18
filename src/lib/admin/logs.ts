@@ -12,7 +12,13 @@ import {
   type QueryConstraint,
   Timestamp
 } from 'firebase/firestore';
-import type { AdminLogEntry, AdminLogFilter, AdminLogLevel, AdminLogType } from './types';
+import type {
+  AdminLogEntry,
+  AdminLogFilter,
+  AdminLogLevel,
+  AdminLogType,
+  ClientErrorLogEntry
+} from './types';
 
 type LogWritePayload = {
   type: AdminLogType;
@@ -26,6 +32,7 @@ type LogWritePayload = {
 };
 
 const logsCollection = () => collection(db(), 'logs');
+const clientErrorsCollection = () => collection(db(), 'clientErrors');
 
 export async function logAdminAction(payload: LogWritePayload) {
   await ensureFirebaseReady();
@@ -57,6 +64,23 @@ const toLogEntry = (docSnap: any): AdminLogEntry => {
   };
 };
 
+const toClientErrorEntry = (docSnap: any): ClientErrorLogEntry => {
+  const data = docSnap.data() ?? {};
+  return {
+    id: docSnap.id,
+    message: data.message ?? 'Unknown error',
+    stack: data.stack ?? null,
+    source: data.source ?? null,
+    context: data.context ?? null,
+    path: data.path ?? null,
+    userId: data.userId ?? null,
+    userEmail: data.userEmail ?? null,
+    userAgent: data.userAgent ?? null,
+    severity: data.severity ?? 'error',
+    createdAt: timestampToDate(data.createdAt ?? null)
+  };
+};
+
 export async function fetchLogs(filter: AdminLogFilter = {}): Promise<AdminLogEntry[]> {
   await ensureFirebaseReady();
   const constraints: QueryConstraint[] = [];
@@ -84,6 +108,14 @@ export async function fetchLogs(filter: AdminLogFilter = {}): Promise<AdminLogEn
     });
   }
   return entries;
+}
+
+export async function fetchClientErrors(limitCount = 50): Promise<ClientErrorLogEntry[]> {
+  await ensureFirebaseReady();
+  const snapshot = await getDocs(
+    query(clientErrorsCollection(), orderBy('createdAt', 'desc'), limit(limitCount))
+  );
+  return snapshot.docs.map(toClientErrorEntry);
 }
 
 export function summarizeLogs(entries: AdminLogEntry[]) {

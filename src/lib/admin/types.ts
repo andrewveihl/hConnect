@@ -12,9 +12,7 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: 'users', label: 'Users', href: '/admin/users' },
   { id: 'features', label: 'Features', href: '/admin/features' },
   { id: 'logs', label: 'Logs', href: '/admin/logs' },
-  { id: 'archive', label: 'Archive', href: '/admin/archive' },
-  { id: 'super-admins', label: 'Super Admins', href: '/admin/super-admins' },
-  { id: 'settings', label: 'Settings', href: '/admin/settings' }
+  { id: 'archive', label: 'Archive', href: '/admin/archive' }
 ];
 
 export type FeatureFlagKey =
@@ -176,6 +174,20 @@ export type AdminLogEntry = {
   dmId?: string | null;
   userId?: string | null;
   level: AdminLogLevel;
+  createdAt: Date;
+};
+
+export type ClientErrorLogEntry = {
+  id: string;
+  message: string;
+  stack?: string | null;
+  source?: string | null;
+  context?: Record<string, unknown> | null;
+  path?: string | null;
+  userId?: string | null;
+  userEmail?: string | null;
+  userAgent?: string | null;
+  severity?: 'error' | 'warning';
   createdAt: Date;
 };
 

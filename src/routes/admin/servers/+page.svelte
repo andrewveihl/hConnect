@@ -368,18 +368,24 @@ let settingsForm = $state({
     }
 
     .server-panel {
-      min-height: clamp(320px, 60vh, 520px);
+      min-height: auto;
+    }
+
+    .server-panel :global(section),
+    .server-panel :global(section > div:last-child) {
+      height: auto;
+    }
+
+    .server-card-body,
+    .server-list,
+    .server-detail {
+      max-height: none;
+      overflow: visible;
     }
   }
-
   @media (max-width: 640px) {
     .server-list {
-      max-height: clamp(280px, 50vh, 420px);
       padding: 1rem;
-    }
-
-    .server-detail {
-      max-height: clamp(320px, 55vh, 480px);
     }
   }
 </style>

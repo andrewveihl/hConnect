@@ -3,6 +3,8 @@
   import { onMount } from 'svelte';
   import SplashScreen from '$lib/components/app/SplashScreen.svelte';
   import { initMobileNavigation } from '$lib/stores/mobileNav';
+  import SuperAdminFab from '$lib/components/app/SuperAdminFab.svelte';
+  import { initClientErrorReporting, teardownClientErrorReporting } from '$lib/telemetry/clientErrors';
 
   interface Props {
     children?: import('svelte').Snippet;
@@ -16,6 +18,7 @@
 
   onMount(() => {
     const teardownNavigation = initMobileNavigation();
+    initClientErrorReporting();
     const isMobile = shouldUseMobileSplash();
 
     if (!isMobile) {
@@ -38,6 +41,7 @@
 
     return () => {
       teardownNavigation?.();
+      teardownClientErrorReporting();
       if (splashTimer) clearTimeout(splashTimer);
       if (hardFailSafeTimer) clearTimeout(hardFailSafeTimer);
     };
@@ -73,6 +77,7 @@
       {@render children?.()}
     </div>
   </div>
+  <SuperAdminFab />
 </div>
 
 <style>

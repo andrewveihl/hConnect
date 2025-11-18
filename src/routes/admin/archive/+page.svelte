@@ -71,24 +71,38 @@
   };
 </script>
 
-<section class="admin-page">
+<section class="admin-page h-full w-full">
+  <div class="archive-panel">
 <AdminCard title="Archive" description="Soft deleted entities live here until restored or purged." padded={false}>
   <div class="flex flex-wrap gap-2 border-b border-slate-100 px-6 py-4">
     {#each Object.keys(filters) as tab}
       <button
         type="button"
         class="rounded-full px-4 py-2 text-sm font-semibold transition"
-        class:bg-slate-900={tab === activeTab}
+        class:bg-gradient-to-r={tab === activeTab}
+        class:from-teal-500={tab === activeTab}
+        class:to-cyan-500={tab === activeTab}
         class:text-white={tab === activeTab}
-        class:bg-slate-100={tab !== activeTab}
-        class:text-slate-600={tab !== activeTab}
+        class:bg-[color-mix(in_srgb,#14b8a6_10%,transparent)]={tab !== activeTab}
+        class:text-[color:var(--color-text-primary,#0f172a)]={tab !== activeTab}
+        class:border={tab !== activeTab}
+        class:border-[color-mix(in_srgb,#14b8a6_40%,transparent)]={tab !== activeTab}
         onclick={() => (activeTab = tab as ArchiveTab)}
       >
         {(tab as string).charAt(0).toUpperCase() + (tab as string).slice(1)}
       </button>
     {/each}
   </div>
-  <div class="space-y-4 p-6">
+  <div class="flex h-full flex-col space-y-4 p-6 overflow-hidden">
+    <div class="settings-callout">
+      <div>
+        <p class="settings-callout__title">Retention &amp; purge controls</p>
+        <p class="settings-callout__subtitle">Adjust auto-expiration rules and safety settings before restoring or purging data.</p>
+      </div>
+      <a href="/admin/settings" class="settings-callout__action">
+        Open Settings
+      </a>
+    </div>
     <div class="flex flex-wrap items-center gap-3">
       <input
         type="search"
@@ -106,7 +120,8 @@
       </button>
     </div>
 
-    <AdminTable headers={[{ label: 'Entity' }, { label: 'Reason' }, { label: 'Deleted By' }, { label: 'Created' }, { label: 'Actions' }]}>
+    <div class="flex-1 overflow-y-auto">
+      <AdminTable headers={[{ label: 'Entity' }, { label: 'Reason' }, { label: 'Deleted By' }, { label: 'Created' }, { label: 'Actions' }]}>
       {#if filteredEntries.length === 0}
         <tr>
           <td class="px-4 py-5 text-sm text-slate-500" colspan="5">Archive is empty.</td>
@@ -135,7 +150,7 @@
               </button>
               <button
                 type="button"
-                class="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-600"
+                class="rounded-full border border-[color-mix(in_srgb,#14b8a6_40%,transparent)] px-3 py-1 text-xs font-semibold text-[color:var(--color-text-primary,#0f172a)] hover:bg-[color-mix(in_srgb,#14b8a6_10%,transparent)]"
                 onclick={() => (confirmAction = { tab: activeTab, id: entry.id, mode: 'delete', label: entry.entityId ?? entry.id })}
               >
                 Delete
@@ -145,9 +160,75 @@
         {/each}
       {/if}
     </AdminTable>
+    </div>
   </div>
 </AdminCard>
+  </div>
 </section>
+
+<style>
+  .archive-panel {
+    min-height: 0;
+  }
+
+  .archive-panel :global(section) {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .archive-panel :global(section > div:last-child) {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .settings-callout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    border-radius: 1rem;
+    background: color-mix(in srgb, var(--surface-panel) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface-highlight) 18%, transparent);
+  }
+
+  .settings-callout__title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .settings-callout__subtitle {
+    font-size: 0.85rem;
+    color: var(--text-60);
+  }
+
+  .settings-callout__action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.55rem 1.15rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.95), rgba(6, 182, 212, 0.9));
+    color: #fff;
+    border: 1px solid rgba(236, 254, 255, 0.35);
+    box-shadow: 0 10px 25px rgba(14, 165, 233, 0.2);
+    text-decoration: none;
+    transition: transform 160ms ease, box-shadow 160ms ease;
+  }
+
+  .settings-callout__action:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 16px 30px rgba(14, 165, 233, 0.28);
+  }
+</style>
 
 <ConfirmDialog
   open={Boolean(confirmAction)}
