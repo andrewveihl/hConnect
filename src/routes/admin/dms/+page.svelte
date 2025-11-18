@@ -38,8 +38,8 @@
   let nextCursor: QueryDocumentSnapshot | null = null;
   let profileLookup = $state<Record<string, string>>({ ...(data.profileLookup ?? {}) });
   let messageSearch = $state('');
-  let messageScroller: HTMLDivElement | null = null;
-  let topSentinel: HTMLDivElement | null = null;
+  let messageScroller: HTMLDivElement | null = $state(null);
+  let topSentinel: HTMLDivElement | null = $state(null);
 
   const filteredThreads = $derived(
     data.threads.filter((thread) => {

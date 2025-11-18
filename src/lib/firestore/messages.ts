@@ -1,5 +1,6 @@
 import { getDb } from '$lib/firebase';
 import { addDoc, collection, doc, serverTimestamp, updateDoc, runTransaction, deleteField } from 'firebase/firestore';
+import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 
 type Nullable<T> = T | null | undefined;
 
@@ -70,7 +71,7 @@ export type MentionInput = {
   handle?: Nullable<string>;
   label?: Nullable<string>;
   color?: Nullable<string>;
-  kind?: 'member' | 'role';
+  kind?: 'member' | 'role' | 'special';
 };
 
 function trimString(value: Nullable<string>): string | undefined {
@@ -123,12 +124,18 @@ function normalizeMentionList(mentions: MentionInput[] | undefined): Array<{
   handle: string | null;
   label: string | null;
   color: string | null;
-  kind?: 'member' | 'role';
+  kind?: 'member' | 'role' | 'special';
 }> {
   if (!Array.isArray(mentions)) return [];
   const map = new Map<
     string,
-    { uid: string; handle: string | null; label: string | null; color: string | null; kind?: 'member' | 'role' }
+    {
+      uid: string;
+      handle: string | null;
+      label: string | null;
+      color: string | null;
+      kind?: 'member' | 'role' | 'special';
+    }
   >();
   for (const entry of mentions) {
     const uid = trimString(entry?.uid);
@@ -136,7 +143,14 @@ function normalizeMentionList(mentions: MentionInput[] | undefined): Array<{
     const handle = trimString(entry?.handle) ?? null;
     const label = trimString(entry?.label) ?? null;
     const color = trimString(entry?.color) ?? null;
-    const kind = entry?.kind === 'role' ? 'role' : entry?.kind === 'member' ? 'member' : undefined;
+    const kind =
+      entry?.kind === 'role'
+        ? 'role'
+        : entry?.kind === 'member'
+          ? 'member'
+          : entry?.kind === 'special'
+            ? 'special'
+            : undefined;
     map.set(uid, { uid, handle, label, color, kind });
   }
   return Array.from(map.values());
@@ -170,6 +184,9 @@ export function buildMessageDocument(payload: MessageInput) {
   const base = baseAuthorFields(payload);
   let extras: Record<string, any> = {};
   const mentions = normalizeMentionList((payload as any)?.mentions);
+  const mentionUidSet = new Set(mentions.map((mention) => mention.uid));
+  const mentionsEveryone = mentionUidSet.has(SPECIAL_MENTION_IDS.EVERYONE);
+  const mentionsHere = mentionUidSet.has(SPECIAL_MENTION_IDS.HERE);
   const replyTo = normalizeReplyReference((payload as BaseMessageInput)?.replyTo);
 
   switch (type) {
@@ -263,7 +280,15 @@ export function buildMessageDocument(payload: MessageInput) {
       ...extras,
       mentions,
       mentionsMap: mentions.reduce<
-        Record<string, { handle: string | null; label: string | null; color?: string | null; kind?: 'member' | 'role' }>
+        Record<
+          string,
+          {
+            handle: string | null;
+            label: string | null;
+            color?: string | null;
+            kind?: 'member' | 'role' | 'special';
+          }
+        >
       >(
         (acc, entry) => {
           acc[entry.uid] = {
@@ -275,7 +300,9 @@ export function buildMessageDocument(payload: MessageInput) {
           return acc;
         },
         {}
-      )
+      ),
+      ...(mentionsEveryone ? { mentionsEveryone: true } : {}),
+      ...(mentionsHere ? { mentionsHere: true } : {})
     };
   }
 

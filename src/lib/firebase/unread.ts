@@ -148,6 +148,22 @@ async function computeChannelSnapshot(options: {
     console.warn('[unread] mention query failed', { serverId, channelId }, err);
   }
 
+  const collectBroadcastMentions = async (field: 'mentionsEveryone' | 'mentionsHere') => {
+    try {
+      const specialQuery = query(base, ...timeConstraint, where(field, '==', true));
+      const specialSnap = await getDocs(specialQuery);
+      specialSnap.forEach((docSnap) => {
+        if (highEvents.has(docSnap.id)) return;
+        const event = buildHighEvent(docSnap, 'mention');
+        highEvents.set(docSnap.id, event);
+      });
+    } catch (err) {
+      console.warn(`[unread] ${field} query failed`, { serverId, channelId }, err);
+    }
+  };
+
+  await Promise.all([collectBroadcastMentions('mentionsEveryone'), collectBroadcastMentions('mentionsHere')]);
+
   try {
     const replyQuery = query(
       base,
