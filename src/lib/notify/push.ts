@@ -7,6 +7,29 @@ import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 const DEVICE_COLLECTION = 'devices';
 const DEVICE_ID_STORAGE_KEY = 'hconnect_device_id';
 const AUTO_PROMPT_STORAGE_KEY = 'hconnect_push_prompted_v1';
+const PUSH_DEBUG_PREFIX = '[push-client]';
+
+export type PushDebugEvent = {
+  step: string;
+  message?: string;
+  context?: unknown;
+  error?: string;
+  at?: number;
+};
+
+export type PushDebugEmitter = (event: PushDebugEvent) => void;
+
+function emitPushDebug(emitter: PushDebugEmitter | undefined, event: PushDebugEvent) {
+  if (!emitter) return;
+  try {
+    emitter({
+      ...event,
+      at: event.at ?? Date.now()
+    });
+  } catch (err) {
+    console.warn('push debug listener error', err);
+  }
+}
 
 type DevicePlatform =
   | 'web_chrome'
@@ -31,6 +54,7 @@ let swReg: ServiceWorkerRegistration | null = null;
 let cachedDeviceId: string | null = null;
 let activeDeviceUid: string | null = null;
 let swMessageHandler: ((event: MessageEvent) => void) | null = null;
+let swMessagePort: MessagePort | null = null;
 type TestPushDelivery = {
   deviceId?: string | null;
   messageId?: string | null;
@@ -49,7 +73,64 @@ const pingResolvers = new Map<
   }
 >();
 
+const PUSH_CHANNEL_NAME = 'hconnect-push-events';
+let pushBroadcastChannel: BroadcastChannel | null = null;
+
+function logPushDebug(message: string, context?: unknown) {
+  if (typeof console === 'undefined') return;
+  if (context !== undefined) {
+    console.info(PUSH_DEBUG_PREFIX, message, context);
+  } else {
+    console.info(PUSH_DEBUG_PREFIX, message);
+  }
+}
+
+function postMessageToServiceWorker(payload: unknown) {
+  if (!browser || !('serviceWorker' in navigator)) return;
+  logPushDebug('postMessageToServiceWorker invoked', {
+    hasController: Boolean(navigator.serviceWorker.controller),
+    payloadType: (payload as any)?.type ?? 'unknown'
+  });
+  const send = (worker: ServiceWorker | null | undefined) => {
+    if (!worker) return false;
+    try {
+      worker.postMessage(payload);
+      logPushDebug('postMessageToServiceWorker -> worker', payload);
+      return true;
+    } catch {
+      console.warn(PUSH_DEBUG_PREFIX, 'postMessageToServiceWorker failed', payload);
+      return false;
+    }
+  };
+  if (send(navigator.serviceWorker.controller)) return;
+  const resolveFromRegistration = () =>
+    navigator.serviceWorker
+      .getRegistration('/firebase-messaging-sw.js')
+      .then((registration) => {
+        const ok = send(registration?.active ?? registration?.waiting ?? registration?.installing ?? null);
+        logPushDebug('postMessageToServiceWorker via getRegistration', { ok });
+        return ok;
+      })
+      .catch(() => {});
+  resolveFromRegistration().finally(() => {
+    navigator.serviceWorker.ready
+      .then((registration) => {
+        const ok = send(registration?.active ?? registration?.waiting ?? registration?.installing ?? null);
+        logPushDebug('postMessageToServiceWorker via ready()', { ok });
+      })
+      .catch(() => {});
+  });
+}
+
 function emitTestPushEvent(payload: TestPushDelivery) {
+  logPushDebug('emitTestPushEvent dispatching', {
+    listenerCount: testPushListeners.size,
+    payload
+  });
+  if (!testPushListeners.size) {
+    logPushDebug('emitTestPushEvent skipped (no listeners)');
+    return;
+  }
   testPushListeners.forEach((listener) => {
     try {
       listener(payload);
@@ -58,50 +139,200 @@ function emitTestPushEvent(payload: TestPushDelivery) {
     }
   });
 }
-function postDeviceIdToServiceWorker(deviceId: string | null) {
-  if (!browser || !deviceId || !('serviceWorker' in navigator)) return;
-  const send = () => {
-    try {
-      navigator.serviceWorker.controller?.postMessage({ type: 'DEVICE_ID', deviceId });
-    } catch {
-      // no-op
-    }
-  };
-  if (navigator.serviceWorker.controller) {
-    send();
+
+function handleWorkerMessagePayload(payload: any) {
+  if (!payload || typeof payload !== 'object') {
+    logPushDebug('handleWorkerMessagePayload ignored invalid payload', { payload });
     return;
   }
-  navigator.serviceWorker.ready
-    .then(() => {
-      send();
-    })
-    .catch(() => {});
+  logPushDebug('handleWorkerMessagePayload', { type: payload.type, payload });
+  if (payload.type === 'FCM_TOKEN_REFRESHED') {
+    const token = payload?.token ?? null;
+    logPushDebug('FCM token refresh message received', { hasToken: Boolean(token) });
+    if (token && activeDeviceUid) {
+      void persistDeviceDoc(activeDeviceUid, { token, permission: resolvePermission() });
+    }
+    return;
+  }
+  if (payload.type === 'TEST_PUSH_RESULT') {
+    logPushDebug('TEST_PUSH_RESULT received', {
+      deviceId: payload.deviceId ?? null,
+      messageId: payload.messageId ?? null,
+      status: payload.status
+    });
+    emitTestPushEvent({
+      deviceId: payload.deviceId ?? null,
+      messageId: payload.messageId ?? null,
+      sentAt: payload.sentAt ?? Date.now(),
+      status: payload.status,
+      error: payload.error ?? null
+    });
+    return;
+  }
+  if (payload.type === 'TEST_PUSH_PONG' && typeof payload.messageId === 'string') {
+    logPushDebug('TEST_PUSH_PONG received', { messageId: payload.messageId });
+    const pending = pingResolvers.get(payload.messageId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pingResolvers.delete(payload.messageId);
+      pending.resolve(true);
+    }
+    return;
+  }
+  if (payload.type === 'REQUEST_DEVICE_ID') {
+    logPushDebug('REQUEST_DEVICE_ID received');
+    const deviceId = ensureDeviceId();
+    if (deviceId) {
+      postDeviceIdToServiceWorker(deviceId);
+    }
+    return;
+  }
+  logPushDebug('Unhandled worker message payload', { type: payload.type });
+}
+
+function ensurePushBroadcastChannel() {
+  if (!browser || typeof BroadcastChannel === 'undefined') return null;
+  if (pushBroadcastChannel) {
+    logPushDebug('BroadcastChannel already connected');
+    return pushBroadcastChannel;
+  }
+  try {
+    pushBroadcastChannel = new BroadcastChannel(PUSH_CHANNEL_NAME);
+    pushBroadcastChannel.addEventListener('message', (event) => {
+      logPushDebug('BroadcastChannel message received', {
+        type: event?.data?.type ?? 'unknown',
+        payload: event?.data
+      });
+      handleWorkerMessagePayload(event?.data);
+    });
+    logPushDebug('BroadcastChannel connected');
+  } catch {
+    console.warn(PUSH_DEBUG_PREFIX, 'BroadcastChannel unavailable');
+    pushBroadcastChannel = null;
+  }
+  return pushBroadcastChannel;
+}
+
+function ensureServiceWorkerPort(registration?: ServiceWorkerRegistration | null) {
+  if (!browser || typeof MessageChannel === 'undefined') return;
+  if (swMessagePort) {
+    logPushDebug('ensureServiceWorkerPort skipped (port already connected)');
+    return;
+  }
+  const controller = navigator.serviceWorker?.controller ?? null;
+  const targetReg = registration ?? swReg ?? null;
+  const worker = targetReg?.active ?? targetReg?.waiting ?? targetReg?.installing ?? null;
+  if (!controller && !worker) {
+    logPushDebug('ensureServiceWorkerPort: no controller/worker available');
+    return;
+  }
+  logPushDebug('ensureServiceWorkerPort attempting', {
+    workerState: worker?.state ?? 'unknown',
+    hasController: Boolean(controller)
+  });
+  try {
+    const channel = new MessageChannel();
+    channel.port1.addEventListener('message', (event) => {
+      logPushDebug('Service worker port message received', {
+        type: event?.data?.type ?? 'unknown',
+        payload: event?.data
+      });
+      handleWorkerMessagePayload(event?.data);
+    });
+    channel.port1.start();
+    let sent = false;
+    if (controller) {
+      try {
+        controller.postMessage({ type: 'CLIENT_PORT' }, [channel.port2]);
+        sent = true;
+        logPushDebug('Service worker port sent via controller');
+      } catch (err) {
+        console.warn(PUSH_DEBUG_PREFIX, 'Failed to send CLIENT_PORT via controller', err);
+      }
+    }
+    if (!sent && worker) {
+      try {
+        worker.postMessage({ type: 'CLIENT_PORT' }, [channel.port2]);
+        sent = true;
+        logPushDebug('Service worker port sent via worker reference');
+      } catch (err) {
+        console.warn(PUSH_DEBUG_PREFIX, 'Failed to send CLIENT_PORT via worker ref', err);
+      }
+    }
+    if (!sent) {
+      logPushDebug('Service worker port could not be delivered');
+      channel.port1.close();
+      return;
+    }
+    swMessagePort = channel.port1;
+    logPushDebug('Service worker port connected', {
+      controller: Boolean(controller),
+      workerState: worker?.state ?? 'unknown'
+    });
+    const cleanup = () => {
+      try {
+        channel.port1.close();
+      } catch {}
+      swMessagePort = null;
+      logPushDebug('Service worker port closed');
+    };
+    channel.port1.addEventListener('messageerror', cleanup);
+  } catch (err) {
+    console.warn(PUSH_DEBUG_PREFIX, 'Failed to establish SW message port', err);
+    swMessagePort = null;
+  }
+}
+
+function postDeviceIdToServiceWorker(deviceId: string | null) {
+  if (!browser || !deviceId || !('serviceWorker' in navigator)) return;
+  logPushDebug('Posting DEVICE_ID to service worker', { deviceId });
+  postMessageToServiceWorker({ type: 'DEVICE_ID', deviceId });
 }
 
 export async function registerFirebaseMessagingSW() {
   if (!browser || !('serviceWorker' in navigator)) return null;
   if (swReg) return swReg;
   try {
+    logPushDebug('registerFirebaseMessagingSW invoked', {
+      hasController: Boolean(navigator.serviceWorker.controller)
+    });
     swReg = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
       scope: '/',
-      type: 'classic'
+      type: 'classic',
+      updateViaCache: 'none'
     });
+    ensureServiceWorkerPort(swReg);
+    try {
+      swReg.update();
+    } catch {
+      // ignore
+    }
     const { app } = await ensureFirebaseReady();
     const cfg = (app as any)?.options ?? null;
     const postConfig = () => {
-      try {
-        navigator.serviceWorker.controller?.postMessage({ type: 'FIREBASE_CONFIG', config: cfg });
-      } catch {
-        // ignore
-      }
+      logPushDebug('Posting FIREBASE_CONFIG to service worker');
+      postMessageToServiceWorker({ type: 'FIREBASE_CONFIG', config: cfg });
     };
     if (!navigator.serviceWorker.controller) {
-      await navigator.serviceWorker.ready;
-      navigator.serviceWorker.addEventListener('controllerchange', () => postConfig());
+      navigator.serviceWorker.ready
+        .then(() => {
+          ensureServiceWorkerPort(swReg);
+          postConfig();
+        })
+        .catch(() => {});
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        logPushDebug('serviceWorker controllerchange detected');
+        swMessagePort = null;
+        ensureServiceWorkerPort(swReg);
+        postConfig();
+      });
+      postMessageToServiceWorker({ type: 'CLAIM_CLIENTS' });
     } else {
       postConfig();
     }
+    ensureServiceWorkerPort(swReg);
     postDeviceIdToServiceWorker(cachedDeviceId);
+    logPushDebug('registerFirebaseMessagingSW completed');
     return swReg;
   } catch (err) {
     console.warn('SW registration failed', err);
@@ -121,32 +352,19 @@ export async function requestNotificationPermission(): Promise<boolean> {
 }
 
 export function setActivePushUser(uid: string | null) {
+  logPushDebug('setActivePushUser called', { previousUid: activeDeviceUid, nextUid: uid });
   activeDeviceUid = uid;
   if (!browser || !('serviceWorker' in navigator)) return;
+  logPushDebug('setActivePushUser', { uid });
+  ensurePushBroadcastChannel();
+  ensureServiceWorkerPort();
   if (!swMessageHandler) {
     swMessageHandler = (event: MessageEvent) => {
-      const data = event?.data;
-      if (data?.type === 'FCM_TOKEN_REFRESHED') {
-        const token = data?.token ?? null;
-        if (token && activeDeviceUid) {
-          void persistDeviceDoc(activeDeviceUid, { token, permission: resolvePermission() });
-        }
-      } else if (data?.type === 'TEST_PUSH_RESULT') {
-        emitTestPushEvent({
-          deviceId: data.deviceId ?? null,
-          messageId: data.messageId ?? null,
-          sentAt: data.sentAt ?? Date.now(),
-          status: data.status,
-          error: data.error ?? null
-        });
-      } else if (data?.type === 'TEST_PUSH_PONG' && typeof data.messageId === 'string') {
-        const pending = pingResolvers.get(data.messageId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          pingResolvers.delete(data.messageId);
-          pending.resolve(true);
-        }
-      }
+      logPushDebug('Navigator serviceWorker message event', {
+        type: event?.data?.type ?? 'unknown',
+        hasPorts: Boolean(event?.ports?.length)
+      });
+      handleWorkerMessagePayload(event?.data);
     };
     navigator.serviceWorker.addEventListener('message', swMessageHandler);
   }
@@ -171,35 +389,104 @@ export async function syncDeviceRegistration(uid: string) {
   await persistDeviceDoc(uid, { permission });
 }
 
+export type EnablePushOptions = {
+  prompt?: boolean;
+  debug?: PushDebugEmitter;
+};
+
 export async function enablePushForUser(
   uid: string,
-  { prompt = true }: { prompt?: boolean } = {}
+  options: EnablePushOptions = {}
 ): Promise<string | null> {
-  if (!browser) return null;
+  const { prompt = true, debug } = options;
+  if (!browser) {
+    emitPushDebug(debug, {
+      step: 'environment.unavailable',
+      message: 'enablePushForUser called outside of the browser.'
+    });
+    return null;
+  }
+  emitPushDebug(debug, {
+    step: 'enable.start',
+    message: 'Attempting to enable push for user.',
+    context: { uid, prompt }
+  });
   let permission = resolvePermission();
+  emitPushDebug(debug, {
+    step: 'permission.resolve',
+    context: { permission }
+  });
   if (permission === 'denied') {
+    emitPushDebug(debug, {
+      step: 'permission.denied',
+      message: 'Notification permission previously denied; persisting state.'
+    });
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'permission_denied', permission }
+    });
     await persistDeviceDoc(uid, { permission, token: null });
     return null;
   }
   if (permission === 'default' && prompt) {
+    emitPushDebug(debug, {
+      step: 'permission.request',
+      message: 'Requesting notification permission from the browser.'
+    });
     const granted = await requestNotificationPermission();
     permission = resolvePermission();
+    emitPushDebug(debug, {
+      step: 'permission.request.result',
+      context: { granted, permission }
+    });
     if (!granted) {
+      emitPushDebug(debug, {
+        step: 'device.persist',
+        context: { reason: 'permission_not_granted', permission }
+      });
       await persistDeviceDoc(uid, { permission: permission ?? 'default', token: null });
       return null;
     }
   } else if (permission === 'default') {
+    emitPushDebug(debug, {
+      step: 'permission.default_skip',
+      message: 'Permission still default but prompting disabled; persisting snapshot.'
+    });
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'prompt_skipped', permission }
+    });
     await persistDeviceDoc(uid, { permission, token: null });
     return null;
   }
 
+  emitPushDebug(debug, {
+    step: 'sw.register.start',
+    message: 'Registering Firebase messaging service worker.'
+  });
   const sw = await registerFirebaseMessagingSW();
+  const controllerPresent =
+    typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+      ? Boolean(navigator.serviceWorker.controller)
+      : false;
+  emitPushDebug(debug, {
+    step: 'sw.register.result',
+    context: { hasRegistration: Boolean(sw), controllerPresent, scope: sw?.scope ?? null }
+  });
   if (!sw) {
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'sw_missing', permission }
+    });
     await persistDeviceDoc(uid, { permission, token: null });
     return null;
   }
 
   try {
+    emitPushDebug(debug, {
+      step: 'messaging.token.start',
+      context: { hasVapidKey: Boolean(PUBLIC_FCM_VAPID_KEY) }
+    });
     const { app } = await ensureFirebaseReady();
     const vapid = PUBLIC_FCM_VAPID_KEY ?? '';
     const messagingSdk = await import('firebase/messaging');
@@ -208,14 +495,43 @@ export async function enablePushForUser(
       vapidKey: vapid || undefined,
       serviceWorkerRegistration: sw
     });
+    emitPushDebug(debug, {
+      step: 'messaging.token.result',
+      context: {
+        hasToken: Boolean(token),
+        tokenPreview: token ? `${token.slice(0, 12)}…${token.slice(-6)}` : null
+      }
+    });
     if (!token) {
+      emitPushDebug(debug, {
+        step: 'device.persist',
+        context: { reason: 'token_missing', permission }
+      });
       await persistDeviceDoc(uid, { permission, token: null });
       return null;
     }
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'token_success', permission: 'granted' }
+    });
     await persistDeviceDoc(uid, { permission: 'granted', token, enabled: true });
+    emitPushDebug(debug, {
+      step: 'enable.success',
+      message: 'Push token stored for device.',
+      context: { tokenPreview: `${token.slice(0, 6)}…${token.slice(-6)}` }
+    });
     return token;
   } catch (err) {
     console.error('Failed to obtain FCM token', err);
+    emitPushDebug(debug, {
+      step: 'messaging.token.error',
+      message: 'Failed while collecting FCM token.',
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+    });
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'token_error', permission }
+    });
     await persistDeviceDoc(uid, { permission, token: null });
     return null;
   }
@@ -233,12 +549,17 @@ function resolvePermission(): DevicePermission {
 
 function ensureDeviceId(): string | null {
   if (!browser) return null;
-  if (cachedDeviceId) return cachedDeviceId;
+  if (cachedDeviceId) {
+    postDeviceIdToServiceWorker(cachedDeviceId);
+    logPushDebug('ensureDeviceId using cached id', { deviceId: cachedDeviceId });
+    return cachedDeviceId;
+  }
   try {
     const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
     if (existing) {
       cachedDeviceId = existing;
       postDeviceIdToServiceWorker(existing);
+      logPushDebug('ensureDeviceId loaded existing id', { deviceId: existing });
       return existing;
     }
     const next =
@@ -246,6 +567,7 @@ function ensureDeviceId(): string | null {
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, next);
     cachedDeviceId = next;
     postDeviceIdToServiceWorker(next);
+    logPushDebug('ensureDeviceId generated new id', { deviceId: next });
     return next;
   } catch (err) {
     console.warn('Failed to read/write device id', err);
@@ -303,6 +625,13 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
   const db = getDb();
   const now = serverTimestamp();
   const ref = doc(collection(db, 'profiles', uid, DEVICE_COLLECTION), deviceId);
+  logPushDebug('persistDeviceDoc invoked', {
+    uid,
+    deviceId,
+    hasTokenUpdate: update.token !== undefined,
+    hasPermissionUpdate: update.permission !== undefined,
+    enabled: update.enabled
+  });
   const payload: Record<string, unknown> = {
     deviceId,
     platform: detectPlatform(),
@@ -327,32 +656,75 @@ export function getCurrentDeviceId(): string | null {
 }
 
 export function listenForTestPushDelivery(callback: TestPushListener) {
+  logPushDebug('listenForTestPushDelivery registered listener');
   testPushListeners.add(callback);
+  logPushDebug('listenForTestPushDelivery listener count', { count: testPushListeners.size });
   return () => {
     testPushListeners.delete(callback);
+    logPushDebug('listenForTestPushDelivery removed listener');
+    logPushDebug('listenForTestPushDelivery listener count', { count: testPushListeners.size });
   };
 }
 
 export function pingServiceWorker(messageId?: string, timeoutMs = 2000): Promise<boolean> {
   if (!browser || !('serviceWorker' in navigator)) return Promise.resolve(false);
   const controller = navigator.serviceWorker.controller;
-  if (!controller) return Promise.resolve(false);
+  if (!controller) {
+    logPushDebug('pingServiceWorker skipped (no controller)');
+    return Promise.resolve(false);
+  }
   const id =
     messageId ??
     (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ping_${Date.now()}`);
+  logPushDebug('pingServiceWorker start', { id, timeoutMs });
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pingResolvers.delete(id);
+      logPushDebug('pingServiceWorker timed out', { id });
       resolve(false);
     }, timeoutMs);
     pingResolvers.set(id, { resolve, timer });
     try {
       controller.postMessage({ type: 'TEST_PUSH_PING', messageId: id });
+      logPushDebug('pingServiceWorker message posted', { id });
     } catch {
       clearTimeout(timer);
       pingResolvers.delete(id);
+      logPushDebug('pingServiceWorker failed to post', { id });
       resolve(false);
     }
   });
+}
+
+if (browser) {
+  ensurePushBroadcastChannel();
+  if ('serviceWorker' in navigator) {
+    if (!navigator.serviceWorker.controller) {
+      postMessageToServiceWorker({ type: 'CLAIM_CLIENTS' });
+    }
+    navigator.serviceWorker.ready
+      .then((registration) => {
+        logPushDebug('navigator.serviceWorker.ready resolved', {
+          scope: registration.scope,
+          workerState: registration.active?.state ?? registration.waiting?.state ?? registration.installing?.state ?? 'unknown'
+        });
+        if (!swReg) swReg = registration;
+        ensureServiceWorkerPort(registration);
+      })
+      .catch(() => {});
+    navigator.serviceWorker
+      .getRegistration('/firebase-messaging-sw.js')
+      .then((registration) => {
+        if (!registration) return;
+        logPushDebug('navigator.serviceWorker.getRegistration resolved', {
+          hasActive: Boolean(registration.active),
+          hasWaiting: Boolean(registration.waiting),
+          hasInstalling: Boolean(registration.installing)
+        });
+        if (!swReg) swReg = registration;
+        ensureServiceWorkerPort(registration);
+      })
+      .catch(() => {});
+  }
 }
 
