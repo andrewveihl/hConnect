@@ -8,7 +8,6 @@ import { activityUnreadCount } from '$lib/stores/activityFeed';
 import { user } from '$lib/stores/user';
 import { mobileDockSuppressed } from '$lib/stores/ui';
 import { subscribeUserServers } from '$lib/firestore/servers';
-import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 import { featureFlags } from '$lib/stores/featureFlags';
 
   type Link = {
@@ -67,16 +66,8 @@ const serverHref = $derived.by(() => {
   }
   return `/servers/${shortcut.id}`;
 });
-const superAdminEmails = superAdminEmailsStore();
 const featureFlagStore = featureFlags;
 const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
-const showAdminLink = $derived(
-  (() => {
-    const email = $user?.email ? $user.email.toLowerCase() : null;
-    if (!email) return false;
-    return Array.isArray($superAdminEmails) ? $superAdminEmails.includes(email) : false;
-  })()
-);
 
   onMount(() => {
     loadStoredLastServer();
@@ -319,20 +310,6 @@ const showAdminLink = $derived(
         </a>
       {/if}
     {/each}
-    {#if showAdminLink}
-      <a
-        href="/admin"
-        onclick={(event) => {
-          event.preventDefault();
-          goto('/admin');
-        }}
-        class={`mobile-dock__item mobile-dock__item--admin ${currentPath.startsWith('/admin') ? 'is-active' : ''}`}
-        aria-label="Admin"
-        aria-current={currentPath.startsWith('/admin') ? 'page' : undefined}
-      >
-        <i class="bx bx-shield-quarter mobile-dock__icon" aria-hidden="true"></i>
-      </a>
-    {/if}
     <a
       href="/settings"
       onclick={(event) => {
@@ -403,17 +380,6 @@ const showAdminLink = $derived(
   .mobile-dock__icon {
     font-size: 1.55rem;
     line-height: 1;
-  }
-
-  .mobile-dock__item--admin {
-    background: linear-gradient(135deg, rgba(56, 189, 248, 0.95), rgba(14, 165, 233, 0.9));
-    color: white;
-    border: 1px solid rgba(14, 165, 233, 0.45);
-    box-shadow: 0 12px 24px rgba(14, 165, 233, 0.35);
-  }
-
-  .mobile-dock__item--admin .mobile-dock__icon {
-    color: white;
   }
 
   .mobile-dock__badge {
