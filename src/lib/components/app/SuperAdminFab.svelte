@@ -30,20 +30,16 @@
 
 <style>
   .super-admin-fab {
-    position: fixed;
-    right: clamp(0.85rem, 2.5vw, 1.75rem);
-    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
-    z-index: 60;
-    width: 3.5rem;
-    height: 3.5rem;
+    width: var(--floating-fab-size, 3.1rem);
+    height: var(--floating-fab-size, 3.1rem);
     border-radius: 999px;
     border: 1px solid rgba(125, 211, 252, 0.65);
     background: linear-gradient(135deg, rgba(46, 196, 182, 0.98), rgba(14, 165, 233, 0.92));
-    box-shadow: 0 18px 30px rgba(14, 165, 233, 0.28);
+    box-shadow: 0 14px 26px rgba(14, 165, 233, 0.32);
     color: #f8fafc;
     display: grid;
     place-items: center;
-    font-size: 1.35rem;
+    font-size: 1.2rem;
     cursor: pointer;
     transition: transform 180ms cubic-bezier(0.2, 0.65, 0.25, 1), box-shadow 180ms ease;
   }
@@ -51,13 +47,7 @@
   .super-admin-fab:hover,
   .super-admin-fab:focus-visible {
     transform: translateY(-2px);
-    box-shadow: 0 20px 40px rgba(14, 165, 233, 0.4);
+    box-shadow: 0 18px 32px rgba(14, 165, 233, 0.45);
     outline: none;
-  }
-
-  @media (max-width: 767px) {
-    .super-admin-fab {
-      display: none;
-    }
   }
 </style>

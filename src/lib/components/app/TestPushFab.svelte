@@ -5,19 +5,14 @@
   import { superAdminEmailsStore } from '$lib/admin/superAdmin';
   import { triggerTestPush } from '$lib/notify/testPush';
 
-  const STORAGE_KEY = 'hconnect:testPushFab:hidden';
   const superAdminEmails = superAdminEmailsStore();
 
-  let hidden = $state(false);
   let sending = $state(false);
   let status = $state<'idle' | 'success' | 'error'>('idle');
   let message = $state<string | null>(null);
   let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
-    if (browser) {
-      hidden = localStorage.getItem(STORAGE_KEY) === '1';
-    }
     return () => {
       if (clearTimer) clearTimeout(clearTimer);
     };
@@ -31,25 +26,6 @@
       return allowList.includes(email);
     })()
   );
-
-  function persistHidden(value: boolean) {
-    hidden = value;
-    if (!browser) return;
-    if (value) {
-      localStorage.setItem(STORAGE_KEY, '1');
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
-    }
-  }
-
-  function dismissFab() {
-    if (!isSuperAdmin) return;
-    persistHidden(true);
-  }
-
-  function restoreFab() {
-    persistHidden(false);
-  }
 
   function scheduleClear() {
     if (!browser) return;
@@ -94,109 +70,99 @@
   }
 </script>
 
-{#if !hidden}
-  <div class="test-push-fab" data-status={status}>
-    <button
-      type="button"
-      class="test-push-fab__button"
-      aria-label="Send test push notification"
-      aria-busy={sending}
-      onclick={handleTestPush}
-    >
-      <i class="bx bx-bell-ring" aria-hidden="true"></i>
-      <span>Test push</span>
-    </button>
-    {#if isSuperAdmin}
-      <button
-        type="button"
-        class="test-push-fab__dismiss"
-        title="Hide test push button"
-        onclick={(event) => {
-          event.stopPropagation();
-          dismissFab();
-        }}
-      >
-        <i class="bx bx-x" aria-hidden="true"></i>
-      </button>
-    {/if}
-    {#if message}
-      <p class="test-push-fab__status" aria-live="polite">{message}</p>
-    {/if}
-  </div>
-{:else if isSuperAdmin}
-  <button type="button" class="test-push-fab__restore" onclick={restoreFab}>
+<div class="test-push-fab" data-status={status}>
+  <button
+    type="button"
+    class="test-push-fab__icon"
+    aria-label="Send test push notification"
+    aria-busy={sending}
+    onclick={handleTestPush}
+  >
     <i class="bx bx-bell" aria-hidden="true"></i>
-    <span>Show Test Push</span>
+    <span class="test-push-fab__label">Test push</span>
   </button>
-{/if}
+  {#if message}
+    <p class="test-push-fab__status" aria-live="polite">{message}</p>
+  {/if}
+</div>
 
 <style>
   .test-push-fab {
-    position: fixed;
-    right: calc(clamp(0.85rem, 2.5vw, 1.75rem) + 4.1rem);
-    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
-    z-index: 59;
+    width: var(--floating-fab-size, 3.1rem);
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
-    gap: 0.4rem;
-  }
-
-  .test-push-fab__button {
-    display: inline-flex;
     align-items: center;
     gap: 0.45rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-strong) 55%, transparent);
-    background: color-mix(in srgb, var(--surface-panel) 90%, transparent);
-    color: var(--text-90);
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    padding: 0.6rem 1.1rem;
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
-    cursor: pointer;
-    transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease;
+    position: relative;
   }
 
-  .test-push-fab__button[aria-busy='true'] {
+  .test-push-fab__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    width: 100%;
+    height: var(--floating-fab-size, 3.1rem);
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--color-border-strong) 55%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 92%, transparent);
+    color: var(--text-90);
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.28);
+    cursor: pointer;
+    transition: transform 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+    padding: 0;
+  }
+
+  .test-push-fab__icon[aria-busy='true'] {
     opacity: 0.7;
     pointer-events: none;
   }
 
-  .test-push-fab__button:hover,
-  .test-push-fab__button:focus-visible {
-    transform: translateY(-2px);
-    box-shadow: 0 16px 30px rgba(15, 23, 42, 0.3);
+  .test-push-fab__icon:hover,
+  .test-push-fab__icon:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: 0 16px 30px rgba(15, 23, 42, 0.32);
     outline: none;
   }
 
-  .test-push-fab__button i {
+  .test-push-fab__icon i {
     font-size: 1.2rem;
   }
 
-  .test-push-fab__dismiss {
-    position: absolute;
-    top: -0.4rem;
-    left: -0.4rem;
-    width: 1.5rem;
-    height: 1.5rem;
-    border-radius: 50%;
-    border: none;
-    background: rgba(15, 23, 42, 0.8);
-    color: #f8fafc;
-    display: grid;
-    place-items: center;
-    cursor: pointer;
-    font-size: 0.95rem;
+  .test-push-fab__label {
+    display: none;
   }
 
   .test-push-fab__status {
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     margin: 0;
-    padding: 0.25rem 0.6rem;
+    padding: 0.25rem 0.65rem;
     border-radius: 999px;
     background: color-mix(in srgb, var(--surface-panel) 80%, transparent);
     color: var(--text-70);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.25);
+    max-width: min(13rem, 72vw);
+    text-align: center;
+  }
+
+  .test-push-fab__admin-toggle {
+    border: none;
+    background: transparent;
+    color: var(--text-50);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    padding: 0.15rem 0.4rem;
+    border-radius: 999px;
+    transition: color 120ms ease, background 120ms ease;
+  }
+
+  .test-push-fab__admin-toggle:hover,
+  .test-push-fab__admin-toggle:focus-visible {
+    color: var(--text-80);
+    background: color-mix(in srgb, var(--surface-panel) 40%, transparent);
+    outline: none;
   }
 
   .test-push-fab[data-status='success'] .test-push-fab__status {
@@ -207,32 +173,9 @@
     color: color-mix(in srgb, var(--color-danger, #f87171) 85%, var(--text-70));
   }
 
-  .test-push-fab__restore {
-    position: fixed;
-    right: calc(clamp(0.85rem, 2.5vw, 1.75rem) + 4.1rem);
-    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
-    border-radius: 999px;
-    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
-    background: color-mix(in srgb, var(--surface-panel) 85%, transparent);
-    color: var(--text-70);
-    padding: 0.35rem 0.9rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    cursor: pointer;
-    z-index: 58;
-  }
-
-  .test-push-fab__restore:hover,
-  .test-push-fab__restore:focus-visible {
-    color: var(--text-90);
-    border-color: color-mix(in srgb, var(--color-border-strong) 65%, transparent);
-  }
-
-  @media (max-width: 767px) {
-    .test-push-fab,
-    .test-push-fab__restore {
-      display: none;
+  @media (prefers-reduced-motion: reduce) {
+    .test-push-fab__icon {
+      transition: none;
     }
   }
 </style>
