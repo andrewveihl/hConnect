@@ -8,6 +8,8 @@ importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-messaging-comp
 
 const DEFAULT_ICON = '/Logo_transparent.png';
 const CLIENT_MESSAGE = 'HCONNECT_PUSH_DEEP_LINK';
+let activeDeviceId = null;
+const pendingTestPayloads = [];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(self.skipWaiting());
@@ -52,6 +54,9 @@ self.addEventListener('message', (event) => {
     } catch (err) {
       console.warn('firebase config relay failed', err);
     }
+  } else if (data?.type === 'DEVICE_ID' && typeof data.deviceId === 'string' && data.deviceId.length) {
+    activeDeviceId = data.deviceId;
+    void flushPendingTestPayloads();
   }
 });
 
@@ -178,12 +183,76 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     (async () => {
       const payload = readPayloadFromPush(event);
-      if (payload) {
+      if (!payload) return;
+      const targetDeviceId = payload?.data?.testDeviceId || payload?.data?.targetDeviceId || null;
+      if (targetDeviceId) {
+        if (!activeDeviceId) {
+          pendingTestPayloads.push(payload);
+          return;
+        }
+        if (targetDeviceId !== activeDeviceId) {
+          return;
+        }
+      }
+      let deliveryStatus = 'delivered';
+      let deliveryError = null;
+      try {
         await showNotification(payload);
+      } catch (err) {
+        deliveryStatus = 'failed';
+        deliveryError = err instanceof Error ? err.message : 'Notification display failed.';
+        console.warn('showNotification failed', err);
+      }
+      if (targetDeviceId) {
+        await notifyClientTestPush({
+          type: 'TEST_PUSH_RESULT',
+          deviceId: targetDeviceId,
+          messageId: payload?.data?.messageId ?? null,
+          sentAt: Date.now(),
+          status: deliveryStatus,
+          error: deliveryError
+        });
       }
     })()
   );
 });
+
+async function notifyClientTestPush(payload) {
+  try {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    clients.forEach((client) => {
+      try {
+        client.postMessage(payload);
+      } catch {}
+    });
+  } catch {}
+}
+
+async function flushPendingTestPayloads() {
+  if (!activeDeviceId || !pendingTestPayloads.length) return;
+  const pending = pendingTestPayloads.splice(0);
+  for (const payload of pending) {
+    const targetDeviceId = payload?.data?.testDeviceId || payload?.data?.targetDeviceId || null;
+    if (!targetDeviceId || targetDeviceId !== activeDeviceId) continue;
+    let status = 'delivered';
+    let error = null;
+    try {
+      await showNotification(payload);
+    } catch (err) {
+      status = 'failed';
+      error = err instanceof Error ? err.message : 'Notification display failed.';
+      console.warn('showNotification failed (queued)', err);
+    }
+    await notifyClientTestPush({
+      type: 'TEST_PUSH_RESULT',
+      deviceId: targetDeviceId,
+      messageId: payload?.data?.messageId ?? null,
+      sentAt: Date.now(),
+      status,
+      error
+    });
+  }
+}
 
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(

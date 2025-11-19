@@ -1,20 +1,51 @@
 <script lang="ts">
-  import { browser } from '$app/environment';
-  import { onMount } from 'svelte';
-  import { user } from '$lib/stores/user';
-  import { superAdminEmailsStore } from '$lib/admin/superAdmin';
-  import { triggerTestPush } from '$lib/notify/testPush';
+import { browser } from '$app/environment';
+import { onMount } from 'svelte';
+import { user } from '$lib/stores/user';
+import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+import { triggerTestPush } from '$lib/notify/testPush';
+import { listenForTestPushDelivery, getCurrentDeviceId } from '$lib/notify/push';
 
   const superAdminEmails = superAdminEmailsStore();
 
-  let sending = $state(false);
-  let status = $state<'idle' | 'success' | 'error'>('idle');
-  let message = $state<string | null>(null);
+const DELIVERY_TIMEOUT_MS = 10000;
+
+let sending = $state(false);
+let status = $state<'idle' | 'success' | 'error'>('idle');
+let message = $state<string | null>(null);
+let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>(null);
   let clearTimer: ReturnType<typeof setTimeout> | null = null;
+  let deliveryTimeout: ReturnType<typeof setTimeout> | null = null;
+  let unsubscribeDelivery: (() => void) | null = null;
 
   onMount(() => {
+    if (browser) {
+      unsubscribeDelivery = listenForTestPushDelivery((payload) => {
+        if (!pendingTest) return;
+        const localDevice = getCurrentDeviceId();
+        if (payload.deviceId && localDevice && payload.deviceId !== localDevice) return;
+        if (pendingTest.messageId && payload.messageId && pendingTest.messageId !== payload.messageId) return;
+        pendingTest = null;
+        if (deliveryTimeout) {
+          clearTimeout(deliveryTimeout);
+          deliveryTimeout = null;
+        }
+        if (payload.status === 'failed') {
+          status = 'error';
+          message =
+            payload.error ??
+            'Edge could not display the notification. Check site permissions and try turning notifications off/on again.';
+        } else {
+          status = 'success';
+          message = 'Notification displayed on this device.';
+        }
+        scheduleClear({ force: payload.status !== 'failed' });
+      });
+    }
     return () => {
       if (clearTimer) clearTimeout(clearTimer);
+      if (deliveryTimeout) clearTimeout(deliveryTimeout);
+      unsubscribeDelivery?.();
     };
   });
 
@@ -27,19 +58,51 @@
     })()
   );
 
-  function scheduleClear() {
+  function scheduleClear(options: { force?: boolean } = {}) {
+    const { force = false } = options;
     if (!browser) return;
     if (clearTimer) clearTimeout(clearTimer);
+    if (pendingTest) return;
+    if (!force && status === 'error') return;
     clearTimer = setTimeout(() => {
       message = null;
       status = 'idle';
     }, 4000);
   }
 
+  function scheduleDeliveryWatch() {
+    if (deliveryTimeout) clearTimeout(deliveryTimeout);
+    deliveryTimeout = setTimeout(() => {
+      deliveryTimeout = null;
+      if (!pendingTest) return;
+      void handleUndeliveredPush();
+    }, DELIVERY_TIMEOUT_MS);
+  }
+
+  function resolveError(reason?: string | null) {
+    const enableMessage = 'Enable push notifications on this device first (Settings -> Notifications).';
+    switch (reason) {
+      case 'missing_device':
+      case 'device_not_registered':
+      case 'no_tokens':
+        return enableMessage;
+      case 'no_service_worker':
+        return 'Could not reach the push service worker. Refresh this page and ensure notifications are enabled.';
+      default:
+        return 'Test push failed.';
+    }
+  }
+
   async function handleTestPush() {
     if (!$user?.uid) {
       status = 'error';
       message = 'Sign in to send a test push.';
+      scheduleClear();
+      return;
+    }
+    if (!browser || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      status = 'error';
+      message = resolveError('no_service_worker');
       scheduleClear();
       return;
     }
@@ -51,22 +114,79 @@
       if (result.ok) {
         status = 'success';
         const count = result.tokens ?? 0;
+        pendingTest = { messageId: result.messageId ?? null, startedAt: Date.now() };
         const suffix = count === 1 ? 'device' : 'devices';
-        message = count > 0 ? `Sent to ${count} ${suffix}.` : 'Test notification sent.';
+        message = count > 0 ? `Sent to ${count} ${suffix}. Waiting for delivery...` : 'Test notification sent.';
+        scheduleDeliveryWatch();
       } else {
         status = 'error';
-        message =
-          result.reason === 'no_tokens'
-            ? 'Enable push on this device first.'
-            : 'Test push failed.';
+        pendingTest = null;
+        message = resolveError(result.reason);
       }
     } catch {
       status = 'error';
+      pendingTest = null;
       message = 'Could not send test push.';
     } finally {
       sending = false;
       scheduleClear();
     }
+  }
+
+  async function handleUndeliveredPush() {
+    if (!pendingTest) return;
+    pendingTest = null;
+    const reason = await diagnoseDeliveryIssue();
+    status = 'error';
+    message = reason;
+    scheduleClear();
+  }
+
+  async function diagnoseDeliveryIssue(): Promise<string> {
+    if (!browser) {
+      return 'Sent push but this browser did not confirm delivery.';
+    }
+    if (!('Notification' in window)) {
+      return 'This browser does not support notifications.';
+    }
+    if (Notification.permission === 'default') {
+      return 'Notifications have not been enabled yet. Allow notifications using the browser permissions prompt.';
+    }
+    if (Notification.permission === 'denied') {
+      return 'Notifications are blocked for this site. Enable them in your browser site settings.';
+    }
+    if (!('serviceWorker' in navigator)) {
+      return 'This browser cannot run the push service worker required for notifications.';
+    }
+    let registration: ServiceWorkerRegistration | null = null;
+    try {
+      registration = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
+    } catch {
+      registration = null;
+    }
+    if (!registration) {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        registration = regs.find((reg) => reg.active?.scriptURL?.includes('firebase-messaging-sw.js')) ?? null;
+      } catch {
+        registration = null;
+      }
+    }
+    if (!registration) {
+      return 'Push service worker is not registered. Reload the page after enabling notifications.';
+    }
+    if (registration.active?.state !== 'activated') {
+      return 'Push service worker is still initializing. Wait a moment and try again.';
+    }
+    try {
+      const subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        return 'This browser is not subscribed for push notifications. Re-enable notifications via Settings -> Notifications.';
+      }
+    } catch {
+      return 'Could not read the push subscription. Refresh the page and re-enable notifications.';
+    }
+    return 'We sent the push notification but did not receive a delivery acknowledgement from this device.';
   }
 </script>
 

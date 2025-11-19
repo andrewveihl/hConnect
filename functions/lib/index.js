@@ -26,17 +26,21 @@ exports.sendTestPush = (0, https_1.onCall)({
     const deviceId = typeof request.data?.deviceId === 'string' && request.data.deviceId.length > 0
         ? request.data.deviceId
         : undefined;
-    firebase_functions_1.logger.info('[sendTestPush] Invoked', { uid, deviceId: deviceId ?? null });
+    if (!deviceId) {
+        firebase_functions_1.logger.warn('[sendTestPush] Missing device id', { uid });
+        return { ok: false, reason: 'missing_device' };
+    }
+    firebase_functions_1.logger.info('[sendTestPush] Invoked', { uid, deviceId });
     const result = await (0, notifications_1.sendTestPushForUid)(uid, deviceId);
     firebase_functions_1.logger.info('[sendTestPush] Completed', {
         uid,
-        deviceId: deviceId ?? null,
+        deviceId,
         sent: result.sent,
         reason: result.reason ?? null
     });
     if (!result.sent) {
-        return { ok: false, reason: result.reason ?? 'no_tokens' };
+        return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
-    return { ok: true, tokens: result.sent };
+    return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
 });
 //# sourceMappingURL=index.js.map
