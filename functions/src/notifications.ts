@@ -542,17 +542,18 @@ async function deliverToRecipients(
 
 export async function sendTestPushForUid(
   uid: string,
-  deviceId?: string
-): Promise<{ sent: number; reason?: string }> {
-  logger.info('[testPush] Fetching device tokens', { uid, deviceId: deviceId ?? null });
+  deviceId: string
+): Promise<{ sent: number; reason?: string; messageId?: string }> {
+  logger.info('[testPush] Fetching device tokens', { uid, deviceId });
   const tokens = await fetchDeviceTokens(uid, deviceId);
-  logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId: deviceId ?? null });
+  logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId });
   if (!tokens.length) {
-    logger.warn('[testPush] No tokens found for user', { uid, deviceId: deviceId ?? null });
-    return { sent: 0, reason: 'no_tokens' };
+    logger.warn('[testPush] No tokens found for user device', { uid, deviceId });
+    return { sent: 0, reason: 'device_not_registered' };
   }
   const title = 'hConnect test notification';
   const body = 'Push notifications are working on this device.';
+  const messageId = `test-${Date.now()}`;
   try {
     logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
     await sendPushToTokens(tokens, {
@@ -564,7 +565,8 @@ export async function sendTestPushForUid(
         origin: 'push',
         mentionType: 'direct',
         targetUrl: '/?origin=push',
-        messageId: `test-${Date.now()}`
+        messageId,
+        testDeviceId: deviceId
       }
     });
     logger.info('[testPush] Push send call completed', { uid, count: tokens.length });
@@ -572,7 +574,7 @@ export async function sendTestPushForUid(
     logger.error('[testPush] Failed to send push payload', { uid, error });
     throw error;
   }
-  return { sent: tokens.length };
+  return { sent: tokens.length, messageId };
 }
 
 type ChannelMessageEvent = FirestoreEvent<

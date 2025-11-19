@@ -31,6 +31,45 @@ let swReg: ServiceWorkerRegistration | null = null;
 let cachedDeviceId: string | null = null;
 let activeDeviceUid: string | null = null;
 let swMessageHandler: ((event: MessageEvent) => void) | null = null;
+type TestPushDelivery = {
+  deviceId?: string | null;
+  messageId?: string | null;
+  sentAt?: number | null;
+  status?: 'delivered' | 'failed';
+  error?: string | null;
+};
+
+type TestPushListener = (payload: TestPushDelivery) => void;
+const testPushListeners = new Set<TestPushListener>();
+
+function emitTestPushEvent(payload: TestPushDelivery) {
+  testPushListeners.forEach((listener) => {
+    try {
+      listener(payload);
+    } catch (err) {
+      console.warn('test push listener error', err);
+    }
+  });
+}
+function postDeviceIdToServiceWorker(deviceId: string | null) {
+  if (!browser || !deviceId || !('serviceWorker' in navigator)) return;
+  const send = () => {
+    try {
+      navigator.serviceWorker.controller?.postMessage({ type: 'DEVICE_ID', deviceId });
+    } catch {
+      // no-op
+    }
+  };
+  if (navigator.serviceWorker.controller) {
+    send();
+    return;
+  }
+  navigator.serviceWorker.ready
+    .then(() => {
+      send();
+    })
+    .catch(() => {});
+}
 
 export async function registerFirebaseMessagingSW() {
   if (!browser || !('serviceWorker' in navigator)) return null;
@@ -42,14 +81,20 @@ export async function registerFirebaseMessagingSW() {
     });
     const { app } = await ensureFirebaseReady();
     const cfg = (app as any)?.options ?? null;
-    const postConfig = () =>
-      navigator.serviceWorker.controller?.postMessage({ type: 'FIREBASE_CONFIG', config: cfg });
+    const postConfig = () => {
+      try {
+        navigator.serviceWorker.controller?.postMessage({ type: 'FIREBASE_CONFIG', config: cfg });
+      } catch {
+        // ignore
+      }
+    };
     if (!navigator.serviceWorker.controller) {
       await navigator.serviceWorker.ready;
       navigator.serviceWorker.addEventListener('controllerchange', () => postConfig());
     } else {
       postConfig();
     }
+    postDeviceIdToServiceWorker(cachedDeviceId);
     return swReg;
   } catch (err) {
     console.warn('SW registration failed', err);
@@ -73,11 +118,20 @@ export function setActivePushUser(uid: string | null) {
   if (!browser || !('serviceWorker' in navigator)) return;
   if (!swMessageHandler) {
     swMessageHandler = (event: MessageEvent) => {
-      if (event?.data?.type === 'FCM_TOKEN_REFRESHED') {
-        const token = event.data?.token ?? null;
+      const data = event?.data;
+      if (data?.type === 'FCM_TOKEN_REFRESHED') {
+        const token = data?.token ?? null;
         if (token && activeDeviceUid) {
           void persistDeviceDoc(activeDeviceUid, { token, permission: resolvePermission() });
         }
+      } else if (data?.type === 'TEST_PUSH_RESULT') {
+        emitTestPushEvent({
+          deviceId: data.deviceId ?? null,
+          messageId: data.messageId ?? null,
+          sentAt: data.sentAt ?? Date.now(),
+          status: data.status,
+          error: data.error ?? null
+        });
       }
     };
     navigator.serviceWorker.addEventListener('message', swMessageHandler);
@@ -170,12 +224,14 @@ function ensureDeviceId(): string | null {
     const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
     if (existing) {
       cachedDeviceId = existing;
+      postDeviceIdToServiceWorker(existing);
       return existing;
     }
     const next =
       typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `dev_${Date.now()}`;
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, next);
     cachedDeviceId = next;
+    postDeviceIdToServiceWorker(next);
     return next;
   } catch (err) {
     console.warn('Failed to read/write device id', err);
@@ -228,6 +284,7 @@ function isStandalone() {
 async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
   const deviceId = ensureDeviceId();
   if (!deviceId) return;
+  postDeviceIdToServiceWorker(deviceId);
   await ensureFirebaseReady();
   const db = getDb();
   const now = serverTimestamp();
@@ -253,5 +310,12 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
 
 export function getCurrentDeviceId(): string | null {
   return ensureDeviceId();
+}
+
+export function listenForTestPushDelivery(callback: TestPushListener) {
+  testPushListeners.add(callback);
+  return () => {
+    testPushListeners.delete(callback);
+  };
 }
 

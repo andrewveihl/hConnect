@@ -45,17 +45,21 @@ export const sendTestPush = onCall(
       typeof request.data?.deviceId === 'string' && request.data.deviceId.length > 0
         ? request.data.deviceId
         : undefined;
-    logger.info('[sendTestPush] Invoked', { uid, deviceId: deviceId ?? null });
+    if (!deviceId) {
+      logger.warn('[sendTestPush] Missing device id', { uid });
+      return { ok: false, reason: 'missing_device' };
+    }
+    logger.info('[sendTestPush] Invoked', { uid, deviceId });
     const result = await sendTestPushForUid(uid, deviceId);
     logger.info('[sendTestPush] Completed', {
       uid,
-      deviceId: deviceId ?? null,
+      deviceId,
       sent: result.sent,
       reason: result.reason ?? null
     });
     if (!result.sent) {
-      return { ok: false, reason: result.reason ?? 'no_tokens' };
+      return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
-    return { ok: true, tokens: result.sent };
+    return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
   }
 );

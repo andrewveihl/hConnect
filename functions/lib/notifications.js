@@ -471,15 +471,16 @@ async function deliverToRecipients(recipients, message, context) {
     }));
 }
 async function sendTestPushForUid(uid, deviceId) {
-    firebase_functions_1.logger.info('[testPush] Fetching device tokens', { uid, deviceId: deviceId ?? null });
+    firebase_functions_1.logger.info('[testPush] Fetching device tokens', { uid, deviceId });
     const tokens = await (0, settings_1.fetchDeviceTokens)(uid, deviceId);
-    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId: deviceId ?? null });
+    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId });
     if (!tokens.length) {
-        firebase_functions_1.logger.warn('[testPush] No tokens found for user', { uid, deviceId: deviceId ?? null });
-        return { sent: 0, reason: 'no_tokens' };
+        firebase_functions_1.logger.warn('[testPush] No tokens found for user device', { uid, deviceId });
+        return { sent: 0, reason: 'device_not_registered' };
     }
     const title = 'hConnect test notification';
     const body = 'Push notifications are working on this device.';
+    const messageId = `test-${Date.now()}`;
     try {
         firebase_functions_1.logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
         await sendPushToTokens(tokens, {
@@ -491,7 +492,8 @@ async function sendTestPushForUid(uid, deviceId) {
                 origin: 'push',
                 mentionType: 'direct',
                 targetUrl: '/?origin=push',
-                messageId: `test-${Date.now()}`
+                messageId,
+                testDeviceId: deviceId
             }
         });
         firebase_functions_1.logger.info('[testPush] Push send call completed', { uid, count: tokens.length });
@@ -500,7 +502,7 @@ async function sendTestPushForUid(uid, deviceId) {
         firebase_functions_1.logger.error('[testPush] Failed to send push payload', { uid, error });
         throw error;
     }
-    return { sent: tokens.length };
+    return { sent: tokens.length, messageId };
 }
 function messageFromEvent(event) {
     const data = event.data?.data();
