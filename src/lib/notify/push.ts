@@ -41,6 +41,13 @@ type TestPushDelivery = {
 
 type TestPushListener = (payload: TestPushDelivery) => void;
 const testPushListeners = new Set<TestPushListener>();
+const pingResolvers = new Map<
+  string,
+  {
+    resolve: (value: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
 
 function emitTestPushEvent(payload: TestPushDelivery) {
   testPushListeners.forEach((listener) => {
@@ -132,6 +139,13 @@ export function setActivePushUser(uid: string | null) {
           status: data.status,
           error: data.error ?? null
         });
+      } else if (data?.type === 'TEST_PUSH_PONG' && typeof data.messageId === 'string') {
+        const pending = pingResolvers.get(data.messageId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pingResolvers.delete(data.messageId);
+          pending.resolve(true);
+        }
       }
     };
     navigator.serviceWorker.addEventListener('message', swMessageHandler);
@@ -317,5 +331,28 @@ export function listenForTestPushDelivery(callback: TestPushListener) {
   return () => {
     testPushListeners.delete(callback);
   };
+}
+
+export function pingServiceWorker(messageId?: string, timeoutMs = 2000): Promise<boolean> {
+  if (!browser || !('serviceWorker' in navigator)) return Promise.resolve(false);
+  const controller = navigator.serviceWorker.controller;
+  if (!controller) return Promise.resolve(false);
+  const id =
+    messageId ??
+    (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ping_${Date.now()}`);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pingResolvers.delete(id);
+      resolve(false);
+    }, timeoutMs);
+    pingResolvers.set(id, { resolve, timer });
+    try {
+      controller.postMessage({ type: 'TEST_PUSH_PING', messageId: id });
+    } catch {
+      clearTimeout(timer);
+      pingResolvers.delete(id);
+      resolve(false);
+    }
+  });
 }
 

@@ -3,8 +3,8 @@ import { browser } from '$app/environment';
 import { onMount } from 'svelte';
 import { user } from '$lib/stores/user';
 import { superAdminEmailsStore } from '$lib/admin/superAdmin';
-import { triggerTestPush } from '$lib/notify/testPush';
-import { listenForTestPushDelivery, getCurrentDeviceId } from '$lib/notify/push';
+  import { triggerTestPush } from '$lib/notify/testPush';
+  import { listenForTestPushDelivery, getCurrentDeviceId, pingServiceWorker } from '$lib/notify/push';
 
   const superAdminEmails = superAdminEmailsStore();
 
@@ -135,25 +135,38 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
 
   async function handleUndeliveredPush() {
     if (!pendingTest) return;
+    const currentTest = pendingTest;
     pendingTest = null;
-    const reason = await diagnoseDeliveryIssue();
+    const workerResponsive = await pingServiceWorker(currentTest.messageId ?? undefined);
+    const reason = await diagnoseDeliveryIssue(workerResponsive);
     status = 'error';
     message = reason;
     scheduleClear();
   }
 
-  async function diagnoseDeliveryIssue(): Promise<string> {
+  async function diagnoseDeliveryIssue(workerResponsive: boolean): Promise<string> {
     if (!browser) {
       return 'Sent push but this browser did not confirm delivery.';
     }
     if (!('Notification' in window)) {
       return 'This browser does not support notifications.';
     }
+    const diagnostics: string[] = [];
+    const deviceId = getCurrentDeviceId();
+    diagnostics.push(`deviceId=${deviceId ?? 'unknown'}`);
+    diagnostics.push(`userAgent=${navigator.userAgent}`);
+    diagnostics.push(`notificationPermission=${Notification.permission}`);
     if (Notification.permission === 'default') {
-      return 'Notifications have not been enabled yet. Allow notifications using the browser permissions prompt.';
+      return [
+        'Notifications have not been enabled yet. Allow notifications using the browser permissions prompt.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
     }
     if (Notification.permission === 'denied') {
-      return 'Notifications are blocked for this site. Enable them in your browser site settings.';
+      return [
+        'Notifications are blocked for this site. Enable them in your browser site settings.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
     }
     if (!('serviceWorker' in navigator)) {
       return 'This browser cannot run the push service worker required for notifications.';
@@ -172,21 +185,68 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
         registration = null;
       }
     }
+    const controller = navigator.serviceWorker.controller;
+    diagnostics.push(`swController=${controller ? controller.scriptURL ?? 'present' : 'missing'}`);
     if (!registration) {
-      return 'Push service worker is not registered. Reload the page after enabling notifications.';
+      diagnostics.push('swRegistration=missing');
+      return [
+        'Push service worker is not registered. Reload the page after enabling notifications.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
     }
+    diagnostics.push(`swScope=${registration.scope}`);
+    diagnostics.push(
+      `swScript=${registration.active?.scriptURL ?? registration.waiting?.scriptURL ?? registration.installing?.scriptURL ?? 'unknown'}`
+    );
+    diagnostics.push(`swState=${registration.active?.state ?? registration.waiting?.state ?? registration.installing?.state ?? 'none'}`);
     if (registration.active?.state !== 'activated') {
-      return 'Push service worker is still initializing. Wait a moment and try again.';
+      return [
+        `Push service worker is still initializing (state=${registration.active?.state ?? 'none'}). Wait a moment and try again.`,
+        formatDiagnostics(diagnostics)
+      ].join('\n');
     }
     try {
       const subscription = await registration.pushManager.getSubscription();
+      diagnostics.push(`pushSubscription=${subscription ? 'present' : 'missing'}`);
+      if (subscription?.endpoint) {
+        diagnostics.push(`subscriptionEndpointSuffix=${subscription.endpoint.slice(-12)}`);
+      }
       if (!subscription) {
-        return 'This browser is not subscribed for push notifications. Re-enable notifications via Settings -> Notifications.';
+        return [
+          'This browser is not subscribed for push notifications. Re-enable notifications via Settings -> Notifications.',
+          formatDiagnostics(diagnostics)
+        ].join('\n');
       }
     } catch {
-      return 'Could not read the push subscription. Refresh the page and re-enable notifications.';
+      diagnostics.push('pushSubscription=error');
+      return [
+        'Could not read the push subscription. Refresh the page and re-enable notifications.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
     }
-    return 'We sent the push notification but did not receive a delivery acknowledgement from this device.';
+    if (!controller) {
+      return [
+        'We sent the push notification but no controlled service worker acknowledged it. Reload the page to ensure the messaging worker is controlling this tab.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
+    }
+    diagnostics.push(`controllerState=${controller.state ?? 'unknown'}`);
+    diagnostics.push(`swPingResponsive=${workerResponsive}`);
+    if (!workerResponsive) {
+      return [
+        'Push service worker did not respond to a ping. Reload the page so the worker controls this tab, then try again.',
+        formatDiagnostics(diagnostics)
+      ].join('\n');
+    }
+    return [
+      'We sent the push notification but did not receive a delivery acknowledgement from this device.',
+      formatDiagnostics(diagnostics)
+    ].join('\n');
+  }
+
+  function formatDiagnostics(lines: string[]) {
+    if (!lines.length) return '';
+    return `Diagnostics:\n- ${lines.join('\n- ')}`;
   }
 </script>
 

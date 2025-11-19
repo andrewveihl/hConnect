@@ -57,6 +57,16 @@ self.addEventListener('message', (event) => {
   } else if (data?.type === 'DEVICE_ID' && typeof data.deviceId === 'string' && data.deviceId.length) {
     activeDeviceId = data.deviceId;
     void flushPendingTestPayloads();
+  } else if (data?.type === 'TEST_PUSH_PING') {
+    try {
+      event?.source?.postMessage?.({
+        type: 'TEST_PUSH_PONG',
+        messageId: data.messageId ?? null,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      console.warn('[firebase-messaging-sw] Failed to respond to ping', err);
+    }
   }
 });
 
@@ -196,6 +206,12 @@ self.addEventListener('push', (event) => {
       }
       let deliveryStatus = 'delivered';
       let deliveryError = null;
+      console.info('[firebase-messaging-sw] Push received', {
+        targetDeviceId,
+        activeDeviceId,
+        hasNotification: Boolean(payload?.notification),
+        hasData: Boolean(payload?.data)
+      });
       try {
         await showNotification(payload);
       } catch (err) {
@@ -231,6 +247,7 @@ async function notifyClientTestPush(payload) {
 async function flushPendingTestPayloads() {
   if (!activeDeviceId || !pendingTestPayloads.length) return;
   const pending = pendingTestPayloads.splice(0);
+  console.info('[firebase-messaging-sw] Flushing pending test pushes', { count: pending.length, activeDeviceId });
   for (const payload of pending) {
     const targetDeviceId = payload?.data?.testDeviceId || payload?.data?.targetDeviceId || null;
     if (!targetDeviceId || targetDeviceId !== activeDeviceId) continue;
