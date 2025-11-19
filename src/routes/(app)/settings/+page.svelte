@@ -8,7 +8,13 @@ import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
 import { db } from '$lib/firestore';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
-  import { enablePushForUser, requestNotificationPermission } from '$lib/notify/push';
+  import {
+    enablePushForUser,
+    requestNotificationPermission,
+    getCurrentDeviceId,
+    pingServiceWorker
+  } from '$lib/notify/push';
+  import type { PushDebugEvent } from '$lib/notify/push';
   import { triggerTestPush } from '$lib/notify/testPush';
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
@@ -278,44 +284,370 @@ let avatarError: string | null = $state(null);
   }
 
   async function enablePush() {
-    if (!$user?.uid) return;
-    const token = await enablePushForUser($user.uid);
-    if (!token) {
-      alert('Could not enable push on this device.');
+    pushDebugCopyState = 'idle';
+    appendPushDebug({ tag: 'enable', message: 'Enable push button clicked.' });
+    await logPushEnvironment('Preflight snapshot (enable)');
+    const deviceId = getCurrentDeviceId();
+    appendPushDebug({
+      tag: 'enable',
+      message: 'Current device id snapshot.',
+      details: { deviceId }
+    });
+    if (!$user?.uid) {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Cannot enable push without an authenticated user.'
+      });
+      alert('Sign in to enable push notifications.');
       return;
     }
-    notif.pushEnabled = true;
-    await save();
-    alert('Push notifications enabled on this device.');
+    if (typeof window === 'undefined') {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Window object not present.'
+      });
+      alert('Push notifications require a browser environment.');
+      return;
+    }
+    if (typeof Notification === 'undefined') {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Notification API unavailable in this browser.'
+      });
+      alert('This browser does not support push notifications.');
+      return;
+    }
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Service worker API missing; cannot register for push.'
+      });
+      alert('This browser cannot register push service workers.');
+      return;
+    }
+    await pingServiceWorkerForDebug('enable');
+    appendPushDebug({
+      tag: 'enable',
+      message: 'Calling enablePushForUser via Firebase Messaging.'
+    });
+    try {
+      const token = await enablePushForUser($user.uid, {
+        prompt: true,
+        debug: createPushDebugBridge('enable')
+      });
+      if (!token) {
+        appendPushDebug({
+          tag: 'enable',
+          level: 'warn',
+          message: 'enablePushForUser returned no token.'
+        });
+        alert('Could not enable push on this device.');
+        return;
+      }
+      appendPushDebug({
+        tag: 'enable',
+        message: 'Push token obtained.',
+        details: { tokenPreview: `${token.slice(0, 10)}…${token.slice(-6)}` }
+      });
+      notif.pushEnabled = true;
+      await save();
+      appendPushDebug({
+        tag: 'enable',
+        message: 'Notification settings saved with pushEnabled=true.'
+      });
+      alert('Push notifications enabled on this device.');
+    } catch (error) {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'enablePushForUser threw an exception.',
+        details: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      });
+      alert('Could not enable push on this device.');
+    }
   }
 
   let testPushState = $state<'idle' | 'loading' | 'success' | 'error'>('idle');
   let testPushMessage: string | null = $state(null);
 
+  type PushDebugEntry = {
+    id: string;
+    timestamp: number;
+    level: 'info' | 'warn' | 'error';
+    tag: string | null;
+    message: string;
+    details?: string;
+  };
+
+  let pushDebugLog: PushDebugEntry[] = $state([]);
+  let pushDebugCopyState = $state<'idle' | 'copying' | 'copied' | 'error'>('idle');
+
+  const PUSH_DEBUG_MAX_ENTRIES = 200;
+
+  function appendPushDebug(entry: { message: string; level?: 'info' | 'warn' | 'error'; tag?: string | null; details?: unknown }) {
+    const timestamp = Date.now();
+    const level = entry.level ?? 'info';
+    const tag = entry.tag ?? null;
+    const details = entry.details !== undefined ? formatDebugDetails(entry.details) : undefined;
+    const logEntry: PushDebugEntry = {
+      id: `${timestamp}_${Math.random().toString(16).slice(2)}`,
+      timestamp,
+      level,
+      tag,
+      message: entry.message,
+      details
+    };
+    pushDebugLog = [...pushDebugLog, logEntry].slice(-PUSH_DEBUG_MAX_ENTRIES);
+    const prefix = tag ? `[push-debug:${tag}]` : '[push-debug]';
+    const consoleArgs: unknown[] = [`${prefix} ${entry.message}`];
+    if (entry.details !== undefined) {
+      consoleArgs.push(entry.details);
+    }
+    const logger = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
+    logger(...consoleArgs);
+  }
+
+  function formatDebugDetails(details: unknown): string | undefined {
+    if (details === null || details === undefined) return undefined;
+    if (typeof details === 'string') return details;
+    try {
+      return JSON.stringify(details, null, 2);
+    } catch (error) {
+      return String(details);
+    }
+  }
+
+  function formatDebugTimestamp(timestamp: number) {
+    return new Date(timestamp).toLocaleTimeString();
+  }
+
+  function clearPushDebugLog() {
+    pushDebugLog = [];
+    pushDebugCopyState = 'idle';
+    console.info('[push-debug] Log cleared.');
+  }
+
+  function createPushDebugBridge(tag: string) {
+    return (event: PushDebugEvent) => {
+      const context: Record<string, unknown> = {};
+      if (event.context !== undefined) {
+        context.context = event.context;
+      }
+      if (event.error) {
+        context.error = event.error;
+      }
+      if (event.at) {
+        context.eventTimestamp = new Date(event.at).toISOString();
+      }
+      appendPushDebug({
+        tag,
+        level: event.error ? 'error' : 'info',
+        message: event.message ? `${event.step}: ${event.message}` : event.step,
+        details: Object.keys(context).length ? context : undefined
+      });
+    };
+  }
+
+  async function copyPushDebugLog() {
+    if (!pushDebugLog.length) return;
+    pushDebugCopyState = 'copying';
+    const text = buildPushDebugText();
+    const success = await writeToClipboard(text);
+    pushDebugCopyState = success ? 'copied' : 'error';
+    if (success) {
+      setTimeout(() => {
+        pushDebugCopyState = 'idle';
+      }, 1800);
+    }
+  }
+
+  function buildPushDebugText() {
+    return pushDebugLog
+      .map((entry) => {
+        const ts = new Date(entry.timestamp).toISOString();
+        const tag = entry.tag ? `[${entry.tag}]` : '';
+        const base = `${ts} ${entry.level.toUpperCase()} ${tag} ${entry.message}`;
+        return entry.details ? `${base}\n${entry.details}` : base;
+      })
+      .join('\n');
+  }
+
+  async function writeToClipboard(text: string) {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      console.warn('Navigator clipboard copy failed, falling back', error);
+    }
+    if (typeof document === 'undefined') return false;
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'absolute';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      const ok = document.execCommand('copy');
+      return ok;
+    } catch (error) {
+      console.warn('execCommand copy failed', error);
+      return false;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
+  async function logPushEnvironment(label: string) {
+    const snapshot = await collectPushDiagnostics();
+    appendPushDebug({
+      tag: 'env',
+      message: label,
+      details: snapshot
+    });
+  }
+
+  async function collectPushDiagnostics() {
+    if (typeof window === 'undefined') return { browser: false };
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const docState = typeof document !== 'undefined' ? document.visibilityState : null;
+    const diag: Record<string, unknown> = {
+      browser: true,
+      location: typeof window !== 'undefined' ? window.location.href : null,
+      userAgent: nav?.userAgent ?? null,
+      online: nav?.onLine ?? null,
+      secureContext: typeof window !== 'undefined' ? window.isSecureContext : null,
+      notificationPermission: typeof Notification !== 'undefined' ? Notification.permission : 'unsupported',
+      hasNotificationAPI: typeof Notification !== 'undefined',
+      hasPushManager: typeof window !== 'undefined' && 'PushManager' in window,
+      visibilityState: docState,
+      deviceId: getCurrentDeviceId(),
+      timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : null
+    };
+    if (nav && 'serviceWorker' in nav) {
+      const controller = nav.serviceWorker.controller;
+      const swInfo: Record<string, unknown> = {
+        supported: true,
+        controllerState: controller?.state ?? null,
+        controllerScript: controller?.scriptURL ?? null
+      };
+      try {
+        const registration = await nav.serviceWorker.getRegistration();
+        if (registration) {
+          swInfo.scope = registration.scope;
+          swInfo.activeState = registration.active?.state ?? null;
+          swInfo.waitingState = registration.waiting?.state ?? null;
+          swInfo.installingState = registration.installing?.state ?? null;
+        }
+      } catch (error) {
+        swInfo.registrationError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      }
+      diag.serviceWorker = swInfo;
+    } else {
+      diag.serviceWorker = {
+        supported: false
+      };
+    }
+    return diag;
+  }
+
+  async function pingServiceWorkerForDebug(tag: string) {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      appendPushDebug({
+        tag,
+        level: 'warn',
+        message: 'Service worker API not available in this environment.'
+      });
+      return;
+    }
+    appendPushDebug({
+      tag,
+      message: 'Pinging active service worker (2.5s timeout)...'
+    });
+    try {
+      const responded = await pingServiceWorker(undefined, 2500);
+      appendPushDebug({
+        tag,
+        level: responded ? 'info' : 'warn',
+        message: responded ? 'Service worker responded to ping.' : 'No service worker pong before timeout.'
+      });
+    } catch (error) {
+      appendPushDebug({
+        tag,
+        level: 'error',
+        message: 'Ping invocation failed.',
+        details: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      });
+    }
+  }
+
   async function sendTestPushNotification() {
+    pushDebugCopyState = 'idle';
+    appendPushDebug({ tag: 'test', message: 'Send test push button clicked.' });
+    await logPushEnvironment('Preflight snapshot (test)');
+    const deviceId = getCurrentDeviceId();
+    appendPushDebug({
+      tag: 'test',
+      message: 'Current device id snapshot.',
+      details: { deviceId }
+    });
     if (!$user?.uid) {
+      appendPushDebug({
+        tag: 'test',
+        level: 'error',
+        message: 'Cannot send test push without signed in user.'
+      });
       testPushState = 'error';
       testPushMessage = 'Sign in to send a test notification.';
       return;
     }
+    await pingServiceWorkerForDebug('test');
     testPushState = 'loading';
     testPushMessage = null;
     try {
-      const result = await triggerTestPush();
+      const result = await triggerTestPush({ debug: createPushDebugBridge('test') });
+      appendPushDebug({
+        tag: 'test',
+        message: 'Callable result received.',
+        details: result
+      });
       if (result.ok) {
         testPushState = 'success';
         const count = result.tokens ?? 0;
         const suffix = count === 1 ? 'device' : 'devices';
         testPushMessage = count > 0 ? `Sent to ${count} ${suffix}.` : 'Test push sent.';
+        appendPushDebug({
+          tag: 'test',
+          message: 'Push acknowledged by Cloud Functions.',
+          details: { count, messageId: result.messageId ?? null }
+        });
       } else {
         testPushState = 'error';
         testPushMessage =
           result.reason === 'no_tokens'
             ? 'No push-enabled devices found. Enable push first.'
             : 'Test push failed.';
+        appendPushDebug({
+          tag: 'test',
+          level: 'warn',
+          message: 'Callable reported failure.',
+          details: result
+        });
       }
     } catch (err) {
       console.warn('Test push failed', err);
+      appendPushDebug({
+        tag: 'test',
+        level: 'error',
+        message: 'triggerTestPush threw an exception.',
+        details: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      });
       testPushState = 'error';
       testPushMessage = 'Could not send test notification.';
     }
@@ -478,6 +810,66 @@ let avatarError: string | null = $state(null);
                   >
                     {testPushMessage}
                   </p>
+                {/if}
+              </div>
+
+              <div class="settings-push-debug" aria-live="polite">
+                <div class="settings-push-debug__header">
+                  <div>
+                    <h4>Push debug log</h4>
+                    <p class="settings-push-debug__hint">
+                      {#if pushDebugCopyState === 'copied'}
+                        Copied to clipboard.
+                      {:else if pushDebugCopyState === 'error'}
+                        Could not copy log. Copy manually from below.
+                      {:else}
+                        Diagnostic entries from enable/test actions.
+                      {/if}
+                    </p>
+                  </div>
+                  <div class="settings-push-debug__actions">
+                    <button
+                      class="settings-chip"
+                      onclick={copyPushDebugLog}
+                      disabled={!pushDebugLog.length || pushDebugCopyState === 'copying'}
+                    >
+                      {#if pushDebugCopyState === 'copying'}
+                        Copying...
+                      {:else if pushDebugCopyState === 'copied'}
+                        Copied!
+                      {:else}
+                        Copy log
+                      {/if}
+                    </button>
+                    <button
+                      class="settings-chip settings-chip--secondary"
+                      onclick={clearPushDebugLog}
+                      disabled={!pushDebugLog.length}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                {#if pushDebugLog.length}
+                  <ol class="settings-push-debug__list">
+                    {#each pushDebugLog as entry (entry.id)}
+                      <li class="settings-push-debug__item" data-level={entry.level}>
+                        <div class="settings-push-debug__meta">
+                          <span class="settings-push-debug__time">{formatDebugTimestamp(entry.timestamp)}</span>
+                          {#if entry.tag}
+                            <span class="settings-push-debug__tag">{entry.tag}</span>
+                          {/if}
+                          <span class="settings-push-debug__level">{entry.level}</span>
+                        </div>
+                        <p class="settings-push-debug__message">{entry.message}</p>
+                        {#if entry.details}
+                          <pre class="settings-push-debug__details">{entry.details}</pre>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ol>
+                {:else}
+                  <p class="settings-push-debug__empty">Logs appear here when you enable push or send a test notification.</p>
                 {/if}
               </div>
 
@@ -926,6 +1318,116 @@ let avatarError: string | null = $state(null);
     gap: 0.75rem;
   }
 
+  .settings-push-debug {
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface-root) 98%, transparent);
+    padding: 0.9rem 1rem;
+    display: grid;
+    gap: 0.7rem;
+  }
+
+  .settings-push-debug__header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .settings-push-debug__header h4 {
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  .settings-push-debug__hint {
+    margin: 0.25rem 0 0;
+    font-size: 0.8rem;
+    color: var(--text-50);
+  }
+
+  .settings-push-debug__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    justify-content: flex-end;
+  }
+
+  .settings-push-debug__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.55rem;
+    max-height: 280px;
+    overflow: auto;
+  }
+
+  .settings-push-debug__item {
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    padding: 0.45rem 0.5rem;
+    background: color-mix(in srgb, var(--surface-root) 99%, transparent);
+    display: grid;
+    gap: 0.3rem;
+  }
+
+  .settings-push-debug__item[data-level='warn'] {
+    border-color: color-mix(in srgb, var(--color-warning, #fbbf24) 40%, var(--color-border-subtle));
+  }
+
+  .settings-push-debug__item[data-level='error'] {
+    border-color: color-mix(in srgb, var(--color-danger, #f87171) 55%, var(--color-border-subtle));
+  }
+
+  .settings-push-debug__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    font-size: 0.75rem;
+    color: var(--text-50);
+  }
+
+  .settings-push-debug__tag {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-60);
+  }
+
+  .settings-push-debug__level {
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-50);
+  }
+
+  .settings-push-debug__message {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-80);
+  }
+
+  .settings-push-debug__details {
+    margin: 0;
+    font-size: 0.75rem;
+    background: color-mix(in srgb, var(--surface-overlay) 65%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem;
+    white-space: pre-wrap;
+    max-height: 160px;
+    overflow: auto;
+  }
+
+  .settings-push-debug__empty {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-50);
+  }
+
+  .settings-push-debug__time {
+    font-variant-numeric: tabular-nums;
+  }
+
   .settings-notif-tile {
     border-radius: var(--radius-md);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
@@ -1091,6 +1593,15 @@ let avatarError: string | null = $state(null);
 
     .settings-notif-tile {
       padding: 0.75rem 0.9rem;
+    }
+
+    .settings-push-debug {
+      padding: 0.75rem 0.85rem;
+    }
+
+    .settings-push-debug__actions {
+      width: 100%;
+      justify-content: flex-start;
     }
 
     .settings-notif-tile__actions {

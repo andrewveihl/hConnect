@@ -14,33 +14,6 @@ const pushBroadcastChannel =
   typeof BroadcastChannel === 'function' ? new BroadcastChannel(PUSH_CHANNEL_NAME) : null;
 const clientMessagePorts = new Set();
 
-const describePayload = (payload) => {
-  if (payload === undefined) return 'undefined';
-  if (payload === null) return 'null';
-  if (typeof payload === 'string') return payload;
-  try {
-    return JSON.stringify(payload);
-  } catch {
-    return String(payload);
-  }
-};
-
-const swInfo = (message, payload) => {
-  if (payload === undefined) {
-    console.info(`[firebase-messaging-sw] ${message}`);
-  } else {
-    console.info(`[firebase-messaging-sw] ${message}: ${describePayload(payload)}`);
-  }
-};
-
-const swWarn = (message, payload) => {
-  if (payload === undefined) {
-    console.warn(`[firebase-messaging-sw] ${message}`);
-  } else {
-    console.warn(`[firebase-messaging-sw] ${message}: ${describePayload(payload)}`);
-  }
-};
-
 self.addEventListener('install', (event) => {
   event.waitUntil(self.skipWaiting());
 });
@@ -76,36 +49,27 @@ async function ensureFirebaseInit() {
 
 self.addEventListener('message', (event) => {
   const data = event?.data || {};
-  swInfo('message event received', {
-    type: data?.type ?? 'unknown',
-    hasPort: Boolean(event?.ports?.length)
-  });
   if (data?.type === 'FIREBASE_CONFIG' && data?.config && !initialized) {
     try {
       self.__FIREBASE_CONFIG = data.config;
       firebase.initializeApp(data.config);
       initialized = true;
     } catch (err) {
-      swWarn('firebase config relay failed', { error: err?.message ?? String(err) });
+      console.warn('firebase config relay failed', err);
     }
-  } else if (data?.type === 'CLIENT_PORT') {
-    if (event.ports && event.ports[0]) {
-      swInfo('CLIENT_PORT message received');
-      registerClientPort(event.ports[0]);
-    } else {
-      swWarn('CLIENT_PORT message missing port');
-    }
+  } else if (data?.type === 'CLIENT_PORT' && event.ports && event.ports[0]) {
+    registerClientPort(event.ports[0]);
   } else if (data?.type === 'DEVICE_ID' && typeof data.deviceId === 'string' && data.deviceId.length) {
-    swInfo('DEVICE_ID message received', { deviceId: data.deviceId });
+    console.info('[firebase-messaging-sw] DEVICE_ID message received', { deviceId: data.deviceId });
     activeDeviceId = data.deviceId;
   } else if (data?.type === 'CLAIM_CLIENTS') {
     event.waitUntil(
       (async () => {
         try {
           await self.clients.claim();
-          swInfo('CLAIM_CLIENTS processed');
+          console.info('[firebase-messaging-sw] CLAIM_CLIENTS processed');
         } catch (err) {
-          swWarn('Failed to claim clients on request', { error: err?.message ?? String(err) });
+          console.warn('[firebase-messaging-sw] Failed to claim clients on request', err);
         }
       })()
     );
@@ -118,7 +82,7 @@ self.addEventListener('message', (event) => {
     try {
       event?.source?.postMessage?.(response);
     } catch (err) {
-      swWarn('Failed to respond to ping', { error: err?.message ?? String(err) });
+      console.warn('[firebase-messaging-sw] Failed to respond to ping', err);
     }
     broadcastPushMessage(response);
     postMessageToPorts(response);
@@ -133,7 +97,7 @@ async function getMessaging() {
     messagingInstance = firebase.messaging();
     return messagingInstance;
   } catch (err) {
-    swWarn('firebase messaging init failed', { error: err?.message ?? String(err) });
+    console.warn('firebase messaging init failed', err);
     return null;
   }
 }
@@ -248,22 +212,14 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     (async () => {
       const payload = readPayloadFromPush(event);
-      swInfo('Push event fired', {
-        hasPayload: Boolean(payload),
-        raw: payload ? undefined : describePayload(event?.data?.text ? event.data.text() : null)
-      });
-      if (!payload) {
-        swWarn('Push event missing payload');
-        return;
-      }
+      if (!payload) return;
       const targetDeviceId = payload?.data?.testDeviceId || payload?.data?.targetDeviceId || null;
       if (targetDeviceId) {
         if (!activeDeviceId) {
           activeDeviceId = targetDeviceId;
           void requestDeviceIdFromClients('missing_device_id');
-          swInfo('No active device id, adopting from payload', { targetDeviceId });
         } else if (targetDeviceId !== activeDeviceId) {
-          swInfo('Target device mismatch, adopting payload id', {
+          console.info('[firebase-messaging-sw] Target device mismatch, adopting payload id', {
             activeDeviceId,
             targetDeviceId
           });
@@ -273,19 +229,18 @@ self.addEventListener('push', (event) => {
       }
       let deliveryStatus = 'delivered';
       let deliveryError = null;
-      swInfo('Push payload parsed', {
+      console.info('[firebase-messaging-sw] Push received', {
         targetDeviceId,
         activeDeviceId,
         hasNotification: Boolean(payload?.notification),
-        hasData: Boolean(payload?.data),
-        messageId: payload?.data?.messageId ?? null
+        hasData: Boolean(payload?.data)
       });
       try {
         await showNotification(payload);
       } catch (err) {
         deliveryStatus = 'failed';
         deliveryError = err instanceof Error ? err.message : 'Notification display failed.';
-        swWarn('showNotification failed', { error: err?.message ?? String(err) });
+        console.warn('showNotification failed', err);
       }
       if (targetDeviceId) {
         await notifyClientTestPush({
@@ -302,96 +257,60 @@ self.addEventListener('push', (event) => {
 });
 
 async function notifyClientTestPush(payload) {
-  swInfo('notifyClientTestPush invoked', {
+  console.info('[firebase-messaging-sw] notifyClientTestPush', {
     type: payload?.type,
     status: payload?.status,
     deviceId: payload?.deviceId ?? null,
-    messageId: payload?.messageId ?? null,
-    portCount: clientMessagePorts.size
+    messageId: payload?.messageId ?? null
   });
   postMessageToPorts(payload);
   broadcastPushMessage(payload);
   try {
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    swInfo('notifyClientTestPush posting to windows', {
-      clientCount: clients.length
-    });
-    if (!clients.length) {
-      swInfo('notifyClientTestPush found zero window clients');
-    }
     clients.forEach((client) => {
       try {
         client.postMessage(payload);
-        swInfo('notifyClientTestPush posted to client', {
-          url: client.url ?? 'unknown'
-        });
-      } catch (err) {
-        swWarn('notifyClientTestPush postMessage failed', { error: err?.message ?? String(err) });
-      }
+      } catch {}
     });
-  } catch (err) {
-    swWarn('notifyClientTestPush clients.matchAll failed', { error: err?.message ?? String(err) });
-  }
+  } catch {}
 }
 
 async function requestDeviceIdFromClients(trigger) {
   const message = { type: 'REQUEST_DEVICE_ID', trigger: trigger || null };
-  swInfo('requestDeviceIdFromClients invoked', message);
+  console.info('[firebase-messaging-sw] requestDeviceIdFromClients', message);
   postMessageToPorts(message);
   broadcastPushMessage(message);
   try {
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    swInfo('requestDeviceIdFromClients posting to windows', {
-      clientCount: clients.length
-    });
-    if (!clients.length) {
-      swInfo('REQUEST_DEVICE_ID had zero clients');
-    }
     clients.forEach((client) => {
       try {
         client.postMessage({ type: 'REQUEST_DEVICE_ID', trigger: trigger || null });
-        swInfo('REQUEST_DEVICE_ID sent to client', { url: client.url ?? 'unknown' });
-      } catch (err) {
-        swWarn('REQUEST_DEVICE_ID post failed', { error: err?.message ?? String(err) });
-      }
+      } catch {}
     });
-  } catch (err) {
-    swWarn('requestDeviceIdFromClients matchAll failed', { error: err?.message ?? String(err) });
-  }
+  } catch {}
 }
 
 function broadcastPushMessage(payload) {
   if (!pushBroadcastChannel) return;
   try {
     pushBroadcastChannel.postMessage(payload);
-    swInfo('BroadcastChannel postMessage', { type: payload?.type });
-  } catch (err) {
-    swWarn('BroadcastChannel postMessage failed', { error: err?.message ?? String(err) });
-  }
+  } catch {}
 }
 
 function postMessageToPorts(payload) {
-  if (!clientMessagePorts.size) {
-    swInfo('postMessageToPorts skipped (no ports)', { payloadType: payload?.type });
-    return;
-  }
-  swInfo('postMessageToPorts', {
+  if (!clientMessagePorts.size) return;
+  console.info('[firebase-messaging-sw] postMessageToPorts', {
     payloadType: payload?.type,
     ports: clientMessagePorts.size
   });
   for (const port of Array.from(clientMessagePorts)) {
     try {
       port.postMessage(payload);
-      swInfo('postMessageToPorts delivered payload', {
-        payloadType: payload?.type
-      });
-    } catch (err) {
-      swWarn('postMessageToPorts failed', { error: err?.message ?? String(err) });
+    } catch {
       try {
         port.close?.();
       } catch {}
       clientMessagePorts.delete(port);
-      swInfo('Removed closed port', { total: clientMessagePorts.size });
     }
   }
 }
@@ -400,25 +319,15 @@ function registerClientPort(port) {
   if (!port) return;
   try {
     port.start?.();
-    port.addEventListener('message', (event) => {
-      swInfo('CLIENT_PORT forwarded message', {
-        type: event?.data?.type ?? 'unknown'
-      });
-    });
     port.addEventListener('messageerror', () => {
       try {
         port.close?.();
       } catch {}
       clientMessagePorts.delete(port);
-      swInfo('CLIENT_PORT removed due to messageerror', {
-        total: clientMessagePorts.size
-      });
     });
-  } catch (err) {
-    swWarn('Failed to register CLIENT_PORT', { error: err?.message ?? String(err) });
-  }
+  } catch {}
   clientMessagePorts.add(port);
-  swInfo('CLIENT_PORT registered', { total: clientMessagePorts.size });
+  console.info('[firebase-messaging-sw] CLIENT_PORT registered', { total: clientMessagePorts.size });
 }
 
 self.addEventListener('pushsubscriptionchange', (event) => {
@@ -433,7 +342,7 @@ self.addEventListener('pushsubscriptionchange', (event) => {
           client.postMessage({ type: 'FCM_TOKEN_REFRESHED', token: token || null })
         );
       } catch (err) {
-        swWarn('push subscription refresh failed', { error: err?.message ?? String(err) });
+        console.warn('push subscription refresh failed', err);
       }
     })()
   );

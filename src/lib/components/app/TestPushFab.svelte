@@ -14,6 +14,8 @@ let sending = $state(false);
 let status = $state<'idle' | 'success' | 'error'>('idle');
 let message = $state<string | null>(null);
 let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>(null);
+let copyStatusState = $state<'idle' | 'copying' | 'copied' | 'error'>('idle');
+let statusDebugLines = $state<string[]>([]);
   let clearTimer: ReturnType<typeof setTimeout> | null = null;
   let deliveryTimeout: ReturnType<typeof setTimeout> | null = null;
   let unsubscribeDelivery: (() => void) | null = null;
@@ -21,31 +23,78 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
   onMount(() => {
     if (browser) {
       unsubscribeDelivery = listenForTestPushDelivery((payload) => {
-        if (!pendingTest) return;
+        pushStatusDebug('listenForTestPushDelivery payload received', {
+          payloadDeviceId: payload.deviceId ?? null,
+          payloadMessageId: payload.messageId ?? null,
+          status: payload.status,
+          pendingMessageId: pendingTest?.messageId ?? null
+        });
+        if (!pendingTest) {
+          pushStatusDebug('TEST_PUSH_RESULT received but no pending test', {
+            payloadDeviceId: payload.deviceId ?? null,
+            payloadMessageId: payload.messageId ?? null
+          });
+          return;
+        }
         const localDevice = getCurrentDeviceId();
-        if (payload.deviceId && localDevice && payload.deviceId !== localDevice) return;
-        if (pendingTest.messageId && payload.messageId && pendingTest.messageId !== payload.messageId) return;
+        if (payload.deviceId && localDevice && payload.deviceId !== localDevice) {
+          pushStatusDebug('Ignoring TEST_PUSH_RESULT for different device', {
+            localDevice,
+            payloadDevice: payload.deviceId,
+            pendingMessageId: pendingTest.messageId
+          });
+          return;
+        }
+        if (pendingTest.messageId && payload.messageId && pendingTest.messageId !== payload.messageId) {
+          pushStatusDebug('Ignoring TEST_PUSH_RESULT for mismatched messageId', {
+            pendingMessageId: pendingTest.messageId,
+            payloadMessageId: payload.messageId
+          });
+          return;
+        }
+        pushStatusDebug('TEST_PUSH_RESULT message received', {
+          payloadDeviceId: payload.deviceId ?? null,
+          payloadMessageId: payload.messageId ?? null,
+          status: payload.status,
+          pendingMessageId: pendingTest?.messageId ?? null
+        });
         pendingTest = null;
+        pushStatusDebug('Pending test cleared due to TEST_PUSH_RESULT');
         if (deliveryTimeout) {
           clearTimeout(deliveryTimeout);
           deliveryTimeout = null;
         }
         if (payload.status === 'failed') {
           status = 'error';
-          message =
+          updateStatusMessage(
             payload.error ??
-            'Edge could not display the notification. Check site permissions and try turning notifications off/on again.';
+              'Edge could not display the notification. Check site permissions and try turning notifications off/on again.'
+          );
+          pushStatusDebug('Delivery event reported failure', {
+            error: payload.error ?? null,
+            messageId: payload.messageId ?? null
+          });
         } else {
           status = 'success';
-          message = 'Notification displayed on this device.';
+          updateStatusMessage('Notification displayed on this device.');
+          pushStatusDebug('Delivery confirmed by service worker', {
+            messageId: payload.messageId ?? null
+          });
         }
         scheduleClear({ force: payload.status !== 'failed' });
+      });
+      pushStatusDebug('listenForTestPushDelivery subscribed', {
+        hasController:
+          typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+            ? Boolean(navigator.serviceWorker.controller)
+            : false
       });
     }
     return () => {
       if (clearTimer) clearTimeout(clearTimer);
       if (deliveryTimeout) clearTimeout(deliveryTimeout);
       unsubscribeDelivery?.();
+      pushStatusDebug('listenForTestPushDelivery unsubscribed');
     };
   });
 
@@ -65,20 +114,128 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
     if (pendingTest) return;
     if (!force && status === 'error') return;
     clearTimer = setTimeout(() => {
-      message = null;
+      updateStatusMessage(null);
       status = 'idle';
     }, 4000);
   }
 
   function scheduleDeliveryWatch() {
     if (deliveryTimeout) clearTimeout(deliveryTimeout);
+    pushStatusDebug('Watching for delivery acknowledgement', {
+      timeoutMs: DELIVERY_TIMEOUT_MS,
+      pendingMessageId: pendingTest?.messageId ?? null,
+      pendingSince: pendingTest?.startedAt ?? null
+    });
     deliveryTimeout = setTimeout(() => {
       deliveryTimeout = null;
+       pushStatusDebug('Delivery acknowledgement timeout fired', {
+        hadPendingTest: Boolean(pendingTest),
+        pendingMessageId: pendingTest?.messageId ?? null
+      });
       if (!pendingTest) return;
       void handleUndeliveredPush();
     }, DELIVERY_TIMEOUT_MS);
   }
 
+  function updateStatusMessage(value: string | null, options: { preserveLog?: boolean } = {}) {
+    const { preserveLog = false } = options;
+    message = value;
+    copyStatusState = 'idle';
+    if (value === null && !preserveLog) {
+      resetStatusDebugLog();
+    }
+  }
+
+  function resetStatusDebugLog() {
+    statusDebugLines = [];
+  }
+
+  function pushStatusDebug(message: string, details?: unknown) {
+    const ts = new Date().toLocaleTimeString([], { hour12: false });
+    const formattedDetails = details !== undefined ? formatDebugDetails(details) : null;
+    const entry = formattedDetails ? `${ts} — ${message}\n${formattedDetails}` : `${ts} — ${message}`;
+    statusDebugLines = [...statusDebugLines, entry].slice(-30);
+    if (formattedDetails) {
+      console.info('[test-push-debug]', message, details);
+    } else {
+      console.info('[test-push-debug]', message);
+    }
+  }
+
+  function formatDebugDetails(details: unknown) {
+    if (details === null || details === undefined) return null;
+    if (typeof details === 'string') return details;
+    try {
+      return JSON.stringify(details, null, 2);
+    } catch (error) {
+      return String(details);
+    }
+  }
+
+  async function copyStatusMessage() {
+    if (!message) return;
+    const text = buildStatusCopyText();
+    copyStatusState = 'copying';
+    const success = await writeToClipboard(text);
+    copyStatusState = success ? 'copied' : 'error';
+    if (success) {
+      setTimeout(() => {
+        copyStatusState = 'idle';
+      }, 2000);
+    }
+  }
+
+  function buildStatusCopyText() {
+    const lines: string[] = [];
+    if (message) {
+      lines.push(message);
+    }
+    if (statusDebugLines.length) {
+      lines.push('', 'Debug log:');
+      statusDebugLines.forEach((line) => {
+        lines.push(line);
+      });
+    }
+    return lines.join('\n');
+  }
+
+  function closeStatusMessage() {
+    if (clearTimer) {
+      clearTimeout(clearTimer);
+      clearTimer = null;
+    }
+    updateStatusMessage(null);
+    if (status !== 'success') {
+      status = 'idle';
+    }
+  }
+
+  async function writeToClipboard(text: string) {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      console.warn('clipboard.writeText failed', error);
+    }
+    if (typeof document === 'undefined') return false;
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'absolute';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      return document.execCommand('copy');
+    } catch (error) {
+      console.warn('execCommand copy failed', error);
+      return false;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
   function resolveError(reason?: string | null) {
     const enableMessage = 'Enable push notifications on this device first (Settings -> Notifications).';
     switch (reason) {
@@ -94,39 +251,72 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
   }
 
   async function handleTestPush() {
+    resetStatusDebugLog();
+    pushStatusDebug('handleTestPush invoked', {
+      hasUser: Boolean($user?.uid),
+      deviceId: getCurrentDeviceId()
+    });
     if (!$user?.uid) {
       status = 'error';
-      message = 'Sign in to send a test push.';
+      updateStatusMessage('Sign in to send a test push.');
+      pushStatusDebug('Aborting test push: no signed-in user');
       scheduleClear();
       return;
     }
     if (!browser || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
       status = 'error';
-      message = resolveError('no_service_worker');
+      updateStatusMessage(resolveError('no_service_worker'));
+      pushStatusDebug('Aborting test push: service worker API unavailable');
       scheduleClear();
       return;
     }
     sending = true;
     status = 'idle';
-    message = null;
+    updateStatusMessage(null, { preserveLog: true });
+    pushStatusDebug('Calling triggerTestPush', {
+      hasController:
+        typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+          ? Boolean(navigator.serviceWorker.controller)
+          : false
+    });
     try {
       const result = await triggerTestPush();
+      pushStatusDebug('triggerTestPush result', {
+        ok: result.ok,
+        tokens: result.tokens ?? 0,
+        reason: result.reason ?? null,
+        messageId: result.messageId ?? null
+      });
       if (result.ok) {
         status = 'success';
         const count = result.tokens ?? 0;
         pendingTest = { messageId: result.messageId ?? null, startedAt: Date.now() };
+        pushStatusDebug('Tracking pending test push', {
+          messageId: pendingTest.messageId ?? null,
+          startedAt: pendingTest.startedAt
+        });
         const suffix = count === 1 ? 'device' : 'devices';
-        message = count > 0 ? `Sent to ${count} ${suffix}. Waiting for delivery...` : 'Test notification sent.';
+        updateStatusMessage(
+          count > 0 ? `Sent to ${count} ${suffix}. Waiting for delivery...` : 'Test notification sent.'
+        );
+        pushStatusDebug('Awaiting delivery acknowledgement', {
+          pendingMessageId: pendingTest.messageId,
+          tokens: count
+        });
         scheduleDeliveryWatch();
       } else {
         status = 'error';
         pendingTest = null;
-        message = resolveError(result.reason);
+        updateStatusMessage(resolveError(result.reason));
+        pushStatusDebug('triggerTestPush indicated failure', {
+          reason: result.reason ?? 'unknown'
+        });
       }
-    } catch {
+    } catch (error) {
       status = 'error';
       pendingTest = null;
-      message = 'Could not send test push.';
+      updateStatusMessage('Could not send test push.');
+      pushStatusDebug('triggerTestPush threw', error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     } finally {
       sending = false;
       scheduleClear();
@@ -134,42 +324,59 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
   }
 
   async function handleUndeliveredPush() {
-    if (!pendingTest) return;
+    if (!pendingTest) {
+      pushStatusDebug('handleUndeliveredPush aborted (no pending test)');
+      return;
+    }
     const currentTest = pendingTest;
     pendingTest = null;
+    pushStatusDebug('Pending test cleared due to timeout/diagnostics');
+    pushStatusDebug('handleUndeliveredPush invoked', {
+      pendingMessageId: currentTest.messageId
+    });
     const workerResponsive = await pingServiceWorker(currentTest.messageId ?? undefined);
+    pushStatusDebug('pingServiceWorker result', {
+      workerResponsive,
+      messageId: currentTest.messageId ?? null
+    });
     const reason = await diagnoseDeliveryIssue(workerResponsive);
     status = 'error';
-    message = reason;
+    updateStatusMessage(reason);
+    pushStatusDebug('handleUndeliveredPush completed', { reason });
     scheduleClear();
   }
 
   async function diagnoseDeliveryIssue(workerResponsive: boolean): Promise<string> {
+    pushStatusDebug('diagnoseDeliveryIssue invoked', { workerResponsive });
     if (!browser) {
-      return 'Sent push but this browser did not confirm delivery.';
+      const reason = 'Sent push but this browser did not confirm delivery.';
+      pushStatusDebug('diagnoseDeliveryIssue result', { reason });
+      return reason;
     }
     if (!('Notification' in window)) {
-      return 'This browser does not support notifications.';
+      const reason = 'This browser does not support notifications.';
+      pushStatusDebug('diagnoseDeliveryIssue result', { reason });
+      return reason;
     }
     const diagnostics: string[] = [];
+    const finish = (reason: string) => {
+      pushStatusDebug('diagnoseDeliveryIssue result', { reason, diagnostics });
+      return [reason, formatDiagnostics(diagnostics)].join('\n');
+    };
     const deviceId = getCurrentDeviceId();
     diagnostics.push(`deviceId=${deviceId ?? 'unknown'}`);
     diagnostics.push(`userAgent=${navigator.userAgent}`);
     diagnostics.push(`notificationPermission=${Notification.permission}`);
     if (Notification.permission === 'default') {
-      return [
-        'Notifications have not been enabled yet. Allow notifications using the browser permissions prompt.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish(
+        'Notifications have not been enabled yet. Allow notifications using the browser permissions prompt.'
+      );
     }
     if (Notification.permission === 'denied') {
-      return [
-        'Notifications are blocked for this site. Enable them in your browser site settings.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish('Notifications are blocked for this site. Enable them in your browser site settings.');
     }
     if (!('serviceWorker' in navigator)) {
-      return 'This browser cannot run the push service worker required for notifications.';
+      return finish('This browser cannot run the push service worker required for notifications.');
     }
     let registration: ServiceWorkerRegistration | null = null;
     try {
@@ -189,10 +396,7 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
     diagnostics.push(`swController=${controller ? controller.scriptURL ?? 'present' : 'missing'}`);
     if (!registration) {
       diagnostics.push('swRegistration=missing');
-      return [
-        'Push service worker is not registered. Reload the page after enabling notifications.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish('Push service worker is not registered. Reload the page after enabling notifications.');
     }
     diagnostics.push(`swScope=${registration.scope}`);
     diagnostics.push(
@@ -200,10 +404,9 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
     );
     diagnostics.push(`swState=${registration.active?.state ?? registration.waiting?.state ?? registration.installing?.state ?? 'none'}`);
     if (registration.active?.state !== 'activated') {
-      return [
-        `Push service worker is still initializing (state=${registration.active?.state ?? 'none'}). Wait a moment and try again.`,
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish(
+        `Push service worker is still initializing (state=${registration.active?.state ?? 'none'}). Wait a moment and try again.`
+      );
     }
     try {
       const subscription = await registration.pushManager.getSubscription();
@@ -212,36 +415,27 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
         diagnostics.push(`subscriptionEndpointSuffix=${subscription.endpoint.slice(-12)}`);
       }
       if (!subscription) {
-        return [
-          'This browser is not subscribed for push notifications. Re-enable notifications via Settings -> Notifications.',
-          formatDiagnostics(diagnostics)
-        ].join('\n');
+        return finish(
+          'This browser is not subscribed for push notifications. Re-enable notifications via Settings -> Notifications.'
+        );
       }
     } catch {
       diagnostics.push('pushSubscription=error');
-      return [
-        'Could not read the push subscription. Refresh the page and re-enable notifications.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish('Could not read the push subscription. Refresh the page and re-enable notifications.');
     }
     if (!controller) {
-      return [
-        'We sent the push notification but no controlled service worker acknowledged it. Reload the page to ensure the messaging worker is controlling this tab.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish(
+        'We sent the push notification but no controlled service worker acknowledged it. Reload the page to ensure the messaging worker is controlling this tab.'
+      );
     }
     diagnostics.push(`controllerState=${controller.state ?? 'unknown'}`);
     diagnostics.push(`swPingResponsive=${workerResponsive}`);
     if (!workerResponsive) {
-      return [
-        'Push service worker did not respond to a ping. Reload the page so the worker controls this tab, then try again.',
-        formatDiagnostics(diagnostics)
-      ].join('\n');
+      return finish(
+        'Push service worker did not respond to a ping. Reload the page so the worker controls this tab, then try again.'
+      );
     }
-    return [
-      'We sent the push notification but did not receive a delivery acknowledgement from this device.',
-      formatDiagnostics(diagnostics)
-    ].join('\n');
+    return finish('We sent the push notification but did not receive a delivery acknowledgement from this device.');
   }
 
   function formatDiagnostics(lines: string[]) {
@@ -262,7 +456,47 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
     <span class="test-push-fab__label">Test push</span>
   </button>
   {#if message}
-    <p class="test-push-fab__status" aria-live="polite">{message}</p>
+    <div class="test-push-fab__status">
+      <button
+        type="button"
+        class="test-push-fab__status-close"
+        aria-label="Dismiss status message"
+        onclick={closeStatusMessage}
+      >
+        ×
+      </button>
+      <div class="test-push-fab__status-text" aria-live="polite" aria-atomic="true">
+        {message}
+      </div>
+      <button
+        type="button"
+        class="test-push-fab__status-btn"
+        onclick={copyStatusMessage}
+        disabled={copyStatusState === 'copying'}
+      >
+        {#if copyStatusState === 'copying'}
+          Copying…
+        {:else if copyStatusState === 'copied'}
+          Copied!
+        {:else if copyStatusState === 'error'}
+          Copy failed
+        {:else}
+          Copy
+        {/if}
+      </button>
+      {#if statusDebugLines.length}
+        <div class="test-push-fab__status-log">
+          <p class="test-push-fab__status-log-title">Debug log</p>
+          <ol class="test-push-fab__status-log-list">
+            {#each statusDebugLines as line, index (line + index)}
+              <li class="test-push-fab__status-log-item">
+                <pre>{line}</pre>
+              </li>
+            {/each}
+          </ol>
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -316,13 +550,111 @@ let pendingTest = $state<{ messageId: string | null; startedAt: number } | null>
   .test-push-fab__status {
     font-size: 0.78rem;
     margin: 0;
-    padding: 0.25rem 0.65rem;
-    border-radius: 999px;
+    padding: 0.7rem 2.4rem 0.55rem 0.85rem;
+    border-radius: 1rem;
     background: color-mix(in srgb, var(--surface-panel) 80%, transparent);
     color: var(--text-70);
     box-shadow: 0 6px 18px rgba(15, 23, 42, 0.25);
-    max-width: min(13rem, 72vw);
-    text-align: center;
+    width: min(28rem, 92vw);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    position: relative;
+  }
+
+  .test-push-fab__status-text {
+    max-height: 9rem;
+    overflow-y: auto;
+    padding-right: 0.2rem;
+    white-space: pre-line;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+
+  .test-push-fab__status-btn {
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.15rem 0.65rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: color-mix(in srgb, var(--color-accent, #22d3ee) 24%, var(--surface-panel));
+    color: var(--text-90);
+    transition: opacity 120ms ease;
+    align-self: flex-start;
+    margin-top: 0.2rem;
+  }
+
+  .test-push-fab__status-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .test-push-fab__status-log {
+    width: 100%;
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    padding-top: 0.35rem;
+    margin-top: 0.25rem;
+    display: grid;
+    gap: 0.3rem;
+  }
+
+  .test-push-fab__status-log-title {
+    margin: 0;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-50);
+  }
+
+  .test-push-fab__status-log-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.25rem;
+    max-height: 8.5rem;
+    overflow-y: auto;
+  }
+
+  .test-push-fab__status-log-item {
+    margin: 0;
+  }
+
+  .test-push-fab__status-log-item pre {
+    margin: 0;
+    font-size: 0.7rem;
+    white-space: pre-wrap;
+    background: color-mix(in srgb, var(--surface-panel) 90%, transparent);
+    border-radius: 0.35rem;
+    padding: 0.3rem 0.4rem;
+    color: var(--text-70);
+  }
+
+  .test-push-fab__status-close {
+    border: none;
+    background: transparent;
+    color: var(--text-60);
+    font-size: 1.05rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 120ms ease, color 120ms ease;
+    position: absolute;
+    top: 0.15rem;
+    right: 0.15rem;
+  }
+
+  .test-push-fab__status-close:hover,
+  .test-push-fab__status-close:focus-visible {
+    background: color-mix(in srgb, var(--surface-panel) 50%, transparent);
+    color: var(--text-80);
+    outline: none;
   }
 
   .test-push-fab__admin-toggle {
