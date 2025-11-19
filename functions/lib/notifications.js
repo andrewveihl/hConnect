@@ -414,19 +414,29 @@ async function writeActivityEntry(uid, recipient, message, context, title, body,
 async function sendPushToTokens(tokens, payload) {
     if (!tokens.length)
         return;
+    const startedAt = Date.now();
+    firebase_functions_1.logger.info('[push] sendPushToTokens invoked', {
+        tokenCount: tokens.length,
+        dataKeys: Object.keys(payload.data ?? {}),
+        messageId: payload.data?.messageId ?? null,
+        targetUrl: payload.data?.targetUrl ?? null
+    });
     try {
         await firebase_1.messaging.sendEachForMulticast({
             tokens,
-            notification: {
-                title: payload.title,
-                body: payload.body
-            },
+            // Send data-only payloads so the service worker receives the push event
+            // (Edge drops the push event entirely if a notification payload is provided).
             data: payload.data,
             webpush: {
                 fcmOptions: {
                     link: payload.data.targetUrl
                 }
             }
+        });
+        firebase_functions_1.logger.info('[push] sendPushToTokens completed', {
+            tokenCount: tokens.length,
+            durationMs: Date.now() - startedAt,
+            messageId: payload.data?.messageId ?? null
         });
     }
     catch (err) {
@@ -481,6 +491,12 @@ async function sendTestPushForUid(uid, deviceId) {
     const title = 'hConnect test notification';
     const body = 'Push notifications are working on this device.';
     const messageId = `test-${Date.now()}`;
+    firebase_functions_1.logger.info('[testPush] Prepared payload metadata', {
+        uid,
+        deviceId,
+        tokenCount: tokens.length,
+        messageId
+    });
     try {
         firebase_functions_1.logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
         await sendPushToTokens(tokens, {

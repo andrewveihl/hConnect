@@ -6,6 +6,7 @@
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-messaging-compat.js');
 
+const SW_VERSION = '2025-EDGE-DEBUG-02';
 const DEFAULT_ICON = '/Logo_transparent.png';
 const CLIENT_MESSAGE = 'HCONNECT_PUSH_DEEP_LINK';
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
@@ -47,16 +48,19 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
+  swInfo('Service worker activated', { version: SW_VERSION });
 });
 
 let initialized = false;
 let messagingInstance = null;
+swInfo('Service worker bootstrapped', { version: SW_VERSION });
 
 async function ensureFirebaseInit() {
   if (initialized) return;
   const cfg = self.__FIREBASE_CONFIG || null;
   if (cfg?.apiKey) {
     firebase.initializeApp(cfg);
+    swInfo('Firebase initialized from page config');
     initialized = true;
     return;
   }
@@ -66,11 +70,16 @@ async function ensureFirebaseInit() {
       const json = await res.json();
       if (json && json.apiKey) {
         firebase.initializeApp(json);
+        swInfo('Firebase initialized from fetched config');
         initialized = true;
+      } else {
+        swWarn('Fetched firebase config missing apiKey');
       }
+    } else {
+      swWarn('Failed to fetch firebase init config', { status: res.status });
     }
-  } catch {
-    // Hosting bootstrap may be unavailable (local dev) �?" rely on page message below.
+  } catch (err) {
+    swWarn('ensureFirebaseInit fetch failed', { error: err?.message ?? String(err) });
   }
 }
 
@@ -115,22 +124,74 @@ self.addEventListener('message', (event) => {
       messageId: data.messageId ?? null,
       timestamp: Date.now()
     };
-    try {
-      event?.source?.postMessage?.(response);
-    } catch (err) {
-      swWarn('Failed to respond to ping', { error: err?.message ?? String(err) });
+    let responded = false;
+    if (event?.ports && event.ports[0]) {
+      try {
+        event.ports[0].postMessage(response);
+        responded = true;
+        swInfo('Responded to ping via MessagePort');
+      } catch (err) {
+        swWarn('Failed to respond to ping via MessagePort', {
+          error: err?.message ?? String(err)
+        });
+      }
+    }
+    if (!responded) {
+      try {
+        event?.source?.postMessage?.(response);
+        responded = true;
+        swInfo('Responded to ping via event.source');
+      } catch (err) {
+        swWarn('Failed to respond to ping via event.source', {
+          error: err?.message ?? String(err)
+        });
+      }
+    }
+    if (!responded) {
+      swWarn('TEST_PUSH_PING response had no direct channel');
     }
     broadcastPushMessage(response);
     postMessageToPorts(response);
+    event.waitUntil(
+      (async () => {
+        try {
+          const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+          swInfo('TEST_PUSH_PING posting to window clients', {
+            clientCount: clients.length
+          });
+          clients.forEach((client) => {
+            try {
+              client.postMessage(response);
+              swInfo('TEST_PUSH_PING posted to client', { url: client.url ?? 'unknown' });
+            } catch (err) {
+              swWarn('TEST_PUSH_PING client post failed', {
+                error: err?.message ?? String(err)
+              });
+            }
+          });
+        } catch (err) {
+          swWarn('TEST_PUSH_PING matchAll failed', { error: err?.message ?? String(err) });
+        }
+      })()
+    );
+  } else {
+    swInfo('message event unhandled', {
+      type: data?.type ?? 'unknown',
+      keys: typeof data === 'object' && data ? Object.keys(data) : []
+    });
   }
 });
 
 async function getMessaging() {
   await ensureFirebaseInit();
   if (!initialized) return null;
-  if (messagingInstance) return messagingInstance;
+  if (messagingInstance) {
+    swInfo('firebase.messaging instance reused');
+    return messagingInstance;
+  }
   try {
     messagingInstance = firebase.messaging();
+    swInfo('firebase.messaging instance created');
     return messagingInstance;
   } catch (err) {
     swWarn('firebase messaging init failed', { error: err?.message ?? String(err) });
@@ -145,10 +206,59 @@ function readPayloadFromPush(event) {
   } catch {
     try {
       return JSON.parse(event.data.text());
-    } catch {
+    } catch (err) {
+      swWarn('Failed to parse push payload', {
+        error: err?.message ?? String(err),
+        raw: event?.data?.text ? event.data.text() : null
+      });
       return null;
     }
   }
+}
+
+const DEVICE_ID_KEYS = [
+  'testDeviceId',
+  'test_device_id',
+  'targetDeviceId',
+  'target_device_id',
+  'deviceId',
+  'device_id'
+];
+const MESSAGE_ID_KEYS = ['messageId', 'message_id'];
+
+function pickStringValue(data, keys) {
+  if (!data || typeof data !== 'object') return null;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'string' && value.length) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function extractDeviceIdFromData(data) {
+  return pickStringValue(data, DEVICE_ID_KEYS);
+}
+
+function extractMessageIdFromData(data) {
+  return pickStringValue(data, MESSAGE_ID_KEYS);
+}
+
+function previewPayloadData(data) {
+  if (!data || typeof data !== 'object') {
+    return { hasData: false };
+  }
+  const keys = Object.keys(data);
+  const preview = {};
+  for (const key of keys.slice(0, 8)) {
+    preview[key] = data[key];
+  }
+  return {
+    hasData: keys.length > 0,
+    keys,
+    preview
+  };
 }
 
 function deriveDeepLink(data = {}) {
@@ -179,7 +289,7 @@ function coercePayloadData(payload) {
 }
 
 async function showNotification(payload) {
-  if (!payload) return;
+  if (!payload) return null;
   const data = coercePayloadData(payload);
   const title = data.title || 'New message';
   const body = data.body || '';
@@ -205,6 +315,15 @@ async function showNotification(payload) {
       .then(() => self.registration.setAppBadge(badgeCount || 1))
       .catch(() => {});
   }
+  return {
+    title,
+    body,
+    tag,
+    mentionType,
+    badgeCount,
+    targetUrl: data.targetUrl || null,
+    dataKeys: Object.keys(data)
+  };
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -212,35 +331,51 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function focusOrOpenClient(data) {
   const targetUrl = data.targetUrl || deriveDeepLink(data);
   const payload = { ...data, targetUrl, origin: data.origin || 'push', clickedAt: Date.now() };
+  swInfo('focusOrOpenClient invoked', {
+    targetUrl,
+    origin: payload.origin,
+    hasExistingData: Boolean(data)
+  });
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   for (const client of clients) {
     if (client.url) {
       try {
+        swInfo('Attempting to focus existing window client', { url: client.url });
         await client.focus();
       } catch {
         // fallback to navigate if focus fails
         if (typeof client.navigate === 'function') {
           try {
+            swInfo('Falling back to navigate existing client', {
+              url: client.url,
+              targetUrl
+            });
             await client.navigate(targetUrl);
           } catch {}
         }
       }
       client.postMessage({ type: CLIENT_MESSAGE, payload });
+      swInfo('Posted deep link payload to existing client', { url: client.url });
       return;
     }
   }
   const created = await self.clients.openWindow(targetUrl);
   if (created) {
+    swInfo('Opened new window client for notification', { targetUrl });
     await delay(800);
     try {
       created.postMessage({ type: CLIENT_MESSAGE, payload });
+      swInfo('Posted deep link payload to new window client');
     } catch {
       // Window might not be ready yet; wait again
       await delay(800);
       try {
         created.postMessage({ type: CLIENT_MESSAGE, payload });
+        swInfo('Posted deep link payload to new window client after retry');
       } catch {}
     }
+  } else {
+    swWarn('Unable to open window client for notification', { targetUrl });
   }
 }
 
@@ -256,46 +391,80 @@ self.addEventListener('push', (event) => {
         swWarn('Push event missing payload');
         return;
       }
-      const targetDeviceId = payload?.data?.testDeviceId || payload?.data?.targetDeviceId || null;
-      if (targetDeviceId) {
+      const payloadData = payload?.data || {};
+      swInfo('Push payload data preview', previewPayloadData(payloadData));
+      const explicitDeviceId = extractDeviceIdFromData(payloadData);
+      const messageId = extractMessageIdFromData(payloadData);
+      const isTestPush =
+        Boolean(explicitDeviceId) ||
+        (typeof messageId === 'string' && messageId.startsWith('test-'));
+      swInfo('Test push detection', {
+        isTestPush,
+        explicitDeviceId,
+        messageId,
+        activeDeviceId
+      });
+      if (explicitDeviceId) {
         if (!activeDeviceId) {
-          activeDeviceId = targetDeviceId;
+          activeDeviceId = explicitDeviceId;
           void requestDeviceIdFromClients('missing_device_id');
-          swInfo('No active device id, adopting from payload', { targetDeviceId });
-        } else if (targetDeviceId !== activeDeviceId) {
+          swInfo('No active device id, adopting from payload', { explicitDeviceId });
+        } else if (explicitDeviceId !== activeDeviceId) {
           swInfo('Target device mismatch, adopting payload id', {
             activeDeviceId,
-            targetDeviceId
+            explicitDeviceId
           });
-          activeDeviceId = targetDeviceId;
+          activeDeviceId = explicitDeviceId;
           void requestDeviceIdFromClients('mismatched_device_id');
         }
+      } else if (!activeDeviceId && isTestPush) {
+        swInfo('Test push missing explicit device id, requesting from clients');
+        void requestDeviceIdFromClients('missing_device_id_from_payload');
       }
+      const ackDeviceId = explicitDeviceId || activeDeviceId || null;
       let deliveryStatus = 'delivered';
       let deliveryError = null;
       swInfo('Push payload parsed', {
-        targetDeviceId,
+        explicitDeviceId,
+        ackDeviceId,
         activeDeviceId,
         hasNotification: Boolean(payload?.notification),
         hasData: Boolean(payload?.data),
-        messageId: payload?.data?.messageId ?? null
+        messageId
       });
+      let notificationInfo = null;
       try {
-        await showNotification(payload);
+        notificationInfo = await showNotification(payload);
+        swInfo('Notification displayed', {
+          ackDeviceId,
+          messageId,
+          mentionType: notificationInfo?.mentionType ?? null,
+          title: notificationInfo?.title ?? null,
+          tag: notificationInfo?.tag ?? null
+        });
       } catch (err) {
         deliveryStatus = 'failed';
         deliveryError = err instanceof Error ? err.message : 'Notification display failed.';
         swWarn('showNotification failed', { error: err?.message ?? String(err) });
       }
-      if (targetDeviceId) {
+      if (isTestPush) {
+        swInfo('Dispatching TEST_PUSH_RESULT', {
+          ackDeviceId,
+          messageId,
+          status: deliveryStatus,
+          error: deliveryError
+        });
         await notifyClientTestPush({
           type: 'TEST_PUSH_RESULT',
-          deviceId: targetDeviceId,
-          messageId: payload?.data?.messageId ?? null,
+          deviceId: ackDeviceId,
+          messageId,
           sentAt: Date.now(),
           status: deliveryStatus,
           error: deliveryError
         });
+        if (!ackDeviceId) {
+          swInfo('Test push result dispatched without device id');
+        }
       }
     })()
   );
@@ -310,7 +479,13 @@ async function notifyClientTestPush(payload) {
     portCount: clientMessagePorts.size
   });
   postMessageToPorts(payload);
+  swInfo('notifyClientTestPush postMessageToPorts completed', {
+    ports: clientMessagePorts.size
+  });
   broadcastPushMessage(payload);
+  swInfo('notifyClientTestPush broadcast complete', {
+    hasBroadcastChannel: Boolean(pushBroadcastChannel)
+  });
   try {
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     swInfo('notifyClientTestPush posting to windows', {
@@ -332,11 +507,19 @@ async function notifyClientTestPush(payload) {
   } catch (err) {
     swWarn('notifyClientTestPush clients.matchAll failed', { error: err?.message ?? String(err) });
   }
+  swInfo('notifyClientTestPush completed dispatch', {
+    status: payload?.status,
+    deviceId: payload?.deviceId ?? null,
+    messageId: payload?.messageId ?? null
+  });
 }
 
 async function requestDeviceIdFromClients(trigger) {
   const message = { type: 'REQUEST_DEVICE_ID', trigger: trigger || null };
-  swInfo('requestDeviceIdFromClients invoked', message);
+  swInfo('requestDeviceIdFromClients invoked', {
+    ...message,
+    activeDeviceId
+  });
   postMessageToPorts(message);
   broadcastPushMessage(message);
   try {
@@ -361,7 +544,10 @@ async function requestDeviceIdFromClients(trigger) {
 }
 
 function broadcastPushMessage(payload) {
-  if (!pushBroadcastChannel) return;
+  if (!pushBroadcastChannel) {
+    swInfo('BroadcastChannel unavailable, payload not broadcast');
+    return;
+  }
   try {
     pushBroadcastChannel.postMessage(payload);
     swInfo('BroadcastChannel postMessage', { type: payload?.type });

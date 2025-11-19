@@ -8,7 +8,7 @@ import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
 import { db } from '$lib/firestore';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
-  import {
+import {
     enablePushForUser,
     requestNotificationPermission,
     getCurrentDeviceId,
@@ -34,6 +34,57 @@ function pickString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : undefined;
+}
+
+const IOS_DEVICE_REGEX = /iP(ad|hone|od)/i;
+const SAFARI_REGEX = /Safari/i;
+const IOS_ALT_BROWSERS = /(CriOS|FxiOS|OPiOS|EdgiOS)/i;
+
+function isIosSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return IOS_DEVICE_REGEX.test(ua) && SAFARI_REGEX.test(ua) && !IOS_ALT_BROWSERS.test(ua);
+}
+
+function isStandaloneDisplayMode(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  const nav = navigator as Navigator & { standalone?: boolean };
+  if (typeof nav.standalone === 'boolean') return nav.standalone;
+  if (typeof window.matchMedia === 'function') {
+    const modes = ['standalone', 'fullscreen', 'minimal-ui', 'window-controls-overlay'];
+    try {
+      if (modes.some((mode) => window.matchMedia(`(display-mode: ${mode})`).matches)) {
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+function getIosNotificationHelpMessage(permission: NotificationPermission | 'unsupported') {
+  if (permission === 'denied') {
+    return 'Notifications are disabled for hConnect. Open the Settings app → Notifications → hConnect and turn on "Allow Notifications", then reopen the app from your Home Screen.';
+  }
+  if (permission === 'default') {
+    return 'Safari could not show the notification prompt. Make sure hConnect was launched from the Home Screen and that notifications are enabled in Settings → Notifications → hConnect.';
+  }
+  return 'iOS is blocking notifications for this app. Open Settings → Notifications → hConnect, enable "Allow Notifications", then relaunch the app from your Home Screen.';
+}
+
+function hasServiceWorkerSupport() {
+  if (typeof navigator === 'undefined') return false;
+  try {
+    if ('serviceWorker' in navigator) return true;
+  } catch {
+    // Safari might throw when checking `in` before the API is ready.
+  }
+  try {
+    return Boolean((navigator as Navigator & { serviceWorker?: ServiceWorkerContainer }).serviceWorker);
+  } catch {
+    return false;
+  }
 }
 
 let displayName = $state('');
@@ -277,7 +328,13 @@ let avatarError: string | null = $state(null);
   async function enableDesktopNotifications() {
     const granted = await requestNotificationPermission();
     if (!granted) {
-      alert('Notifications are blocked by the browser. Enable them in site settings.');
+      const permissionStatus =
+        typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+      if (isIosSafari()) {
+        alert(getIosNotificationHelpMessage(permissionStatus as NotificationPermission));
+      } else {
+        alert('Notifications are blocked by the browser. Enable them in site settings.');
+      }
       return;
     }
     notif.desktopEnabled = true;
@@ -286,13 +343,7 @@ let avatarError: string | null = $state(null);
   async function enablePush() {
     pushDebugCopyState = 'idle';
     appendPushDebug({ tag: 'enable', message: 'Enable push button clicked.' });
-    await logPushEnvironment('Preflight snapshot (enable)');
-    const deviceId = getCurrentDeviceId();
-    appendPushDebug({
-      tag: 'enable',
-      message: 'Current device id snapshot.',
-      details: { deviceId }
-    });
+    enablePushLoading = true;
     if (!$user?.uid) {
       appendPushDebug({
         tag: 'enable',
@@ -311,6 +362,29 @@ let avatarError: string | null = $state(null);
       alert('Push notifications require a browser environment.');
       return;
     }
+    const deviceId = getCurrentDeviceId();
+    appendPushDebug({
+      tag: 'enable',
+      message: 'Current device id snapshot.',
+      details: { deviceId }
+    });
+    const iosSafari = isIosSafari();
+    const iosStandalone = isStandaloneDisplayMode();
+    if (iosSafari && !iosStandalone) {
+      const iosMessage =
+        'On iOS Safari, push notifications only work when hConnect is installed to your Home Screen. Tap the share icon, choose "Add to Home Screen", then reopen the app from that icon before enabling push.';
+      appendPushDebug({
+        tag: 'enable',
+        level: 'warn',
+        message: 'iOS Safari detected outside standalone mode; push enable blocked.',
+        details: { standalone: iosStandalone }
+      });
+      const proceed = typeof window !== 'undefined' ? window.confirm(`${iosMessage}\n\nTap OK to try anyway or Cancel to add the app now.`) : false;
+      if (!proceed) {
+        alert(iosMessage);
+        return;
+      }
+    }
     if (typeof Notification === 'undefined') {
       appendPushDebug({
         tag: 'enable',
@@ -320,15 +394,63 @@ let avatarError: string | null = $state(null);
       alert('This browser does not support push notifications.');
       return;
     }
-    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    if (typeof navigator === 'undefined') {
       appendPushDebug({
         tag: 'enable',
         level: 'error',
-        message: 'Service worker API missing; cannot register for push.'
+        message: 'Navigator object unavailable.'
       });
-      alert('This browser cannot register push service workers.');
+      alert('Push notifications require a browser environment.');
       return;
     }
+    const serviceWorkerAvailable = hasServiceWorkerSupport();
+    appendPushDebug({
+      tag: 'enable',
+      message: 'serviceWorker availability check',
+      details: { serviceWorkerAvailable }
+    });
+    if (!serviceWorkerAvailable) {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Service worker API missing on navigator.'
+      });
+      if (iosSafari) {
+        alert(
+          'Safari on iOS only exposes push inside an installed app. Close this tab and launch hConnect from your Home Screen, then try again.'
+        );
+      } else {
+        alert('This browser cannot register push service workers.');
+      }
+      return;
+    }
+    appendPushDebug({
+      tag: 'enable',
+      message: 'serviceWorker supported on navigator.'
+    });
+    let manualPermissionPrompt = false;
+    let permissionStatus: NotificationPermission | 'unsupported' =
+      typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+    if (iosSafari && permissionStatus === 'default') {
+      manualPermissionPrompt = true;
+      appendPushDebug({
+        tag: 'enable',
+        message: 'Triggering iOS notification permission prompt immediately.'
+      });
+      const granted = await requestNotificationPermission();
+      permissionStatus =
+        typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+      appendPushDebug({
+        tag: 'enable',
+        message: 'iOS notification prompt result.',
+        details: { granted, permission: permissionStatus }
+      });
+      if (!granted) {
+        alert(getIosNotificationHelpMessage(permissionStatus));
+        return;
+      }
+    }
+    await logPushEnvironment('Preflight snapshot (enable)');
     await pingServiceWorkerForDebug('enable');
     appendPushDebug({
       tag: 'enable',
@@ -336,7 +458,7 @@ let avatarError: string | null = $state(null);
     });
     try {
       const token = await enablePushForUser($user.uid, {
-        prompt: true,
+        prompt: !manualPermissionPrompt,
         debug: createPushDebugBridge('enable')
       });
       if (!token) {
@@ -368,6 +490,8 @@ let avatarError: string | null = $state(null);
         details: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
       });
       alert('Could not enable push on this device.');
+    } finally {
+      enablePushLoading = false;
     }
   }
 
@@ -385,6 +509,7 @@ let avatarError: string | null = $state(null);
 
   let pushDebugLog: PushDebugEntry[] = $state([]);
   let pushDebugCopyState = $state<'idle' | 'copying' | 'copied' | 'error'>('idle');
+  let enablePushLoading = $state(false);
 
   const PUSH_DEBUG_MAX_ENTRIES = 200;
 
@@ -783,7 +908,17 @@ let avatarError: string | null = $state(null);
                   <p>Show native alerts when new messages arrive.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button class="settings-chip" onclick={enableDesktopNotifications}>Grant permission</button>
+                  <button
+                    class="settings-chip"
+                    onclick={enableDesktopNotifications}
+                    disabled={notif.desktopEnabled}
+                  >
+                    {#if notif.desktopEnabled}
+                      Enabled
+                    {:else}
+                      Grant permission
+                    {/if}
+                  </button>
                 </div>
               </div>
 
@@ -793,7 +928,19 @@ let avatarError: string | null = $state(null);
                   <p>Receive updates even when the app is closed.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button class="settings-chip" onclick={enablePush}>Enable on this device</button>
+                  <button
+                    class="settings-chip"
+                    onclick={enablePush}
+                    disabled={notif.pushEnabled || enablePushLoading}
+                  >
+                    {#if enablePushLoading}
+                      Enabling...
+                    {:else if notif.pushEnabled}
+                      Enabled
+                    {:else}
+                      Enable on this device
+                    {/if}
+                  </button>
                   <button
                     class="settings-chip settings-chip--secondary"
                     aria-busy={testPushState === 'loading'}

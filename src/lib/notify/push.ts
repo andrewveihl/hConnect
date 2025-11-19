@@ -76,6 +76,35 @@ const pingResolvers = new Map<
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
 let pushBroadcastChannel: BroadcastChannel | null = null;
 
+async function getEffectiveNotificationPermission(): Promise<DevicePermission> {
+  if (!browser || typeof Notification === 'undefined') return 'unsupported';
+  const base = Notification.permission;
+  if (base === 'granted' || base === 'denied') return base;
+  const nav: Navigator & { permissions?: { query?: (descriptor: PermissionDescriptor) => Promise<{ state?: NotificationPermission }> } } = navigator as any;
+  if (nav?.permissions?.query) {
+    try {
+      const result = await nav.permissions.query({ name: 'notifications' as PermissionName });
+      const state = result?.state;
+      if (state === 'granted' || state === 'denied') return state;
+    } catch {
+      // ignore
+    }
+  }
+  if ('serviceWorker' in navigator) {
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const permissionState = registration?.pushManager?.permissionState?.bind(registration.pushManager);
+      if (permissionState) {
+        const state = await permissionState({ userVisibleOnly: true });
+        if (state === 'granted' || state === 'denied') return state;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return base;
+}
+
 function logPushDebug(message: string, context?: unknown) {
   if (typeof console === 'undefined') return;
   if (context !== undefined) {
@@ -342,12 +371,17 @@ export async function registerFirebaseMessagingSW() {
 
 export async function requestNotificationPermission(): Promise<boolean> {
   if (!browser || !('Notification' in window)) return false;
-  if (Notification.permission === 'granted') return true;
+  const initial = await getEffectiveNotificationPermission();
+  if (initial === 'granted') return true;
+  if (initial === 'denied') return false;
   try {
     const res = await Notification.requestPermission();
-    return res === 'granted';
+    if (res === 'granted') return true;
+    const finalState = await getEffectiveNotificationPermission();
+    return finalState === 'granted';
   } catch {
-    return false;
+    const fallback = await getEffectiveNotificationPermission();
+    return fallback === 'granted';
   }
 }
 

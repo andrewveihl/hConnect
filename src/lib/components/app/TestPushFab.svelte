@@ -236,6 +236,36 @@ let statusDebugLines = $state<string[]>([]);
       document.body.removeChild(textarea);
     }
   }
+
+  async function showLocalTestNotification() {
+    if (
+      !browser ||
+      typeof Notification === 'undefined' ||
+      Notification.permission !== 'granted'
+    ) {
+      return;
+    }
+    try {
+      const registration = await navigator.serviceWorker?.ready;
+      if (!registration?.showNotification) return;
+      await registration.showNotification('hConnect test notification', {
+        body: 'If push is enabled, you should see a system notification shortly.',
+        icon: '/Logo_transparent.png',
+        tag: 'hconnect:test-push',
+        renotify: true,
+        data: {
+          origin: 'local_test_push',
+          timestamp: Date.now()
+        }
+      });
+      pushStatusDebug('Local test notification displayed via service worker');
+    } catch (error) {
+      pushStatusDebug(
+        'Local test notification failed',
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      );
+    }
+  }
   function resolveError(reason?: string | null) {
     const enableMessage = 'Enable push notifications on this device first (Settings -> Notifications).';
     switch (reason) {
@@ -304,6 +334,7 @@ let statusDebugLines = $state<string[]>([]);
           tokens: count
         });
         scheduleDeliveryWatch();
+        void showLocalTestNotification();
       } else {
         status = 'error';
         pendingTest = null;
@@ -380,7 +411,7 @@ let statusDebugLines = $state<string[]>([]);
     }
     let registration: ServiceWorkerRegistration | null = null;
     try {
-      registration = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
+      registration = (await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js')) ?? null;
     } catch {
       registration = null;
     }
@@ -654,26 +685,6 @@ let statusDebugLines = $state<string[]>([]);
   .test-push-fab__status-close:focus-visible {
     background: color-mix(in srgb, var(--surface-panel) 50%, transparent);
     color: var(--text-80);
-    outline: none;
-  }
-
-  .test-push-fab__admin-toggle {
-    border: none;
-    background: transparent;
-    color: var(--text-50);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    cursor: pointer;
-    padding: 0.15rem 0.4rem;
-    border-radius: 999px;
-    transition: color 120ms ease, background 120ms ease;
-  }
-
-  .test-push-fab__admin-toggle:hover,
-  .test-push-fab__admin-toggle:focus-visible {
-    color: var(--text-80);
-    background: color-mix(in srgb, var(--surface-panel) 40%, transparent);
     outline: none;
   }
 

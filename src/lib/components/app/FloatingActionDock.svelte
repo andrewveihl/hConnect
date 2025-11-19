@@ -18,7 +18,7 @@
   let dragging = $state(false);
   let pointerId: number | null = null;
   let dragOffset: Position = { x: 0, y: 0 };
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  let holdTimer: ReturnType<typeof window.setTimeout> | null = null;
   let defaultFrame: number | null = null;
   let dockResizeObserver: ResizeObserver | null = null;
   let chatInputObserver: ResizeObserver | null = null;
@@ -231,14 +231,14 @@
   data-ready={ready}
   data-dragging={dragging}
   style={`transform: translate3d(${position.x}px, ${position.y}px, 0);`}
-  on:pointerdown={handlePointerDown}
-  on:pointermove={handlePointerMove}
-  on:pointerup={handlePointerUp}
-  on:pointercancel={handlePointerUp}
-  on:touchstart={stopTouchPropagation}
-  on:touchmove={stopTouchPropagation}
-  on:touchend={stopTouchPropagation}
-  on:touchcancel={stopTouchPropagation}
+  onpointerdown={handlePointerDown}
+  onpointermove={handlePointerMove}
+  onpointerup={handlePointerUp}
+  onpointercancel={handlePointerUp}
+  ontouchstart={stopTouchPropagation}
+  ontouchmove={stopTouchPropagation}
+  ontouchend={stopTouchPropagation}
+  ontouchcancel={stopTouchPropagation}
 >
   <TestPushFab />
   <SuperAdminFab />
