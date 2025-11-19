@@ -541,13 +541,14 @@ async function deliverToRecipients(
 }
 
 export async function sendTestPushForUid(
-  uid: string
+  uid: string,
+  deviceId?: string
 ): Promise<{ sent: number; reason?: string }> {
-  logger.info('[testPush] Fetching device tokens', { uid });
-  const tokens = await fetchDeviceTokens(uid);
-  logger.info('[testPush] Device token check complete', { uid, count: tokens.length });
+  logger.info('[testPush] Fetching device tokens', { uid, deviceId: deviceId ?? null });
+  const tokens = await fetchDeviceTokens(uid, deviceId);
+  logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId: deviceId ?? null });
   if (!tokens.length) {
-    logger.warn('[testPush] No tokens found for user', { uid });
+    logger.warn('[testPush] No tokens found for user', { uid, deviceId: deviceId ?? null });
     return { sent: 0, reason: 'no_tokens' };
   }
   const title = 'hConnect test notification';

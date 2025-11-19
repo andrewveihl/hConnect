@@ -49,8 +49,23 @@ export async function fetchPresence(uid: string): Promise<PresenceDoc | null> {
   }
 }
 
-export async function fetchDeviceTokens(uid: string): Promise<string[]> {
+export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise<string[]> {
   try {
+    if (deviceId) {
+      const docSnap = await db.doc(`profiles/${uid}/devices/${deviceId}`).get();
+      if (!docSnap.exists) return [];
+      const doc = docSnap.data() as DeviceDoc | undefined;
+      if (
+        doc &&
+        typeof doc.token === 'string' &&
+        doc.token.length > 0 &&
+        (doc.permission === 'granted' || doc.permission === undefined) &&
+        doc.enabled !== false
+      ) {
+        return [doc.token];
+      }
+      return [];
+    }
     const snap = await db.collection(`profiles/${uid}/devices`).get();
     return snap.docs
       .map((docSnap: QueryDocumentSnapshot) => docSnap.data() as DeviceDoc)

@@ -470,12 +470,12 @@ async function deliverToRecipients(recipients, message, context) {
         await sendPushToTokens(tokens, { title, body, data });
     }));
 }
-async function sendTestPushForUid(uid) {
-    firebase_functions_1.logger.info('[testPush] Fetching device tokens', { uid });
-    const tokens = await (0, settings_1.fetchDeviceTokens)(uid);
-    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: tokens.length });
+async function sendTestPushForUid(uid, deviceId) {
+    firebase_functions_1.logger.info('[testPush] Fetching device tokens', { uid, deviceId: deviceId ?? null });
+    const tokens = await (0, settings_1.fetchDeviceTokens)(uid, deviceId);
+    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId: deviceId ?? null });
     if (!tokens.length) {
-        firebase_functions_1.logger.warn('[testPush] No tokens found for user', { uid });
+        firebase_functions_1.logger.warn('[testPush] No tokens found for user', { uid, deviceId: deviceId ?? null });
         return { sent: 0, reason: 'no_tokens' };
     }
     const title = 'hConnect test notification';

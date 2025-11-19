@@ -41,9 +41,18 @@ export const sendTestPush = onCall(
     if (!uid) {
       throw new HttpsError('unauthenticated', 'Sign in to test push notifications.');
     }
-    logger.info('[sendTestPush] Invoked', { uid });
-    const result = await sendTestPushForUid(uid);
-    logger.info('[sendTestPush] Completed', { uid, sent: result.sent, reason: result.reason ?? null });
+    const deviceId =
+      typeof request.data?.deviceId === 'string' && request.data.deviceId.length > 0
+        ? request.data.deviceId
+        : undefined;
+    logger.info('[sendTestPush] Invoked', { uid, deviceId: deviceId ?? null });
+    const result = await sendTestPushForUid(uid, deviceId);
+    logger.info('[sendTestPush] Completed', {
+      uid,
+      deviceId: deviceId ?? null,
+      sent: result.sent,
+      reason: result.reason ?? null
+    });
     if (!result.sent) {
       return { ok: false, reason: result.reason ?? 'no_tokens' };
     }
