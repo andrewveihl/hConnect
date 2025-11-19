@@ -23,9 +23,17 @@ exports.sendTestPush = (0, https_1.onCall)({
     if (!uid) {
         throw new https_1.HttpsError('unauthenticated', 'Sign in to test push notifications.');
     }
-    firebase_functions_1.logger.info('[sendTestPush] Invoked', { uid });
-    const result = await (0, notifications_1.sendTestPushForUid)(uid);
-    firebase_functions_1.logger.info('[sendTestPush] Completed', { uid, sent: result.sent, reason: result.reason ?? null });
+    const deviceId = typeof request.data?.deviceId === 'string' && request.data.deviceId.length > 0
+        ? request.data.deviceId
+        : undefined;
+    firebase_functions_1.logger.info('[sendTestPush] Invoked', { uid, deviceId: deviceId ?? null });
+    const result = await (0, notifications_1.sendTestPushForUid)(uid, deviceId);
+    firebase_functions_1.logger.info('[sendTestPush] Completed', {
+        uid,
+        deviceId: deviceId ?? null,
+        sent: result.sent,
+        reason: result.reason ?? null
+    });
     if (!result.sent) {
         return { ok: false, reason: result.reason ?? 'no_tokens' };
     }

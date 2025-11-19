@@ -251,3 +251,7 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
   await setDoc(ref, payload, { merge: true });
 }
 
+export function getCurrentDeviceId(): string | null {
+  return ensureDeviceId();
+}
+

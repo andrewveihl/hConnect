@@ -48,8 +48,22 @@ async function fetchPresence(uid) {
         return null;
     }
 }
-async function fetchDeviceTokens(uid) {
+async function fetchDeviceTokens(uid, deviceId) {
     try {
+        if (deviceId) {
+            const docSnap = await firebase_1.db.doc(`profiles/${uid}/devices/${deviceId}`).get();
+            if (!docSnap.exists)
+                return [];
+            const doc = docSnap.data();
+            if (doc &&
+                typeof doc.token === 'string' &&
+                doc.token.length > 0 &&
+                (doc.permission === 'granted' || doc.permission === undefined) &&
+                doc.enabled !== false) {
+                return [doc.token];
+            }
+            return [];
+        }
         const snap = await firebase_1.db.collection(`profiles/${uid}/devices`).get();
         return snap.docs
             .map((docSnap) => docSnap.data())
