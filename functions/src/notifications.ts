@@ -1,6 +1,6 @@
 import { URLSearchParams } from 'url';
 
-import { logger } from 'firebase-functions';
+import { logger, config as firebaseConfig } from 'firebase-functions';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import type { FirestoreEvent, QueryDocumentSnapshot } from 'firebase-functions/v2/firestore';
 import webpush from 'web-push';
@@ -41,9 +41,22 @@ const MENTION_PRIORITY: Record<MentionType, number> = {
   everyone: 1
 };
 
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:support@hconnect.app';
-const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? '';
-const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ?? process.env.VAPID_PRIVATE_KEY ?? '';
+let functionsConfig: Record<string, any> = {};
+try {
+  functionsConfig = firebaseConfig();
+} catch (err) {
+  logger.warn('firebase config unavailable', err);
+}
+
+const VAPID_SUBJECT =
+  process.env.VAPID_SUBJECT ?? functionsConfig.vapid?.subject ?? 'mailto:support@hconnect.app';
+const VAPID_PUBLIC_KEY =
+  process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? '';
+const VAPID_PRIVATE_KEY =
+  process.env.FCM_VAPID_PRIVATE_KEY ??
+  process.env.VAPID_PRIVATE_KEY ??
+  functionsConfig.vapid?.private_key ??
+  '';
 const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 
 if (WEB_PUSH_AVAILABLE) {
