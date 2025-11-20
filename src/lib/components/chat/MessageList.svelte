@@ -3,6 +3,7 @@
 
   import { createEventDispatcher, onMount, tick } from 'svelte';
   import type { PendingUploadPreview } from './types';
+  import EmojiPicker from './EmojiPicker.svelte';
   import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
   import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
   import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
@@ -130,6 +131,18 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     } catch {
       return '';
     }
+  }
+
+  function displayNameForUid(uid: string | null | undefined) {
+    if (!uid) return '';
+    const fromMap = users[uid] ?? {};
+    const resolved =
+      fromMap.displayName ||
+      fromMap.name ||
+      fromMap.email;
+    if (resolved) return resolved;
+    if (uid === currentUserId) return 'You';
+    return fromMap.username || fromMap.handle || uid || '';
   }
 
   function nameFor(m: any) {
@@ -469,7 +482,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     return Math.round((n / total) * 100);
   }
 
-  const QUICK_REACTIONS = ['\u{1F44D}', '\u{1F389}', '\u2764\uFE0F', '\u{1F602}', '\u{1F525}', '\u{1F44F}'];
+  const QUICK_REACTIONS = ['\u{1F44D}', '\u{1F389}', '\u2764\uFE0F', '\u{1F602}', '\u{1F525}', '\u{1F44F}', '\u{1F410}'];
   const LONG_PRESS_MS = 450;
   const LONG_PRESS_MOVE_THRESHOLD = 10;
   const SWIPE_INPUT_BLUR_THRESHOLD = 18;
@@ -483,6 +496,9 @@ let isMobileViewport = $state(false);
   let reactionMenuAnchor: HTMLElement | null = null;
   let reactionMenuEl: HTMLDivElement | null = $state(null);
   let reactionMenuPosition = $state({ top: 0, left: 0 });
+  let showReactionPicker = $state(false);
+  let reactionPickerPosition = $state({ top: 0, left: 0 });
+  let reactionPickerEl: HTMLDivElement | null = $state(null);
   let longPressTimer: number | null = null;
   let longPressStart: { x: number; y: number } | null = null;
   type SwipeState = { pointerId: number | null; startX: number; startY: number; blurred: boolean };
@@ -514,6 +530,7 @@ let isMobileViewport = $state(false);
     lastFirstMessageId = currentFirstId;
     if (reactionMenuFor && !messages.some((msg) => msg?.id === reactionMenuFor)) {
       reactionMenuFor = null;
+      showReactionPicker = false;
     }
   });
 
@@ -539,13 +556,16 @@ onMount(() => {
       };
       updateViewportFlags();
       const handleResize = () => {
-        updateViewportFlags();
-        if (reactionMenuFor) void positionReactionMenu();
       };
       const handleGlobalPointerDown = (event: PointerEvent) => {
         if (!reactionMenuFor) return;
         const target = event.target as HTMLElement | null;
-        if (target?.closest('.reaction-menu') || target?.closest('.reaction-add')) return;
+        if (
+          target?.closest('.reaction-menu') ||
+          target?.closest('.reaction-picker') ||
+          target?.closest('.reaction-add')
+        )
+          return;
         closeReactionMenu();
       };
       window.addEventListener('resize', handleResize);
@@ -655,6 +675,7 @@ onMount(() => {
   function closeReactionMenu() {
     reactionMenuFor = null;
     reactionMenuAnchor = null;
+    showReactionPicker = false;
     clearLongPressTimer();
   }
 
@@ -672,6 +693,7 @@ onMount(() => {
     reactionMenuAnchor = anchor ?? null;
     hoveredMessageId = messageId;
     await positionReactionMenu();
+    showReactionPicker = false;
   }
 
   async function positionReactionMenu() {
@@ -706,6 +728,54 @@ onMount(() => {
     }
 
     reactionMenuPosition = { top, left };
+    if (showReactionPicker) {
+      await positionReactionPicker();
+    }
+  }
+
+  async function positionReactionPicker() {
+    if (typeof window === 'undefined' || !showReactionPicker) return;
+    await tick();
+    const anchorRect = reactionMenuAnchor?.getBoundingClientRect();
+    const pickerRect = reactionPickerEl?.getBoundingClientRect();
+    if (!pickerRect) return;
+    const safeGap = 12;
+    let top = anchorRect ? anchorRect.bottom + safeGap : reactionMenuPosition.top;
+    let left = anchorRect
+      ? anchorRect.left + anchorRect.width / 2 - pickerRect.width / 2
+      : reactionMenuPosition.left;
+    const viewportWidth = window.innerWidth;
+    if (left < safeGap) left = safeGap;
+    if (left + pickerRect.width > viewportWidth - safeGap) {
+      left = viewportWidth - pickerRect.width - safeGap;
+    }
+    const viewportHeight = window.innerHeight;
+    if (top + pickerRect.height > viewportHeight - safeGap) {
+      top = anchorRect
+        ? Math.max(safeGap, anchorRect.top - pickerRect.height - safeGap)
+        : Math.max(safeGap, viewportHeight - pickerRect.height - safeGap);
+    }
+    reactionPickerPosition = { top, left };
+  }
+
+  async function openReactionPicker() {
+    if (!reactionMenuFor) return;
+    if (showReactionPicker) {
+      showReactionPicker = false;
+      return;
+    }
+    showReactionPicker = true;
+    await positionReactionPicker();
+  }
+
+  function closeReactionPicker() {
+    showReactionPicker = false;
+  }
+
+  function onReactionPickerPick(symbol: string) {
+    if (!reactionMenuFor) return;
+    showReactionPicker = false;
+    chooseReaction(reactionMenuFor, symbol);
   }
 
   function chooseReaction(messageId: string, emoji: string) {
@@ -1166,7 +1236,7 @@ onMount(() => {
     align-items: flex-end;
     align-self: flex-end;
   }
-
+  
   .message-payload {
     position: relative;
     display: inline-flex;
@@ -1766,6 +1836,47 @@ onMount(() => {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(40px, 1fr));
     gap: 0.4rem;
+  }
+
+  .reaction-menu__actions {
+    margin-top: 0.65rem;
+    display: flex;
+    justify-content: center;
+  }
+
+  .reaction-menu__action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.9rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    background: color-mix(in srgb, rgba(255, 255, 255, 0.04) 85%, transparent);
+    color: var(--text-80);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, border 120ms ease;
+  }
+
+  .reaction-menu__action:hover,
+  .reaction-menu__action:focus-visible {
+    background: color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    color: var(--text-100);
+    border-color: color-mix(in srgb, var(--color-border-strong) 75%, transparent);
+    outline: none;
+  }
+
+  .reaction-menu__action i {
+    font-size: 1.1rem;
+  }
+
+  .reaction-picker {
+    position: fixed;
+    z-index: 600;
+  }
+
+  .reaction-picker :global(.emoji-panel) {
+    pointer-events: auto;
   }
 
   .reaction-button {
@@ -2641,17 +2752,33 @@ onMount(() => {
 
 {#if reactionMenuFor && currentUserId}
   <button type="button" class="reaction-menu-backdrop" aria-label="Close reactions" onclick={closeReactionMenu}></button>
-  <div
-    class="reaction-menu"
-    bind:this={reactionMenuEl}
-    style={`top: ${reactionMenuPosition.top}px; left: ${reactionMenuPosition.left}px`}
-  >
-    <div class="reaction-grid">
-      {#each QUICK_REACTIONS as emoji}
-        <button type="button" class="reaction-button" onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
-      {/each}
+  {#if showReactionPicker}
+    <div
+      class="reaction-picker"
+      bind:this={reactionPickerEl}
+      style={`top: ${reactionPickerPosition.top}px; left: ${reactionPickerPosition.left}px`}
+    >
+      <EmojiPicker on:close={closeReactionPicker} on:pick={(event) => onReactionPickerPick(event.detail)} />
     </div>
-  </div>
+  {:else}
+    <div
+      class="reaction-menu"
+      bind:this={reactionMenuEl}
+      style={`top: ${reactionMenuPosition.top}px; left: ${reactionMenuPosition.left}px`}
+    >
+      <div class="reaction-grid">
+        {#each QUICK_REACTIONS as emoji}
+          <button type="button" class="reaction-button" onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button>
+        {/each}
+      </div>
+      <div class="reaction-menu__actions">
+        <button type="button" class="reaction-menu__action" onclick={openReactionPicker}>
+          <i class="bx bx-smile" aria-hidden="true"></i>
+          <span>More emojis</span>
+        </button>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 {#if previewAttachment}
