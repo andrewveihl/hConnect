@@ -371,6 +371,7 @@
         messages={[...(root ? [root] : []), ...messages.filter((msg) => msg?.id !== root?.id)]}
         {users}
         {currentUserId}
+        replyTargetId={replyTarget?.messageId ?? null}
         hideReplyPreview={true}
         scrollToBottomSignal={scrollSignal + focusScrollSignal}
         pendingUploads={pendingUploads}

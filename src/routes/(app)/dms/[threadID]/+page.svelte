@@ -1352,6 +1352,7 @@ run(() => {
               {messages}
               users={messageUsers}
               currentUserId={me?.uid ?? null}
+              replyTargetId={pendingReply?.messageId ?? null}
               {pendingUploads}
               scrollToBottomSignal={combinedScrollSignal}
               on:vote={handleVote}

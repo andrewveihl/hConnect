@@ -16,7 +16,8 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
-  type Unsubscribe,
+  writeBatch,
+  type Unsubscribe
 } from 'firebase/firestore';
 
 type PermissionKey =
@@ -80,7 +81,7 @@ function dlog(...args: any[]) {
 export async function upsertUserMembership(
   serverId: string,
   uid: string,
-  data: { name: string; icon?: string | null }
+  data: { name: string; icon?: string | null; position?: number }
 ) {
   const db = getDb();
   dlog('upsertUserMembership', { serverId, uid, data });
@@ -91,6 +92,7 @@ export async function upsertUserMembership(
       name: data.name,
       icon: data.icon ?? null,
       joinedAt: serverTimestamp(),
+      position: typeof data.position === 'number' ? data.position : -Date.now()
     },
     { merge: true }
   );
@@ -284,15 +286,70 @@ export async function deleteServer(serverId: string, ownerId: string) {
  */
 export function subscribeUserServers(
   uid: string,
-  cb: (rows: { id: string; name: string; icon?: string | null }[]) => void
+  cb: (rows: { id: string; name: string; icon?: string | null; position?: number | null; joinedAt?: number | null }[]) => void
 ): Unsubscribe {
   const db = getDb();
   const q = query(collection(db, 'profiles', uid, 'servers'), orderBy('joinedAt', 'desc'));
 
-  let current: Record<string, { id: string; name: string; icon?: string | null }> = {};
+  let current: Record<
+    string,
+    { id: string; name: string; icon?: string | null; position: number | null; joinedAt: number | null }
+  > = {};
   let serverUnsubs: Record<string, () => void> = {};
   let membershipUnsubs: Record<string, () => void> = {};
-  const emit = () => cb(Object.values(current));
+  let initializingPositions = false;
+  const sortServers = (
+    a: { position: number | null; joinedAt: number | null },
+    b: { position: number | null; joinedAt: number | null }
+  ) => {
+    if (a.position != null && b.position != null && a.position !== b.position) {
+      return a.position - b.position;
+    }
+    if (a.position != null && b.position == null) return -1;
+    if (b.position != null && a.position == null) return 1;
+    const aJoin = a.joinedAt ?? 0;
+    const bJoin = b.joinedAt ?? 0;
+    return bJoin - aJoin;
+  };
+  const emit = () => {
+    const values = Object.values(current).sort(sortServers);
+    cb(values);
+  };
+
+  const toMillis = (value: any): number | null => {
+    if (!value) return null;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    if (typeof value?.toMillis === 'function') {
+      return value.toMillis();
+    }
+    if (value instanceof Date) return value.getTime();
+    return null;
+  };
+
+  async function backfillPositions() {
+    if (initializingPositions) return;
+    initializingPositions = true;
+    try {
+      const ordered = Object.values(current)
+        .sort((a, b) => (b.joinedAt ?? 0) - (a.joinedAt ?? 0))
+        .map((row, index) => ({ id: row.id, position: index * 10 }));
+      if (!ordered.length) return;
+      const batch = writeBatch(db);
+      ordered.forEach((row) => {
+        batch.update(doc(db, 'profiles', uid, 'servers', row.id), { position: row.position });
+        current[row.id] = { ...current[row.id], position: row.position };
+      });
+      await batch.commit();
+    } catch (err) {
+      dlog('backfillPositions error', err);
+    } finally {
+      initializingPositions = false;
+    }
+  }
 
   async function verifyAndMaybePurge(serverId: string) {
     let membershipChecked = false;
@@ -342,11 +399,20 @@ export function subscribeUserServers(
 
   const stop = onSnapshot(q, (snap) => {
     const seen: Record<string, true> = {};
+    let needsPositionBackfill = false;
     for (const d of snap.docs) {
       const id = d.id;
       seen[id] = true;
       const data = d.data() as any;
-      current[id] = { id, name: data.name, icon: data.icon ?? null };
+      const position =
+        typeof data.position === 'number'
+          ? data.position
+          : data.position === null
+            ? null
+            : null;
+      if (position === null) needsPositionBackfill = true;
+      const joinedAt = toMillis(data.joinedAt) ?? null;
+      current[id] = { id, name: data.name, icon: data.icon ?? null, position, joinedAt };
 
       if (!serverUnsubs[id]) {
         const serverRef = doc(db, 'servers', id);
@@ -358,7 +424,8 @@ export function subscribeUserServers(
               return;
             }
             const payload = sv.data() as any;
-            const existing = current[id] ?? { id, name: payload?.name ?? 'Server', icon: null };
+            const existing =
+              current[id] ?? { id, name: payload?.name ?? 'Server', icon: null, position: null, joinedAt: null };
             current[id] = {
               ...existing,
               name: payload?.name ?? existing.name,
@@ -396,6 +463,9 @@ export function subscribeUserServers(
       }
     }
     emit();
+    if (needsPositionBackfill) {
+      void backfillPositions();
+    }
   });
 
   return () => {
@@ -403,6 +473,15 @@ export function subscribeUserServers(
     for (const k in serverUnsubs) serverUnsubs[k]!();
     for (const k in membershipUnsubs) membershipUnsubs[k]!();
   };
+}
+
+export async function saveServerOrder(uid: string, serverIds: string[]) {
+  const db = getDb();
+  const batch = writeBatch(db);
+  serverIds.forEach((serverId, index) => {
+    batch.update(doc(db, 'profiles', uid, 'servers', serverId), { position: index * 10 });
+  });
+  await batch.commit();
 }
 
 

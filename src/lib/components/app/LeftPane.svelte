@@ -2,12 +2,13 @@
   import { run } from 'svelte/legacy';
 
   import { onDestroy } from 'svelte';
+  import { flip } from 'svelte/animate';
   import { goto } from '$app/navigation';
   import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { user } from '$lib/stores/user';
   import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
-  import { subscribeUserServers } from '$lib/firestore/servers';
+  import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
   import { db } from '$lib/firestore';
 import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } from 'firebase/firestore';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
@@ -45,7 +46,9 @@ import { featureFlags } from '$lib/stores/featureFlags';
     showBottomActions = true
   }: Props = $props();
 
-  let servers: { id: string; name: string; icon?: string | null }[] = $state([]);
+  type ServerRailEntry = { id: string; name: string; icon?: string | null; position?: number | null; joinedAt?: number | null };
+
+  let servers: ServerRailEntry[] = $state([]);
   let unsub: (() => void) | undefined = $state();
   let localCreateOpen = $state(false);
   let myPresenceState: PresenceState = $state('offline');
@@ -60,6 +63,20 @@ import { featureFlags } from '$lib/stores/featureFlags';
   let presenceUnsub: (() => void) | null = $state(null);
   let dmRailUnsub: Unsubscribe | null = $state(null);
   let dmMetadata: Record<string, { title: string; photoURL: string | null }> = $state({});
+  let serverList: ServerRailEntry[] = $state([]);
+  let dragPreview: ServerRailEntry[] = $state([]);
+  let draggingServerId: string | null = $state(null);
+  let reorderSaving = $state(false);
+  let reorderError: string | null = $state(null);
+  let suppressNextServerClick = $state(false);
+  const serverButtonRefs = new Map<string, HTMLButtonElement>();
+  let dragPointerId: number | null = null;
+  let dragCandidateId: string | null = null;
+  let dragStartY = 0;
+  const DRAG_THRESHOLD_PX = 6;
+  let dragMoveListener: ((event: PointerEvent) => void) | null = null;
+  let dragUpListener: ((event: PointerEvent) => void) | null = null;
+  let pendingOrderIds: string[] | null = null;
 const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
 const featureFlagStore = featureFlags;
 const enableVoice = $derived(Boolean($featureFlagStore.enableVoice));
@@ -79,12 +96,27 @@ const isSuperAdmin = $derived(
       unsub?.();
       unsub = subscribeUserServers($user.uid, (rows) => {
         servers = rows ?? [];
+        const incomingIds = servers.map((entry) => entry.id);
+        if (pendingOrderIds) {
+          serverList = mergeServerData(serverList.length ? serverList : servers, servers);
+          if (arraysEqual(incomingIds, pendingOrderIds)) {
+            pendingOrderIds = null;
+            if (!draggingServerId && !dragCandidateId) {
+              serverList = servers;
+            }
+          }
+        } else if (!draggingServerId && !dragCandidateId) {
+          serverList = servers;
+        } else {
+          serverList = mergeServerData(serverList.length ? serverList : servers, servers);
+        }
       });
     }
   });
 
   onDestroy(() => unsub?.());
   onDestroy(() => dmRailUnsub?.());
+  onDestroy(() => detachDragListeners());
 
   const handleCreateClick = () => {
     if (onCreateServer) onCreateServer();
@@ -135,7 +167,7 @@ const isSuperAdmin = $derived(
   const IDLE_WINDOW_MS = 60 * 60 * 1000;
   const DEFAULT_OVERRIDE_MS = 24 * 60 * 60 * 1000;
 
-  const dmAlerts = $derived.by(() => {
+const dmAlerts = $derived.by(() => {
     const list = ($notifications ?? [])
       .filter((item: NotificationItem) => item?.kind === 'dm' && (item.unread ?? 0) > 0)
       .map((item) => {
@@ -342,7 +374,135 @@ const isSuperAdmin = $derived(
   };
 
 
-  const statusDotLabel = () => presenceLabels[myPresenceState] ?? 'Offline';
+const statusDotLabel = () => presenceLabels[myPresenceState] ?? 'Offline';
+
+const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
+
+  function serverRefAction(node: HTMLButtonElement, serverId: string) {
+    let id = serverId;
+    serverButtonRefs.set(id, node);
+    return {
+      update(nextId: string) {
+        if (nextId === id) return;
+        serverButtonRefs.delete(id);
+        id = nextId;
+        serverButtonRefs.set(id, node);
+      },
+      destroy() {
+        serverButtonRefs.delete(id);
+      }
+    };
+  }
+
+  function attachDragListeners() {
+    if (typeof window === 'undefined' || dragMoveListener) return;
+    dragMoveListener = (event: PointerEvent) => handleWindowPointerMove(event);
+    dragUpListener = (event: PointerEvent) => handleWindowPointerUp(event);
+    window.addEventListener('pointermove', dragMoveListener, { passive: false });
+    window.addEventListener('pointerup', dragUpListener, { passive: false });
+    window.addEventListener('pointercancel', dragUpListener, { passive: false });
+  }
+
+  function detachDragListeners() {
+    if (typeof window === 'undefined') return;
+    if (dragMoveListener) {
+      window.removeEventListener('pointermove', dragMoveListener);
+      dragMoveListener = null;
+    }
+    if (dragUpListener) {
+      window.removeEventListener('pointerup', dragUpListener);
+      window.removeEventListener('pointercancel', dragUpListener);
+      dragUpListener = null;
+    }
+  }
+
+  function beginDrag(candidateId: string, pointerId: number, startY: number) {
+    dragCandidateId = candidateId;
+    dragPointerId = pointerId;
+    dragStartY = startY;
+  }
+
+  function activateDrag() {
+    if (!dragCandidateId) return;
+    draggingServerId = dragCandidateId;
+    dragPreview = [...serverList];
+    suppressNextServerClick = true;
+  }
+
+  function updatePreviewOrder(clientY: number) {
+    if (!draggingServerId) return;
+    const ordered = dragPreview.length ? dragPreview : serverList;
+    let targetId = ordered[ordered.length - 1]?.id ?? draggingServerId;
+    for (const entry of ordered) {
+      const el = serverButtonRefs.get(entry.id);
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      if (clientY < mid) {
+        targetId = entry.id;
+        break;
+      }
+    }
+    const next = reorderList(ordered, draggingServerId, targetId);
+    if (next !== ordered) {
+      dragPreview = next;
+    }
+  }
+
+  async function finalizeDrag() {
+    const finalList = dragPreview.length ? dragPreview : serverList;
+    const finalIds = finalList.map((entry) => entry.id);
+    const originalIds = servers.map((entry) => entry.id);
+    resetDragState();
+    serverList = finalList;
+    if (!arraysEqual(finalIds, originalIds)) {
+      pendingOrderIds = finalIds;
+      await persistServerOrder(finalList);
+    } else {
+      pendingOrderIds = null;
+    }
+    suppressNextServerClick = true;
+  }
+
+  function resetDragState() {
+    draggingServerId = null;
+    dragCandidateId = null;
+    dragPointerId = null;
+    dragStartY = 0;
+    dragPreview = [];
+    detachDragListeners();
+    setTimeout(() => {
+      suppressNextServerClick = false;
+    }, 0);
+  }
+
+  function handleServerPointerDown(event: PointerEvent, serverId: string) {
+    if (event.button !== 0) return;
+    suppressNextServerClick = false;
+    beginDrag(serverId, event.pointerId, event.clientY);
+    attachDragListeners();
+  }
+
+  function handleWindowPointerMove(event: PointerEvent) {
+    if (!dragCandidateId || dragPointerId !== event.pointerId) return;
+    const delta = Math.abs(event.clientY - dragStartY);
+    if (!draggingServerId && delta >= DRAG_THRESHOLD_PX) {
+      activateDrag();
+    }
+    if (!draggingServerId) return;
+    event.preventDefault();
+    updatePreviewOrder(event.clientY);
+  }
+
+  async function handleWindowPointerUp(event: PointerEvent) {
+    if (dragPointerId !== event.pointerId) return;
+    if (draggingServerId) {
+      event.preventDefault();
+      await finalizeDrag();
+    } else {
+      resetDragState();
+    }
+  }
 
   async function applyStatusOverride(selection: StatusSelection) {
     if (!$user?.uid) return;
@@ -400,9 +560,66 @@ const isSuperAdmin = $derived(
       statusMenuOpen = false;
     }
   }
+
+  const navigateToServer = (serverId: string) => {
+    goto(`/servers/${serverId}`, { keepFocus: true });
+  };
+
+  function handleServerClick(event: MouseEvent, serverId: string) {
+    if (draggingServerId || dragCandidateId || suppressNextServerClick) {
+      event.preventDefault();
+      return;
+    }
+    if (event.metaKey || event.ctrlKey) {
+      const url = `/servers/${serverId}`;
+      if (browser) window.open(url, '_blank');
+      return;
+    }
+    navigateToServer(serverId);
+  }
+
+  function reorderList(list: ServerRailEntry[], sourceId: string, targetId: string) {
+    if (sourceId === targetId) return list;
+    const next = [...list];
+    const fromIndex = next.findIndex((entry) => entry.id === sourceId);
+    const toIndex = next.findIndex((entry) => entry.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) return list;
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    return next;
+  }
+
+  function mergeServerData(base: ServerRailEntry[], updates: ServerRailEntry[]): ServerRailEntry[] {
+    if (!base.length) return updates;
+    const map = new Map(updates.map((entry) => [entry.id, entry]));
+    return base.map((entry) => ({ ...entry, ...(map.get(entry.id) ?? {}) }));
+  }
+
+  async function persistServerOrder(list: ServerRailEntry[]) {
+    if (!$user?.uid) return;
+    reorderSaving = true;
+    reorderError = null;
+    try {
+      await saveServerOrder(
+        $user.uid,
+        list.map((entry) => entry.id)
+      );
+    } catch (err) {
+      console.error('[LeftPane] saveServerOrder error', err);
+      reorderError = 'Could not save order';
+      pendingOrderIds = null;
+    } finally {
+      reorderSaving = false;
+    }
+  }
+
+  function arraysEqual(a: string[], b: string[]) {
+    if (a.length !== b.length) return false;
+    return a.every((value, index) => value === b[index]);
+  }
 </script>
 
-<svelte:window on:pointerdown={handleStatusOutside} on:keydown={handleStatusKeydown} />
+<svelte:window onpointerdown={handleStatusOutside} on:keydown={handleStatusKeydown} />
 
 <aside
   class="app-rail h-dvh w-[72px] sticky top-0 left-0 z-30 flex flex-col items-center select-none"
@@ -421,25 +638,24 @@ const isSuperAdmin = $derived(
 
   <div class="flex-1 w-full overflow-y-auto touch-pan-y">
     <div class="rail-server-stack pb-4">
-      {#each servers as s (s.id)}
-        <a
-          href={`/servers/${s.id}`}
-          class={`rail-button ${activeServerId === s.id ? 'rail-button--active' : ''}`}
+      {#each displayedServers as s (s.id)}
+        <button
+          type="button"
+          class={`rail-button ${activeServerId === s.id ? 'rail-button--active' : ''} ${draggingServerId === s.id ? 'rail-button--dragging' : ''}`}
           aria-label={s.name}
           title={s.name}
           aria-current={activeServerId === s.id ? 'page' : undefined}
+          onclick={(event) => handleServerClick(event, s.id)}
+          use:serverRefAction={s.id}
+          onpointerdown={(event) => handleServerPointerDown(event, s.id)}
+          animate:flip={{ duration: 180 }}
         >
           {#if s.icon}
-            <img
-              src={s.icon}
-              alt={s.name}
-              class="rail-button__image"
-              draggable="false"
-            />
+            <img src={s.icon} alt={s.name} class="rail-button__image" draggable="false" />
           {:else}
             <span class="rail-button__fallback">{s.name.slice(0, 2).toUpperCase()}</span>
           {/if}
-        </a>
+        </button>
       {/each}
 
       <button
@@ -453,6 +669,9 @@ const isSuperAdmin = $derived(
       >
         <i class="bx bx-plus text-2xl leading-none"></i>
       </button>
+      {#if reorderError}
+        <p class="rail-reorder-error">{reorderError}</p>
+      {/if}
     </div>
   </div>
 
@@ -624,6 +843,11 @@ const isSuperAdmin = $derived(
     border: 1px solid color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
     color: var(--text-40);
     cursor: not-allowed;
+  }
+
+  :global(.rail-button--dragging) {
+    opacity: 0.65;
+    cursor: grabbing;
   }
 
   @media (max-width: 767px) {
@@ -816,5 +1040,12 @@ const isSuperAdmin = $derived(
     margin-top: 0.6rem;
     font-size: 0.75rem;
     color: var(--text-60);
+  }
+
+  .rail-reorder-error {
+    color: color-mix(in srgb, var(--color-danger, #f87171) 85%, white);
+    font-size: 0.72rem;
+    text-align: center;
+    margin-top: 0.4rem;
   }
 </style>

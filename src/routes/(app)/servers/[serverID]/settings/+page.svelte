@@ -15,6 +15,7 @@ import {
     collection, doc, getDoc, onSnapshot, getDocs,
     query, orderBy, setDoc, updateDoc, deleteDoc,
     limit, addDoc, serverTimestamp, arrayUnion, arrayRemove, writeBatch, where,
+    deleteField,
     type Unsubscribe
   } from 'firebase/firestore';
 
@@ -59,6 +60,11 @@ const DEFAULT_MENTION = '#f97316';
   let inviteAutomationStatus: string | null = $state(null);
   let inviteAutomationError: string | null = $state(null);
   let inviteAutomationBusy = $state(false);
+  let inviteAutoSentUids: Record<string, boolean> = $state({});
+  let inviteDeclinedUids: Record<string, boolean> = $state({});
+  const AUTO_INVITE_INTERVAL_MS = 60000;
+  let autoInviteTimer: number | null = null;
+  let autoInviteLoopActive = false;
   let deleteConfirm = $state('');
   let deleteBusy = $state(false);
   let deleteError: string | null = $state(null);
@@ -93,6 +99,7 @@ const DEFAULT_MENTION = '#f97316';
 
   // live lists
   let members: ServerMember[] = $state([]);
+  let membersReady = $state(false);
   let membersWithProfiles: EnrichedMember[] = $state([]);
   let memberDirectory: Record<string, MentionDirectoryEntry> = $state({});
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
@@ -136,6 +143,7 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
   type Profile = {
     uid: string;
     displayName?: string;
+    name?: string;
     nameLower?: string;
     email?: string;
     photoURL?: string;
@@ -194,8 +202,12 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
               .filter((d: string) => d.length > 0)
           )
         )
-      : [];
+      : typeof automation?.domain === 'string'
+        ? [automation.domain]
+        : [];
     inviteDefaultRoleId = typeof automation?.defaultRoleId === 'string' ? automation.defaultRoleId : null;
+    inviteAutoSentUids = automation?.sentUids ?? {};
+    inviteDeclinedUids = automation?.declinedUids ?? {};
     const owner = ownerFrom(data);
     serverOwnerId = owner ?? null;
 
@@ -223,6 +235,7 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     const db = getDb();
     return onSnapshot(collection(db, 'servers', serverId!, 'members'), (snap) => {
       members = snap.docs.map((d) => ({ uid: d.id, ...(d.data() as any) }));
+      membersReady = true;
     });
   }
 
@@ -274,9 +287,11 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
           const bTs = ((b.createdAt as any)?.toMillis?.() ?? 0) as number;
           return bTs - aTs;
         });
+        const prev = pendingInvitesByUid;
         pendingInvites = list;
         pendingInvitesByUid = map;
         syncInviteProfileWatchers(list);
+        handleInviteLifecycle(prev, map);
       },
       () => {
         pendingInvites = [];
@@ -360,6 +375,23 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     });
   }
 
+  function handleInviteLifecycle(
+    prev: Record<string, ServerInvite>,
+    next: Record<string, ServerInvite>
+  ) {
+    if (!membersReady) return;
+    const memberSet = new Set(members.map((m) => m.uid));
+    Object.keys(prev).forEach((uid) => {
+      if (!next[uid]) {
+        if (memberSet.has(uid)) {
+          clearDomainInviteDecline(uid);
+        } else {
+          markDomainInviteDeclined(uid);
+        }
+      }
+    });
+  }
+
   run(() => {
     membersWithProfiles = members.map((member) => {
       const entry = memberDirectory[member.uid];
@@ -424,6 +456,32 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
       }
     }
     if (changed) roleCollapsed = next;
+  });
+
+  run(() => {
+    const shouldRun =
+      typeof window !== 'undefined' &&
+      !!serverId &&
+      inviteAutomationEnabled &&
+      inviteDomains.length > 0 &&
+      (isOwner || isAdmin);
+    if (shouldRun && !autoInviteLoopActive) {
+      autoInviteLoopActive = true;
+      scheduleAutoInviteLoop();
+    } else if (!shouldRun && autoInviteLoopActive) {
+      autoInviteLoopActive = false;
+      stopAutoInviteLoop();
+    }
+  });
+
+  run(() => {
+    if (!membersReady) return;
+    const memberSet = new Set(members.map((m) => m.uid));
+    Object.keys(inviteDeclinedUids).forEach((uid) => {
+      if (inviteDeclinedUids[uid] && memberSet.has(uid)) {
+        clearDomainInviteDecline(uid);
+      }
+    });
   });
   run(() => {
     filteredMembers = membersWithProfiles.filter((member) => {
@@ -590,6 +648,7 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
       inviteProfileStops.clear();
       inviteProfiles = {};
       pendingInvitesByUid = {};
+      stopAutoInviteLoop();
     };
   });
 
@@ -619,7 +678,9 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
         'settings.inviteAutomation': {
           enabled: inviteAutomationEnabled,
           domains: inviteDomains,
-          defaultRoleId: inviteDefaultRoleId
+          defaultRoleId: inviteDefaultRoleId,
+          sentUids: inviteAutoSentUids,
+          declinedUids: inviteDeclinedUids
         }
       });
       inviteAutomationStatus = 'Settings saved.';
@@ -657,42 +718,115 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     inviteDomains = inviteDomains.filter((d) => d !== domain);
   }
 
-  async function sendAutoInvitesForDomains() {
+  function recordAutoInviteSent(uid: string) {
+    if (!uid || inviteAutoSentUids[uid]) return;
+    inviteAutoSentUids = { ...inviteAutoSentUids, [uid]: true };
+    if (!serverId) return;
+    const db = getDb();
+    void updateDoc(doc(db, 'servers', serverId), {
+      [`settings.inviteAutomation.sentUids.${uid}`]: true
+    }).catch((err) => console.error('[ServerSettings] recordAutoInviteSent error', err));
+  }
+
+  function markDomainInviteDeclined(uid: string) {
+    if (!uid || inviteDeclinedUids[uid] || !inviteAutoSentUids[uid]) return;
+    inviteDeclinedUids = { ...inviteDeclinedUids, [uid]: true };
+    if (!serverId) return;
+    const db = getDb();
+    void updateDoc(doc(db, 'servers', serverId), {
+      [`settings.inviteAutomation.declinedUids.${uid}`]: true
+    }).catch((err) => console.error('[ServerSettings] markDomainInviteDeclined error', err));
+  }
+
+  function clearDomainInviteDecline(uid: string) {
+    if (!inviteDeclinedUids[uid]) return;
+    const { [uid]: _, ...rest } = inviteDeclinedUids;
+    inviteDeclinedUids = rest;
+    if (!serverId) return;
+    const db = getDb();
+    void updateDoc(doc(db, 'servers', serverId), {
+      [`settings.inviteAutomation.declinedUids.${uid}`]: deleteField()
+    }).catch((err) => console.error('[ServerSettings] clearDomainInviteDecline error', err));
+  }
+
+  function stopAutoInviteLoop() {
+    if (autoInviteTimer) {
+      clearTimeout(autoInviteTimer);
+      autoInviteTimer = null;
+    }
+  }
+
+  function scheduleAutoInviteLoop() {
+    stopAutoInviteLoop();
+    if (typeof window === 'undefined') return;
+    autoInviteTimer = window.setTimeout(() => {
+      void sendAutoInvitesForDomains({ single: true, auto: true });
+      scheduleAutoInviteLoop();
+    }, AUTO_INVITE_INTERVAL_MS);
+  }
+
+  async function sendAutoInvitesForDomains(options: { single?: boolean; auto?: boolean } = {}) {
+    const { single = false, auto = false } = options;
     if (!(isOwner || isAdmin) || !inviteAutomationEnabled) return;
+    if (single && inviteAutomationBusy) return;
     const domainSet = new Set(inviteDomains);
     if (!domainSet.size) {
-      inviteAutomationError = 'Add at least one domain before syncing.';
+      if (!auto) inviteAutomationError = 'Add at least one domain before syncing.';
       return;
     }
     const existingMembers = new Set(members.map((m) => m.uid));
+    const pendingSet = new Set(Object.keys(pendingInvitesByUid));
+    const declinedSet = new Set(
+      Object.keys(inviteDeclinedUids).filter((uid) => inviteDeclinedUids[uid])
+    );
     const candidates = allProfiles.filter((profile) => {
-      if (!profile.email) return false;
+      if (!profile?.uid || !profile.email) return false;
       const [, domainRaw] = profile.email.split('@');
       if (!domainRaw) return false;
       const domain = domainRaw.toLowerCase();
       if (!domainSet.has(domain)) return false;
       if (existingMembers.has(profile.uid)) return false;
+      if (pendingSet.has(profile.uid)) return false;
+      if (declinedSet.has(profile.uid)) return false;
       return true;
     });
     if (candidates.length === 0) {
-      inviteAutomationStatus = 'Everyone from those domains is already a member or invited.';
-      inviteAutomationError = null;
+      if (!auto) {
+        inviteAutomationStatus = 'Everyone from those domains is already a member or invited.';
+        inviteAutomationError = null;
+      }
       return;
     }
-    inviteAutomationBusy = true;
-    inviteAutomationStatus = `Sending invites to ${candidates.length} account${candidates.length === 1 ? '' : 's'}...`;
-    inviteAutomationError = null;
-    for (const candidate of candidates) {
+    const targets = single ? candidates.slice(0, 1) : candidates;
+    if (!single) {
+      inviteAutomationBusy = true;
+      inviteAutomationStatus = `Sending invites to ${targets.length} account${targets.length === 1 ? '' : 's'}...`;
+      inviteAutomationError = null;
+    }
+    for (const candidate of targets) {
       try {
-        await inviteUser(candidate.uid);
+        const result = await inviteUser(candidate.uid, { silent: auto || single });
+        if (result?.ok) {
+          recordAutoInviteSent(candidate.uid);
+          if (auto) {
+            const label =
+              candidate?.displayName ?? candidate?.name ?? candidate?.email ?? candidate.uid;
+            inviteAutomationStatus = `Auto-invited ${label}`;
+          }
+        } else if (!auto) {
+          inviteAutomationError = 'Some invites could not be delivered.';
+        }
       } catch (err) {
         console.error(err);
-        inviteAutomationError = 'Some invites could not be delivered.';
+        if (!auto) inviteAutomationError = 'Some invites could not be delivered.';
       }
+      if (single) break;
     }
-    inviteAutomationBusy = false;
-    if (!inviteAutomationError) {
-      inviteAutomationStatus = 'Domain invites sent.';
+    if (!single) {
+      inviteAutomationBusy = false;
+      if (!inviteAutomationError) {
+        inviteAutomationStatus = 'Domain invites sent.';
+      }
     }
   }
 
@@ -1160,47 +1294,62 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
   let q = $derived((search || '').trim().toLowerCase());
 
   // Derived: filter and exclude users already in this server (optional)
-  let memberSet = $derived(new Set(members.map(m => m.uid)));
-  let filtered = $derived(allProfiles
-    .filter(p => {
-      // donÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢t show people already in the server
-      if (memberSet.has(p.uid)) return false;
-      if (!q) return true;
-      const n = (p.nameLower || '').toLowerCase();
-      const d = (p.displayName || '').toLowerCase();
-      const e = (p.email || '').toLowerCase();
-      const u = (p.uid || '').toLowerCase();
-      return n.includes(q) || d.includes(q) || e.includes(q) || u.includes(q);
-    })
-    .slice(0, 50)); // keep list tidy
+  let memberSet = $derived(new Set(members.map((m) => m.uid)));
+  let filtered = $derived(
+    allProfiles
+      .filter((profile) => {
+        if (!profile?.uid) return false;
+        if (memberSet.has(profile.uid)) return false;
+        if (!q) return true;
+        const fields = [
+          profile.nameLower,
+          profile.displayName,
+          profile.name,
+          profile.email,
+          profile.uid
+        ];
+        return fields.some(
+          (value) => typeof value === 'string' && value.toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 50)
+  ); // keep list tidy
 
   // invite to first text channel (keeps your current accept flow)
-  async function inviteUser(toUid: string) {
-    if (!(isOwner || isAdmin)) return;
-    if (!isOwner) { // matches your current security rules
-      alert('Per current security rules, only channel owners can send invites.');
-      return;
+  async function inviteUser(toUid: string, options: { silent?: boolean } = {}) {
+    const silent = options?.silent ?? false;
+    if (!(isOwner || isAdmin)) return { ok: false };
+    if (!isOwner) {
+      if (!silent) alert('Per current security rules, only channel owners can send invites.');
+      return { ok: false };
     }
     const fallback = channels.find((c) => c.type === 'text') ?? channels[0];
-    if (!fallback) { alert('Create a channel first.'); return; }
+    if (!fallback) {
+      if (!silent) alert('Create a channel first.');
+      return { ok: false };
+    }
 
     if (pendingInvitesByUid[toUid]) {
-      inviteError = 'That user already has a pending invite to this server.';
-      console.debug('[ServerSettings] inviteUser skipped; pending invite already exists', {
-        toUid,
-        invite: pendingInvitesByUid[toUid]
-      });
-      return;
+      if (!silent) {
+        inviteError = 'That user already has a pending invite to this server.';
+        console.debug('[ServerSettings] inviteUser skipped; pending invite already exists', {
+          toUid,
+          invite: pendingInvitesByUid[toUid]
+        });
+      }
+      return { ok: false };
     }
 
     const fromUid = $user?.uid;
     if (!fromUid) {
-      inviteError = 'You must be signed in to send invites.';
-      return;
+      if (!silent) inviteError = 'You must be signed in to send invites.';
+      return { ok: false };
     }
 
-    inviteError = null;
-    inviteLoading = { ...inviteLoading, [toUid]: true };
+    if (!silent) {
+      inviteError = null;
+      inviteLoading = { ...inviteLoading, [toUid]: true };
+    }
     try {
       const fromDisplayName = (() => {
         const raw = $user?.displayName ?? $user?.email ?? null;
@@ -1217,47 +1366,59 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
         channelName: fallback.name || 'general'
       });
       if (!res.ok) {
-        inviteError = `Failed to invite ${toUid}: ${res.error ?? 'Unknown error'}`;
-        console.debug('[ServerSettings] sendServerInvite failed', { toUid, res });
+        if (!silent) {
+          inviteError = 'Failed to invite ' + toUid + ': ' + (res.error ?? 'Unknown error');
+          console.debug('[ServerSettings] sendServerInvite failed', { toUid, res });
+        }
         if (pendingInvitesByUid[toUid]) {
           const { [toUid]: _, ...rest } = pendingInvitesByUid;
           pendingInvitesByUid = rest;
           pendingInvites = pendingInvites.filter((invite) => invite.toUid !== toUid);
         }
-      } else {
-        if (res.alreadyExisted) {
-          inviteError = `User already has a pending invite.`;
-          console.debug('[ServerSettings] sendServerInvite already existed', { toUid, res });
-        } else {
-          const inviteId = res.inviteId ?? `${serverId!}__${toUid}`;
-          const inviteStub: ServerInvite = {
-            id: inviteId,
-            toUid,
-            fromUid,
-            fromDisplayName,
-            serverId: serverId!,
-            serverName: serverName || serverId!,
-            serverIcon: serverIcon && serverIcon.trim().length ? serverIcon : null,
-            channelId: fallback.id,
-            channelName: fallback.name || 'general',
-            type: 'channel',
-            status: 'pending',
-            createdAt: null as any
-          };
-          pendingInvitesByUid = { ...pendingInvitesByUid, [toUid]: inviteStub };
-          pendingInvites = [...pendingInvites.filter((invite) => invite.toUid !== toUid), inviteStub];
-          console.debug('[ServerSettings] sendServerInvite ok', { toUid, res });
-        }
+        return { ok: false };
       }
-      (window as any)?.navigator?.vibrate?.(10);
-  } catch (e) {
-    console.error('[ServerSettings] inviteUser error', e);
-    inviteError = (e as Error)?.message ?? 'Failed to send invite.';
-  }
-  inviteLoading = { ...inviteLoading, [toUid]: false };
-}
 
-async function cancelInvite(invite: ServerInvite) {
+      if (res.alreadyExisted) {
+        if (!silent) {
+          inviteError = 'User already has a pending invite.';
+          console.debug('[ServerSettings] sendServerInvite already existed', { toUid, res });
+        }
+        return { ok: false };
+      }
+
+      const inviteId = res.inviteId ?? `${serverId!}__${toUid}`;
+      const inviteStub: ServerInvite = {
+        id: inviteId,
+        toUid,
+        fromUid,
+        fromDisplayName,
+        serverId: serverId!,
+        serverName: serverName || serverId!,
+        serverIcon: serverIcon && serverIcon.trim().length ? serverIcon : null,
+        channelId: fallback.id,
+        channelName: fallback.name || 'general',
+        type: 'channel',
+        status: 'pending',
+        createdAt: null as any
+      };
+      pendingInvitesByUid = { ...pendingInvitesByUid, [toUid]: inviteStub };
+      pendingInvites = [...pendingInvites.filter((invite) => invite.toUid !== toUid), inviteStub];
+      console.debug('[ServerSettings] sendServerInvite ok', { toUid, res });
+      if (!silent) (window as any)?.navigator?.vibrate?.(10);
+      return { ok: true };
+    } catch (e) {
+      console.error('[ServerSettings] inviteUser error', e);
+      if (!silent) inviteError = (e as Error)?.message ?? 'Failed to send invite.';
+      return { ok: false };
+    } finally {
+      if (!silent) {
+        inviteLoading = { ...inviteLoading, [toUid]: false };
+      }
+    }
+
+  }
+
+  async function cancelInvite(invite: ServerInvite) {
   if (!(isOwner || isAdmin)) return;
   const toUid = invite?.toUid;
   if (!toUid || !serverId) return;
@@ -1638,7 +1799,7 @@ async function clearPendingInvites() {
                 type="button"
                 class="btn btn-ghost"
                 disabled={!inviteAutomationEnabled || inviteAutomationBusy}
-                onclick={sendAutoInvitesForDomains}
+                onclick={() => sendAutoInvitesForDomains()}
               >
                 {inviteAutomationBusy ? 'Syncing...' : 'Run domain sync'}
               </button>
@@ -3206,6 +3367,7 @@ async function clearPendingInvites() {
     }
   }
 </style>
+
 
 
 
