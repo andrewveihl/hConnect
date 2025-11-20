@@ -34,6 +34,8 @@ type DMUploadParams = BaseParams &
     threadId: string;
   };
 
+type ProfileUploadParams = BaseParams & UploadCallbacks;
+
 const ROOT = 'chat-uploads';
 
 function safeSegment(value: string, fallback: string) {
@@ -179,5 +181,13 @@ export async function uploadChannelFile(params: ChannelUploadParams): Promise<Up
 
 export async function uploadDMFile(params: DMUploadParams): Promise<UploadedChatFile> {
   const path = buildPath([ROOT, 'dms', params.threadId, 'attachments'], params.file?.name || 'file');
+  return uploadToPath(path, params.file, params.uid, params);
+}
+
+export async function uploadProfileAvatar(params: ProfileUploadParams): Promise<UploadedChatFile> {
+  const path = buildPath(
+    ['profile-uploads', params.uid, 'avatars'],
+    params.file?.name || 'avatar.png'
+  );
   return uploadToPath(path, params.file, params.uid, params);
 }

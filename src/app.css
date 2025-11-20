@@ -1361,22 +1361,22 @@ body {
   .chat-input-region {
     bottom: calc(
       var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) +
-      max(var(--mobile-dock-height, 0px) - 0.75rem, 0px)
+      max(var(--mobile-dock-height, 0px) - 0.35rem, 0px)
     );
     box-shadow: 0 -12px 28px rgba(5, 9, 16, 0.45);
   }
 
-  .message-scroll-region .chat-scroll {
-    --chat-scroll-padding: calc(
-      max(
-        var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
-        0px
-      ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
-      max(var(--mobile-dock-height, 0px) - 0.75rem, 0px) +
-      var(--chat-keyboard-offset, 0px) + 0.6rem
-    );
+    .message-scroll-region .chat-scroll {
+      --chat-scroll-padding: calc(
+        max(
+          var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
+          0px
+        ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
+        max(calc(var(--mobile-dock-height, 0px) - 1.2rem), 0px) +
+        var(--chat-keyboard-offset, 0px) + 0.15rem
+      );
+    }
   }
-}
 
 .mobile-panel__header {
   display: flex;

@@ -141,6 +141,7 @@
         {messages}
         users={profiles}
         {currentUserId}
+        replyTargetId={replyTarget?.messageId ?? null}
         threadStats={threadStats}
         {pendingUploads}
         scrollToBottomSignal={combinedScrollSignal}

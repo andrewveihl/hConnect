@@ -3,11 +3,11 @@ import { run } from 'svelte/legacy';
 
 import { onMount } from 'svelte';
 import { get } from 'svelte/store';
-import { goto } from '$app/navigation';
 import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
 import { db } from '$lib/firestore';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { uploadProfileAvatar } from '$lib/firebase/storage';
 import {
     enablePushForUser,
     requestNotificationPermission,
@@ -21,6 +21,7 @@ import {
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 import InvitePanel from '$lib/components/app/InvitePanel.svelte';
+import LeftPane from '$lib/components/app/LeftPane.svelte';
 
   interface Props {
     serverId?: string | null;
@@ -29,8 +30,6 @@ import InvitePanel from '$lib/components/app/InvitePanel.svelte';
   let { serverId = null }: Props = $props();
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const FIRESTORE_IMAGE_LIMIT = 900 * 1024; // Keep data URLs safely under 1 MB Firestore limit
-const AVATAR_MAX_DIMENSION = 512;
 
 function pickString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -99,6 +98,15 @@ let loading = $state(true);
 let loadedUid: string | null = $state(null);
 let avatarFileInput: HTMLInputElement | null = $state(null);
 let avatarError: string | null = $state(null);
+let avatarUploadBusy = $state(false);
+let avatarUploadProgress = $state(0);
+
+  const AUTOSAVE_DELAY = 900;
+  type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+  let saveState: SaveState = $state('idle');
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let saveInFlight = false;
+  let saveQueued = false;
 
   type NotifPrefs = {
     desktopEnabled: boolean;
@@ -248,7 +256,60 @@ let notif = $state<NotifPrefs>({
       'settings.theme': themeMode,
       'settings.aiAssist': aiAssist
     });
-    alert('Saved.');
+  }
+
+  function queueAutoSave() {
+    if (!$user?.uid) return;
+    if (saveState !== 'saving') {
+      saveState = 'pending';
+    }
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer);
+    }
+    const run = () => {
+      autosaveTimer = null;
+      void triggerAutoSave();
+    };
+    if (typeof window === 'undefined') {
+      run();
+      return;
+    }
+    autosaveTimer = setTimeout(run, AUTOSAVE_DELAY);
+  }
+
+  function flushAutoSave() {
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+    }
+    return triggerAutoSave();
+  }
+
+  async function triggerAutoSave() {
+    if (saveInFlight) {
+      saveQueued = true;
+      return;
+    }
+    saveInFlight = true;
+    saveState = 'saving';
+    try {
+      await save();
+      saveState = 'saved';
+      setTimeout(() => {
+        if (saveState === 'saved') {
+          saveState = 'idle';
+        }
+      }, 2000);
+    } catch (error) {
+      console.error(error);
+      saveState = 'error';
+    } finally {
+      saveInFlight = false;
+      if (saveQueued) {
+        saveQueued = false;
+        queueAutoSave();
+      }
+    }
   }
 
   function useGooglePhoto() {
@@ -259,49 +320,12 @@ let notif = $state<NotifPrefs>({
       authPhotoURL = provider;
       photoURL = '';
       avatarError = null;
+      queueAutoSave();
     }
   }
 
   function triggerAvatarUpload() {
     avatarFileInput?.click();
-  }
-
-  function dataUrlBytes(dataUrl: string): number {
-    const base64 = dataUrl.split(',')[1] ?? '';
-    return Math.ceil((base64.length * 3) / 4);
-  }
-
-  async function compressImageFile(file: File, maxDimension: number): Promise<string> {
-    const objectUrl = URL.createObjectURL(file);
-    try {
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = reject;
-        image.src = objectUrl;
-      });
-
-      const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.floor(img.width * scale));
-      canvas.height = Math.max(1, Math.floor(img.height * scale));
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Canvas unavailable');
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      let quality = 0.92;
-      let result = canvas.toDataURL('image/webp', quality);
-      while (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT && quality > 0.4) {
-        quality -= 0.1;
-        result = canvas.toDataURL('image/webp', quality);
-      }
-      if (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT) {
-        throw new Error('Image is still too large after compression.');
-      }
-      return result;
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
   }
 
   async function onAvatarFileSelected(event: Event) {
@@ -318,14 +342,31 @@ let notif = $state<NotifPrefs>({
       input.value = '';
       return;
     }
-    try {
-      const processed = await compressImageFile(file, AVATAR_MAX_DIMENSION);
-      photoURL = processed;
-      avatarError = null;
-    } catch (error: any) {
-      avatarError = error?.message ?? 'Could not process the selected file.';
+    if (!$user?.uid) {
+      avatarError = 'Sign in to upload a profile photo.';
+      input.value = '';
+      return;
     }
-    input.value = '';
+    avatarUploadBusy = true;
+    avatarUploadProgress = 0;
+    try {
+      const result = await uploadProfileAvatar({
+        file,
+        uid: $user.uid,
+        onProgress: (progress) => {
+          avatarUploadProgress = progress;
+        }
+      });
+      photoURL = result.url;
+      avatarError = null;
+      queueAutoSave();
+    } catch (error: any) {
+      avatarError = error?.message ?? 'Could not upload the selected file.';
+    } finally {
+      avatarUploadBusy = false;
+      avatarUploadProgress = 0;
+      input.value = '';
+    }
   }
 
   async function enableDesktopNotifications() {
@@ -347,9 +388,9 @@ let notif = $state<NotifPrefs>({
     const target = event.currentTarget as HTMLInputElement | null;
     if (!target) return;
     const desired = target.checked;
+    const previous = notif.desktopEnabled;
     if (desired) {
       desktopToggleBusy = true;
-      const previous = notif.desktopEnabled;
       await enableDesktopNotifications();
       desktopToggleBusy = false;
       if (!notif.desktopEnabled) {
@@ -357,6 +398,9 @@ let notif = $state<NotifPrefs>({
       }
     } else {
       notif.desktopEnabled = false;
+    }
+    if (notif.desktopEnabled !== previous) {
+      queueAutoSave();
     }
   }
 
@@ -493,10 +537,10 @@ let notif = $state<NotifPrefs>({
       appendPushDebug({
         tag: 'enable',
         message: 'Push token obtained.',
-        details: { tokenPreview: `${token.slice(0, 10)}…${token.slice(-6)}` }
+        details: { tokenPreview: `${token.slice(0, 10)}...${token.slice(-6)}` }
       });
       notif.pushEnabled = true;
-      await save();
+      await flushAutoSave();
       appendPushDebug({
         tag: 'enable',
         message: 'Notification settings saved with pushEnabled=true.'
@@ -539,6 +583,7 @@ let notif = $state<NotifPrefs>({
         tag: 'enable',
         message: 'Push disabled for this device.'
       });
+      queueAutoSave();
     } catch (error) {
       appendPushDebug({
         tag: 'enable',
@@ -854,34 +899,37 @@ let enablePushLoading = $state(false);
     }
   }
 
-  function exitSettings() {
-    if (typeof window !== 'undefined' && window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-    if (serverId) {
-      void goto(`/servers/${serverId}`);
-    } else {
-      void goto('/');
-    }
-  }
 </script>
 
-<div class="settings-page app-bg text-primary">
-  <div class="settings-shell">
+<div class="settings-stage app-bg text-primary">
+  <aside class="settings-left-pane">
+    <LeftPane activeServerId={serverId ?? null} />
+  </aside>
+
+  <div class="settings-page">
+    <div class="settings-shell">
     <header class="settings-bar">
       <div class="settings-bar__row">
         <div class="settings-bar__left">
-          <button type="button" class="settings-back" onclick={exitSettings} aria-label="Back to app">
-            <i class="bx bx-chevron-left" aria-hidden="true"></i>
-            <span>Back</span>
-          </button>
-          <div>
-            <h1 class="settings-title">Account settings</h1>
-            <p class="settings-subtitle">Manage your profile, appearance, and notifications.</p>
-          </div>
+          <p class="settings-eyebrow">Account</p>
+          <h1 class="settings-title">Settings</h1>
         </div>
-        <SignOutButton />
+        <div class="settings-bar__actions">
+          {#if saveState !== 'idle'}
+            <span class={`save-indicator save-indicator--${saveState}`}>
+              {saveState === 'pending'
+                ? 'Pending save'
+                : saveState === 'saving'
+                  ? 'Saving…'
+                  : saveState === 'saved'
+                    ? 'Saved'
+                    : saveState === 'error'
+                      ? 'Save failed'
+                      : ''}
+            </span>
+          {/if}
+          <SignOutButton />
+        </div>
       </div>
     </header>
 
@@ -892,10 +940,9 @@ let enablePushLoading = $state(false);
         <div class="settings-placeholder">Sign in to manage your settings.</div>
       {:else}
         <div class="settings-grid">
-          <section class="settings-card settings-card--accent settings-card--profile">
+          <section class="settings-card settings-card--profile">
             <header>
               <h2>Profile</h2>
-              <p>These details appear to people you add or invite.</p>
             </header>
 
             <div class="settings-profile">
@@ -907,13 +954,25 @@ let enablePushLoading = $state(false);
                 {/if}
               </div>
               <div class="settings-avatar__actions">
-                <div class="settings-chip-row">
-                  <button class="settings-chip" onclick={useGooglePhoto} disabled={!providerPhotoAvailable}>
-                    Use Google/Apple photo
+                <div class="profile-upload">
+                  <button
+                    type="button"
+                    class="btn btn-secondary"
+                    onclick={triggerAvatarUpload}
+                    disabled={avatarUploadBusy}
+                  >
+                    {avatarUploadBusy ? 'Uploading…' : 'Upload photo'}
                   </button>
-                  <button type="button" class="settings-chip settings-chip--primary" onclick={triggerAvatarUpload}>
-                    Upload photo
-                  </button>
+                  {#if providerPhotoAvailable}
+                    <button
+                      type="button"
+                      class="btn btn-ghost"
+                      onclick={useGooglePhoto}
+                      disabled={avatarUploadBusy}
+                    >
+                      Use linked photo
+                    </button>
+                  {/if}
                 </div>
                 <input
                   class="hidden"
@@ -922,50 +981,34 @@ let enablePushLoading = $state(false);
                   bind:this={avatarFileInput}
                   onchange={onAvatarFileSelected}
                 />
+                {#if avatarUploadBusy}
+                  <p class="settings-hint">
+                    Uploading {Math.round(avatarUploadProgress * 100)}%
+                  </p>
+                {/if}
                 {#if avatarError}
                   <p class="settings-hint settings-hint--error">{avatarError}</p>
                 {/if}
-                {#if !pickString(photoURL) && previewPhotoURL}
-                  <p class="settings-hint">Currently using your Google or Apple profile photo.</p>
-                {/if}
-                {#if !providerPhotoAvailable}
-                  <p class="settings-hint">Link Google or Apple to enable the fallback option.</p>
-                {/if}
-                <p class="settings-hint">JPG, PNG, GIF up to 8&nbsp;MB. Larger images are compressed automatically.</p>
               </div>
             </div>
 
-            <label class="settings-field">
+            <label class="settings-field settings-field--name">
               <span>Display name</span>
-              <input class="input" bind:value={displayName} />
+              <input class="input" bind:value={displayName} maxlength={32} oninput={queueAutoSave} />
             </label>
 
-            <label class="settings-field settings-field--inline">
-              <span>Avatar URL</span>
-              <input
-                class="input input--compact"
-                bind:value={photoURL}
-                placeholder="https://example.com/avatar.png"
-                maxlength="240"
-              />
-            </label>
-
-            <footer class="settings-actions">
-              <button class="btn btn-primary" onclick={save}>Save profile</button>
-            </footer>
           </section>
 
           <section class="settings-card settings-card--notifications">
             <header>
               <h2>Notifications</h2>
-              <p>Control when hConnect taps you on the shoulder.</p>
             </header>
 
             <div class="settings-notif-options">
               <article class="settings-notif-option">
                 <div class="settings-notif-option__body">
-                  <h3>Push notifications</h3>
-                  <p>Receive updates even when the app is closed. Works on Chrome, Edge, and iOS Home Screen apps.</p>
+                  <h3>Push</h3>
+                  <p>Mobile and background alerts.</p>
                 </div>
                 <div class="settings-notif-option__actions">
                   <label class="settings-toggle">
@@ -988,7 +1031,7 @@ let enablePushLoading = $state(false);
               <article class="settings-notif-option">
                 <div class="settings-notif-option__body">
                   <h3>Desktop banners</h3>
-                  <p>Let this browser show native alerts whenever new activity lands.</p>
+                  <p>Native browser notifications.</p>
                 </div>
                 <div class="settings-notif-option__actions">
                   <label class="settings-toggle">
@@ -1008,10 +1051,6 @@ let enablePushLoading = $state(false);
                 </div>
               </article>
             </div>
-
-            <p class="settings-hint">
-              Need iOS alerts? Open hConnect in Safari, tap "Add to Home Screen," launch from that icon, then enable push above.
-            </p>
 
             {#if $showNotificationDebugTools}
               <div class="settings-notif-debug" aria-live="polite">
@@ -1102,48 +1141,31 @@ let enablePushLoading = $state(false);
               </div>
             {/if}
 
-            <p class="settings-hint">
-              Want per-server controls? Tell us what would help and we'll line it up next.
-            </p>
-
-            <footer class="settings-actions settings-actions--inline">
-              <button class="btn btn-primary" onclick={save}>Save notification settings</button>
-            </footer>
           </section>
 
           <section class="settings-card settings-card--ai">
-            <header>
-              <h2>AI typing assist</h2>
-              <p>Let OpenAI draft starter replies, next words, and mobile quick-type chips.</p>
-            </header>
-            <div class="settings-ai-toggle">
+            <div class="settings-ai-row">
+              <div>
+                <h2>AI assist</h2>
+                <p>Inline suggestions while typing.</p>
+              </div>
               <label class="settings-switch">
                 <input
                   type="checkbox"
                   bind:checked={aiAssist.enabled}
                   aria-label="Enable AI typing assistant"
+                  onchange={queueAutoSave}
                 />
                 <span class="settings-switch__track">
                   <span class="settings-switch__thumb"></span>
                 </span>
               </label>
-              <div class="settings-ai-copy">
-                <h3>Smart compose</h3>
-                <p>
-                  On desktop, replying to a message offers an OpenAI suggestion and inline next-word predictions.
-                  Mobile keyboards show three quick-type options inspired by Apple's autofill bar. Disable it anytime if you prefer manual typing.
-                </p>
-              </div>
             </div>
-            <footer class="settings-actions settings-actions--inline">
-              <button class="btn btn-primary" onclick={save}>Save AI settings</button>
-            </footer>
           </section>
 
           <section class="settings-card settings-card--appearance">
             <header>
               <h2>Appearance</h2>
-              <p>Pick the theme that feels right. Changes apply instantly.</p>
             </header>
             <div class="settings-theme-grid">
               {#each themeChoices as choice}
@@ -1163,7 +1185,6 @@ let enablePushLoading = $state(false);
           <section class="settings-card settings-card--invite">
             <header>
               <h2>Invites</h2>
-              <p>Review new invites and share access when you need to loop others in.</p>
             </header>
             <InvitePanel {serverId} embedded />
           </section>
@@ -1172,27 +1193,48 @@ let enablePushLoading = $state(false);
     </main>
   </div>
 </div>
+</div>
 
 <style>
-  .settings-page {
+  .settings-stage {
+    display: flex;
     min-height: 100dvh;
     background: var(--surface-root);
+    color: var(--text-100);
+    overflow: hidden;
+  }
+
+  .settings-left-pane {
+    display: none;
+    flex-shrink: 0;
+    min-height: 100dvh;
+  }
+
+  @media (min-width: 768px) {
+    .settings-left-pane {
+      display: flex;
+    }
+  }
+
+  .settings-page {
+    flex: 1 1 auto;
+    min-height: 100dvh;
+    height: 100dvh;
+    background: var(--surface-root);
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .settings-shell {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
-    padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) clamp(1rem, 4vw, 1.75rem) 1.75rem;
+    gap: 1.5rem;
+    padding: calc(env(safe-area-inset-top, 0px) + 1.5rem) clamp(1rem, 6vw, 3rem) 2rem;
     min-height: 100dvh;
-    max-height: 100dvh;
-    overflow-y: auto;
-    overscroll-behavior-y: contain;
-    scroll-padding-bottom: calc(var(--mobile-dock-height, 0px) + 2rem);
-    max-width: 960px;
+    width: min(1200px, 100%);
     margin: 0 auto;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
   }
 
   .settings-bar {
@@ -1216,29 +1258,48 @@ let enablePushLoading = $state(false);
     gap: 0.75rem;
   }
 
-  .settings-back {
-    display: none;
+  .settings-bar__actions {
+    display: flex;
     align-items: center;
-    gap: 0.35rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .settings-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 0.75rem;
+    color: var(--text-50);
+    margin: 0;
+  }
+
+  .save-indicator {
+    font-size: 0.8rem;
+    padding: 0.3rem 0.75rem;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: transparent;
-    color: var(--text-70);
-    padding: 0.35rem 0.95rem;
-    font-weight: 600;
-    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+    background: color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+    color: var(--text-80);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
   }
 
-  .settings-back:hover,
-  .settings-back:focus-visible {
-    color: var(--color-text-primary);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
-    outline: none;
+  .save-indicator--saving,
+  .save-indicator--pending {
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 90%, var(--color-text-primary));
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
   }
 
-  .settings-back i {
-    font-size: 1.15rem;
+  .save-indicator--saved {
+    background: color-mix(in srgb, var(--color-success, #22c55e) 20%, transparent);
+    color: color-mix(in srgb, var(--color-success, #22c55e) 85%, white);
+    border-color: color-mix(in srgb, var(--color-success, #22c55e) 45%, transparent);
+  }
+
+  .save-indicator--error {
+    background: color-mix(in srgb, var(--color-danger, #f87171) 22%, transparent);
+    color: color-mix(in srgb, var(--color-danger, #f87171) 90%, white);
+    border-color: color-mix(in srgb, var(--color-danger, #f87171) 55%, transparent);
   }
 
   .settings-shell::-webkit-scrollbar {
@@ -1248,12 +1309,6 @@ let enablePushLoading = $state(false);
   .settings-title {
     font-size: 1.75rem;
     font-weight: 600;
-  }
-
-  .settings-subtitle {
-    margin-top: 0.35rem;
-    color: var(--text-60);
-    font-size: 0.95rem;
   }
 
   .settings-content {
@@ -1275,37 +1330,22 @@ let enablePushLoading = $state(false);
   }
 
   .settings-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
+    display: grid;
+    gap: 1.25rem;
     width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    align-items: stretch;
   }
 
-  .settings-card--profile {
-    grid-area: profile;
-  }
+  @media (min-width: 1024px) {
+    .settings-card--profile,
+    .settings-card--notifications {
+      grid-column: span 2;
+    }
 
-  .settings-card--notifications {
-    grid-area: notifications;
-  }
-
-  .settings-card--ai {
-    grid-area: ai;
-  }
-
-  .settings-card--appearance {
-    grid-area: appearance;
-  }
-
-  .settings-card--invite {
-    grid-area: invite;
-  }
-
-  .settings-ai-toggle {
-    display: flex;
-    flex-direction: column;
-    gap: 0.9rem;
-    align-items: flex-start;
+    .settings-card--appearance {
+      grid-column: span 2;
+    }
   }
 
   .settings-switch {
@@ -1350,40 +1390,35 @@ let enablePushLoading = $state(false);
     background: var(--color-accent);
   }
 
-  .settings-ai-copy h3 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
+  .settings-ai-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
   }
 
-  .settings-ai-copy p {
+  .settings-ai-row p {
     margin: 0.25rem 0 0;
     color: var(--text-60);
-    font-size: 0.88rem;
-    line-height: 1.35;
+    font-size: 0.85rem;
   }
 
   .settings-card {
-    background: color-mix(in srgb, var(--surface-root) 96%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 92%, transparent);
     border-radius: var(--radius-lg);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
     box-shadow: none;
-    padding: 1.15rem;
-    display: grid;
+    padding: 1.2rem 1.3rem;
+    display: flex;
+    flex-direction: column;
     gap: 0.85rem;
     min-width: 0;
   }
 
   .settings-card header h2 {
-    font-size: 1.2rem;
+    font-size: 1.15rem;
     font-weight: 600;
-    margin-bottom: 0.35rem;
-  }
-
-  .settings-card header p {
     margin: 0;
-    color: var(--text-60);
-    font-size: 0.9rem;
   }
 
   .settings-card--accent::after {
@@ -1433,6 +1468,13 @@ let enablePushLoading = $state(false);
   .settings-avatar__actions {
     display: grid;
     gap: 0.6rem;
+    align-items: flex-start;
+  }
+
+  .profile-upload {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 
   .settings-chip-row {
@@ -1490,6 +1532,10 @@ let enablePushLoading = $state(false);
 
   .settings-field--inline {
     max-width: 28rem;
+  }
+
+  .settings-field--name {
+    max-width: 16rem;
   }
 
   .settings-field--url {
@@ -1843,10 +1889,6 @@ let enablePushLoading = $state(false);
   }
 
   @media (min-width: 768px) {
-    .settings-back {
-      display: inline-flex;
-    }
-
     .settings-bar__row {
       flex-direction: row;
       align-items: center;

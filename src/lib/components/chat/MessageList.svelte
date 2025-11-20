@@ -80,6 +80,7 @@ const dispatch = createEventDispatcher();
       }
     >;
     hideReplyPreview?: boolean;
+    replyTargetId?: string | null;
   }
 
   let {
@@ -89,7 +90,8 @@ const dispatch = createEventDispatcher();
     scrollToBottomSignal = 0,
     pendingUploads = [],
     threadStats = {},
-    hideReplyPreview = false
+    hideReplyPreview = false,
+    replyTargetId = null
   }: Props = $props();
 
 let scroller = $state<HTMLDivElement | null>(null);
@@ -485,7 +487,8 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   const LONG_PRESS_MOVE_THRESHOLD = 10;
   const SWIPE_INPUT_BLUR_THRESHOLD = 18;
 
-  let hasHoverSupport = $state(true);
+let hasHoverSupport = $state(true);
+let isMobileViewport = $state(false);
   let hoveredMessageId: string | null = $state(null);
   let touchActionMessageId: string | null = $state(null);
   let hoveredMinuteKey: string | null = $state(null);
@@ -545,14 +548,14 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     }
   });
 
-  onMount(() => {
+onMount(() => {
     if (typeof window !== 'undefined') {
-      hasHoverSupport = window.matchMedia('(hover: hover)').matches;
+      const updateViewportFlags = () => {
+        hasHoverSupport = window.matchMedia('(hover: hover)').matches;
+        isMobileViewport = window.matchMedia('(max-width: 640px)').matches;
+      };
+      updateViewportFlags();
       const handleResize = () => {
-        if (reactionMenuFor) {
-          void positionReactionMenu();
-          if (showReactionPicker) void positionReactionPicker();
-        }
       };
       const handleGlobalPointerDown = (event: PointerEvent) => {
         if (!reactionMenuFor) return;
@@ -902,6 +905,24 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     formDrafts[m.id] = Array(m.form.questions.length).fill('');
   }
 
+  function bubblePlainText(message: any): string {
+    if (!message) return '';
+    const text = (message as any).text ?? (message as any).content ?? '';
+    return typeof text === 'string' ? text : '';
+  }
+
+  const emojiOnlyRegex =
+    /^[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAD6}\u{1F900}-\u{1F9FF}\u{2600}-\u{27BF}\u{1F004}\u{1F0CF}\u{FE0F}\u{200D}\s]+$/u;
+
+  function shouldCenterBubble(message: any) {
+    const text = bubblePlainText(message).trim();
+    if (!text) return false;
+    if (emojiOnlyRegex.test(text)) return true;
+    const words = text.split(/\s+/).filter(Boolean);
+    const charCount = text.replace(/\s+/g, '').length;
+    return words.length <= 2 && charCount <= 14;
+  }
+
   const formInputId = (mId: string, idx: number) => `form-${mId}-${idx}`;
 </script>
 
@@ -1215,7 +1236,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     align-items: flex-end;
     align-self: flex-end;
   }
-
+  
   .message-payload {
     position: relative;
     display: inline-flex;
@@ -1352,15 +1373,20 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   .message-bubble {
     position: relative;
     display: inline-block;
-    max-width: min(640px, 100%);
-    padding: 0.65rem 1rem;
-    border-radius: 1.15rem;
-    border: 1px solid transparent;
+    width: fit-content;
+    max-width: min(100%, 700px);
+    padding: 0.8rem 1.35rem;
+    margin: 0.08rem 0;
+    border-radius: 1.35rem;
+    border: 0;
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.5;
+    line-height: 1.45;
     text-align: left;
-    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.22);
+    font-size: clamp(1rem, 1.3vw, 1.18rem);
+    box-shadow: 0 12px 34px rgba(9, 12, 16, 0.25);
+    background-clip: padding-box;
+    isolation: isolate;
     transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
   }
 
@@ -1378,57 +1404,71 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   .message-bubble--mine {
     background: var(--chat-bubble-self-bg);
     color: var(--chat-bubble-self-text);
-    border-color: var(--chat-bubble-self-border);
   }
 
   .message-bubble--other {
     background: var(--chat-bubble-other-bg);
     color: var(--chat-bubble-other-text);
-    border-color: var(--chat-bubble-other-border);
   }
 
   .message-bubble--first-other::before,
-  .message-bubble--first-other::after {
+  .message-bubble--first-mine::before {
     content: '';
     position: absolute;
-    width: 0.9rem;
-    height: 0.9rem;
-    bottom: 0.2rem;
-    left: -0.45rem;
-    border-bottom-right-radius: 1.2rem;
-    transform: rotate(45deg);
+    bottom: 0.1rem;
+    width: 0.95rem;
+    height: 0.95rem;
+    pointer-events: none;
+    border-radius: 1rem;
   }
 
   .message-bubble--first-other::before {
-    background: var(--chat-bubble-other-border);
-    left: -0.52rem;
-    bottom: 0.16rem;
-  }
-
-  .message-bubble--first-other::after {
+    left: -0.45rem;
     background: var(--chat-bubble-other-bg);
-  }
-
-  .message-bubble--first-mine::before,
-  .message-bubble--first-mine::after {
-    content: '';
-    position: absolute;
-    width: 0.9rem;
-    height: 0.9rem;
-    bottom: 0.2rem;
-    right: -0.45rem;
-    border-bottom-left-radius: 1.2rem;
-    transform: rotate(-45deg);
+    clip-path: polygon(0% 100%, 100% 0%, 100% 100%);
+    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.2);
   }
 
   .message-bubble--first-mine::before {
-    background: var(--chat-bubble-self-border);
-    right: -0.52rem;
-    bottom: 0.16rem;
+    right: -0.45rem;
+    background: var(--chat-bubble-self-bg);
+    clip-path: polygon(100% 100%, 0% 0%, 0% 100%);
+    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.2);
   }
 
+  .message-bubble--first-other::after,
   .message-bubble--first-mine::after {
-    background: var(--chat-bubble-self-bg);
+    content: none;
+  }
+
+  .message-bubble--compact {
+    text-align: center;
+    padding-left: 1.4rem;
+    padding-right: 1.4rem;
+    font-size: clamp(1.05rem, 1.3vw, 1.22rem);
+  }
+
+  @media (max-width: 800px) {
+    .message-bubble {
+      max-width: 100%;
+      padding: 0.7rem 1.1rem;
+      font-size: 1.08rem;
+      line-height: 1.4;
+    }
+
+    .message-bubble--compact {
+      font-size: 1.2rem;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .message-layout--continued {
+      padding-left: calc(1.75rem + 0.45rem);
+    }
+
+    .message-layout--mine.message-layout--continued {
+      padding-right: calc(1.75rem + 0.45rem);
+    }
   }
 
   .chat-mention {
@@ -1481,8 +1521,9 @@ const SPECIAL_MENTION_LOOKUP = new Map(
 
   .chat-gif {
     display: block;
-    max-width: min(440px, 100%);
-    border-radius: calc(var(--radius-sm) + 0.2rem);
+    width: 100%;
+    max-width: min(2000px, 100%);
+    border-radius: calc(var(--radius-lg) + 0.2rem);
     border: 1px solid var(--chat-bubble-other-border);
     overflow: hidden;
   }
@@ -1492,7 +1533,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   }
 
   .chat-file {
-    max-width: min(520px, 100%);
+    max-width: min(1400px, 100%);
   }
 
   .chat-file__card {
@@ -1655,18 +1696,29 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   }
 
   .reaction-row {
-    position: relative;
+    position: absolute;
+    top: calc(100% - 0.55rem);
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    min-height: 0;
-    padding-right: 0;
+    pointer-events: none;
+  }
+
+  .reaction-row--other {
+    right: 0;
+    justify-content: flex-end;
+  }
+
+  .reaction-row--mine {
+    left: 0;
+    justify-content: flex-start;
   }
 
   .reaction-list {
     display: inline-flex;
     flex-wrap: wrap;
     gap: 0.2rem;
+    pointer-events: auto;
   }
 
   .reaction-chip {
@@ -1882,6 +1934,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
+  position: relative;
 }
 
 .message-thread-stack--mine {
@@ -1896,6 +1949,10 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   margin-left: 0;
   margin-right: clamp(1.5rem, 4vw, 2.8rem);
 }
+
+  .message-thread-stack--has-reactions {
+    padding-bottom: 0.85rem;
+  }
 
 .thread-preview--indented {
   margin-left: clamp(1.5rem, 4vw, 3rem);
@@ -2102,7 +2159,6 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   background: transparent;
   border: none;
   color: inherit;
-  align-self: flex-end;
   font-size: 1.5rem;
   padding: 0.25rem;
   border-radius: 999px;
@@ -2135,11 +2191,37 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   border-radius: 0.5rem;
 }
 
-.image-preview-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
+  .image-preview-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .image-preview-header {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .image-preview-download {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: inherit;
+    transition: background 150ms ease, border 150ms ease;
+  }
+
+  .image-preview-download:hover,
+  .image-preview-download:focus-visible {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.6);
+    outline: none;
+  }
 
 .image-preview-name {
   font-weight: 600;
@@ -2188,21 +2270,32 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-@media (max-width: 640px) {
-  .image-preview-panel {
-    height: auto;
-    max-height: calc(100vh - 1rem);
-  }
+  @media (max-width: 640px) {
+    .image-preview-panel {
+      height: auto;
+      max-height: calc(100vh - 0.75rem);
+      padding: 0.55rem 0.75rem 0.85rem;
+      gap: 0.6rem;
+    }
 
-  .image-preview-actions {
-    flex-direction: column;
-  }
+    .image-preview-close {
+      position: relative;
+      top: 0;
+      right: 0;
+      align-self: flex-end;
+      padding: 0.15rem;
+    }
 
-  .image-preview-button {
-    width: 100%;
-    flex: none;
+    .image-preview-actions {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .image-preview-button {
+      width: 100%;
+      flex: none;
+    }
   }
-}
 
 </style>
 
@@ -2230,6 +2323,10 @@ const SPECIAL_MENTION_LOOKUP = new Map(
       {@const mine = !isSystem && isMine(m)}
       {@const continued = !isSystem && i > 0 && sameBlock(messages[i - 1], m)}
       {@const firstInBlock = !continued}
+      {@const nextInBlock = !isSystem && i < messages.length - 1 && sameBlock(m, messages[i + 1])}
+      {@const lastInBlock = !isSystem && !nextInBlock}
+      {@const isReplyTarget = !isSystem && replyTargetId && (m?.id === replyTargetId || (m as any)?.messageId === replyTargetId)}
+      {@const showBubbleTail = lastInBlock || Boolean(isReplyTarget)}
       {@const reactions = isSystem ? [] : reactionsFor(m)}
       {@const hasReactions = reactions.length > 0}
       {@const sameMinuteAsPrev = !isSystem && i > 0 && sameMinute(messages[i - 1], m)}
@@ -2250,7 +2347,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
         <div class="flex w-full justify-center" data-message-id={m.id}>
           <div
             class={`message-block w-full max-w-3xl message-block--system ${minuteHovered ? 'is-minute-hovered' : ''}`}
-            style={`margin-top: ${(continued ? 0.1 : 0.6)}rem;`}
+            style={`margin-top: ${(continued ? 0 : 0.15)}rem;`}
           >
             <div class="system-message">
               <span>{(m as any).text ?? ''}</span>
@@ -2272,7 +2369,7 @@ const SPECIAL_MENTION_LOOKUP = new Map(
       >
         <div
           class={`message-block w-full max-w-3xl ${mine ? 'message-block--mine' : 'message-block--other'} ${minuteHovered ? 'is-minute-hovered' : ''}`}
-          style={`margin-top: ${(continued ? 0.1 : 0.6)}rem;`}
+          style={`margin-top: ${(continued ? 0 : 0.15)}rem;`}
         >
           {#if firstInBlock}
             <div class={`message-heading-row ${mine ? 'message-heading-row--mine' : ''}`}>
@@ -2373,10 +2470,13 @@ const SPECIAL_MENTION_LOOKUP = new Map(
                 <div
                   class={`message-thread-stack ${mine ? 'message-thread-stack--mine' : ''} ${
                     replyRef ? 'message-thread-stack--indented' : ''
-                  }`}
+                  } ${hasReactions ? 'message-thread-stack--has-reactions' : ''}`}
                 >
                   {#if !m.type || m.type === 'text' || String(m.type) === 'normal'}
-                    <div class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${firstInBlock ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''}`}>
+                    {@const compactBubble = shouldCenterBubble(m)}
+                    <div
+                      class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${showBubbleTail ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''} ${compactBubble ? 'message-bubble--compact' : ''}`}
+                    >
                       {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                         {#if isMentionSegment(segment)}
                           {@const baseLabel = segment.data?.label ?? segment.value.replace(/^@/, '')}
@@ -2546,6 +2646,25 @@ const SPECIAL_MENTION_LOOKUP = new Map(
                       </div>
                     </div>
                   {/if}
+
+                  {#if hasReactions}
+                    <div class={`reaction-row ${mine ? 'reaction-row--mine' : 'reaction-row--other'}`}>
+                      <div class="reaction-list">
+                        {#each reactions as reaction (reaction.key)}
+                          <button
+                            type="button"
+                            class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
+                            onclick={() => toggleReaction(m.id, reaction.emoji)}
+                            disabled={!currentUserId}
+                            title={reaction.users.join(', ')}
+                          >
+                            <span>{reaction.emoji}</span>
+                            <span class="count">{reaction.count}</span>
+                          </button>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
                 </div>
                 {#if !isSystem && (m as any).createdAt && !sameMinuteAsNext}
                   <div
@@ -2557,29 +2676,6 @@ const SPECIAL_MENTION_LOOKUP = new Map(
                 {/if}
               </div>
 
-                {#if !isSystem && (reactions.length || currentUserId)}
-                  <div
-                    class="reaction-row"
-                    style={`margin-top: ${hasReactions ? (continued ? 0.15 : 0.4) : 0}rem;`}
-                  >
-                    <div class="reaction-list">
-                      {#each reactions as reaction (reaction.key)}
-                        {@const tooltip = reaction.users.map((uid) => displayNameForUid(uid)).filter((value) => !!value).join(', ')}
-                        <button
-                          type="button"
-                          class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
-                          onclick={() => toggleReaction(m.id, reaction.emoji)}
-                          disabled={!currentUserId}
-                          title={tooltip}
-                          aria-label={tooltip || `Reacted with ${reaction.emoji}`}
-                        >
-                          <span>{reaction.emoji}</span>
-                          <span class="count">{reaction.count}</span>
-                        </button>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
               </div>
             </div>
         </div>
@@ -2696,50 +2792,62 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   >
     <button type="button" class="image-preview-dismiss" aria-label="Close preview" onclick={closePreview}></button>
     <div class="image-preview-panel">
-      <button type="button" class="image-preview-close" aria-label="Close preview" onclick={closePreview}>
-        <i class="bx bx-x" aria-hidden="true"></i>
-      </button>
+      <div class="image-preview-header">
+        <button type="button" class="image-preview-close" aria-label="Close preview" onclick={closePreview}>
+          <i class="bx bx-x" aria-hidden="true"></i>
+        </button>
+        <a
+          class="image-preview-download"
+          href={previewAttachment.downloadUrl ?? previewAttachment.url}
+          download={previewAttachment.name ?? undefined}
+          aria-label="Download image"
+        >
+          <i class="bx bx-download" aria-hidden="true"></i>
+        </a>
+      </div>
       <div class="image-preview-media">
         <img src={previewAttachment.url} alt={previewAttachment.name ?? 'Image preview'} loading="eager" />
       </div>
       <div class="image-preview-meta">
-        <div class="image-preview-name">{previewAttachment.name ?? 'Image attachment'}</div>
-        <div class="image-preview-subtext">
-          {#if previewAttachment.contentType}<span>{previewAttachment.contentType}</span>{/if}
-          {#if previewAttachment.contentType && previewAttachment.sizeLabel}
-            <span aria-hidden="true">&bull;</span>
-          {/if}
-          {#if previewAttachment.sizeLabel}<span>{previewAttachment.sizeLabel}</span>{/if}
-        </div>
-        {#if previewAttachment.author || previewAttachment.timestamp}
-          <div class="image-preview-subtext image-preview-subtext--secondary">
-            {#if previewAttachment.author}<span>Shared by {previewAttachment.author}</span>{/if}
-            {#if previewAttachment.author && previewAttachment.timestamp}
+        {#if !isMobileViewport}
+          <div class="image-preview-name">{previewAttachment.name ?? 'Image attachment'}</div>
+          <div class="image-preview-subtext">
+            {#if previewAttachment.contentType}<span>{previewAttachment.contentType}</span>{/if}
+            {#if previewAttachment.contentType && previewAttachment.sizeLabel}
               <span aria-hidden="true">&bull;</span>
             {/if}
-            {#if previewAttachment.timestamp}<span>{previewAttachment.timestamp}</span>{/if}
+            {#if previewAttachment.sizeLabel}<span>{previewAttachment.sizeLabel}</span>{/if}
+          </div>
+          {#if previewAttachment.author || previewAttachment.timestamp}
+            <div class="image-preview-subtext image-preview-subtext--secondary">
+              {#if previewAttachment.author}<span>Shared by {previewAttachment.author}</span>{/if}
+              {#if previewAttachment.author && previewAttachment.timestamp}
+                <span aria-hidden="true">&bull;</span>
+              {/if}
+              {#if previewAttachment.timestamp}<span>{previewAttachment.timestamp}</span>{/if}
+            </div>
+          {/if}
+        {/if}
+        {#if !isMobileViewport}
+          <div class="image-preview-actions">
+            <a
+              class="image-preview-button accent"
+              href={previewAttachment.downloadUrl ?? previewAttachment.url}
+              download={previewAttachment.name ?? undefined}
+            >
+              Download
+            </a>
+            <a
+              class="image-preview-button subtle"
+              href={previewAttachment.downloadUrl ?? previewAttachment.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open original
+            </a>
           </div>
         {/if}
-        <div class="image-preview-actions">
-          <a
-            class="image-preview-button accent"
-            href={previewAttachment.downloadUrl ?? previewAttachment.url}
-            download={previewAttachment.name ?? undefined}
-          >
-            Download
-          </a>
-          <a
-            class="image-preview-button subtle"
-            href={previewAttachment.downloadUrl ?? previewAttachment.url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open original
-          </a>
-        </div>
       </div>
     </div>
   </div>
 {/if}
-
-
