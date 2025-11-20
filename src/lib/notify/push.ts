@@ -686,6 +686,10 @@ function isStandalone() {
 }
 
 function shouldUseSafariWebPush() {
+  if (!browser) return false;
+  if (typeof window === 'undefined' || !window.isSecureContext) return false;
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return false;
+  if (typeof PushManager === 'undefined') return false;
   const platform = detectPlatform();
   return SAFARI_WEB_PUSH_PLATFORMS.has(platform);
 }
