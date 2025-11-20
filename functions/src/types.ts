@@ -78,11 +78,21 @@ export type PresenceDoc = {
   status?: string | null;
 };
 
+export type WebPushSubscription = {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys?: {
+    p256dh?: string;
+    auth?: string;
+  };
+};
+
 export type DeviceDoc = {
   token?: string | null;
   permission?: string | null;
   enabled?: boolean;
   platform?: string | null;
+  subscription?: WebPushSubscription | null;
 };
 
 export type MentionType = 'direct' | 'role' | 'here' | 'everyone' | 'dm';

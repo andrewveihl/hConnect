@@ -56,14 +56,14 @@ async function fetchDeviceTokens(uid, deviceId) {
                 return [];
             const doc = docSnap.data();
             if (doc &&
-                typeof doc.token === 'string' &&
-                doc.token.length > 0 &&
+                (hasValidToken(doc) || hasSafariSubscription(doc)) &&
                 (doc.permission === 'granted' || doc.permission === undefined) &&
                 doc.enabled !== false) {
                 return [
                     {
-                        token: doc.token,
-                        platform: doc.platform ?? null
+                        token: doc.token ?? null,
+                        platform: doc.platform ?? null,
+                        subscription: doc.subscription ?? null
                     }
                 ];
             }
@@ -72,18 +72,24 @@ async function fetchDeviceTokens(uid, deviceId) {
         const snap = await firebase_1.db.collection(`profiles/${uid}/devices`).get();
         return snap.docs
             .map((docSnap) => docSnap.data())
-            .filter((doc) => typeof doc?.token === 'string' &&
-            doc.token.length > 0 &&
+            .filter((doc) => (hasValidToken(doc) || hasSafariSubscription(doc)) &&
             (doc.permission === 'granted' || doc.permission === undefined) &&
             doc.enabled !== false)
             .map((doc) => ({
-            token: doc.token,
-            platform: doc.platform ?? null
+            token: doc.token ?? null,
+            platform: doc.platform ?? null,
+            subscription: doc.subscription ?? null
         }));
     }
     catch (err) {
         console.warn('Failed to fetch device tokens', uid, err);
         return [];
     }
+}
+function hasValidToken(doc) {
+    return typeof doc?.token === 'string' && doc.token.length > 0;
+}
+function hasSafariSubscription(doc) {
+    return Boolean(doc?.subscription?.endpoint);
 }
 //# sourceMappingURL=settings.js.map

@@ -3,6 +3,7 @@ import { URLSearchParams } from 'url';
 import { logger } from 'firebase-functions';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import type { FirestoreEvent, QueryDocumentSnapshot } from 'firebase-functions/v2/firestore';
+import webpush from 'web-push';
 
 import { db, messaging } from './firebase';
 import {
@@ -23,7 +24,8 @@ import type {
   RawMessage,
   ServerDoc,
   ServerMember,
-  ThreadDoc
+  ThreadDoc,
+  WebPushSubscription
 } from './types';
 
 const SPECIAL_MENTION_IDS = {
@@ -38,6 +40,21 @@ const MENTION_PRIORITY: Record<MentionType, number> = {
   here: 2,
   everyone: 1
 };
+
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:support@hconnect.app';
+const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? '';
+const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ?? process.env.VAPID_PRIVATE_KEY ?? '';
+const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+
+if (WEB_PUSH_AVAILABLE) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  } catch (err) {
+    logger.error('Failed to configure web push VAPID details', err);
+  }
+} else {
+  logger.warn('Web push disabled (missing VAPID keys)');
+}
 
 type MessageContext = {
   serverId?: string;
@@ -476,37 +493,36 @@ async function writeActivityEntry(
 const APPLE_WEB_PUSH_PLATFORMS = new Set(['ios_browser', 'ios_pwa', 'web_safari']);
 
 function groupTokensByChannel(deviceTokens: DeviceTokenRecord[]) {
-  const safariTokens: string[] = [];
-  const dataOnlyTokens: string[] = [];
+  const safariSubscriptions: WebPushSubscription[] = [];
+  const fcmTokens: string[] = [];
   for (const record of deviceTokens) {
-    if (!record?.token) continue;
     const platform = (record.platform ?? '').toLowerCase();
-    if (APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
-      safariTokens.push(record.token);
-    } else {
-      dataOnlyTokens.push(record.token);
+    if (record.subscription?.endpoint && APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
+      safariSubscriptions.push(record.subscription);
+    } else if (record.token) {
+      fcmTokens.push(record.token);
     }
   }
-  return { safariTokens, dataOnlyTokens };
+  return { safariSubscriptions, fcmTokens };
 }
 
 async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { title: string; body: string; data: Record<string, string> }) {
   if (!deviceTokens.length) return;
-  const { safariTokens, dataOnlyTokens } = groupTokensByChannel(deviceTokens);
+  const { safariSubscriptions, fcmTokens } = groupTokensByChannel(deviceTokens);
   const startedAt = Date.now();
   logger.info('[push] sendPushToTokens invoked', {
     totalTokens: deviceTokens.length,
-    safariTokens: safariTokens.length,
-    dataOnlyTokens: dataOnlyTokens.length,
+    safariSubscriptions: safariSubscriptions.length,
+    fcmTokens: fcmTokens.length,
     dataKeys: Object.keys(payload.data ?? {}),
     messageId: payload.data?.messageId ?? null,
     targetUrl: payload.data?.targetUrl ?? null
   });
   const tasks: Promise<unknown>[] = [];
-  if (dataOnlyTokens.length) {
+  if (fcmTokens.length) {
     tasks.push(
       messaging.sendEachForMulticast({
-        tokens: dataOnlyTokens,
+        tokens: fcmTokens,
         data: payload.data,
         webpush: {
           fcmOptions: {
@@ -516,22 +532,23 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
       })
     );
   }
-  if (safariTokens.length) {
-    tasks.push(
-      messaging.sendEachForMulticast({
-        tokens: safariTokens,
+  if (safariSubscriptions.length) {
+    if (!WEB_PUSH_AVAILABLE) {
+      logger.warn('Safari web push subscriptions present but VAPID keys missing', {
+        count: safariSubscriptions.length
+      });
+    } else {
+      const safariPayload = JSON.stringify({
         notification: {
           title: payload.title,
           body: payload.body
         },
-        data: payload.data,
-        webpush: {
-          fcmOptions: {
-            link: payload.data.targetUrl
-          }
-        }
-      })
-    );
+        data: payload.data
+      });
+      safariSubscriptions.forEach((subscription) => {
+        tasks.push(sendSafariWebPush(subscription, safariPayload));
+      });
+    }
   }
   try {
     await Promise.all(tasks);
@@ -542,6 +559,32 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
     });
   } catch (err) {
     logger.error('Failed to send push payload', err);
+  }
+}
+
+async function sendSafariWebPush(subscription: WebPushSubscription, body: string) {
+  if (!subscription?.endpoint) return;
+  if (!subscription.keys?.auth || !subscription.keys?.p256dh) {
+    logger.warn('Safari web push subscription missing keys', { endpoint: subscription.endpoint });
+    return;
+  }
+  try {
+    await webpush.sendNotification(
+      {
+        endpoint: subscription.endpoint,
+        keys: {
+          auth: subscription.keys.auth,
+          p256dh: subscription.keys.p256dh
+        },
+        expirationTime: subscription.expirationTime ?? null
+      },
+      body
+    );
+  } catch (err) {
+    logger.error('Safari web push send failed', {
+      endpoint: subscription.endpoint,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+    });
   }
 }
 
@@ -556,7 +599,7 @@ async function deliverToRecipients(
 
   await Promise.all(
     recipients.map(async (recipient) => {
-      const tokens = await fetchDeviceTokens(recipient.uid);
+      const deviceTokens = await fetchDeviceTokens(recipient.uid);
       const title = context.dmId
         ? describeDmTitle(context.dm ?? null, authorName)
         : describeTitle(context);
@@ -570,9 +613,9 @@ async function deliverToRecipients(
         context,
         title,
         body,
-        tokens.length > 0
+        deviceTokens.length > 0
       );
-      if (!tokens.length) return;
+      if (!deviceTokens.length) return;
       const data: Record<string, string> = {
         title,
         body,
@@ -587,7 +630,7 @@ async function deliverToRecipients(
       if (context.threadId) data.threadId = context.threadId;
       if (context.dmId) data.dmId = context.dmId;
       if (recipient.roleId) data.roleId = recipient.roleId;
-      await sendPushToTokens(tokens, { title, body, data });
+      await sendPushToTokens(deviceTokens, { title, body, data });
     })
   );
 }
@@ -597,9 +640,9 @@ export async function sendTestPushForUid(
   deviceId: string
 ): Promise<{ sent: number; reason?: string; messageId?: string }> {
   logger.info('[testPush] Fetching device tokens', { uid, deviceId });
-  const tokens = await fetchDeviceTokens(uid, deviceId);
-  logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId });
-  if (!tokens.length) {
+  const deviceTokens = await fetchDeviceTokens(uid, deviceId);
+  logger.info('[testPush] Device token check complete', { uid, count: deviceTokens.length, deviceId });
+  if (!deviceTokens.length) {
     logger.warn('[testPush] No tokens found for user device', { uid, deviceId });
     return { sent: 0, reason: 'device_not_registered' };
   }
@@ -609,12 +652,12 @@ export async function sendTestPushForUid(
   logger.info('[testPush] Prepared payload metadata', {
     uid,
     deviceId,
-    tokenCount: tokens.length,
+    tokenCount: deviceTokens.length,
     messageId
   });
   try {
-    logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
-    await sendPushToTokens(tokens, {
+    logger.info('[testPush] Sending push payload', { uid, count: deviceTokens.length });
+    await sendPushToTokens(deviceTokens, {
       title,
       body,
       data: {
@@ -627,12 +670,12 @@ export async function sendTestPushForUid(
         testDeviceId: deviceId
       }
     });
-    logger.info('[testPush] Push send call completed', { uid, count: tokens.length });
+    logger.info('[testPush] Push send call completed', { uid, count: deviceTokens.length });
   } catch (error) {
     logger.error('[testPush] Failed to send push payload', { uid, error });
     throw error;
   }
-  return { sent: tokens.length, messageId };
+  return { sent: deviceTokens.length, messageId };
 }
 
 type ChannelMessageEvent = FirestoreEvent<

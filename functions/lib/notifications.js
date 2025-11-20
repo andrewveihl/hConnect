@@ -1,4 +1,7 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendTestPushForUid = sendTestPushForUid;
 exports.handleServerMessage = handleServerMessage;
@@ -7,6 +10,7 @@ exports.handleDmMessage = handleDmMessage;
 const url_1 = require("url");
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-admin/firestore");
+const web_push_1 = __importDefault(require("web-push"));
 const firebase_1 = require("./firebase");
 const settings_1 = require("./settings");
 const SPECIAL_MENTION_IDS = {
@@ -20,6 +24,21 @@ const MENTION_PRIORITY = {
     here: 2,
     everyone: 1
 };
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:support@hconnect.app';
+const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? '';
+const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ?? process.env.VAPID_PRIVATE_KEY ?? '';
+const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (WEB_PUSH_AVAILABLE) {
+    try {
+        web_push_1.default.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('Failed to configure web push VAPID details', err);
+    }
+}
+else {
+    firebase_functions_1.logger.warn('Web push disabled (missing VAPID keys)');
+}
 class ServerMemberCache {
     constructor(serverId) {
         this.serverId = serverId;
@@ -413,38 +432,36 @@ async function writeActivityEntry(uid, recipient, message, context, title, body,
 }
 const APPLE_WEB_PUSH_PLATFORMS = new Set(['ios_browser', 'ios_pwa', 'web_safari']);
 function groupTokensByChannel(deviceTokens) {
-    const safariTokens = [];
-    const dataOnlyTokens = [];
+    const safariSubscriptions = [];
+    const fcmTokens = [];
     for (const record of deviceTokens) {
-        if (!record?.token)
-            continue;
         const platform = (record.platform ?? '').toLowerCase();
-        if (APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
-            safariTokens.push(record.token);
+        if (record.subscription?.endpoint && APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
+            safariSubscriptions.push(record.subscription);
         }
-        else {
-            dataOnlyTokens.push(record.token);
+        else if (record.token) {
+            fcmTokens.push(record.token);
         }
     }
-    return { safariTokens, dataOnlyTokens };
+    return { safariSubscriptions, fcmTokens };
 }
 async function sendPushToTokens(deviceTokens, payload) {
     if (!deviceTokens.length)
         return;
-    const { safariTokens, dataOnlyTokens } = groupTokensByChannel(deviceTokens);
+    const { safariSubscriptions, fcmTokens } = groupTokensByChannel(deviceTokens);
     const startedAt = Date.now();
     firebase_functions_1.logger.info('[push] sendPushToTokens invoked', {
         totalTokens: deviceTokens.length,
-        safariTokens: safariTokens.length,
-        dataOnlyTokens: dataOnlyTokens.length,
+        safariSubscriptions: safariSubscriptions.length,
+        fcmTokens: fcmTokens.length,
         dataKeys: Object.keys(payload.data ?? {}),
         messageId: payload.data?.messageId ?? null,
         targetUrl: payload.data?.targetUrl ?? null
     });
     const tasks = [];
-    if (dataOnlyTokens.length) {
+    if (fcmTokens.length) {
         tasks.push(firebase_1.messaging.sendEachForMulticast({
-            tokens: dataOnlyTokens,
+            tokens: fcmTokens,
             data: payload.data,
             webpush: {
                 fcmOptions: {
@@ -453,20 +470,24 @@ async function sendPushToTokens(deviceTokens, payload) {
             }
         }));
     }
-    if (safariTokens.length) {
-        tasks.push(firebase_1.messaging.sendEachForMulticast({
-            tokens: safariTokens,
-            notification: {
-                title: payload.title,
-                body: payload.body
-            },
-            data: payload.data,
-            webpush: {
-                fcmOptions: {
-                    link: payload.data.targetUrl
-                }
-            }
-        }));
+    if (safariSubscriptions.length) {
+        if (!WEB_PUSH_AVAILABLE) {
+            firebase_functions_1.logger.warn('Safari web push subscriptions present but VAPID keys missing', {
+                count: safariSubscriptions.length
+            });
+        }
+        else {
+            const safariPayload = JSON.stringify({
+                notification: {
+                    title: payload.title,
+                    body: payload.body
+                },
+                data: payload.data
+            });
+            safariSubscriptions.forEach((subscription) => {
+                tasks.push(sendSafariWebPush(subscription, safariPayload));
+            });
+        }
     }
     try {
         await Promise.all(tasks);
@@ -480,20 +501,44 @@ async function sendPushToTokens(deviceTokens, payload) {
         firebase_functions_1.logger.error('Failed to send push payload', err);
     }
 }
+async function sendSafariWebPush(subscription, body) {
+    if (!subscription?.endpoint)
+        return;
+    if (!subscription.keys?.auth || !subscription.keys?.p256dh) {
+        firebase_functions_1.logger.warn('Safari web push subscription missing keys', { endpoint: subscription.endpoint });
+        return;
+    }
+    try {
+        await web_push_1.default.sendNotification({
+            endpoint: subscription.endpoint,
+            keys: {
+                auth: subscription.keys.auth,
+                p256dh: subscription.keys.p256dh
+            },
+            expirationTime: subscription.expirationTime ?? null
+        }, body);
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('Safari web push send failed', {
+            endpoint: subscription.endpoint,
+            error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+        });
+    }
+}
 async function deliverToRecipients(recipients, message, context) {
     const roleNames = context.roleNames ?? {};
     const authorName = pickAuthorName(message);
     const preview = previewFromMessage(message);
     await Promise.all(recipients.map(async (recipient) => {
-        const tokens = await (0, settings_1.fetchDeviceTokens)(recipient.uid);
+        const deviceTokens = await (0, settings_1.fetchDeviceTokens)(recipient.uid);
         const title = context.dmId
             ? describeDmTitle(context.dm ?? null, authorName)
             : describeTitle(context);
         const roleName = recipient.roleId ? roleNames[recipient.roleId] : null;
         const label = mentionLabel(recipient.mentionType, roleName);
         const body = `${label} ${authorName}: ${preview}`;
-        const activityId = await writeActivityEntry(recipient.uid, recipient, message, context, title, body, tokens.length > 0);
-        if (!tokens.length)
+        const activityId = await writeActivityEntry(recipient.uid, recipient, message, context, title, body, deviceTokens.length > 0);
+        if (!deviceTokens.length)
             return;
         const data = {
             title,
@@ -514,14 +559,14 @@ async function deliverToRecipients(recipients, message, context) {
             data.dmId = context.dmId;
         if (recipient.roleId)
             data.roleId = recipient.roleId;
-        await sendPushToTokens(tokens, { title, body, data });
+        await sendPushToTokens(deviceTokens, { title, body, data });
     }));
 }
 async function sendTestPushForUid(uid, deviceId) {
     firebase_functions_1.logger.info('[testPush] Fetching device tokens', { uid, deviceId });
-    const tokens = await (0, settings_1.fetchDeviceTokens)(uid, deviceId);
-    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: tokens.length, deviceId });
-    if (!tokens.length) {
+    const deviceTokens = await (0, settings_1.fetchDeviceTokens)(uid, deviceId);
+    firebase_functions_1.logger.info('[testPush] Device token check complete', { uid, count: deviceTokens.length, deviceId });
+    if (!deviceTokens.length) {
         firebase_functions_1.logger.warn('[testPush] No tokens found for user device', { uid, deviceId });
         return { sent: 0, reason: 'device_not_registered' };
     }
@@ -531,12 +576,12 @@ async function sendTestPushForUid(uid, deviceId) {
     firebase_functions_1.logger.info('[testPush] Prepared payload metadata', {
         uid,
         deviceId,
-        tokenCount: tokens.length,
+        tokenCount: deviceTokens.length,
         messageId
     });
     try {
-        firebase_functions_1.logger.info('[testPush] Sending push payload', { uid, count: tokens.length });
-        await sendPushToTokens(tokens, {
+        firebase_functions_1.logger.info('[testPush] Sending push payload', { uid, count: deviceTokens.length });
+        await sendPushToTokens(deviceTokens, {
             title,
             body,
             data: {
@@ -549,13 +594,13 @@ async function sendTestPushForUid(uid, deviceId) {
                 testDeviceId: deviceId
             }
         });
-        firebase_functions_1.logger.info('[testPush] Push send call completed', { uid, count: tokens.length });
+        firebase_functions_1.logger.info('[testPush] Push send call completed', { uid, count: deviceTokens.length });
     }
     catch (error) {
         firebase_functions_1.logger.error('[testPush] Failed to send push payload', { uid, error });
         throw error;
     }
-    return { sent: tokens.length, messageId };
+    return { sent: deviceTokens.length, messageId };
 }
 function messageFromEvent(event) {
     const data = event.data?.data();
