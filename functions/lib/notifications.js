@@ -411,30 +411,67 @@ async function writeActivityEntry(uid, recipient, message, context, title, body,
     });
     return ref.id;
 }
-async function sendPushToTokens(tokens, payload) {
-    if (!tokens.length)
+const APPLE_WEB_PUSH_PLATFORMS = new Set(['ios_browser', 'ios_pwa', 'web_safari']);
+function groupTokensByChannel(deviceTokens) {
+    const safariTokens = [];
+    const dataOnlyTokens = [];
+    for (const record of deviceTokens) {
+        if (!record?.token)
+            continue;
+        const platform = (record.platform ?? '').toLowerCase();
+        if (APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
+            safariTokens.push(record.token);
+        }
+        else {
+            dataOnlyTokens.push(record.token);
+        }
+    }
+    return { safariTokens, dataOnlyTokens };
+}
+async function sendPushToTokens(deviceTokens, payload) {
+    if (!deviceTokens.length)
         return;
+    const { safariTokens, dataOnlyTokens } = groupTokensByChannel(deviceTokens);
     const startedAt = Date.now();
     firebase_functions_1.logger.info('[push] sendPushToTokens invoked', {
-        tokenCount: tokens.length,
+        totalTokens: deviceTokens.length,
+        safariTokens: safariTokens.length,
+        dataOnlyTokens: dataOnlyTokens.length,
         dataKeys: Object.keys(payload.data ?? {}),
         messageId: payload.data?.messageId ?? null,
         targetUrl: payload.data?.targetUrl ?? null
     });
-    try {
-        await firebase_1.messaging.sendEachForMulticast({
-            tokens,
-            // Send data-only payloads so the service worker receives the push event
-            // (Edge drops the push event entirely if a notification payload is provided).
+    const tasks = [];
+    if (dataOnlyTokens.length) {
+        tasks.push(firebase_1.messaging.sendEachForMulticast({
+            tokens: dataOnlyTokens,
             data: payload.data,
             webpush: {
                 fcmOptions: {
                     link: payload.data.targetUrl
                 }
             }
-        });
+        }));
+    }
+    if (safariTokens.length) {
+        tasks.push(firebase_1.messaging.sendEachForMulticast({
+            tokens: safariTokens,
+            notification: {
+                title: payload.title,
+                body: payload.body
+            },
+            data: payload.data,
+            webpush: {
+                fcmOptions: {
+                    link: payload.data.targetUrl
+                }
+            }
+        }));
+    }
+    try {
+        await Promise.all(tasks);
         firebase_functions_1.logger.info('[push] sendPushToTokens completed', {
-            tokenCount: tokens.length,
+            totalTokens: deviceTokens.length,
             durationMs: Date.now() - startedAt,
             messageId: payload.data?.messageId ?? null
         });

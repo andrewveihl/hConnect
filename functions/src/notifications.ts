@@ -10,7 +10,8 @@ import {
   fetchNotificationSettings,
   fetchPresence,
   perChannelKey,
-  perRoleKey
+  perRoleKey,
+  type DeviceTokenRecord
 } from './settings';
 import type {
   ChannelDoc,
@@ -472,29 +473,70 @@ async function writeActivityEntry(
   return ref.id;
 }
 
-async function sendPushToTokens(tokens: string[], payload: { title: string; body: string; data: Record<string, string> }) {
-  if (!tokens.length) return;
+const APPLE_WEB_PUSH_PLATFORMS = new Set(['ios_browser', 'ios_pwa', 'web_safari']);
+
+function groupTokensByChannel(deviceTokens: DeviceTokenRecord[]) {
+  const safariTokens: string[] = [];
+  const dataOnlyTokens: string[] = [];
+  for (const record of deviceTokens) {
+    if (!record?.token) continue;
+    const platform = (record.platform ?? '').toLowerCase();
+    if (APPLE_WEB_PUSH_PLATFORMS.has(platform)) {
+      safariTokens.push(record.token);
+    } else {
+      dataOnlyTokens.push(record.token);
+    }
+  }
+  return { safariTokens, dataOnlyTokens };
+}
+
+async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { title: string; body: string; data: Record<string, string> }) {
+  if (!deviceTokens.length) return;
+  const { safariTokens, dataOnlyTokens } = groupTokensByChannel(deviceTokens);
   const startedAt = Date.now();
   logger.info('[push] sendPushToTokens invoked', {
-    tokenCount: tokens.length,
+    totalTokens: deviceTokens.length,
+    safariTokens: safariTokens.length,
+    dataOnlyTokens: dataOnlyTokens.length,
     dataKeys: Object.keys(payload.data ?? {}),
     messageId: payload.data?.messageId ?? null,
     targetUrl: payload.data?.targetUrl ?? null
   });
-  try {
-    await messaging.sendEachForMulticast({
-      tokens,
-      // Send data-only payloads so the service worker receives the push event
-      // (Edge drops the push event entirely if a notification payload is provided).
-      data: payload.data,
-      webpush: {
-        fcmOptions: {
-          link: payload.data.targetUrl
+  const tasks: Promise<unknown>[] = [];
+  if (dataOnlyTokens.length) {
+    tasks.push(
+      messaging.sendEachForMulticast({
+        tokens: dataOnlyTokens,
+        data: payload.data,
+        webpush: {
+          fcmOptions: {
+            link: payload.data.targetUrl
+          }
         }
-      }
-    });
+      })
+    );
+  }
+  if (safariTokens.length) {
+    tasks.push(
+      messaging.sendEachForMulticast({
+        tokens: safariTokens,
+        notification: {
+          title: payload.title,
+          body: payload.body
+        },
+        data: payload.data,
+        webpush: {
+          fcmOptions: {
+            link: payload.data.targetUrl
+          }
+        }
+      })
+    );
+  }
+  try {
+    await Promise.all(tasks);
     logger.info('[push] sendPushToTokens completed', {
-      tokenCount: tokens.length,
+      totalTokens: deviceTokens.length,
       durationMs: Date.now() - startedAt,
       messageId: payload.data?.messageId ?? null
     });
