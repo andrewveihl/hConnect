@@ -18,7 +18,7 @@
   let dragging = $state(false);
   let pointerId: number | null = null;
   let dragOffset: Position = { x: 0, y: 0 };
-  let holdTimer: ReturnType<typeof window.setTimeout> | null = null;
+  let holdTimer: number | null = null;
   let defaultFrame: number | null = null;
   let dockResizeObserver: ResizeObserver | null = null;
   let chatInputObserver: ResizeObserver | null = null;

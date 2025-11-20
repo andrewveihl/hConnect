@@ -12,7 +12,8 @@ import {
     enablePushForUser,
     requestNotificationPermission,
     getCurrentDeviceId,
-    pingServiceWorker
+    pingServiceWorker,
+    disablePushForUser
   } from '$lib/notify/push';
   import type { PushDebugEvent } from '$lib/notify/push';
   import { triggerTestPush } from '$lib/notify/testPush';
@@ -105,13 +106,13 @@ let avatarError: string | null = $state(null);
     allMessages: boolean;
   };
 
-  let notif: NotifPrefs = {
-    desktopEnabled: false,
-    pushEnabled: false,
-    dms: true,
-    mentions: true,
-    allMessages: false
-  };
+let notif = $state<NotifPrefs>({
+  desktopEnabled: false,
+  pushEnabled: false,
+  dms: true,
+  mentions: true,
+  allMessages: false
+});
 
   type AiAssistPrefs = {
     enabled: boolean;
@@ -340,6 +341,23 @@ let avatarError: string | null = $state(null);
     notif.desktopEnabled = true;
   }
 
+  async function handleDesktopToggleChange(event: Event) {
+    const target = event.currentTarget as HTMLInputElement | null;
+    if (!target) return;
+    const desired = target.checked;
+    if (desired) {
+      desktopToggleBusy = true;
+      const previous = notif.desktopEnabled;
+      await enableDesktopNotifications();
+      desktopToggleBusy = false;
+      if (!notif.desktopEnabled) {
+        target.checked = previous;
+      }
+    } else {
+      notif.desktopEnabled = false;
+    }
+  }
+
   async function enablePush() {
     pushDebugCopyState = 'idle';
     appendPushDebug({ tag: 'enable', message: 'Enable push button clicked.' });
@@ -495,6 +513,44 @@ let avatarError: string | null = $state(null);
     }
   }
 
+  async function handlePushToggleChange(event: Event) {
+    const target = event.currentTarget as HTMLInputElement | null;
+    if (!target) return;
+    const desired = target.checked;
+    if (desired) {
+      await enablePush();
+      if (!notif.pushEnabled) {
+        target.checked = false;
+      }
+      return;
+    }
+    target.checked = false;
+    if (!$user?.uid) {
+      notif.pushEnabled = false;
+      return;
+    }
+    pushToggleBusy = true;
+    try {
+      await disablePushForUser($user.uid);
+      notif.pushEnabled = false;
+      appendPushDebug({
+        tag: 'enable',
+        message: 'Push disabled for this device.'
+      });
+    } catch (error) {
+      appendPushDebug({
+        tag: 'enable',
+        level: 'error',
+        message: 'Failed to disable push for this device.',
+        details: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      });
+      target.checked = true;
+      notif.pushEnabled = true;
+    } finally {
+      pushToggleBusy = false;
+    }
+  }
+
   let testPushState = $state<'idle' | 'loading' | 'success' | 'error'>('idle');
   let testPushMessage: string | null = $state(null);
 
@@ -507,9 +563,11 @@ let avatarError: string | null = $state(null);
     details?: string;
   };
 
-  let pushDebugLog: PushDebugEntry[] = $state([]);
-  let pushDebugCopyState = $state<'idle' | 'copying' | 'copied' | 'error'>('idle');
-  let enablePushLoading = $state(false);
+let pushDebugLog: PushDebugEntry[] = $state([]);
+let pushDebugCopyState = $state<'idle' | 'copying' | 'copied' | 'error'>('idle');
+let enablePushLoading = $state(false);
+  let desktopToggleBusy = $state(false);
+  let pushToggleBusy = $state(false);
 
   const PUSH_DEBUG_MAX_ENTRIES = 200;
 
@@ -908,17 +966,20 @@ let avatarError: string | null = $state(null);
                   <p>Show native alerts when new messages arrive.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button
-                    class="settings-chip"
-                    onclick={enableDesktopNotifications}
-                    disabled={notif.desktopEnabled}
-                  >
-                    {#if notif.desktopEnabled}
-                      Enabled
-                    {:else}
-                      Grant permission
-                    {/if}
-                  </button>
+                  <label class="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notif.desktopEnabled}
+                      disabled={desktopToggleBusy}
+                      onchange={handleDesktopToggleChange}
+                    />
+                    <span class="settings-toggle__track" aria-hidden="true">
+                      <span class="settings-toggle__thumb" aria-hidden="true"></span>
+                    </span>
+                    <span class="settings-toggle__label">
+                      {notif.desktopEnabled ? 'Desktop alerts enabled' : 'Enable desktop alerts'}
+                    </span>
+                  </label>
                 </div>
               </div>
 
@@ -928,22 +989,24 @@ let avatarError: string | null = $state(null);
                   <p>Receive updates even when the app is closed.</p>
                 </div>
                 <div class="settings-notif-tile__actions">
-                  <button
-                    class="settings-chip"
-                    onclick={enablePush}
-                    disabled={notif.pushEnabled || enablePushLoading}
-                  >
-                    {#if enablePushLoading}
-                      Enabling...
-                    {:else if notif.pushEnabled}
-                      Enabled
-                    {:else}
-                      Enable on this device
-                    {/if}
-                  </button>
+                  <label class="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notif.pushEnabled}
+                      disabled={pushToggleBusy || enablePushLoading}
+                      onchange={handlePushToggleChange}
+                    />
+                    <span class="settings-toggle__track" aria-hidden="true">
+                      <span class="settings-toggle__thumb" aria-hidden="true"></span>
+                    </span>
+                    <span class="settings-toggle__label">
+                      {notif.pushEnabled ? 'Push enabled on this device' : 'Enable push on this device'}
+                    </span>
+                  </label>
                   <button
                     class="settings-chip settings-chip--secondary"
                     aria-busy={testPushState === 'loading'}
+                    disabled={!notif.pushEnabled || testPushState === 'loading'}
                     onclick={sendTestPushNotification}
                   >
                     Send test push
@@ -1498,6 +1561,66 @@ let avatarError: string | null = $state(null);
     flex-wrap: wrap;
     gap: 0.4rem;
     justify-content: flex-end;
+  }
+
+  .settings-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .settings-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .settings-toggle__track {
+    width: 2.85rem;
+    height: 1.45rem;
+    border-radius: 999px;
+    background: linear-gradient(
+      120deg,
+      color-mix(in srgb, var(--surface-panel) 85%, transparent),
+      color-mix(in srgb, var(--surface-panel) 65%, transparent)
+    );
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    position: relative;
+    transition: background 160ms ease, border-color 160ms ease;
+    flex-shrink: 0;
+  }
+
+  .settings-toggle__thumb {
+    position: absolute;
+    top: 0.1rem;
+    left: 0.15rem;
+    width: 1.15rem;
+    height: 1.15rem;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--surface-base) 85%, var(--color-border-subtle));
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.25);
+    transition: transform 160ms ease, background 160ms ease;
+  }
+
+  .settings-toggle input:checked + .settings-toggle__track {
+    background: linear-gradient(
+      120deg,
+      color-mix(in srgb, var(--color-accent, #22d3ee) 85%, var(--surface-panel)),
+      color-mix(in srgb, var(--color-accent, #22d3ee) 65%, var(--surface-panel))
+    );
+    border-color: color-mix(in srgb, var(--color-accent, #22d3ee) 70%, var(--color-border-subtle));
+  }
+
+  .settings-toggle input:checked + .settings-toggle__track .settings-toggle__thumb {
+    transform: translateX(1.35rem);
+    background: color-mix(in srgb, var(--color-accent, #22d3ee) 85%, white);
+  }
+
+  .settings-toggle__label {
+    font-size: 0.82rem;
+    color: var(--text-70);
   }
 
   .settings-push-debug__list {

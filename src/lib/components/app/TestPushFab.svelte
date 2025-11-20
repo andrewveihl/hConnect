@@ -253,7 +253,7 @@ let statusDebugLines = $state<string[]>([]);
         body: 'Tap to open hConnect. If push is enabled you will also get the remote notification.',
         icon: '/Logo_transparent.png',
         tag: 'hconnect:test-push',
-        renotify: true,
+        requireInteraction: true,
         data: {
           origin: 'local_test_push',
           targetUrl,
