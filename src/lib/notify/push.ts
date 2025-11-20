@@ -1,6 +1,6 @@
 // src/lib/notify/push.ts
 import { browser } from '$app/environment';
-import { PUBLIC_FCM_VAPID_KEY } from '$env/static/public';
+import { PUBLIC_FCM_VAPID_KEY, PUBLIC_FCM_VAPID_KEY_FCM } from '$env/static/public';
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 
@@ -77,6 +77,7 @@ const pingResolvers = new Map<
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
 let pushBroadcastChannel: BroadcastChannel | null = null;
 const SAFARI_WEB_PUSH_PLATFORMS = new Set<DevicePlatform>(['ios_pwa', 'web_safari']);
+const FCM_WEB_VAPID_KEY = PUBLIC_FCM_VAPID_KEY_FCM || PUBLIC_FCM_VAPID_KEY || '';
 
 async function getEffectiveNotificationPermission(): Promise<DevicePermission> {
   if (!browser || typeof Notification === 'undefined') return 'unsupported';
@@ -533,9 +534,13 @@ export async function enablePushForUser(
       await persistDeviceDoc(uid, { permission, token: null, subscription: null });
       return null;
     }
+    const previewEndpoint =
+      typeof subscription.endpoint === 'string'
+        ? `${subscription.endpoint.slice(0, 20)}…`
+        : 'unknown';
     emitPushDebug(debug, {
       step: 'safari.subscription.success',
-      context: { endpointPreview: `${subscription.endpoint.slice(0, 20)}…` }
+      context: { endpointPreview: previewEndpoint }
     });
     permission = 'granted';
     await persistDeviceDoc(uid, { permission: 'granted', subscription, token: null, enabled: true });
@@ -556,7 +561,15 @@ export async function enablePushForUser(
       context: { hasVapidKey: Boolean(PUBLIC_FCM_VAPID_KEY) }
     });
     const { app } = await ensureFirebaseReady();
-    const vapid = PUBLIC_FCM_VAPID_KEY ?? '';
+    const vapid = useSafariWebPush ? PUBLIC_FCM_VAPID_KEY ?? '' : FCM_WEB_VAPID_KEY;
+    if (!vapid) {
+      emitPushDebug(debug, {
+        step: 'messaging.vapid.missing',
+        message: 'No VAPID key configured for FCM token collection.'
+      });
+      await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+      return null;
+    }
     const messagingSdk = await import('firebase/messaging');
     const messaging = messagingSdk.getMessaging(app);
     const token = await messagingSdk.getToken(messaging, {
@@ -682,7 +695,15 @@ function isStandalone() {
   if (!browser) return false;
   const nav = navigator as Navigator & { standalone?: boolean };
   if (typeof nav?.standalone === 'boolean') return nav.standalone;
-  return typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
+  if (typeof window.matchMedia === 'function') {
+    try {
+      const modes = ['standalone', 'fullscreen', 'minimal-ui', 'window-controls-overlay'];
+      return modes.some((mode) => window.matchMedia(`(display-mode: ${mode})`).matches);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function shouldUseSafariWebPush() {
