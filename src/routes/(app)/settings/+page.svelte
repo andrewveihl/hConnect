@@ -15,6 +15,7 @@ import {
     pingServiceWorker,
     disablePushForUser
   } from '$lib/notify/push';
+  import { featureFlag } from '$lib/stores/featureFlags';
   import type { PushDebugEvent } from '$lib/notify/push';
   import { triggerTestPush } from '$lib/notify/testPush';
 
@@ -40,6 +41,7 @@ function pickString(value: unknown): string | undefined {
 const IOS_DEVICE_REGEX = /iP(ad|hone|od)/i;
 const SAFARI_REGEX = /Safari/i;
 const IOS_ALT_BROWSERS = /(CriOS|FxiOS|OPiOS|EdgiOS)/i;
+  const showNotificationDebugTools = featureFlag('showNotificationDebugTools');
 
 function isIosSafari(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -959,13 +961,36 @@ let enablePushLoading = $state(false);
               <p>Control when hConnect taps you on the shoulder.</p>
             </header>
 
-            <div class="settings-notif-grid">
-              <div class="settings-notif-tile">
-                <div class="settings-notif-tile__body">
-                  <h3>Desktop notifications</h3>
-                  <p>Show native alerts when new messages arrive.</p>
+            <div class="settings-notif-options">
+              <article class="settings-notif-option">
+                <div class="settings-notif-option__body">
+                  <h3>Push notifications</h3>
+                  <p>Receive updates even when the app is closed. Works on Chrome, Edge, and iOS Home Screen apps.</p>
                 </div>
-                <div class="settings-notif-tile__actions">
+                <div class="settings-notif-option__actions">
+                  <label class="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notif.pushEnabled}
+                      disabled={pushToggleBusy || enablePushLoading}
+                      onchange={handlePushToggleChange}
+                    />
+                    <span class="settings-toggle__track" aria-hidden="true">
+                      <span class="settings-toggle__thumb" aria-hidden="true"></span>
+                    </span>
+                    <span class="settings-toggle__label">
+                      {notif.pushEnabled ? 'Enabled on this device' : 'Tap to enable push'}
+                    </span>
+                  </label>
+                </div>
+              </article>
+
+              <article class="settings-notif-option">
+                <div class="settings-notif-option__body">
+                  <h3>Desktop banners</h3>
+                  <p>Let this browser show native alerts whenever new activity lands.</p>
+                </div>
+                <div class="settings-notif-option__actions">
                   <label class="settings-toggle">
                     <input
                       type="checkbox"
@@ -981,35 +1006,27 @@ let enablePushLoading = $state(false);
                     </span>
                   </label>
                 </div>
-              </div>
+              </article>
+            </div>
 
-              <div class="settings-notif-tile">
-                <div class="settings-notif-tile__body">
-                  <h3>Push notifications</h3>
-                  <p>Receive updates even when the app is closed.</p>
-                </div>
-                <div class="settings-notif-tile__actions">
-                  <label class="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={notif.pushEnabled}
-                      disabled={pushToggleBusy || enablePushLoading}
-                      onchange={handlePushToggleChange}
-                    />
-                    <span class="settings-toggle__track" aria-hidden="true">
-                      <span class="settings-toggle__thumb" aria-hidden="true"></span>
-                    </span>
-                    <span class="settings-toggle__label">
-                      {notif.pushEnabled ? 'Push enabled on this device' : 'Enable push on this device'}
-                    </span>
-                  </label>
+            <p class="settings-hint">
+              Need iOS alerts? Open hConnect in Safari, tap "Add to Home Screen," launch from that icon, then enable push above.
+            </p>
+
+            {#if $showNotificationDebugTools}
+              <div class="settings-notif-debug" aria-live="polite">
+                <div class="settings-notif-debug__header">
+                  <div>
+                    <h3>Send test push</h3>
+                    <p>Super admins can fire a diagnostic push at this device.</p>
+                  </div>
                   <button
                     class="settings-chip settings-chip--secondary"
                     aria-busy={testPushState === 'loading'}
                     disabled={!notif.pushEnabled || testPushState === 'loading'}
                     onclick={sendTestPushNotification}
                   >
-                    Send test push
+                    {testPushState === 'loading' ? 'Sending...' : 'Send test push'}
                   </button>
                 </div>
                 {#if testPushMessage}
@@ -1021,77 +1038,69 @@ let enablePushLoading = $state(false);
                     {testPushMessage}
                   </p>
                 {/if}
-              </div>
-
-              <div class="settings-push-debug" aria-live="polite">
-                <div class="settings-push-debug__header">
-                  <div>
-                    <h4>Push debug log</h4>
-                    <p class="settings-push-debug__hint">
-                      {#if pushDebugCopyState === 'copied'}
-                        Copied to clipboard.
-                      {:else if pushDebugCopyState === 'error'}
-                        Could not copy log. Copy manually from below.
-                      {:else}
-                        Diagnostic entries from enable/test actions.
-                      {/if}
-                    </p>
-                  </div>
-                  <div class="settings-push-debug__actions">
-                    <button
-                      class="settings-chip"
-                      onclick={copyPushDebugLog}
-                      disabled={!pushDebugLog.length || pushDebugCopyState === 'copying'}
-                    >
-                      {#if pushDebugCopyState === 'copying'}
-                        Copying...
-                      {:else if pushDebugCopyState === 'copied'}
-                        Copied!
-                      {:else}
-                        Copy log
-                      {/if}
-                    </button>
-                    <button
-                      class="settings-chip settings-chip--secondary"
-                      onclick={clearPushDebugLog}
-                      disabled={!pushDebugLog.length}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-                {#if pushDebugLog.length}
-                  <ol class="settings-push-debug__list">
-                    {#each pushDebugLog as entry (entry.id)}
-                      <li class="settings-push-debug__item" data-level={entry.level}>
-                        <div class="settings-push-debug__meta">
-                          <span class="settings-push-debug__time">{formatDebugTimestamp(entry.timestamp)}</span>
-                          {#if entry.tag}
-                            <span class="settings-push-debug__tag">{entry.tag}</span>
-                          {/if}
-                          <span class="settings-push-debug__level">{entry.level}</span>
-                        </div>
-                        <p class="settings-push-debug__message">{entry.message}</p>
-                        {#if entry.details}
-                          <pre class="settings-push-debug__details">{entry.details}</pre>
+                <div class="settings-push-debug">
+                  <div class="settings-push-debug__header">
+                    <div>
+                      <h4>Push debug log</h4>
+                      <p class="settings-push-debug__hint">
+                        {#if pushDebugCopyState === 'copied'}
+                          Copied to clipboard.
+                        {:else if pushDebugCopyState === 'error'}
+                          Could not copy log. Copy manually from below.
+                        {:else}
+                          Diagnostic entries from enable/test actions.
                         {/if}
-                      </li>
-                    {/each}
-                  </ol>
-                {:else}
-                  <p class="settings-push-debug__empty">Logs appear here when you enable push or send a test notification.</p>
-                {/if}
-              </div>
-
-              <div class="settings-notif-tile">
-                <div class="settings-notif-tile__body">
-                  <h3>Channel highlights</h3>
-                  <p>Choose which updates we surface.</p>
+                      </p>
+                    </div>
+                    <div class="settings-push-debug__actions">
+                      <button
+                        class="settings-chip"
+                        onclick={copyPushDebugLog}
+                        disabled={!pushDebugLog.length || pushDebugCopyState === 'copying'}
+                      >
+                        {#if pushDebugCopyState === 'copying'}
+                          Copying...
+                        {:else if pushDebugCopyState === 'copied'}
+                          Copied!
+                        {:else}
+                          Copy log
+                        {/if}
+                      </button>
+                      <button
+                        class="settings-chip settings-chip--secondary"
+                        onclick={clearPushDebugLog}
+                        disabled={!pushDebugLog.length}
+                      >
+                        Clear log
+                      </button>
+                    </div>
+                  </div>
+                  {#if pushDebugLog.length}
+                    <ol class="settings-push-debug__list">
+                      {#each pushDebugLog as entry (entry.id)}
+                        <li class="settings-push-debug__item" data-level={entry.level}>
+                          <div class="settings-push-debug__meta">
+                            <span class="settings-push-debug__time">{formatDebugTimestamp(entry.timestamp)}</span>
+                            {#if entry.tag}
+                              <span class="settings-push-debug__tag">{entry.tag}</span>
+                            {/if}
+                            <span class="settings-push-debug__level">{entry.level}</span>
+                          </div>
+                          <p class="settings-push-debug__message">{entry.message}</p>
+                          {#if entry.details}
+                            <pre class="settings-push-debug__details">{entry.details}</pre>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ol>
+                  {:else}
+                    <p class="settings-push-debug__empty">
+                      Logs appear here when you enable push or send a test notification.
+                    </p>
+                  {/if}
                 </div>
-                <div class="settings-notif-list">
-                </div>
               </div>
-            </div>
+            {/if}
 
             <p class="settings-hint">
               Want per-server controls? Tell us what would help and we'll line it up next.
@@ -1522,10 +1531,71 @@ let enablePushLoading = $state(false);
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   }
 
-  .settings-notif-grid {
+  .settings-notif-options {
     display: flex;
     flex-direction: column;
+    gap: 0.9rem;
+  }
+
+  .settings-notif-option {
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .settings-notif-option__body {
+    flex: 1 1 16rem;
+    min-width: 12rem;
+  }
+
+  .settings-notif-option__body h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-80);
+  }
+
+  .settings-notif-option__body p {
+    margin: 0.25rem 0 0;
+    color: var(--text-60);
+    font-size: 0.86rem;
+    line-height: 1.35;
+  }
+
+  .settings-notif-option__actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    justify-content: flex-end;
+  }
+
+  .settings-notif-debug {
+    margin-top: 1.25rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    padding: 1.2rem;
+    display: grid;
+    gap: 0.85rem;
+    background: color-mix(in srgb, var(--surface-overlay) 92%, transparent);
+  }
+
+  .settings-notif-debug__header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.75rem;
+  }
+
+  .settings-notif-debug__header h3 {
+    margin: 0;
+    font-size: 1rem;
   }
 
   .settings-push-debug {
@@ -1698,38 +1768,6 @@ let enablePushLoading = $state(false);
     font-variant-numeric: tabular-nums;
   }
 
-  .settings-notif-tile {
-    border-radius: var(--radius-md);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--surface-root) 98%, transparent);
-    padding: 0.85rem 1rem;
-    display: grid;
-    gap: 0.45rem;
-    min-width: 0;
-  }
-
-  .settings-notif-tile__body h3 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text-80);
-  }
-
-  .settings-notif-tile__body p {
-    margin: 0.2rem 0 0;
-    color: var(--text-60);
-    font-size: 0.85rem;
-    line-height: 1.35;
-  }
-
-  .settings-notif-tile__actions {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-start;
-  }
-
   .settings-notif-status {
     margin: 0.6rem 0 0;
     font-size: 0.85rem;
@@ -1742,11 +1780,6 @@ let enablePushLoading = $state(false);
 
   .settings-notif-status--error {
     color: color-mix(in srgb, var(--color-danger, #f87171) 85%, var(--text-60));
-  }
-
-  .settings-notif-list {
-    display: grid;
-    gap: 0.45rem;
   }
 
   .appearance-option {
@@ -1857,12 +1890,22 @@ let enablePushLoading = $state(false);
       height: 4.25rem;
     }
 
-    .settings-notif-grid {
+    .settings-notif-options {
       gap: 0.75rem;
     }
 
-    .settings-notif-tile {
-      padding: 0.75rem 0.9rem;
+    .settings-notif-option {
+      flex-direction: column;
+      padding: 0.9rem;
+    }
+
+    .settings-notif-option__actions {
+      width: 100%;
+      justify-content: flex-start;
+    }
+
+    .settings-notif-debug {
+      padding: 1rem;
     }
 
     .settings-push-debug {
@@ -1872,11 +1915,6 @@ let enablePushLoading = $state(false);
     .settings-push-debug__actions {
       width: 100%;
       justify-content: flex-start;
-    }
-
-    .settings-notif-tile__actions {
-      flex-direction: column;
-      align-items: flex-start;
     }
 
     .settings-chip-row {
