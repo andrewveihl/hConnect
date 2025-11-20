@@ -1,7 +1,7 @@
 import type { QueryDocumentSnapshot } from 'firebase-admin/firestore';
 
 import { db } from './firebase';
-import type { DeviceDoc, NotificationSettings, PresenceDoc } from './types';
+import type { DeviceDoc, NotificationSettings, PresenceDoc, WebPushSubscription } from './types';
 
 const SETTINGS_SUBCOLLECTION = 'notificationSettings';
 const SETTINGS_DOC_ID = 'preferences';
@@ -50,8 +50,9 @@ export async function fetchPresence(uid: string): Promise<PresenceDoc | null> {
 }
 
 export type DeviceTokenRecord = {
-  token: string;
+  token?: string | null;
   platform?: string | null;
+  subscription?: WebPushSubscription | null;
 };
 
 export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise<DeviceTokenRecord[]> {
@@ -62,15 +63,15 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
       const doc = docSnap.data() as DeviceDoc | undefined;
       if (
         doc &&
-        typeof doc.token === 'string' &&
-        doc.token.length > 0 &&
+        (hasValidToken(doc) || hasSafariSubscription(doc)) &&
         (doc.permission === 'granted' || doc.permission === undefined) &&
         doc.enabled !== false
       ) {
         return [
           {
-            token: doc.token!,
-            platform: doc.platform ?? null
+            token: doc.token ?? null,
+            platform: doc.platform ?? null,
+            subscription: doc.subscription ?? null
           }
         ];
       }
@@ -81,17 +82,25 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
       .map((docSnap: QueryDocumentSnapshot) => docSnap.data() as DeviceDoc)
       .filter(
         (doc) =>
-          typeof doc?.token === 'string' &&
-          doc.token.length > 0 &&
+          (hasValidToken(doc) || hasSafariSubscription(doc)) &&
           (doc.permission === 'granted' || doc.permission === undefined) &&
           doc.enabled !== false
       )
       .map((doc) => ({
-        token: doc.token!,
-        platform: doc.platform ?? null
+        token: doc.token ?? null,
+        platform: doc.platform ?? null,
+        subscription: doc.subscription ?? null
       }));
   } catch (err) {
     console.warn('Failed to fetch device tokens', uid, err);
     return [];
   }
+}
+
+function hasValidToken(doc?: DeviceDoc | null) {
+  return typeof doc?.token === 'string' && doc.token.length > 0;
+}
+
+function hasSafariSubscription(doc?: DeviceDoc | null) {
+  return Boolean(doc?.subscription?.endpoint);
 }

@@ -48,6 +48,7 @@ type DeviceDocUpdate = {
   token?: string | null;
   permission?: DevicePermission;
   enabled?: boolean;
+  subscription?: PushSubscriptionJSON | null;
 };
 
 let swReg: ServiceWorkerRegistration | null = null;
@@ -75,6 +76,7 @@ const pingResolvers = new Map<
 
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
 let pushBroadcastChannel: BroadcastChannel | null = null;
+const SAFARI_WEB_PUSH_PLATFORMS = new Set<DevicePlatform>(['ios_pwa', 'web_safari']);
 
 async function getEffectiveNotificationPermission(): Promise<DevicePermission> {
   if (!browser || typeof Notification === 'undefined') return 'unsupported';
@@ -459,7 +461,7 @@ export async function enablePushForUser(
       step: 'device.persist',
       context: { reason: 'permission_denied', permission }
     });
-    await persistDeviceDoc(uid, { permission, token: null });
+    await persistDeviceDoc(uid, { permission, token: null, subscription: null });
     return null;
   }
   if (permission === 'default' && prompt) {
@@ -478,7 +480,7 @@ export async function enablePushForUser(
         step: 'device.persist',
         context: { reason: 'permission_not_granted', permission }
       });
-      await persistDeviceDoc(uid, { permission: permission ?? 'default', token: null });
+      await persistDeviceDoc(uid, { permission: permission ?? 'default', token: null, subscription: null });
       return null;
     }
   } else if (permission === 'default') {
@@ -490,7 +492,7 @@ export async function enablePushForUser(
       step: 'device.persist',
       context: { reason: 'prompt_skipped', permission }
     });
-    await persistDeviceDoc(uid, { permission, token: null });
+    await persistDeviceDoc(uid, { permission, token: null, subscription: null });
     return null;
   }
 
@@ -512,8 +514,40 @@ export async function enablePushForUser(
       step: 'device.persist',
       context: { reason: 'sw_missing', permission }
     });
-    await persistDeviceDoc(uid, { permission, token: null });
+    await persistDeviceDoc(uid, { permission, token: null, subscription: null });
     return null;
+  }
+
+  const useSafariWebPush = shouldUseSafariWebPush();
+  if (useSafariWebPush) {
+    emitPushDebug(debug, {
+      step: 'safari.subscription.start',
+      message: 'Preparing Safari Web Push subscription.'
+    });
+    const subscription = await ensureSafariSubscription(sw);
+    if (!subscription) {
+      emitPushDebug(debug, {
+        step: 'safari.subscription.error',
+        message: 'Failed to obtain Safari Web Push subscription.'
+      });
+      await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+      return null;
+    }
+    emitPushDebug(debug, {
+      step: 'safari.subscription.success',
+      context: { endpointPreview: `${subscription.endpoint.slice(0, 20)}…` }
+    });
+    permission = 'granted';
+    await persistDeviceDoc(uid, { permission: 'granted', subscription, token: null, enabled: true });
+    emitPushDebug(debug, {
+      step: 'device.persist',
+      context: { reason: 'safari_subscription', permission: 'granted' }
+    });
+    const endpointPreview =
+      typeof subscription.endpoint === 'string'
+        ? `safari:${subscription.endpoint.slice(-12)}`
+        : 'safari_web_push';
+    return endpointPreview;
   }
 
   try {
@@ -541,14 +575,14 @@ export async function enablePushForUser(
         step: 'device.persist',
         context: { reason: 'token_missing', permission }
       });
-      await persistDeviceDoc(uid, { permission, token: null });
+      await persistDeviceDoc(uid, { permission, token: null, subscription: null });
       return null;
     }
     emitPushDebug(debug, {
       step: 'device.persist',
       context: { reason: 'token_success', permission: 'granted' }
     });
-    await persistDeviceDoc(uid, { permission: 'granted', token, enabled: true });
+    await persistDeviceDoc(uid, { permission: 'granted', token, subscription: null, enabled: true });
     emitPushDebug(debug, {
       step: 'enable.success',
       message: 'Push token stored for device.',
@@ -566,14 +600,14 @@ export async function enablePushForUser(
       step: 'device.persist',
       context: { reason: 'token_error', permission }
     });
-    await persistDeviceDoc(uid, { permission, token: null });
+    await persistDeviceDoc(uid, { permission, token: null, subscription: null });
     return null;
   }
 }
 
 export async function disablePushForUser(uid: string) {
   if (!browser) return;
-  await persistDeviceDoc(uid, { token: null, enabled: false });
+  await persistDeviceDoc(uid, { token: null, subscription: null, enabled: false });
 }
 
 function resolvePermission(): DevicePermission {
@@ -651,6 +685,54 @@ function isStandalone() {
   return typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
 }
 
+function shouldUseSafariWebPush() {
+  const platform = detectPlatform();
+  return SAFARI_WEB_PUSH_PLATFORMS.has(platform);
+}
+
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = typeof window !== 'undefined' ? window.atob(base64) : Buffer.from(base64, 'base64').toString('binary');
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+async function ensureSafariSubscription(sw: ServiceWorkerRegistration): Promise<PushSubscriptionJSON | null> {
+  if (!sw?.pushManager) {
+    logPushDebug('ensureSafariSubscription: pushManager unavailable');
+    return null;
+  }
+  try {
+    const existing = await sw.pushManager.getSubscription();
+    if (existing) {
+      logPushDebug('ensureSafariSubscription using existing subscription');
+      return existing.toJSON();
+    }
+  } catch (err) {
+    logPushDebug('ensureSafariSubscription getSubscription failed', { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) });
+  }
+  if (!PUBLIC_FCM_VAPID_KEY) {
+    logPushDebug('ensureSafariSubscription aborted (missing VAPID key)');
+    return null;
+  }
+  try {
+    const convertedKey = urlBase64ToUint8Array(PUBLIC_FCM_VAPID_KEY);
+    const subscription = await sw.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: convertedKey
+    });
+    logPushDebug('ensureSafariSubscription created new subscription');
+    return subscription.toJSON();
+  } catch (err) {
+    logPushDebug('ensureSafariSubscription subscribe failed', { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) });
+    return null;
+  }
+}
+
 async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
   const deviceId = ensureDeviceId();
   if (!deviceId) return;
@@ -678,6 +760,10 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
   if (update.token !== undefined) {
     payload.token = update.token || null;
     payload.tokenUpdatedAt = now;
+  }
+  if (update.subscription !== undefined) {
+    payload.subscription = update.subscription || null;
+    payload.subscriptionUpdatedAt = now;
   }
   if (update.enabled !== undefined) {
     payload.enabled = update.enabled;
