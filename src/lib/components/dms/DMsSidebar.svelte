@@ -579,6 +579,62 @@ let {
   const searchSentinelAction = createLazyObserver(loadMoreSearchResults);
   const peopleSentinelAction = createLazyObserver(loadMorePeople);
 
+    /* ---------------- Long-press delete (mobile) ---------------- */
+  const DM_LONG_PRESS_MS = 600;
+
+  let dmLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let dmLongPressThreadId: string | null = null;
+  let dmLongPressFiredFor: string | null = null;
+
+  function clearDmLongPressTimer() {
+    if (dmLongPressTimer) {
+      clearTimeout(dmLongPressTimer);
+      dmLongPressTimer = null;
+    }
+  }
+
+  function handleThreadPointerDown(event: PointerEvent, threadId: string) {
+    // Only treat touch as long-press; don't interfere with desktop mouse
+    if (event.pointerType !== 'touch') return;
+
+    clearDmLongPressTimer();
+    dmLongPressThreadId = threadId;
+    dmLongPressFiredFor = null;
+
+    dmLongPressTimer = setTimeout(() => {
+      dmLongPressFiredFor = threadId;
+      clearDmLongPressTimer();
+      // reuse existing delete logic (includes confirm dialog)
+      deleteThread(threadId);
+    }, DM_LONG_PRESS_MS);
+  }
+
+  function handleThreadPointerUp(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    clearDmLongPressTimer();
+  }
+
+  function handleThreadPointerCancel(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    clearDmLongPressTimer();
+  }
+
+  function handleThreadClick(event: MouseEvent | PointerEvent, threadId: string) {
+    // prevent the click from bubbling to the row / delete button wrappers
+    event.stopPropagation();
+
+    // If a long-press just fired, don't also open the DM
+    if (dmLongPressFiredFor === threadId) {
+      dmLongPressFiredFor = null;
+      return;
+    }
+    openExisting(threadId);
+  }
+
+  onDestroy(() => {
+    clearDmLongPressTimer();
+  });
+
   /* ---------------- Actions ---------------- */
   function openExisting(threadId: string) {
     activeThreadId = threadId;
@@ -851,7 +907,11 @@ let {
               <div class={`dm-thread__row group ${isActive ? 'dm-thread__row--active' : ''}`}>
                 <button
                   class="dm-thread__button flex items-center gap-3 text-left focus:outline-none min-w-0"
-                  onclick={() => openExisting(t.id)}
+                  onclick={(event) => handleThreadClick(event, t.id)}
+                  onpointerdown={(event) => handleThreadPointerDown(event, t.id)}
+                  onpointerup={handleThreadPointerUp}
+                  onpointerleave={handleThreadPointerCancel}
+                  onpointercancel={handleThreadPointerCancel}
                 >
                   <div class="dm-thread__avatar">
                     <div class="dm-thread__avatar-img">
@@ -1086,7 +1146,7 @@ let {
     border-radius: var(--radius-md);
     border: none;
     background: transparent;
-    color: rgba(255, 255, 255, 0.65);
+    color: var(--color-text-secondary);
     opacity: 0;
     transition:
       opacity 140ms ease,
@@ -1102,22 +1162,18 @@ let {
   .dm-thread__delete-btn:hover,
   .dm-thread__delete-btn:focus-visible {
     background: color-mix(in srgb, white 10%, transparent);
-    color: white;
+    color: var(--color-text-primary);
   }
 
   @media (max-width: 640px) {
     .dm-thread__button {
       padding-right: 1rem;
     }
-
     .dm-thread__delete-btn {
-      opacity: 1;
-      pointer-events: auto;
-      right: -0.25rem;
-      transform: translate(65%, -50%);
-      background: color-mix(in srgb, #0f172a 30%, rgba(15, 23, 42, 0.2));
-      color: white;
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+      display: none !important;
+      opacity: 0 !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
     }
 
     .dm-thread__delete-btn i {

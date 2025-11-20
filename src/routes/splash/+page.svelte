@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import SplashScreen from '$lib/components/app/SplashScreen.svelte';
 
-  let isDemoReady = $state(true); // Controls the splash visibility for this dedicated demo page.
+  let isDemoReady = $state(true); // Controls the splash visibility for this dedicated demo page
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const playDemo = () => {
