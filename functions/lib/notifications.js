@@ -24,9 +24,19 @@ const MENTION_PRIORITY = {
     here: 2,
     everyone: 1
 };
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:support@hconnect.app';
-const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? '';
-const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ?? process.env.VAPID_PRIVATE_KEY ?? '';
+let functionsConfig = {};
+try {
+    functionsConfig = (0, firebase_functions_1.config)();
+}
+catch (err) {
+    firebase_functions_1.logger.warn('firebase config unavailable', err);
+}
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? functionsConfig.vapid?.subject ?? 'mailto:support@hconnect.app';
+const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? '';
+const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ??
+    process.env.VAPID_PRIVATE_KEY ??
+    functionsConfig.vapid?.private_key ??
+    '';
 const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (WEB_PUSH_AVAILABLE) {
     try {
