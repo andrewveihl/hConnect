@@ -248,13 +248,15 @@ let statusDebugLines = $state<string[]>([]);
     try {
       const registration = await navigator.serviceWorker?.ready;
       if (!registration?.showNotification) return;
+      const targetUrl = '/settings?origin=test_push';
       await registration.showNotification('hConnect test notification', {
-        body: 'If push is enabled, you should see a system notification shortly.',
+        body: 'Tap to open hConnect. If push is enabled you will also get the remote notification.',
         icon: '/Logo_transparent.png',
         tag: 'hconnect:test-push',
         renotify: true,
         data: {
           origin: 'local_test_push',
+          targetUrl,
           timestamp: Date.now()
         }
       });

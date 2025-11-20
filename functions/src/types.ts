@@ -82,6 +82,7 @@ export type DeviceDoc = {
   token?: string | null;
   permission?: string | null;
   enabled?: boolean;
+  platform?: string | null;
 };
 
 export type MentionType = 'direct' | 'role' | 'here' | 'everyone' | 'dm';

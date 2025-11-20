@@ -49,7 +49,12 @@ export async function fetchPresence(uid: string): Promise<PresenceDoc | null> {
   }
 }
 
-export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise<string[]> {
+export type DeviceTokenRecord = {
+  token: string;
+  platform?: string | null;
+};
+
+export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise<DeviceTokenRecord[]> {
   try {
     if (deviceId) {
       const docSnap = await db.doc(`profiles/${uid}/devices/${deviceId}`).get();
@@ -62,7 +67,12 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
         (doc.permission === 'granted' || doc.permission === undefined) &&
         doc.enabled !== false
       ) {
-        return [doc.token];
+        return [
+          {
+            token: doc.token!,
+            platform: doc.platform ?? null
+          }
+        ];
       }
       return [];
     }
@@ -76,7 +86,10 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
           (doc.permission === 'granted' || doc.permission === undefined) &&
           doc.enabled !== false
       )
-      .map((doc) => doc.token!) as string[];
+      .map((doc) => ({
+        token: doc.token!,
+        platform: doc.platform ?? null
+      }));
   } catch (err) {
     console.warn('Failed to fetch device tokens', uid, err);
     return [];

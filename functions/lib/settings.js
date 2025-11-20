@@ -60,7 +60,12 @@ async function fetchDeviceTokens(uid, deviceId) {
                 doc.token.length > 0 &&
                 (doc.permission === 'granted' || doc.permission === undefined) &&
                 doc.enabled !== false) {
-                return [doc.token];
+                return [
+                    {
+                        token: doc.token,
+                        platform: doc.platform ?? null
+                    }
+                ];
             }
             return [];
         }
@@ -71,7 +76,10 @@ async function fetchDeviceTokens(uid, deviceId) {
             doc.token.length > 0 &&
             (doc.permission === 'granted' || doc.permission === undefined) &&
             doc.enabled !== false)
-            .map((doc) => doc.token);
+            .map((doc) => ({
+            token: doc.token,
+            platform: doc.platform ?? null
+        }));
     }
     catch (err) {
         console.warn('Failed to fetch device tokens', uid, err);
