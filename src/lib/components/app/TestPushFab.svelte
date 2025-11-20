@@ -3,10 +3,12 @@ import { browser } from '$app/environment';
 import { onMount } from 'svelte';
 import { user } from '$lib/stores/user';
 import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+import { featureFlag } from '$lib/stores/featureFlags';
   import { triggerTestPush } from '$lib/notify/testPush';
   import { listenForTestPushDelivery, getCurrentDeviceId, pingServiceWorker } from '$lib/notify/push';
 
   const superAdminEmails = superAdminEmailsStore();
+  const showNotificationDebugTools = featureFlag('showNotificationDebugTools');
 
 const DELIVERY_TIMEOUT_MS = 10000;
 
@@ -98,14 +100,13 @@ let statusDebugLines = $state<string[]>([]);
     };
   });
 
-  const isSuperAdmin = $derived(
-    (() => {
-      const email = $user?.email ? $user.email.toLowerCase() : null;
-      if (!email) return false;
-      const allowList = Array.isArray($superAdminEmails) ? $superAdminEmails : [];
-      return allowList.includes(email);
-    })()
-  );
+  const isSuperAdmin = $derived(() => {
+    const email = $user?.email ? $user.email.toLowerCase() : null;
+    if (!email) return false;
+    const allowList = Array.isArray($superAdminEmails) ? $superAdminEmails : [];
+    return allowList.includes(email);
+  });
+  const canShowFab = $derived($showNotificationDebugTools && isSuperAdmin);
 
   function scheduleClear(options: { force?: boolean } = {}) {
     const { force = false } = options;
@@ -477,7 +478,8 @@ let statusDebugLines = $state<string[]>([]);
   }
 </script>
 
-<div class="test-push-fab" data-status={status}>
+{#if canShowFab}
+  <div class="test-push-fab" data-status={status}>
   <button
     type="button"
     class="test-push-fab__icon"
@@ -531,7 +533,8 @@ let statusDebugLines = $state<string[]>([]);
       {/if}
     </div>
   {/if}
-</div>
+  </div>
+{/if}
 
 <style>
   .test-push-fab {

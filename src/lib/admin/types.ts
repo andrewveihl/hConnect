@@ -32,7 +32,8 @@ export type FeatureFlagKey =
   | 'enableReadReceipts'
   | 'enableMessageEditing'
   | 'enableMessageDeleting'
-  | 'readOnlyMode';
+  | 'readOnlyMode'
+  | 'showNotificationDebugTools';
 
 export type FeatureFlagMap = Record<FeatureFlagKey, boolean>;
 
@@ -124,6 +125,11 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
     description: 'Allow message delete controls.'
   },
   {
+    key: 'showNotificationDebugTools',
+    label: 'Notification debug tools',
+    description: 'Expose in-app test push buttons and debug logs.'
+  },
+  {
     key: 'readOnlyMode',
     label: 'Read-only Mode',
     description: 'Lock outbound messaging globally.'
@@ -147,7 +153,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
   enableReadReceipts: true,
   enableMessageEditing: true,
   enableMessageDeleting: true,
-  readOnlyMode: false
+  readOnlyMode: false,
+  showNotificationDebugTools: true
 };
 
 export type AdminLogType =
