@@ -1,6 +1,7 @@
 // src/lib/notify/push.ts
 import { browser } from '$app/environment';
-import { PUBLIC_FCM_VAPID_KEY, PUBLIC_FCM_VAPID_KEY_FCM } from '$env/static/public';
+import { PUBLIC_FCM_VAPID_KEY } from '$env/static/public';
+import { env as PUBLIC_ENV } from '$env/dynamic/public';
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 
@@ -77,7 +78,7 @@ const pingResolvers = new Map<
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
 let pushBroadcastChannel: BroadcastChannel | null = null;
 const SAFARI_WEB_PUSH_PLATFORMS = new Set<DevicePlatform>(['ios_pwa', 'web_safari']);
-const FCM_WEB_VAPID_KEY = PUBLIC_FCM_VAPID_KEY_FCM || PUBLIC_FCM_VAPID_KEY || '';
+const FCM_WEB_VAPID_KEY = PUBLIC_ENV.PUBLIC_FCM_VAPID_KEY_FCM || PUBLIC_FCM_VAPID_KEY || '';
 
 async function getEffectiveNotificationPermission(): Promise<DevicePermission> {
   if (!browser || typeof Notification === 'undefined') return 'unsupported';
