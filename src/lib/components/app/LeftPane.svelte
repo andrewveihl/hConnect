@@ -73,10 +73,14 @@ import { featureFlags } from '$lib/stores/featureFlags';
   let dragPointerId: number | null = null;
   let dragCandidateId: string | null = null;
   let dragStartY = 0;
+  let dragMoved = false;
   const DRAG_THRESHOLD_PX = 6;
-  let dragMoveListener: ((event: PointerEvent) => void) | null = null;
-  let dragUpListener: ((event: PointerEvent) => void) | null = null;
   let pendingOrderIds: string[] | null = null;
+  let serverScrollEl: HTMLDivElement | null = $state(null);
+  let lastPointerY = 0;
+  let autoScrollFrame: number | null = null;
+  const AUTO_SCROLL_EDGE_PX = 56;
+  const AUTO_SCROLL_MAX_STEP = 18;
 const currentStatusSelection = $derived(myOverrideActive && myOverrideState ? myOverrideState : 'auto');
 const featureFlagStore = featureFlags;
 const enableVoice = $derived(Boolean($featureFlagStore.enableVoice));
@@ -116,7 +120,7 @@ const isSuperAdmin = $derived(
 
   onDestroy(() => unsub?.());
   onDestroy(() => dmRailUnsub?.());
-  onDestroy(() => detachDragListeners());
+  onDestroy(() => stopAutoScroll());
 
   const handleCreateClick = () => {
     if (onCreateServer) onCreateServer();
@@ -394,45 +398,55 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
     };
   }
 
-  function attachDragListeners() {
-    if (typeof window === 'undefined' || dragMoveListener) return;
-    dragMoveListener = (event: PointerEvent) => handleWindowPointerMove(event);
-    dragUpListener = (event: PointerEvent) => handleWindowPointerUp(event);
-    window.addEventListener('pointermove', dragMoveListener, { passive: false });
-    window.addEventListener('pointerup', dragUpListener, { passive: false });
-    window.addEventListener('pointercancel', dragUpListener, { passive: false });
+  function stopAutoScroll() {
+    if (autoScrollFrame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(autoScrollFrame);
+    }
+    autoScrollFrame = null;
   }
 
-  function detachDragListeners() {
-    if (typeof window === 'undefined') return;
-    if (dragMoveListener) {
-      window.removeEventListener('pointermove', dragMoveListener);
-      dragMoveListener = null;
+  function runAutoScroll() {
+    if (!draggingServerId || !serverScrollEl) {
+      stopAutoScroll();
+      return;
     }
-    if (dragUpListener) {
-      window.removeEventListener('pointerup', dragUpListener);
-      window.removeEventListener('pointercancel', dragUpListener);
-      dragUpListener = null;
+    const rect = serverScrollEl.getBoundingClientRect();
+    const upperEdge = rect.top + AUTO_SCROLL_EDGE_PX;
+    const lowerEdge = rect.bottom - AUTO_SCROLL_EDGE_PX;
+    let delta = 0;
+    if (lastPointerY < upperEdge) {
+      const intensity = 1 - (lastPointerY - rect.top) / AUTO_SCROLL_EDGE_PX;
+      delta = -Math.max(4, Math.min(AUTO_SCROLL_MAX_STEP, intensity * AUTO_SCROLL_MAX_STEP));
+    } else if (lastPointerY > lowerEdge) {
+      const intensity = 1 - (rect.bottom - lastPointerY) / AUTO_SCROLL_EDGE_PX;
+      delta = Math.max(4, Math.min(AUTO_SCROLL_MAX_STEP, intensity * AUTO_SCROLL_MAX_STEP));
     }
+    if (delta !== 0) {
+      serverScrollEl.scrollBy({ top: delta });
+    } else {
+      stopAutoScroll();
+      return;
+    }
+    autoScrollFrame = requestAnimationFrame(runAutoScroll);
   }
 
-  function beginDrag(candidateId: string, pointerId: number, startY: number) {
-    dragCandidateId = candidateId;
-    dragPointerId = pointerId;
-    dragStartY = startY;
+  function ensureAutoScroll(clientY: number) {
+    lastPointerY = clientY;
+    if (!draggingServerId || autoScrollFrame !== null) return;
+    autoScrollFrame = requestAnimationFrame(runAutoScroll);
   }
 
   function activateDrag() {
     if (!dragCandidateId) return;
     draggingServerId = dragCandidateId;
     dragPreview = [...serverList];
-    suppressNextServerClick = true;
   }
 
   function updatePreviewOrder(clientY: number) {
     if (!draggingServerId) return;
     const ordered = dragPreview.length ? dragPreview : serverList;
     let targetId = ordered[ordered.length - 1]?.id ?? draggingServerId;
+    let placeAtEnd = true;
     for (const entry of ordered) {
       const el = serverButtonRefs.get(entry.id);
       if (!el) continue;
@@ -440,11 +454,13 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
       const mid = rect.top + rect.height / 2;
       if (clientY < mid) {
         targetId = entry.id;
+        placeAtEnd = false;
         break;
       }
     }
-    const next = reorderList(ordered, draggingServerId, targetId);
+    const next = reorderList(ordered, draggingServerId, targetId, placeAtEnd);
     if (next !== ordered) {
+      dragMoved = true;
       dragPreview = next;
     }
   }
@@ -455,13 +471,14 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
     const originalIds = servers.map((entry) => entry.id);
     resetDragState();
     serverList = finalList;
-    if (!arraysEqual(finalIds, originalIds)) {
+    const changed = !arraysEqual(finalIds, originalIds);
+    if (changed) {
       pendingOrderIds = finalIds;
       await persistServerOrder(finalList);
     } else {
       pendingOrderIds = null;
     }
-    suppressNextServerClick = true;
+    suppressNextServerClick = changed || dragMoved;
   }
 
   function resetDragState() {
@@ -470,7 +487,8 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
     dragPointerId = null;
     dragStartY = 0;
     dragPreview = [];
-    detachDragListeners();
+    dragMoved = false;
+    stopAutoScroll();
     setTimeout(() => {
       suppressNextServerClick = false;
     }, 0);
@@ -478,19 +496,27 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
 
   function handleServerPointerDown(event: PointerEvent, serverId: string) {
     if (event.button !== 0) return;
+    event.stopPropagation();
     suppressNextServerClick = false;
-    beginDrag(serverId, event.pointerId, event.clientY);
-    attachDragListeners();
+    dragMoved = false;
+    (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    dragCandidateId = serverId;
+    dragPointerId = event.pointerId;
+    dragStartY = event.clientY;
+    draggingServerId = serverId;
+    dragPreview = [...serverList];
   }
 
   function handleWindowPointerMove(event: PointerEvent) {
-    if (!dragCandidateId || dragPointerId !== event.pointerId) return;
+    if ((!dragCandidateId && !draggingServerId) || dragPointerId !== event.pointerId) return;
     const delta = Math.abs(event.clientY - dragStartY);
     if (!draggingServerId && delta >= DRAG_THRESHOLD_PX) {
       activateDrag();
     }
     if (!draggingServerId) return;
     event.preventDefault();
+    if (delta > 0.5) dragMoved = true;
+    ensureAutoScroll(event.clientY);
     updatePreviewOrder(event.clientY);
   }
 
@@ -578,14 +604,23 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
     navigateToServer(serverId);
   }
 
-  function reorderList(list: ServerRailEntry[], sourceId: string, targetId: string) {
-    if (sourceId === targetId) return list;
+  function reorderList(list: ServerRailEntry[], sourceId: string, targetId: string, placeAtEnd = false) {
+    if (sourceId === targetId && !placeAtEnd) return list;
     const next = [...list];
     const fromIndex = next.findIndex((entry) => entry.id === sourceId);
-    const toIndex = next.findIndex((entry) => entry.id === targetId);
-    if (fromIndex === -1 || toIndex === -1) return list;
+    if (fromIndex === -1) return list;
     const [moved] = next.splice(fromIndex, 1);
-    next.splice(toIndex, 0, moved);
+    if (placeAtEnd) {
+      next.push(moved);
+      return next;
+    }
+    const toIndex = next.findIndex((entry) => entry.id === targetId);
+    if (toIndex === -1) {
+      next.push(moved);
+      return next;
+    }
+    const insertAt = fromIndex < toIndex ? toIndex : toIndex;
+    next.splice(insertAt < 0 ? 0 : insertAt, 0, moved);
     return next;
   }
 
@@ -619,7 +654,13 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
   }
 </script>
 
-<svelte:window onpointerdown={handleStatusOutside} on:keydown={handleStatusKeydown} />
+<svelte:window
+  onpointerdown={handleStatusOutside}
+  onpointermove={handleWindowPointerMove}
+  onpointerup={handleWindowPointerUp}
+  onpointercancel={handleWindowPointerUp}
+  on:keydown={handleStatusKeydown}
+/>
 
 <aside
   class="app-rail h-dvh w-[72px] sticky top-0 left-0 z-30 flex flex-col items-center select-none"
@@ -636,7 +677,11 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
 
   <div class="rail-divider"></div>
 
-  <div class="flex-1 w-full overflow-y-auto touch-pan-y">
+  <div
+    class="flex-1 w-full overflow-y-auto touch-pan-y"
+    bind:this={serverScrollEl}
+    style:touch-action={draggingServerId ? 'none' : undefined}
+  >
     <div class="rail-server-stack pb-4">
       {#each displayedServers as s (s.id)}
         <button

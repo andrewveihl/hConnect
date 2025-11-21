@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { run } from 'svelte/legacy';
 
   import { page } from '$app/stores';
@@ -89,6 +89,15 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
   let draggingChannelType: Chan['type'] | null = $state(null);
   let dragOverChannelId: string | null = $state(null);
   let dragOverAfter = $state(false);
+  let channelDragCandidateId: string | null = null;
+  let channelDragCandidateType: Chan['type'] | null = null;
+  let channelDragPointerId: number | null = null;
+  let channelDragStartY = 0;
+  let channelDragMoved = false;
+  const CHANNEL_DRAG_THRESHOLD_PX = 6;
+  const channelRowRefs = new Map<string, HTMLElement>();
+  let suppressChannelClick = false;
+  let serverIcon: string | null = $state(null);
 
   let voicePresence: Record<string, VoiceParticipant[]> = $state({});
   const voiceUnsubs = new Map<string, Unsubscribe>();
@@ -347,99 +356,6 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     return canManageChannels ? defaultOrderIds() : personalOrderIds();
   }
 
-  function findSibling(id: string, type: Chan['type'], delta: number): string | null {
-    if (!workingOrder.length) return null;
-    const ids = workingOrder.filter((cid) => {
-      const chan = channelById(cid);
-      if (!chan || chan.type !== type) return false;
-      if (reorderMode === 'default') return true;
-      return canSeeChannel(chan);
-    });
-    const currentIndex = ids.indexOf(id);
-    if (currentIndex === -1) return null;
-    const targetIndex = currentIndex + delta;
-    if (targetIndex < 0 || targetIndex >= ids.length) return null;
-    return ids[targetIndex] ?? null;
-  }
-
-  function moveChannelInWorkingOrder(id: string, type: Chan['type'], delta: number) {
-    if (!workingOrder.length) return;
-    const scoped = workingOrder
-      .map((cid, index) => ({ cid, index }))
-      .filter(({ cid }) => {
-        const chan = channelById(cid);
-        if (!chan || chan.type !== type) return false;
-        if (reorderMode === 'default') return true;
-        return canSeeChannel(chan);
-      });
-
-    const current = scoped.findIndex((entry) => entry.cid === id);
-    if (current === -1) return;
-    const target = current + delta;
-    if (target < 0 || target >= scoped.length) return;
-
-    const fromIndex = scoped[current].index;
-    const targetIndexRaw = scoped[target].index;
-    const targetIndexAfterRemoval = targetIndexRaw - (targetIndexRaw > fromIndex ? 1 : 0);
-    const insertIndex = delta > 0 ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval;
-
-    const result = [...workingOrder];
-    const [moved] = result.splice(fromIndex, 1);
-    result.splice(Math.max(0, Math.min(result.length, insertIndex)), 0, moved);
-    workingOrder = result;
-  }
-
-
-  function canMoveChannel(id: string, type: Chan['type'], delta: number) {
-    return !!findSibling(id, type, delta);
-  }
-
-  function resetDragState() {
-    draggingChannelId = null;
-    draggingChannelType = null;
-    dragOverChannelId = null;
-    dragOverAfter = false;
-  }
-
-  function startChannelDrag(event: DragEvent, id: string, type: Chan['type']) {
-    if (reorderMode === 'none' || savingOrder) {
-      event.preventDefault();
-      return;
-    }
-    draggingChannelId = id;
-    draggingChannelType = type;
-    dragOverChannelId = null;
-    dragOverAfter = false;
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', id);
-    }
-  }
-
-  function handleChannelDragOver(event: DragEvent, targetId: string, type: Chan['type']) {
-    if (reorderMode === 'none' || !draggingChannelId || savingOrder) return;
-    if (draggingChannelId === targetId) {
-      event.preventDefault();
-      return;
-    }
-    if (draggingChannelType && draggingChannelType !== type) return;
-    const sourceChan = channelById(draggingChannelId);
-    const targetChan = channelById(targetId);
-    if (!sourceChan || !targetChan) return;
-    if (sourceChan.type !== type || targetChan.type !== type) return;
-    if (reorderMode !== 'default' && (!canSeeChannel(sourceChan) || !canSeeChannel(targetChan))) return;
-
-    const element = event.currentTarget as HTMLElement;
-    const rect = element.getBoundingClientRect();
-    const after = event.clientY - rect.top > rect.height / 2;
-    event.preventDefault();
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = 'move';
-    }
-    dragOverChannelId = targetId;
-    dragOverAfter = after;
-  }
-
   function reorderChannelsByDrag(sourceId: string, targetId: string, type: Chan['type'], placeAfter: boolean) {
     if (reorderMode === 'none' || !workingOrder.length) return;
     if (sourceId === targetId) return;
@@ -447,7 +363,7 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
       .map((cid, index) => ({ cid, index }))
       .filter(({ cid }) => {
         const chan = channelById(cid);
-        if (!chan || chan.type !== type) return false;
+        if (!chan) return false;
         if (reorderMode === 'default') return true;
         return canSeeChannel(chan);
       });
@@ -469,25 +385,127 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     workingOrder = result;
   }
 
-  function handleChannelDrop(event: DragEvent, targetId: string, type: Chan['type']) {
-    if (reorderMode === 'none' || !draggingChannelId || savingOrder) {
-      resetDragState();
-      return;
-    }
-    if (draggingChannelType && draggingChannelType !== type) {
-      resetDragState();
-      return;
-    }
-    event.preventDefault();
-    const element = event.currentTarget as HTMLElement;
-    const rect = element.getBoundingClientRect();
-    const after = event.clientY - rect.top > rect.height / 2;
-    reorderChannelsByDrag(draggingChannelId, targetId, type, after);
-    resetDragState();
+  function channelRowRefAction(node: HTMLElement, id: string) {
+    channelRowRefs.set(id, node);
+    return {
+      update(nextId: string) {
+        if (nextId === id) return;
+        channelRowRefs.delete(id);
+        id = nextId;
+        channelRowRefs.set(id, node);
+      },
+      destroy() {
+        channelRowRefs.delete(id);
+      }
+    };
   }
 
-  function endChannelDrag() {
-    resetDragState();
+  function resetDragState() {
+    draggingChannelId = null;
+    draggingChannelType = null;
+    dragOverChannelId = null;
+    dragOverAfter = false;
+    channelDragCandidateId = null;
+    channelDragCandidateType = null;
+    channelDragPointerId = null;
+    channelDragStartY = 0;
+    channelDragMoved = false;
+    suppressChannelClick = false;
+  }
+
+  function ensureWorkingOrder(type: Chan['type']): boolean {
+    if (reorderMode !== 'none' && workingOrder.length) return true;
+    if (canManageChannels) {
+      reorderMode = 'default';
+      workingOrder = defaultOrderIds();
+      return true;
+    }
+    if (canReorderPersonal) {
+      reorderMode = 'personal';
+      workingOrder = personalOrderIds();
+      return true;
+    }
+    return false;
+  }
+
+  function startChannelPointerDrag(event: PointerEvent, id: string, type: Chan['type']) {
+    if (savingOrder) return;
+    if (!canManageChannels && !canReorderPersonal) return;
+    orderError = null;
+    suppressChannelClick = false;
+    channelDragCandidateId = id;
+    channelDragCandidateType = type;
+    channelDragPointerId = event.pointerId;
+    channelDragStartY = event.clientY;
+    channelDragMoved = false;
+  }
+
+  function updateChannelOrderFromPointer(clientY: number, sourceId: string, type: Chan['type']) {
+    if (!ensureWorkingOrder(type)) return;
+    const scopedIds = workingOrder.filter((cid) => {
+      const chan = channelById(cid);
+      if (!chan) return false;
+      if (reorderMode === 'default') return true;
+      return canSeeChannel(chan);
+    });
+    if (!scopedIds.length) return;
+    let targetId = scopedIds[scopedIds.length - 1];
+    let placeAfter =
+      clientY > (channelRowRefs.get(targetId)?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY);
+    for (const id of scopedIds) {
+      const el = channelRowRefs.get(id);
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      if (clientY < mid) {
+        targetId = id;
+        placeAfter = false;
+        break;
+      }
+    }
+    if (sourceId === targetId && !placeAfter) return;
+    dragOverChannelId = targetId;
+    dragOverAfter = placeAfter;
+    reorderChannelsByDrag(sourceId, targetId, type, placeAfter);
+  }
+
+  function handleChannelPointerMove(event: PointerEvent) {
+    if (reorderMode === 'none' && !channelDragCandidateId) return;
+    if (savingOrder) return;
+    if (channelDragPointerId !== event.pointerId) return;
+    const delta = Math.abs(event.clientY - channelDragStartY);
+    if (!draggingChannelId && channelDragCandidateId && delta >= CHANNEL_DRAG_THRESHOLD_PX) {
+      if (!ensureWorkingOrder(channelDragCandidateType ?? channelTypeById(channelDragCandidateId) ?? 'text')) {
+        resetDragState();
+        return;
+      }
+      draggingChannelId = channelDragCandidateId;
+      draggingChannelType = channelDragCandidateType ?? channelTypeById(channelDragCandidateId);
+      (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    }
+
+    if (!draggingChannelId || !draggingChannelType || reorderMode === 'none') return;
+    event.preventDefault();
+    channelDragMoved = true;
+    suppressChannelClick = true;
+    updateChannelOrderFromPointer(event.clientY, draggingChannelId, draggingChannelType);
+  }
+
+  async function handleChannelPointerUp(event: PointerEvent) {
+    if (channelDragPointerId !== event.pointerId) return;
+    channelDragPointerId = null;
+    channelDragCandidateId = null;
+    channelDragCandidateType = null;
+    dragOverChannelId = null;
+    dragOverAfter = false;
+    if (draggingChannelId && channelDragMoved) {
+      event.preventDefault();
+      await saveReorder();
+    }
+    draggingChannelId = null;
+    draggingChannelType = null;
+    suppressChannelClick = false;
+    channelDragMoved = false;
   }
 
 
@@ -501,10 +519,12 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
         if (!snap.exists()) {
           serverName = 'Server';
           ownerId = null;
+          serverIcon = null;
           return;
         }
         const data = snap.data() as any;
         serverName = data?.name ?? 'Server';
+        serverIcon = typeof data?.icon === 'string' && data.icon.length ? data.icon : null;
         ownerId = deriveOwnerId(data);
         if (computeIsOwner()) {
           myRole = 'owner';
@@ -512,6 +532,7 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
       },
       () => {
         serverName = 'Server';
+        serverIcon = null;
         ownerId = null;
       }
     );
@@ -898,142 +919,81 @@ run(() => {
   aria-label="Channels"
 >
   <div class="server-sidebar__header h-12 px-3 flex items-center justify-between border-b border-subtle">
-    <div class="flex items-center gap-2 min-w-0">
-      <div class="font-semibold truncate" title={serverName}>{serverName}</div>
-      {#if isOwner}
-        <span class="badge-accent text-[10px] px-1.5 py-0.5">owner</span>
-      {:else if isAdminLike}
-        <span class="badge-accent text-[10px] px-1.5 py-0.5">admin</span>
-      {/if}
-    </div>
-
-    <div class="flex items-center gap-1.5 pr-1">
-      {#if canManageChannels || canReorderPersonal}
-        {#if reorderMode === 'none'}
-          <button
-            type="button"
-            class="btn btn-ghost h-8 px-2 "
-            title="Reorder channels"
-            aria-label="Reorder channels"
-            onclick={beginReorder}
-          >
-            <i class="bx bx-sort-alt-2 text-lg" aria-hidden="true"></i>
-          </button>
+    <button
+      type="button"
+      class="server-header__button"
+      onclick={openServerSettings}
+      aria-label="Open server settings"
+      disabled={!isAdminLike}
+    >
+      <span class="server-avatar">
+        {#if serverIcon}
+          <img src={serverIcon} alt={serverName} class="h-full w-full object-cover" />
         {:else}
-          <button
-            type="button"
-            class="btn btn-primary h-8 px-3 "
-            onclick={saveReorder}
-            disabled={savingOrder}
-          >
-            {savingOrder ? 'SavingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦' : 'Save'}
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost h-8 px-2 "
-            onclick={cancelReorder}
-            disabled={savingOrder}
-          >
-            Cancel
-          </button>
+          <span class="server-avatar__initial">{voiceInitial(serverName)}</span>
         {/if}
-      {/if}
-      {#if isAdminLike}
-        <button
-          type="button"
-          class="btn btn-ghost h-8 w-8 grid place-items-center "
-          title="Server settings"
-          aria-label="Server settings"
-          onclick={openServerSettings}
-        >
-          <i class="bx bx-cog text-[16px]" aria-hidden="true"></i>
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="btn btn-ghost h-8 w-8 grid place-items-center "
-        title="Create channel"
-        aria-label="Create channel"
-        onclick={() => (showCreate = true)}
-        disabled={reorderMode !== 'none'}
-      >
-        <i class="bx bx-plus" aria-hidden="true"></i>
-      </button>
-    </div>
+      </span>
+      <span class="server-header__label">
+        <span class="server-label-row">
+          <span class="server-name truncate" title={serverName}>{serverName}</span>
+          {#if isOwner}
+            <span class="badge-accent text-[10px] px-1.5 py-0.5">owner</span>
+          {:else if isAdminLike}
+            <span class="badge-accent text-[10px] px-1.5 py-0.5">admin</span>
+          {/if}
+        </span>
+      </span>
+    </button>
   </div>
 
-  {#if reorderMode !== 'none'}
-    <div class="px-3 pt-2 text-xs text-soft">
-      {#if reorderMode === 'default'}
-        Reordering default channel order (applies to everyone).
-      {:else}
-        Reordering your personal channel order.
-      {/if}
-    </div>
-  {/if}
   {#if orderError}
     <div class="px-3 pt-2 text-xs text-red-300">{orderError}</div>
   {/if}
 
-<div class="p-3 space-y-4 overflow-y-auto overflow-x-hidden">
+  <div class="p-3 space-y-4 overflow-y-auto overflow-x-hidden">
     {#if activeVoice}
-      <!-- Desktop-only mini voice panel -->
       <div class="hidden md:block">
         <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
       </div>
     {/if}
-    <div class="space-y-1">
-        {#each visibleChannels.filter((c) => c.type === 'text') as c (c.id)}
+    <div class="channel-heading">Channels</div>
+    <div class="channel-list space-y-1">
+      {#each visibleChannels as c (c.id)}
         <div
           class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
           role="listitem"
-          draggable={reorderMode !== 'none' && !savingOrder}
-          ondragstart={(event) => startChannelDrag(event, c.id, 'text')}
-          ondragend={endChannelDrag}
-          ondragover={(event) => handleChannelDragOver(event, c.id, 'text')}
-          ondrop={(event) => handleChannelDrop(event, c.id, 'text')}
+          draggable={false}
+          use:channelRowRefAction={c.id}
+          onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
         >
-            {#if reorderMode !== 'none'}
-              <div class="channel-reorder-controls">
-                <button
-                  type="button"
-                  class="channel-reorder-button"
-                  title="Move up"
-                  aria-label="Move channel up"
-                  onclick={() => moveChannelInWorkingOrder(c.id, 'text', -1)}
-                  disabled={!canMoveChannel(c.id, 'text', -1) || savingOrder}
-                >
-                  <i class="bx bx-chevron-up text-sm" aria-hidden="true"></i>
-                </button>
-                <button
-                  type="button"
-                  class="channel-reorder-button"
-                  title="Move down"
-                  aria-label="Move channel down"
-                  onclick={() => moveChannelInWorkingOrder(c.id, 'text', 1)}
-                  disabled={!canMoveChannel(c.id, 'text', 1) || savingOrder}
-                >
-                  <i class="bx bx-chevron-down text-sm" aria-hidden="true"></i>
-                </button>
-              </div>
-            {/if}
-
-            <button
-              type="button"
-              class="channel-row__button"
-              onclick={() => pick(c.id)}
-              aria-label={`Open #${c.name} text channel`}
-              disabled={reorderMode !== 'none'}
-            >
+          <button
+            type="button"
+            class="channel-row__button"
+            onclick={() => pick(c.id)}
+            aria-label={`Open #${c.name} text channel`}
+            aria-current={activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'page' : undefined}
+            title={c.name}
+          >
+            {#if c.type === 'voice'}
+              <i class="bx bx-headphone" aria-hidden="true"></i>
+            {:else}
               <i class="bx bx-hash" aria-hidden="true"></i>
-              <span class="truncate">{c.name}</span>
-              <span class="channel-row__meta ml-auto">
-                {#if threadUnreadByChannel?.[c.id]}
-                  <span class="channel-thread-unread-dot" aria-hidden="true"></span>
+            {/if}
+            <span class="channel-name truncate">{c.name}</span>
+            <span class="channel-row__meta ml-auto">
+              {#if threadUnreadByChannel?.[c.id]}
+                <span class="channel-thread-unread-dot" aria-hidden="true"></span>
+              {/if}
+              {#if mentionHighlights.has(c.id)}
+                <span class="channel-mention-pill" title="You were mentioned">@</span>
+              {/if}
+              {#if c.type === 'voice'}
+                {#if (voicePresence[c.id]?.length ?? 0) > 0}
+                  <span class="channel-voice-count">
+                    {voicePresence[c.id].length}
+                  </span>
                 {/if}
-                {#if mentionHighlights.has(c.id)}
-                  <span class="channel-mention-pill" title="You were mentioned">@</span>
-                {/if}
+              {:else}
                 {#if (unreadByChannel[c.id]?.high ?? 0) > 0}
                   <span
                     class="channel-unread"
@@ -1044,154 +1004,85 @@ run(() => {
                 {:else if (unreadByChannel[c.id]?.low ?? 0) > 0}
                   <span class="channel-teal-dot" aria-hidden="true"></span>
                 {/if}
-                {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
-                  <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
-                {/if}
-              </span>
-            </button>
-          </div>
-        {/each}
-        {#if !visibleChannels.some((c) => c.type === 'text')}
-          <div class="text-xs text-soft px-3 py-2">No accessible text channels.</div>
-        {/if}
-    </div>
+              {/if}
+              {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
+                <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
+              {/if}
+            </span>
+          </button>
 
-    <div class="space-y-1">
-        {#each visibleChannels.filter((c) => c.type === 'voice') as c (c.id)}
-        <div
-          class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
-          role="listitem"
-          draggable={reorderMode !== 'none' && !savingOrder}
-          ondragstart={(event) => startChannelDrag(event, c.id, 'voice')}
-          ondragend={endChannelDrag}
-          ondragover={(event) => handleChannelDragOver(event, c.id, 'voice')}
-          ondrop={(event) => handleChannelDrop(event, c.id, 'voice')}
-        >
-            {#if reorderMode !== 'none'}
-              <div class="channel-reorder-controls">
-                <button
-                  type="button"
-                  class="channel-reorder-button"
-                  title="Move up"
-                  aria-label="Move voice channel up"
-                  onclick={() => moveChannelInWorkingOrder(c.id, 'voice', -1)}
-                  disabled={!canMoveChannel(c.id, 'voice', -1) || savingOrder}
-                >
-                  <i class="bx bx-chevron-up text-sm" aria-hidden="true"></i>
-                </button>
-                <button
-                  type="button"
-                  class="channel-reorder-button"
-                  title="Move down"
-                  aria-label="Move voice channel down"
-                  onclick={() => moveChannelInWorkingOrder(c.id, 'voice', 1)}
-                  disabled={!canMoveChannel(c.id, 'voice', 1) || savingOrder}
-                >
-                  <i class="bx bx-chevron-down text-sm" aria-hidden="true"></i>
-                </button>
+          {#if c.type === 'voice'}
+            {#if (voicePresence[c.id]?.length ?? 0) > 0}
+              <div class="channel-voice-presence">
+                {#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
+                  <div class="channel-voice-avatar">
+                    {#if member.photoURL}
+                      <img
+                        src={member.photoURL}
+                        alt={member.displayName}
+                        class="h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    {:else}
+                      <div class="grid h-full w-full place-items-center text-[10px] font-semibold text-primary">
+                        {voiceInitial(member.displayName)}
+                      </div>
+                    {/if}
+                    {#if member.hasVideo === false}
+                      <i class="bx bx-video-off channel-voice-indicator channel-voice-indicator--video"></i>
+                    {/if}
+                    {#if member.hasAudio === false}
+                      <i class="bx bx-microphone-off channel-voice-indicator channel-voice-indicator--audio"></i>
+                    {/if}
+                  </div>
+                {/each}
+                {#if (voicePresence[c.id]?.length ?? 0) > 6}
+                  <div class="channel-voice-more">
+                    +{voicePresence[c.id].length - 6}
+                  </div>
+                {/if}
               </div>
             {/if}
 
-            <button
-              type="button"
-              class="channel-row__button"
-              onclick={() => pick(c.id)}
-              aria-label={`Open ${c.name} voice channel`}
-              disabled={reorderMode !== 'none'}
-            >
-              <i class="bx bx-headphone" aria-hidden="true"></i>
-              <span class="truncate">{c.name}</span>
-              <span class="channel-row__meta ml-auto">
-                {#if threadUnreadByChannel?.[c.id]}
-                  <span class="channel-thread-unread-dot" aria-hidden="true"></span>
-                {/if}
-                {#if (voicePresence[c.id]?.length ?? 0) > 0}
-                  <span class="channel-voice-count">
-                    {voicePresence[c.id].length}
-                  </span>
-                {/if}
-                {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
-                  <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
-                {/if}
-              </span>
-        </button>
-      </div>
-
-      {@const channelThreadList = (threads ?? []).filter((thread) => thread.parentChannelId === c.id && thread.status !== 'archived')}
-      {#if channelThreadList.length}
-        <ul class="thread-list">
-          {#each channelThreadList as thread (thread.id)}
-            <li>
-              <button
-                type="button"
-                class={`thread-row ${thread.id === activeThreadId ? 'is-active' : ''}`}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  onPickThread({
-                    id: thread.id,
-                    parentChannelId: thread.parentChannelId ?? c.id
-                  });
-                }}
-              >
-                <div class="thread-row__info">
-                  <i class="bx bx-message-square-dots" aria-hidden="true"></i>
-                  <span class="thread-row__name">{thread.name || 'Thread'}</span>
-                </div>
-                <div class="thread-row__meta">
-                  {#if thread.unread}
-                    <span class="thread-row__dot" aria-hidden="true"></span>
-                  {/if}
-                  {#if thread.messageCount}
-                    <span class="thread-row__count">{thread.messageCount}</span>
-                  {/if}
-                </div>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-
-      {#if (voicePresence[c.id]?.length ?? 0) > 0}
-        <div class="channel-voice-presence">
-              <div class="flex flex-wrap items-center gap-2">
-                <div class="flex items-center -space-x-2">
-                  {#each voicePresence[c.id].slice(0, 4) as member (member.uid)}
-                    <div class="channel-voice-avatar">
-                      {#if member.photoURL}
-                        <img
-                          src={member.photoURL}
-                          alt={member.displayName}
-                          class="h-full w-full object-cover"
-                          loading="lazy"
-                        />
-                      {:else}
-                        <div class="grid h-full w-full place-items-center text-[10px] font-semibold text-primary">
-                          {voiceInitial(member.displayName)}
-                        </div>
-                      {/if}
-                      {#if member.hasVideo === false}
-                        <i class="bx bx-video-off channel-voice-indicator channel-voice-indicator--video"></i>
-                      {/if}
-                      {#if member.hasAudio === false}
-                        <i class="bx bx-microphone-off channel-voice-indicator channel-voice-indicator--audio"></i>
-                      {/if}
-                    </div>
-                  {/each}
-                  {#if voicePresence[c.id].length > 4}
-                    <div class="channel-voice-more">
-                      +{voicePresence[c.id].length - 4}
-                    </div>
-                  {/if}
-                </div>
-                <span class="ml-auto text-[10px] uppercase tracking-wide text-soft">
-                  {voicePresence[c.id].length} online
-                </span>
-              </div>
-            </div>
+            {@const channelThreadList = (threads ?? []).filter((thread) => thread.parentChannelId === c.id && thread.status !== 'archived')}
+            {#if channelThreadList.length}
+              <ul class="thread-list">
+                {#each channelThreadList as thread (thread.id)}
+                  <li>
+                    <button
+                      type="button"
+                      class={`thread-row ${thread.id === activeThreadId ? 'is-active' : ''}`}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        onPickThread({
+                          id: thread.id,
+                          parentChannelId: thread.parentChannelId ?? c.id
+                        });
+                      }}
+                    >
+                      <div class="thread-row__info">
+                        <i class="bx bx-message-square-dots" aria-hidden="true"></i>
+                        <span class="thread-row__name">{thread.name || 'Thread'}</span>
+                      </div>
+                      <div class="thread-row__meta">
+                        {#if thread.unread}
+                          <span class="thread-row__dot" aria-hidden="true"></span>
+                        {/if}
+                        {#if thread.messageCount}
+                          <span class="thread-row__count">{thread.messageCount}</span>
+                        {/if}
+                      </div>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           {/if}
-        {/each}
-      {#if !visibleChannels.some((c) => c.type === 'voice')}
-        <div class="text-xs text-soft px-3 py-2">No accessible voice channels.</div>
+        </div>
+      {/each}
+
+      {#if !visibleChannels.length}
+        <div class="text-xs text-soft px-3 py-2">No accessible channels.</div>
       {/if}
     </div>
 
@@ -1208,21 +1099,79 @@ run(() => {
   .server-sidebar__header {
     min-height: 3rem;
     height: 3rem;
-    padding: 0 1rem;
+    padding: 0.5rem 0.75rem;
     display: flex;
     align-items: center;
   }
 
+  .server-header__button {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: 100%;
+    padding: 0.4rem 0.55rem;
+    border-radius: 0.9rem;
+    border: 1px solid transparent;
+    background: transparent;
+    text-align: left;
+    user-select: none;
+  }
+
+  .server-header__button:disabled {
+    opacity: 1;
+    cursor: default;
+  }
+
+  .server-avatar {
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 999px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+  }
+
+  .server-avatar__initial {
+    font-weight: 700;
+    font-size: 1rem;
+  }
+
+  .server-header__label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .server-label-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .server-name {
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+
+  .channel-heading {
+    font-weight: 800;
+    font-size: 0.95rem;
+    padding-left: 0.25rem;
+  }
+
+  .channel-list {
+    user-select: none;
+  }
+
   .channel-row {
     position: relative;
-  }
-
-  .channel-row[draggable='true'] {
-    cursor: grab;
-  }
-
-  .channel-row[draggable='true']:active {
-    cursor: grabbing;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
   }
 
   .channel-row--dragging {
@@ -1256,8 +1205,104 @@ run(() => {
     padding-left: 0.9rem;
   }
 
-  .channel-row--mention .channel-row__button:hover {
-    border-left-color: var(--color-accent);
+  .channel-row__button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.55rem;
+    text-align: left;
+    user-select: none;
+    background: transparent;
+    border: 1px solid transparent;
+    box-shadow: none;
+  }
+
+  .channel-row__button:hover,
+  .channel-row__button:focus,
+  .channel-row__button:active {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
+
+  .channel-row--active .channel-row__button {
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    border-radius: 0.75rem;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+    color: inherit;
+  }
+
+  .channel-row--active .channel-row__button:hover,
+  .channel-row--active .channel-row__button:focus,
+  .channel-row--active .channel-row__button:active {
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+    color: inherit;
+    border-color: transparent;
+  }
+
+  .channel-name {
+    font-size: 1.05rem;
+  }
+
+  .channel-voice-count {
+    min-width: 1.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: var(--color-accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .channel-voice-presence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.25rem;
+    width: 100%;
+    padding-left: 2.1rem;
+  }
+
+  .channel-voice-avatar {
+    position: relative;
+    width: 1.85rem;
+    height: 1.85rem;
+    border-radius: 999px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  }
+
+  .channel-voice-indicator {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    font-size: 0.8rem;
+    background: var(--color-panel);
+    border-radius: 999px;
+    padding: 1px;
+  }
+
+  .channel-voice-indicator--video {
+    color: #f97316;
+  }
+
+  .channel-voice-indicator--audio {
+    color: #ef4444;
+  }
+
+  .channel-voice-more {
+    width: 1.85rem;
+    height: 1.85rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    color: var(--color-accent);
+    display: grid;
+    place-items: center;
+    font-size: 0.8rem;
+    font-weight: 700;
   }
 
   .channel-mention-pill {
@@ -1344,3 +1389,10 @@ run(() => {
   }
 
 </style>
+
+
+<svelte:window
+  onpointermove={handleChannelPointerMove}
+  onpointerup={handleChannelPointerUp}
+  onpointercancel={handleChannelPointerUp}
+/>
