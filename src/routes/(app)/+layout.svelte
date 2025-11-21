@@ -15,11 +15,27 @@
     startDeepLinkListener
   } from '$lib/notify/deepLink';
   import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+  import { page } from '$app/stores';
+  import { isMobileViewport } from '$lib/stores/viewport';
+  import { settingsUI, closeSettings, setSettingsSection } from '$lib/stores/settingsUI';
+  import {
+    serverSettingsUI,
+    closeServerSettings,
+    setServerSettingsSection
+  } from '$lib/stores/serverSettingsUI';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import MobileDock from '$lib/components/app/MobileDock.svelte';
   import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
+  import SettingsMobileShell from '$lib/components/settings/SettingsMobileShell.svelte';
+  import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
+  import ServerSettingsMobileShell from '$lib/components/servers/ServerSettingsMobileShell.svelte';
+  import ServerSettingsModal from '$lib/components/servers/ServerSettingsModal.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { user } from '$lib/stores/user';
+  import { acceptInvite, declineInvite, subscribeInbox, type ServerInvite } from '$lib/firestore/invites';
+  import { requestDomainAutoInvites } from '$lib/servers/domainAutoInvite';
+  import type { SettingsSectionId } from '$lib/settings/sections';
   import type { VoiceSession } from '$lib/stores/voice';
   interface Props {
     children?: import('svelte').Snippet;
@@ -30,6 +46,7 @@
   // App name used everywhere (tab title, social tags)
   const APP_TITLE = 'hConnect';
   const settingsState = $derived($settingsUI);
+  const serverSettingsState = $derived($serverSettingsUI);
   const mobileViewport = $derived($isMobileViewport);
   const currentPath = $derived($page?.url?.pathname ?? '/');
 
@@ -276,6 +293,23 @@
     setSettingsSection(event.detail);
   }
 
+  function handleServerSettingsClose() {
+    const destination =
+      serverSettingsState.returnTo ??
+      (serverSettingsState.serverId ? `/servers/${serverSettingsState.serverId}` : null);
+    closeServerSettings();
+    const routePath = serverSettingsState.serverId
+      ? `/servers/${serverSettingsState.serverId}/settings`
+      : null;
+    if (destination && routePath && currentPath === routePath) {
+      goto(destination, { replaceState: true, keepFocus: true });
+    }
+  }
+
+  function handleServerSettingsSection(event: CustomEvent<import('$lib/servers/settingsSections').ServerSettingsSectionId>) {
+    setServerSettingsSection(event.detail);
+  }
+
   async function resumeLastLocation() {
     if (!browser || skipResumeRestore) return;
     const stored = readStoredLocation();
@@ -411,6 +445,27 @@
         serverId={null}
         on:close={handleSettingsClose}
         on:section={handleSettingsSection}
+      />
+    {/if}
+  {/if}
+
+  {#if serverSettingsState.open}
+    {#if mobileViewport}
+      <ServerSettingsMobileShell
+        open={serverSettingsState.open}
+        activeSection={serverSettingsState.activeSection}
+        serverId={serverSettingsState.serverId}
+        startInSection={serverSettingsState.source === 'route'}
+        on:close={handleServerSettingsClose}
+        on:section={handleServerSettingsSection}
+      />
+    {:else}
+      <ServerSettingsModal
+        open={serverSettingsState.open}
+        activeSection={serverSettingsState.activeSection}
+        serverId={serverSettingsState.serverId}
+        on:close={handleServerSettingsClose}
+        on:section={handleServerSettingsSection}
       />
     {/if}
   {/if}

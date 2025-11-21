@@ -5,13 +5,16 @@ export function pickString(value: unknown): string | undefined {
 }
 
 export function resolveProfilePhotoURL(record: any, fallback?: string | null): string | null {
+  const avatar = pickString(record?.avatar) ?? pickString(record?.avatarUrl) ?? pickString(record?.avatarURL);
+  if (avatar) return avatar;
+
   const custom = pickString(record?.customPhotoURL);
   if (custom) return custom;
 
   const provider = pickString(record?.authPhotoURL);
   if (provider) return provider;
 
-  const stored = pickString(record?.photoURL);
+  const stored = pickString(record?.photoURL) ?? pickString(record?.photoUrl);
   if (stored) return stored;
 
   return pickString(fallback) ?? null;
