@@ -1,10 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendTestPush = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = void 0;
+exports.sendTestPush = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
 const notifications_1 = require("./notifications");
+var domainInvites_1 = require("./domainInvites");
+Object.defineProperty(exports, "requestDomainAutoInvite", { enumerable: true, get: function () { return domainInvites_1.requestDomainAutoInvite; } });
 exports.onChannelMessageCreated = (0, firestore_1.onDocumentCreated)('servers/{serverId}/channels/{channelId}/messages/{messageId}', async (event) => {
     await (0, notifications_1.handleServerMessage)(event);
 });
