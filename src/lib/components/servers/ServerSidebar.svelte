@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
+  import { openServerSettings } from '$lib/stores/serverSettingsUI';
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
@@ -762,9 +763,12 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     }
   }
 
-  function openServerSettings() {
+  function openServerSettingsOverlay() {
     if (!computedServerId || !isAdminLike) return;
-    goto(`/servers/${computedServerId}/settings`);
+    openServerSettings({
+      serverId: computedServerId,
+      source: 'trigger'
+    });
   }
 
   // Unread state map
@@ -922,7 +926,7 @@ run(() => {
     <button
       type="button"
       class="server-header__button"
-      onclick={openServerSettings}
+      onclick={openServerSettingsOverlay}
       aria-label="Open server settings"
       disabled={!isAdminLike}
     >
