@@ -119,12 +119,14 @@ const DEFAULT_MENTION = '#f97316';
   let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
 let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
 let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
-  let newChannelName = $state('');
-  let newChannelType: 'text' | 'voice' = $state('text');
-  let newChannelPrivate = $state(false);
-  let newChannelAllowedRoleIds: string[] = $state([]);
-  let channelCreateBusy = $state(false);
-  let channelError: string | null = $state(null);
+let newChannelName = $state('');
+let newChannelType: 'text' | 'voice' = $state('text');
+let newChannelPrivate = $state(false);
+let newChannelAllowedRoleIds: string[] = $state([]);
+let channelCreateBusy = $state(false);
+let channelError: string | null = $state(null);
+let channelPrivacyBusy: Record<string, boolean> = $state({});
+let channelPrivacyError: string | null = $state(null);
   type RolePermissionKey =
     | 'manageServer'
     | 'manageRoles'
@@ -1272,6 +1274,29 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     }
   }
 
+  async function toggleChannelPrivacy(channelId: string, nextPrivate: boolean) {
+    if (!isAdmin) return;
+    const db = getDb();
+    channelPrivacyError = null;
+    channelPrivacyBusy = { ...channelPrivacyBusy, [channelId]: true };
+    const payload: Record<string, unknown> = { isPrivate: nextPrivate };
+    if (!nextPrivate) {
+      payload.allowedRoleIds = [];
+    }
+    try {
+      await updateDoc(doc(db, 'servers', serverId!, 'channels', channelId), payload);
+    } catch (e) {
+      console.error(e);
+      channelPrivacyError = nextPrivate
+        ? 'Failed to make channel private.'
+        : 'Failed to make channel public.';
+    } finally {
+      const next = { ...channelPrivacyBusy };
+      delete next[channelId];
+      channelPrivacyBusy = next;
+    }
+  }
+
   // ----- actions: Danger Zone (owner only) -----
   async function deleteServer() {
     if (!isOwner) return;
@@ -2203,6 +2228,9 @@ async function clearPendingInvites() {
         </div>
 
         <div class="settings-card space-y-3">
+          {#if channelPrivacyError}
+            <div class="settings-status settings-status--error">{channelPrivacyError}</div>
+          {/if}
           {#if sortedChannels.length === 0}
             <div class="text-white/60">No channels yet.</div>
           {/if}
@@ -2213,7 +2241,14 @@ async function clearPendingInvites() {
                   {#if c.type === 'text'}<i class="bx bx-hash" aria-hidden="true"></i>{:else}<i class="bx bx-headphone" aria-hidden="true"></i>{/if}
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="truncate font-medium">{c.name}</div>
+                  <div class="truncate font-medium flex items-center gap-2">
+                    {c.name}
+                    {#if c.isPrivate}
+                      <span class="settings-channel-lock" title="Private channel">
+                        <i class="bx bx-lock-alt" aria-hidden="true"></i>
+                      </span>
+                    {/if}
+                  </div>
                   <div class="text-xs text-white/40">
                     {c.type === 'text' ? 'Text channel' : 'Voice channel'}{#if c.isPrivate} • Private{/if}
                   </div>
@@ -2245,6 +2280,13 @@ async function clearPendingInvites() {
                       onclick={() => renameChannel(c.id, c.name)}
                     >
                       Rename
+                    </button>
+                    <button
+                      class="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/15"
+                      onclick={() => toggleChannelPrivacy(c.id, !c.isPrivate)}
+                      disabled={Boolean(channelPrivacyBusy[c.id])}
+                    >
+                      {channelPrivacyBusy[c.id] ? 'Saving...' : c.isPrivate ? 'Make public' : 'Make private'}
                     </button>
                     <button
                       class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-300 hover:bg-red-900/60"
@@ -2819,6 +2861,18 @@ async function clearPendingInvites() {
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
+  }
+
+  .settings-channel-lock {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.3rem;
+    height: 1.3rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.7rem;
   }
 
   .settings-color-field {

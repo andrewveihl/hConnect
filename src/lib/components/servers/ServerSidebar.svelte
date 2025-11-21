@@ -58,6 +58,7 @@ import { notifications, channelIndicators } from '$lib/stores/notifications';
     type: 'text' | 'voice';
     position?: number;
     isPrivate?: boolean;
+    allowedRoleIds?: string[];
   };
 
   const CALL_DOC_ID = 'live';
@@ -1010,7 +1011,7 @@ run(() => {
                 {/if}
               {/if}
               {#if Array.isArray((c as any).allowedRoleIds) && (c as any).allowedRoleIds.length}
-                <i class="bx bx-lock text-xs opacity-70" aria-hidden="true"></i>
+                <i class="bx bx-lock text-xs opacity-70" title="Private channel" aria-hidden="true"></i>
               {/if}
             </span>
           </button>
@@ -1321,6 +1322,7 @@ run(() => {
     font-size: 0.68rem;
     font-weight: 700;
   }
+
 
   .channel-thread-unread-dot {
     width: 8px;
