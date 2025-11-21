@@ -18,6 +18,12 @@
   import MobileDock from '$lib/components/app/MobileDock.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
+  import SettingsMobileShell from '$lib/components/settings/SettingsMobileShell.svelte';
+  import { settingsUI, closeSettings, setSettingsSection } from '$lib/stores/settingsUI';
+  import { isMobileViewport } from '$lib/stores/viewport';
+  import { page } from '$app/stores';
+  import type { SettingsSectionId } from '$lib/settings/sections';
   import type { VoiceSession } from '$lib/stores/voice';
   interface Props {
     children?: import('svelte').Snippet;
@@ -27,6 +33,9 @@
 
   // App name used everywhere (tab title, social tags)
   const APP_TITLE = 'hConnect';
+  const settingsState = $derived($settingsUI);
+  const mobileViewport = $derived($isMobileViewport);
+  const currentPath = $derived($page?.url?.pathname ?? '/');
 
   let activeVoice: VoiceSession | null = $state(null);
   const stopVoice = voiceSession.subscribe((value) => {
@@ -67,6 +76,18 @@
 
   const fullPath = (loc: { pathname: string; search?: string; hash?: string }) =>
     `${loc.pathname}${loc.search ?? ''}${loc.hash ?? ''}`;
+
+  function handleSettingsClose() {
+    const destination = settingsState.returnTo;
+    closeSettings();
+    if (destination && currentPath === '/settings') {
+      goto(destination, { replaceState: true, keepFocus: true });
+    }
+  }
+
+  function handleSettingsSection(event: CustomEvent<SettingsSectionId>) {
+    setSettingsSection(event.detail);
+  }
 
   async function resumeLastLocation() {
     if (!browser || skipResumeRestore) return;
@@ -183,6 +204,27 @@
   </div>
 
   <MobileDock />
+
+  {#if settingsState.open}
+    {#if mobileViewport}
+      <SettingsMobileShell
+        open={settingsState.open}
+        activeSection={settingsState.activeSection}
+        serverId={null}
+        startInSection={settingsState.source === 'route'}
+        on:close={handleSettingsClose}
+        on:section={handleSettingsSection}
+      />
+    {:else}
+      <SettingsModal
+        open={settingsState.open}
+        activeSection={settingsState.activeSection}
+        serverId={null}
+        on:close={handleSettingsClose}
+        on:section={handleSettingsSection}
+      />
+    {/if}
+  {/if}
 
   {#if activeVoice && !activeVoice.visible}
     <div

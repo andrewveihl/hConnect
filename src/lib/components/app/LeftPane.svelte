@@ -17,8 +17,10 @@ import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } fro
 import { dmUnreadCount, notifications } from '$lib/stores/notifications';
 import type { NotificationItem } from '$lib/stores/notifications';
 import { streamMyDMs } from '$lib/firestore/dms';
-import { superAdminEmailsStore } from '$lib/admin/superAdmin';
-import { featureFlags } from '$lib/stores/featureFlags';
+  import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+  import { featureFlags } from '$lib/stores/featureFlags';
+import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
+  import { defaultSettingsSection } from '$lib/settings/sections';
 
   interface Props {
     activeServerId?: string | null;
@@ -138,6 +140,11 @@ const isSuperAdmin = $derived(
     }
     goto('/', { keepFocus: true, noScroll: true, replaceState: true });
   };
+  function openUserSettings(event: MouseEvent) {
+    event.preventDefault();
+    setSettingsSection(defaultSettingsSection);
+    openSettings({ source: 'trigger' });
+  }
 
   const formatBadge = (value: number): string => {
     if (!Number.isFinite(value)) return '';
@@ -146,6 +153,7 @@ const isSuperAdmin = $derived(
   };
 
   let currentPath = $derived($page?.url?.pathname ?? '/');
+  const isSettingsOpen = $derived($settingsUI.open);
   let dmsActive = $derived(currentPath === '/dms' || currentPath.startsWith('/dms/'));
   let activeDmThreadId =
     $derived(currentPath.startsWith('/dms/') && currentPath.length > 5
@@ -798,6 +806,9 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
             class="rail-button rail-button--profile overflow-hidden mt-1"
             aria-label="Profile"
             title="Profile"
+            class:rail-button--active={isSettingsOpen || currentPath.startsWith('/settings')}
+            aria-current={isSettingsOpen || currentPath.startsWith('/settings') ? 'page' : undefined}
+            onclick={openUserSettings}
           >
             {#if $user?.photoURL}
               <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />

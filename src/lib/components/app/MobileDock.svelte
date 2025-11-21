@@ -9,6 +9,8 @@ import { user } from '$lib/stores/user';
 import { mobileDockSuppressed } from '$lib/stores/ui';
 import { subscribeUserServers } from '$lib/firestore/servers';
 import { featureFlags } from '$lib/stores/featureFlags';
+import { closeSettings, openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
+import { defaultSettingsSection } from '$lib/settings/sections';
 
   type Link = {
     href: string;
@@ -55,9 +57,9 @@ import { featureFlags } from '$lib/stores/featureFlags';
   let stopUser: (() => void) | null = null;
   let serverChannelMemory: ChannelMemory = $state({});
   const shortcut = $derived(lastServerShortcut as ServerShortcut | null);
-  const serverActive = $derived(
-    shortcut ? currentPath?.startsWith(`/servers/${shortcut.id}`) ?? false : false
-  );
+const serverActive = $derived(
+  shortcut ? currentPath?.startsWith(`/servers/${shortcut.id}`) ?? false : false
+);
 const serverHref = $derived.by(() => {
   if (!shortcut) return '/servers';
   const lastChannel = serverChannelMemory?.[shortcut.id];
@@ -68,6 +70,9 @@ const serverHref = $derived.by(() => {
 });
 const featureFlagStore = featureFlags;
 const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
+const isSettingsOpen = $derived($settingsUI.open);
+const settingsActive = $derived(isSettingsOpen || (currentPath?.startsWith('/settings') ?? false));
+const dockSuppressed = $derived(settingsActive);
 
   onMount(() => {
     loadStoredLastServer();
@@ -191,6 +196,7 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
 
   function handleNav(event: MouseEvent, link: Link) {
     event.preventDefault();
+    closeSettings();
     if (typeof window !== 'undefined' && link.href === '/dms') {
       try {
         sessionStorage.setItem('dm-show-list', '1');
@@ -199,6 +205,12 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
       }
     }
     goto(link.href);
+  }
+
+  function openMobileSettings(event: MouseEvent) {
+    event.preventDefault();
+    setSettingsSection(defaultSettingsSection);
+    openSettings({ source: 'trigger' });
   }
 
   function loadStoredChannelMemory() {
@@ -261,11 +273,12 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
       href={serverHref}
       onclick={(event) => {
         event.preventDefault();
+        closeSettings();
         goto(serverHref);
       }}
-      class={`mobile-dock__item mobile-dock__item--server ${serverActive ? 'is-active' : ''} ${shortcut ? '' : 'is-placeholder'}`}
+      class={`mobile-dock__item mobile-dock__item--server ${serverActive && !dockSuppressed ? 'is-active' : ''} ${shortcut ? '' : 'is-placeholder'}`}
       aria-label={shortcut?.name ?? 'Servers'}
-      aria-current={serverActive ? 'page' : undefined}
+      aria-current={serverActive && !dockSuppressed ? 'page' : undefined}
     >
       {#if shortcut?.icon}
         <img
@@ -287,7 +300,7 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
 
     {#each links as link}
       {#if link.href !== '/dms' || enableDMs}
-        {@const active = link.isActive(currentPath)}
+        {@const active = dockSuppressed ? false : link.isActive(currentPath)}
         {@const badge =
           link.href === '/dms'
             ? $dmUnreadCount
@@ -300,6 +313,7 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
           class={`mobile-dock__item ${active ? 'is-active' : ''}`}
           class:mobile-dock__item--alert={!active && badge > 0}
           class:mobile-dock__item--notes={link.href === '/dms/notes'}
+          class:mobile-dock__item--dms={link.href === '/dms'}
           aria-label={link.label}
           aria-current={active ? 'page' : undefined}
         >
@@ -312,13 +326,10 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
     {/each}
     <a
       href="/settings"
-      onclick={(event) => {
-        event.preventDefault();
-        goto('/settings');
-      }}
-      class={`mobile-dock__item mobile-dock__item--profile ${currentPath.startsWith('/settings') ? 'is-active' : ''}`}
+      onclick={openMobileSettings}
+      class={`mobile-dock__item mobile-dock__item--profile ${settingsActive ? 'is-active' : ''}`}
       aria-label="Profile"
-      aria-current={currentPath.startsWith('/settings') ? 'page' : undefined}
+      aria-current={settingsActive ? 'page' : undefined}
     >
       {#if $user?.photoURL}
         <img src={$user.photoURL} alt="Me" class="mobile-dock__avatar" />
@@ -409,6 +420,10 @@ const enableDMs = $derived(Boolean($featureFlagStore.enableDMs));
   }
 
   .mobile-dock__item--notes .mobile-dock__icon {
+    color: var(--color-accent);
+  }
+
+  .mobile-dock__item--dms .mobile-dock__icon {
     color: var(--color-accent);
   }
 
