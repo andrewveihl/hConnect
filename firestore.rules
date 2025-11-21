@@ -115,6 +115,12 @@ service cloud.firestore {
         || hasThreadPermission(serverId, channelId, threadId, "canPost");
     }
 
+    function isReactionOnlyUpdate() {
+      return request.resource != null
+        && resource != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["reactions"]);
+    }
+
     /* ---------------- DM helpers (legacy tolerant) ---------------- */
 
     function docHasParticipant(docData, uid) {
@@ -269,7 +275,12 @@ service cloud.firestore {
         match /messages/{messageId} {
           allow read: if canViewChannel(serverId);
           allow create: if canSendInChannel(serverId);
-          allow update, delete: if isSignedIn() && (
+          allow update: if isSignedIn() && (
+            request.auth.uid == resource.data.uid ||
+            hasPerm(serverId, "manageMessages") ||
+            (canViewChannel(serverId) && isReactionOnlyUpdate())
+          );
+          allow delete: if isSignedIn() && (
             request.auth.uid == resource.data.uid || hasPerm(serverId, "manageMessages")
           );
         }
@@ -351,7 +362,11 @@ service cloud.firestore {
           || (isSignedIn()
           && request.resource.data.uid == request.auth.uid
           && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
-        allow update, delete: if isSuperAdminUser();
+        allow update: if isSuperAdminUser()
+          || (isSignedIn()
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid)
+          && isReactionOnlyUpdate());
+        allow delete: if isSuperAdminUser();
       }
 
       match /reads/{uid} {
