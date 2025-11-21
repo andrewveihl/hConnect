@@ -1,3 +1,5 @@
+const DEFAULT_AVATAR_URL = '/default-avatar.svg';
+
 export function pickString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -17,5 +19,5 @@ export function resolveProfilePhotoURL(record: any, fallback?: string | null): s
   const stored = pickString(record?.photoURL) ?? pickString(record?.photoUrl);
   if (stored) return stored;
 
-  return pickString(fallback) ?? null;
+  return pickString(fallback) ?? DEFAULT_AVATAR_URL;
 }
