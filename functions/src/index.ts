@@ -8,6 +8,7 @@ import {
   handleThreadMessage,
   sendTestPushForUid
 } from './notifications';
+export { requestDomainAutoInvite } from './domainInvites';
 
 export const onChannelMessageCreated = onDocumentCreated(
   'servers/{serverId}/channels/{channelId}/messages/{messageId}',

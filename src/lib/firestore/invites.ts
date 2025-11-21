@@ -58,6 +58,7 @@ export async function sendServerInvite(params: {
   serverIcon?: string | null;
   channelId?: string | null;
   channelName?: string | null;
+  type?: string | null;
 }) {
   const {
     toUid,
@@ -68,6 +69,7 @@ export async function sendServerInvite(params: {
     serverIcon = null,
     channelId = null,
     channelName = null,
+    type = 'channel',
   } = params;
 
   const payload = {
@@ -79,7 +81,7 @@ export async function sendServerInvite(params: {
     serverIcon,
     channelId,
     channelName,
-    type: 'channel',
+    type: type ?? 'channel',
     status: 'pending' as InviteStatus,
     createdAt: serverTimestamp(),
   };

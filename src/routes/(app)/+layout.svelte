@@ -2,6 +2,7 @@
 <script lang="ts">
   import '$lib/stores/theme';
   import { onDestroy, onMount } from 'svelte';
+  import { run } from 'svelte/legacy';
   import { startAuthListener } from '$lib/firebase';
   import { startPresenceService } from '$lib/firebase/presence';
   import { browser } from '$app/environment';
@@ -16,8 +17,17 @@
   import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import MobileDock from '$lib/components/app/MobileDock.svelte';
+  import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { user } from '$lib/stores/user';
+  import {
+    acceptInvite,
+    declineInvite,
+    subscribeInbox,
+    type ServerInvite
+  } from '$lib/firestore/invites';
+  import { requestDomainAutoInvites } from '$lib/servers/domainAutoInvite';
   import type { VoiceSession } from '$lib/stores/voice';
   interface Props {
     children?: import('svelte').Snippet;
@@ -37,6 +47,197 @@
   let pendingInitialUrl: URL | null = null;
   let skipResumeRestore = false;
   let stopDeepLinkListener: (() => void) | null = null;
+  const DOMAIN_INVITE_DISMISS_KEY = 'domainAutoInviteDismissals';
+
+  let domainInviteCandidate: ServerInvite | null = $state(null);
+  let domainInviteBusy = $state(false);
+  let domainInviteError: string | null = $state(null);
+  let domainInviteInboxStop: (() => void) | null = null;
+  let domainInviteInboxUid: string | null = null;
+  let dismissedDomainInviteIds = new Set<string>();
+  let detachDomainInviteTestListener: (() => void) | null = null;
+
+  if (browser) {
+    try {
+      const raw = localStorage.getItem(DOMAIN_INVITE_DISMISS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((entry) => {
+            if (typeof entry === 'string' && entry.trim().length) {
+              dismissedDomainInviteIds.add(entry);
+            }
+          });
+        }
+      }
+    } catch {
+      dismissedDomainInviteIds = new Set();
+    }
+
+    const handleTestInvite = ((event: Event) => {
+      const detail = (event as CustomEvent<Partial<ServerInvite> | undefined>)?.detail;
+      const sample = buildTestInvite(detail ?? {});
+      domainInviteCandidate = sample;
+      domainInviteBusy = false;
+      domainInviteError = null;
+      if (sample.id) {
+        dismissedDomainInviteIds.delete(sample.id);
+      }
+    }) as EventListener;
+    window.addEventListener('domain-invite-test', handleTestInvite);
+    detachDomainInviteTestListener = () => window.removeEventListener('domain-invite-test', handleTestInvite);
+  }
+
+  const persistDismissedDomainInvites = () => {
+    if (!browser) return;
+    try {
+      localStorage.setItem(
+        DOMAIN_INVITE_DISMISS_KEY,
+        JSON.stringify(Array.from(dismissedDomainInviteIds.values()))
+      );
+    } catch {
+      // Ignore storage quota issues
+    }
+  };
+
+  const dismissDomainInvite = (inviteId: string | null | undefined) => {
+    if (inviteId && !dismissedDomainInviteIds.has(inviteId)) {
+      dismissedDomainInviteIds.add(inviteId);
+      persistDismissedDomainInvites();
+    }
+    domainInviteCandidate = null;
+    domainInviteBusy = false;
+    domainInviteError = null;
+  };
+
+  const pruneDismissedDomainInvites = (activeIds: Set<string>) => {
+    let changed = false;
+    dismissedDomainInviteIds.forEach((id) => {
+      if (!activeIds.has(id)) {
+        dismissedDomainInviteIds.delete(id);
+        changed = true;
+      }
+    });
+    if (changed) persistDismissedDomainInvites();
+  };
+
+  const inviteTimestamp = (invite: ServerInvite): number => {
+    const ts = (invite?.createdAt as any)?.toMillis?.();
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (typeof invite?.createdAt === 'number' && Number.isFinite(invite.createdAt)) return invite.createdAt;
+    return 0;
+  };
+
+  const handleDomainInboxSnapshot = (rows: ServerInvite[]) => {
+    const domainInvites = rows
+      .filter((row) => (row?.type ?? 'channel') === 'domain-auto')
+      .sort((a, b) => inviteTimestamp(b) - inviteTimestamp(a));
+    const activeIds = new Set(
+      domainInvites
+        .map((invite) => invite.id)
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    );
+    pruneDismissedDomainInvites(activeIds);
+    const next = domainInvites.find((invite) => invite.id && !dismissedDomainInviteIds.has(invite.id));
+    domainInviteCandidate = next ?? null;
+    if (!next) {
+      domainInviteError = null;
+    }
+  };
+
+  run(() => {
+    if (!browser) return;
+    const uid = $user?.uid ?? null;
+    if (uid === domainInviteInboxUid) return;
+    domainInviteInboxUid = uid;
+    domainInviteCandidate = null;
+    domainInviteError = null;
+    domainInviteBusy = false;
+    domainInviteInboxStop?.();
+    if (!uid) {
+      domainInviteInboxStop = null;
+      return;
+    }
+    domainInviteInboxStop = subscribeInbox(uid, handleDomainInboxSnapshot);
+    void requestDomainAutoInvites();
+  });
+
+  async function acceptDomainInvite() {
+    const invite = domainInviteCandidate;
+    const me = $user?.uid ?? null;
+    if (!invite?.id) {
+      dismissDomainInvite(null);
+      return;
+    }
+    if (!me) {
+      domainInviteError = 'Sign in to accept invites.';
+      return;
+    }
+    domainInviteBusy = true;
+    domainInviteError = null;
+    try {
+      const res = await acceptInvite(invite.id, me);
+      if (!res.ok) {
+        domainInviteError = res.error ?? 'Unable to join this server.';
+        return;
+      }
+      dismissDomainInvite(invite.id);
+    } catch (error: any) {
+      domainInviteError = error?.message ?? 'Unable to join this server.';
+    } finally {
+      domainInviteBusy = false;
+    }
+  }
+
+  async function declineDomainInvite() {
+    const invite = domainInviteCandidate;
+    const me = $user?.uid ?? null;
+    if (!invite?.id) {
+      dismissDomainInvite(null);
+      return;
+    }
+    if (!me) {
+      domainInviteError = 'Sign in to decline invites.';
+      return;
+    }
+    domainInviteBusy = true;
+    domainInviteError = null;
+    try {
+      const res = await declineInvite(invite.id, me);
+      if (!res.ok) {
+        domainInviteError = res.error ?? 'Unable to decline this invite.';
+        return;
+      }
+      dismissDomainInvite(invite.id);
+    } catch (error: any) {
+      domainInviteError = error?.message ?? 'Unable to decline this invite.';
+    } finally {
+      domainInviteBusy = false;
+    }
+  }
+
+  const dismissCurrentDomainInvite = () => dismissDomainInvite(domainInviteCandidate?.id ?? null);
+
+  function buildTestInvite(detail?: Partial<ServerInvite>): ServerInvite {
+    const now = Date.now();
+    const base: ServerInvite = {
+      id: detail?.id ?? '__domain_test_invite__',
+      toUid: detail?.toUid ?? ($user?.uid ?? 'tester'),
+      fromUid: detail?.fromUid ?? 'auto',
+      fromDisplayName: detail?.fromDisplayName ?? 'Auto Invite',
+      serverId: detail?.serverId ?? 'test-server',
+      serverName: detail?.serverName ?? 'Sample Workspace',
+      serverIcon: detail?.serverIcon ?? null,
+      channelId: detail?.channelId ?? 'general',
+      channelName: detail?.channelName ?? 'general',
+      type: 'domain-auto',
+      status: 'pending',
+      createdAt: {
+        toMillis: () => now
+      } as any
+    };
+    return { ...base, ...detail };
+  }
 
   const persistLastLocation = (url: URL | null | undefined) => {
     if (!browser || !url) return;
@@ -165,6 +366,8 @@
 
   onDestroy(() => {
     stopVoice?.();
+    domainInviteInboxStop?.();
+    detachDomainInviteTestListener?.();
   });
 </script>
 
@@ -194,4 +397,13 @@
       </div>
     </div>
   {/if}
+
+  <DomainInvitePrompt
+    invite={domainInviteCandidate}
+    busy={domainInviteBusy}
+    error={domainInviteError}
+    onAccept={acceptDomainInvite}
+    onDecline={declineDomainInvite}
+    onDismiss={dismissCurrentDomainInvite}
+  />
 </div>

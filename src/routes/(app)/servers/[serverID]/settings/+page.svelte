@@ -9,7 +9,8 @@
   import { createChannel } from '$lib/firestore/channels';
   import { removeUserMembership } from '$lib/firestore/servers';
   import { sendServerInvite, type ServerInvite } from '$lib/firestore/invites';
-  import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+import LeftPane from '$lib/components/app/LeftPane.svelte';
 
 import {
     collection, doc, getDoc, onSnapshot, getDocs,
@@ -65,6 +66,7 @@ const DEFAULT_MENTION = '#f97316';
   const AUTO_INVITE_INTERVAL_MS = 60000;
   let autoInviteTimer: number | null = null;
   let autoInviteLoopActive = false;
+  let inviteAutomationBaselineKey: string | null = null;
   let deleteConfirm = $state('');
   let deleteBusy = $state(false);
   let deleteError: string | null = $state(null);
@@ -171,6 +173,18 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
   }
 
+  function automationSnapshotKey() {
+    const normalizedDomains = inviteDomains
+      .map((domain) => (typeof domain === 'string' ? domain.trim().toLowerCase() : ''))
+      .filter((domain) => domain.length > 0)
+      .sort();
+    return JSON.stringify({
+      enabled: !!inviteAutomationEnabled,
+      domains: normalizedDomains,
+      role: inviteDefaultRoleId ?? null
+    });
+  }
+
   async function gate() {
     const db = getDb();
     const snap = await getDoc(doc(db, 'servers', serverId!));
@@ -208,6 +222,7 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     inviteDefaultRoleId = typeof automation?.defaultRoleId === 'string' ? automation.defaultRoleId : null;
     inviteAutoSentUids = automation?.sentUids ?? {};
     inviteDeclinedUids = automation?.declinedUids ?? {};
+    inviteAutomationBaselineKey = automationSnapshotKey();
     const owner = ownerFrom(data);
     serverOwnerId = owner ?? null;
 
@@ -683,8 +698,16 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
           declinedUids: inviteDeclinedUids
         }
       });
+      const previousAutomationKey = inviteAutomationBaselineKey;
+      const nextAutomationKey = automationSnapshotKey();
+      inviteAutomationBaselineKey = nextAutomationKey;
+      const shouldAutoSyncDomains =
+        nextAutomationKey !== previousAutomationKey && inviteAutomationEnabled && inviteDomains.length > 0;
       inviteAutomationStatus = 'Settings saved.';
       inviteAutomationError = null;
+      if (shouldAutoSyncDomains) {
+        await sendAutoInvitesForDomains();
+      }
     } catch (e) {
       console.error(e);
       inviteAutomationError = 'Failed to save settings.';
@@ -805,7 +828,10 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
     }
     for (const candidate of targets) {
       try {
-        const result = await inviteUser(candidate.uid, { silent: auto || single });
+        const result = await inviteUser(candidate.uid, {
+          silent: auto || single,
+          type: 'domain-auto'
+        });
         if (result?.ok) {
           recordAutoInviteSent(candidate.uid);
           if (auto) {
@@ -1316,8 +1342,9 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
   ); // keep list tidy
 
   // invite to first text channel (keeps your current accept flow)
-  async function inviteUser(toUid: string, options: { silent?: boolean } = {}) {
+  async function inviteUser(toUid: string, options: { silent?: boolean; type?: string | null } = {}) {
     const silent = options?.silent ?? false;
+    const inviteType = options?.type ?? null;
     if (!(isOwner || isAdmin)) return { ok: false };
     if (!isOwner) {
       if (!silent) alert('Per current security rules, only channel owners can send invites.');
@@ -1363,7 +1390,8 @@ let sortedChannels: Array<{ id: string; name: string; type: 'text' | 'voice'; po
         serverName: serverName || serverId!,
         serverIcon,
         channelId: fallback.id,
-        channelName: fallback.name || 'general'
+        channelName: fallback.name || 'general',
+        type: inviteType ?? undefined
       });
       if (!res.ok) {
         if (!silent) {
@@ -1472,13 +1500,17 @@ async function clearPendingInvites() {
 </svelte:head>
 
 {#if allowed}
-  <div
-    class="settings-shell"
-    style={`--server-accent:${accentColor}; --server-sidebar:${sidebarColor}; --server-mention:${mentionColor};`}
-    use:passive={['touchstart', () => touchStartListener]}
-    use:passive={['touchend', () => touchEndListener]}
-  >
-    <div class="settings-container">
+  <div class="settings-workspace flex h-dvh app-bg text-primary overflow-hidden">
+    <div class="hidden md:flex md:shrink-0">
+      <LeftPane activeServerId={serverId} padForDock={false} />
+    </div>
+    <div
+      class="settings-shell flex-1"
+      style={`--server-accent:${accentColor}; --server-sidebar:${sidebarColor}; --server-mention:${mentionColor};`}
+      use:passive={['touchstart', () => touchStartListener]}
+      use:passive={['touchend', () => touchEndListener]}
+    >
+      <div class="settings-container">
 
       <!-- header -->
       <div class="settings-header">
@@ -2393,6 +2425,7 @@ async function clearPendingInvites() {
           </div>
         </div>
       {/if}
+      </div>
     </div>
   </div>
 {/if}
