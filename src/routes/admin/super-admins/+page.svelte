@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PageData } from './$types';
+  import { browser } from '$app/environment';
   import AdminCard from '$lib/admin/components/AdminCard.svelte';
   import AdminTable from '$lib/admin/components/AdminTable.svelte';
   import ConfirmDialog from '$lib/admin/components/ConfirmDialog.svelte';
@@ -31,6 +32,7 @@
   let busy = $state(false);
   let pendingRemoval: string | null = $state(null);
   let removalBusy = $state(false);
+  const DOMAIN_INVITE_STORAGE_KEY = 'domainAutoInviteDismissals';
 
   const normalize = (value: string) => value.trim().toLowerCase();
 
@@ -69,6 +71,31 @@
     if (adminEntries.length > 1) return false;
     const current = normalize(data.user?.email ?? '');
     return normalize(email) === current;
+  };
+
+  const handleResetDomainPrompt = () => {
+    if (!browser) {
+      showAdminToast({ type: 'info', message: 'Open this page in a browser session to run the reset.' });
+      return;
+    }
+    try {
+      localStorage.removeItem(DOMAIN_INVITE_STORAGE_KEY);
+      showAdminToast({
+        type: 'success',
+        message: 'Cleared the domain invite prompt dismissal flag for this device.'
+      });
+    } catch (err) {
+      console.error(err);
+      showAdminToast({ type: 'error', message: 'Unable to reset local storage for this browser.' });
+    }
+  };
+
+  const openSplashDemo = () => {
+    if (!browser) {
+      showAdminToast({ type: 'info', message: 'Splash demo is only available in-browser.' });
+      return;
+    }
+    window.open('/splash', '_blank', 'noopener');
   };
 </script>
 
@@ -135,6 +162,40 @@
     </div>
   </AdminCard>
   </div>
+
+  <div class="super-admin-panel lg:col-span-2">
+  <AdminCard title="Feature Testing" description="Shortcuts to QA the newest experiences.">
+    <div class="feature-test-grid">
+      <article class="feature-test-card">
+        <div>
+          <h4 class="feature-test-card__title">Domain auto-invite prompt</h4>
+          <p class="feature-test-card__copy">
+            Reset the local dismissal so the new join modal can reappear the next time you have a pending domain invite.
+          </p>
+        </div>
+        <div class="feature-test-actions">
+          <button type="button" class="feature-test-button" onclick={handleResetDomainPrompt}>
+            Reset prompt dismissal
+          </button>
+          <a class="feature-test-link" href="/settings#invites" target="_blank" rel="noreferrer">
+            Open invite inbox
+          </a>
+        </div>
+      </article>
+      <article class="feature-test-card">
+        <div>
+          <h4 class="feature-test-card__title">Splash screen demo</h4>
+          <p class="feature-test-card__copy">
+            Launch the standalone splash route in a fresh tab to verify branding and animation tweaks.
+          </p>
+        </div>
+        <div class="feature-test-actions">
+          <button type="button" class="feature-test-button" onclick={openSplashDemo}>Open splash page</button>
+        </div>
+      </article>
+    </div>
+  </AdminCard>
+  </div>
 </section>
 
 <style>
@@ -153,6 +214,65 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+
+  .feature-test-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+  }
+
+  .feature-test-card {
+    border-radius: 1.25rem;
+    border: 1px solid color-mix(in srgb, var(--surface-panel) 35%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 75%, transparent);
+    padding: 1.25rem;
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .feature-test-card__title {
+    margin: 0 0 0.2rem;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .feature-test-card__copy {
+    margin: 0;
+    color: color-mix(in srgb, var(--text-70,#475569) 90%, transparent);
+    font-size: 0.9rem;
+    line-height: 1.35;
+  }
+
+  .feature-test-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+  }
+
+  .feature-test-button {
+    border: none;
+    border-radius: 999px;
+    padding: 0.5rem 1.2rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #041014;
+    background: linear-gradient(
+      130deg,
+      color-mix(in srgb, var(--color-accent) 65%, transparent),
+      color-mix(in srgb, var(--color-highlight,#22d3ee) 65%, transparent)
+    );
+    cursor: pointer;
+  }
+
+  .feature-test-link {
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--surface-panel) 40%, transparent);
+    padding: 0.45rem 1.1rem;
+    font-size: 0.9rem;
+    color: inherit;
+    text-decoration: none;
   }
 </style>
 

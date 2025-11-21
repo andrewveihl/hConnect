@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { PageData } from './$types';
+  import { browser } from '$app/environment';
   import AdminCard from '$lib/admin/components/AdminCard.svelte';
   import { FEATURE_FLAGS, type FeatureFlagKey } from '$lib/admin/types';
   import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
   import { showAdminToast } from '$lib/admin/stores/toast';
   import { ensureFirebaseReady, getDb } from '$lib/firebase';
   import { doc, setDoc } from 'firebase/firestore';
+  import type { ServerInvite } from '$lib/firestore/invites';
+  import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
 
   interface Props {
     data: PageData;
@@ -17,6 +20,8 @@
   let pending: Record<FeatureFlagKey, boolean> = $state({} as Record<FeatureFlagKey, boolean>);
   let defaultTheme = $state(data.defaultTheme ?? 'dark');
   let themeSaving = $state(false);
+  const DOMAIN_INVITE_STORAGE_KEY = 'domainAutoInviteDismissals';
+  let previewInvite: ServerInvite | null = $state(null);
 
   const toggleFlag = async (key: FeatureFlagKey) => {
     const nextValue = !flags[key];
@@ -54,6 +59,73 @@
     } finally {
       themeSaving = false;
     }
+  };
+
+  const handleResetDomainPrompt = () => {
+    if (!browser) {
+      showAdminToast({ type: 'info', message: 'Open an in-browser admin session to reset the prompt here.' });
+      return;
+    }
+    try {
+      localStorage.removeItem(DOMAIN_INVITE_STORAGE_KEY);
+      showAdminToast({ type: 'success', message: 'Domain invite prompt reset for this device.' });
+    } catch (err) {
+      console.error(err);
+      showAdminToast({ type: 'error', message: 'Unable to reset local storage.' });
+    }
+  };
+
+  const openSplashDemo = () => {
+    if (!browser) {
+      showAdminToast({ type: 'info', message: 'Splash preview is available in browser sessions only.' });
+      return;
+    }
+    window.open('/splash', '_blank', 'noopener');
+  };
+
+  const buildSampleInvite = (): ServerInvite => ({
+    id: '__domain_preview__',
+    toUid: data?.user?.uid ?? 'tester',
+    fromUid: 'auto',
+    fromDisplayName: 'Auto Invite',
+    serverId: 'preview-server',
+    serverName: 'QA Review Workspace',
+    serverIcon: 'https://avatars.githubusercontent.com/u/9919?v=4',
+    channelId: 'launch-updates',
+    channelName: 'launch-updates',
+    type: 'domain-auto',
+    status: 'pending',
+    createdAt: {
+      toMillis: () => Date.now()
+    } as any
+  });
+
+  const triggerDomainPromptPreview = () => {
+    if (!browser) {
+      showAdminToast({ type: 'info', message: 'Open this page in the browser to test the invite prompt.' });
+      return;
+    }
+    previewInvite = buildSampleInvite();
+    showAdminToast({ type: 'success', message: 'Sample invite prompt displayed.' });
+    window.dispatchEvent(
+      new CustomEvent('domain-invite-test', {
+        detail: previewInvite
+      })
+    );
+  };
+
+  const closePreviewInvite = () => {
+    previewInvite = null;
+  };
+
+  const handlePreviewAccept = () => {
+    showAdminToast({ type: 'success', message: 'Sample invite accepted.' });
+    closePreviewInvite();
+  };
+
+  const handlePreviewDecline = () => {
+    showAdminToast({ type: 'info', message: 'Sample invite declined.' });
+    closePreviewInvite();
   };
 </script>
 
@@ -137,6 +209,43 @@
       </div>
     </AdminCard>
   </div>
+
+  <div class="feature-panel">
+    <AdminCard title="Feature Testing" description="Quick shortcuts for QA routines.">
+      <div class="feature-test-grid">
+        <article class="feature-test-card">
+          <div>
+            <h4>Domain auto-invite prompt</h4>
+            <p class="feature-test-copy">
+              Clears the local dismissal flag so the new domain invite modal reappears for pending invites.
+            </p>
+        </div>
+        <div class="feature-test-actions">
+          <button type="button" class="test-button" onclick={handleResetDomainPrompt}>
+            Reset prompt dismissal
+          </button>
+          <a class="test-link" href="/settings#invites" target="_blank" rel="noreferrer">
+            Open invite inbox
+          </a>
+          <button type="button" class="test-button test-button--ghost" onclick={triggerDomainPromptPreview}>
+            Show sample invite
+          </button>
+        </div>
+      </article>
+        <article class="feature-test-card">
+          <div>
+            <h4>Splash screen preview</h4>
+            <p class="feature-test-copy">
+              Opens the standalone splash page in a new tab so you can confirm animation and branding tweaks.
+            </p>
+          </div>
+          <div class="feature-test-actions">
+            <button type="button" class="test-button" onclick={openSplashDemo}>Open splash demo</button>
+          </div>
+        </article>
+      </div>
+    </AdminCard>
+  </div>
 </section>
 
 <style>
@@ -156,4 +265,78 @@
     flex-direction: column;
     min-height: 0;
   }
+
+  .feature-test-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+  }
+
+  .feature-test-card {
+    border-radius: 1.25rem;
+    border: 1px solid color-mix(in srgb, var(--surface-panel) 35%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 75%, transparent);
+    padding: 1.25rem;
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .feature-test-card h4 {
+    margin: 0 0 0.2rem;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .feature-test-copy {
+    margin: 0;
+    color: color-mix(in srgb, var(--text-70,#475569) 90%, transparent);
+    font-size: 0.9rem;
+    line-height: 1.35;
+  }
+
+  .feature-test-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+  }
+
+  .test-button {
+    border: none;
+    border-radius: 999px;
+    padding: 0.5rem 1.2rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #041014;
+    background: linear-gradient(
+      130deg,
+      color-mix(in srgb, var(--color-accent) 65%, transparent),
+      color-mix(in srgb, var(--color-highlight,#22d3ee) 65%, transparent)
+    );
+    cursor: pointer;
+  }
+
+  .test-button--ghost {
+    background: transparent;
+    color: inherit;
+    border: 1px dashed color-mix(in srgb, var(--surface-panel) 40%, transparent);
+  }
+
+  .test-link {
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--surface-panel) 40%, transparent);
+    padding: 0.45rem 1.1rem;
+    font-size: 0.9rem;
+    color: inherit;
+    text-decoration: none;
+  }
 </style>
+
+<DomainInvitePrompt
+  invite={previewInvite}
+  busy={false}
+  error={null}
+  onAccept={handlePreviewAccept}
+  onDecline={handlePreviewDecline}
+  onDismiss={closePreviewInvite}
+/>
