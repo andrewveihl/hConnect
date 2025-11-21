@@ -177,9 +177,6 @@
   style:pointer-events={showThreads ? 'auto' : 'none'}
   aria-label="Conversations"
 >
-  <div class="mobile-panel__header md:hidden">
-    <div class="mobile-panel__title">Conversations</div>
-  </div>
   <div class="flex-1 overflow-y-auto">
     <DMsSidebar
       activeThreadId="__notes"

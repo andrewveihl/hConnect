@@ -132,6 +132,7 @@
     idle: 'Idle',
     offline: 'Offline'
   };
+  const MAX_VISIBLE_MEMBER_ROLES = 2;
   run(() => {
     selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
   });
@@ -802,13 +803,15 @@
                             </span>
                           </div>
                           {#if (member.baseRole && member.baseRole !== 'member') || member.roles.length}
+                            {@const rolePreview = member.roles.slice(0, MAX_VISIBLE_MEMBER_ROLES)}
+                            {@const extraRoleCount = Math.max(0, member.roles.length - rolePreview.length)}
                             <div class="member-roles member-row__roles">
                               {#if member.baseRole === 'owner'}
                                 <span class="member-role" data-tone="owner">Owner</span>
                               {:else if member.baseRole === 'admin'}
                                 <span class="member-role" data-tone="admin">Admin</span>
                               {/if}
-                              {#each member.roles as role}
+                              {#each rolePreview as role}
                                 <span
                                   class="member-role"
                                   style={role.color ? `--member-role-color: ${role.color}` : undefined}
@@ -816,6 +819,9 @@
                                   {role.name}
                                 </span>
                               {/each}
+                              {#if extraRoleCount > 0}
+                                <span class="member-role member-role--more">+{extraRoleCount}</span>
+                              {/if}
                             </div>
                           {/if}
                         </div>
@@ -897,6 +903,9 @@
 <style>
   .members-pane__scroll {
     min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 
   .members-pane {
