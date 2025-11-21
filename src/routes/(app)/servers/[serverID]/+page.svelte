@@ -25,7 +25,7 @@ import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, 
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
-  import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
+import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 import {
     createChannelThread,
     sendThreadMessage,
@@ -64,7 +64,14 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
   });
 
 
-  type Channel = { id: string; name: string; type: 'text' | 'voice'; position?: number };
+  type Channel = {
+    id: string;
+    name: string;
+    type: 'text' | 'voice';
+    position?: number;
+    isPrivate?: boolean;
+    allowedRoleIds?: string[];
+  };
   type MentionSendRecord = {
     uid: string;
     handle: string | null;
@@ -145,7 +152,7 @@ let floatingThreadDragActive = $state(false);
 let floatingThreadDragStart = { x: 0, y: 0 };
 let floatingThreadWindowStart = { x: 0, y: 0 };
 let floatingHeaderPointerId: number | null = null;
-  const profileUnsubs: Record<string, Unsubscribe> = {};
+const profileUnsubs: Record<string, Unsubscribe> = {};
 let serverDisplayName = $state('Server');
   let serverMetaUnsub: Unsubscribe | null = $state(null);
   let mentionOptions: MentionDirectoryEntry[] = $state([]);
