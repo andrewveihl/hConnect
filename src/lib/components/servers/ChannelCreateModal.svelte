@@ -54,7 +54,8 @@
   async function submit() {
     if (!serverIdFinal) { errorMsg = 'Server not ready yet. Try again in a moment.'; return; }
     busy = true; errorMsg = '';
-    const name = (chName.trim() || (chType === 'text' ? 'new-text' : 'New Voice')).toLowerCase();
+    const trimmed = chName.trim();
+    const name = trimmed || (chType === 'text' ? 'New Text Channel' : 'New Voice Channel');
 
     try {
       const id = await createChannel(

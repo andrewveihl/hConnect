@@ -404,6 +404,7 @@ export function subscribeUserServers(
       const id = d.id;
       seen[id] = true;
       const data = d.data() as any;
+      const existing = current[id];
       const position =
         typeof data.position === 'number'
           ? data.position
@@ -412,7 +413,23 @@ export function subscribeUserServers(
             : null;
       if (position === null) needsPositionBackfill = true;
       const joinedAt = toMillis(data.joinedAt) ?? null;
-      current[id] = { id, name: data.name, icon: data.icon ?? null, position, joinedAt };
+      const name =
+        (typeof data.name === 'string' && data.name.trim().length
+          ? data.name.trim()
+          : undefined) ?? existing?.name ?? 'Server';
+      const icon =
+        (typeof data.icon === 'string' && data.icon.trim().length ? data.icon.trim() : undefined) ??
+        existing?.icon ??
+        null;
+      current[id] = {
+        ...existing,
+        id,
+        position,
+        joinedAt,
+        // Preserve better server doc values if they were already merged in.
+        name: existing?.name ?? name,
+        icon: existing?.icon ?? icon
+      };
 
       if (!serverUnsubs[id]) {
         const serverRef = doc(db, 'servers', id);
