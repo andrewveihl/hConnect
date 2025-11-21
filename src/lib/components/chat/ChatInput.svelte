@@ -12,6 +12,7 @@
   import type { ReplyMessageContext } from '$lib/api/ai';
   import { mobileDockSuppressed } from '$lib/stores/ui';
   import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
+  import { featureFlags } from '$lib/stores/featureFlags';
 
   type MentionCandidate = {
     uid: string;
@@ -182,6 +183,10 @@
   let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
 
+  const featureFlagStore = featureFlags;
+  const aiPlatformEnabled = $derived(Boolean($featureFlagStore.enableAIFeatures));
+  const aiSuggestionsEnabled = $derived(Boolean($featureFlagStore.enableAISuggestedReplies));
+  const aiPredictionsEnabled = $derived(Boolean($featureFlagStore.enableAIPredictions));
   let aiServiceAvailable = $state(true);
   let aiReplySuggestion = $state<string | null>(null);
   let aiReplyLoading = $state(false);
@@ -218,18 +223,19 @@
   let suggestionTapPrimed = false;
   let textareaExpanded = $state(false);
 
-  const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable));
+  const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable && aiPlatformEnabled));
+  const aiSuggestionCoachAllowed = $derived(Boolean(aiAssistAllowed && aiSuggestionsEnabled));
   const isDesktop = $derived(platform === 'desktop');
   const isReplying = $derived(Boolean(replyTarget?.messageId));
   const mobileSuggestionContext = $derived(replySource ?? replyTarget ?? defaultSuggestionSource ?? null);
-  const showReplyCoach = $derived(Boolean(aiAssistAllowed && isDesktop && isReplying));
+  const showReplyCoach = $derived(Boolean(aiSuggestionCoachAllowed && isDesktop && isReplying));
   const showGeneralCoach = $derived(
-    Boolean(aiAssistAllowed && !isDesktop && isReplying && mobileSuggestionContext && !text.trim())
+    Boolean(aiSuggestionCoachAllowed && !isDesktop && isReplying && mobileSuggestionContext && !text.trim())
   );
   const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
   const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
   const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
-  const showInlinePrediction = $derived(Boolean(aiAssistAllowed));
+  const showInlinePrediction = $derived(Boolean(aiAssistAllowed && aiPredictionsEnabled));
   const hasInlinePrediction = $derived(Boolean(showInlinePrediction && aiInlineSuggestion));
   const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
   const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));

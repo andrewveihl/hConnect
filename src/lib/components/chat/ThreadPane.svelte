@@ -14,6 +14,7 @@
     type ThreadSummaryMessage
   } from '$lib/api/ai';
   import type { ChannelThread } from '$lib/firestore/threads';
+  import { featureFlags } from '$lib/stores/featureFlags';
 
   export let root: any | null = null;
   export let messages: any[] = [];
@@ -55,6 +56,12 @@
   let idleHours = 0;
   let summaryPayload: ThreadSummaryMessage[] = [];
   let shouldSuggestSummary = false;
+  const featureFlagStore = featureFlags;
+  let aiSummaryFlag = true;
+  let summaryAvailable = true;
+  $: aiSummaryFlag =
+    Boolean($featureFlagStore?.enableAIFeatures && $featureFlagStore?.enableAISummaries);
+  $: summaryAvailable = Boolean(aiAssistEnabled && aiSummaryFlag);
 
   const pickString = (value: any) => (typeof value === 'string' ? value.trim() : '');
 
@@ -85,6 +92,7 @@
   }
 
   function handleSummarizeToggle() {
+    if (!summaryAvailable) return;
     summaryPanelOpen = !summaryPanelOpen;
     if (summaryPanelOpen && !summary.length && !summaryLoading) {
       void generateSummary();
@@ -115,6 +123,9 @@
   });
 
   $: if (isMobileView) {
+    summaryPanelOpen = false;
+  }
+  $: if (!summaryAvailable) {
     summaryPanelOpen = false;
   }
 
@@ -171,7 +182,12 @@
 
   $: {
     shouldSuggestSummary =
-      !summary.length && !summaryLoading && !summaryError && messages.length >= 4 && idleHours >= 1;
+      summaryAvailable &&
+      !summary.length &&
+      !summaryLoading &&
+      !summaryError &&
+      messages.length >= 4 &&
+      idleHours >= 1;
   }
 
   $: {
@@ -233,6 +249,7 @@
   }
 
   async function generateSummary() {
+    if (!summaryAvailable) return;
     if (!summaryPayload.length) {
       summaryError = 'No messages to summarize.';
       return;
@@ -300,17 +317,19 @@
         {#if threadStatus === 'archived'}
           <span class="thread-status-badge">Archived</span>
         {/if}
-        <button
-          type="button"
-          class="thread-pane__action thread-pane__action-icon"
-          onclick={handleSummarizeToggle}
-          aria-pressed={summaryPanelOpen}
-          title="Summarize thread"
-          bind:this={summaryButtonEl}
-        >
-          <i class="bx bx-pen"></i>
-          <span class="sr-only">Summarize</span>
-        </button>
+        {#if summaryAvailable}
+          <button
+            type="button"
+            class="thread-pane__action thread-pane__action-icon"
+            onclick={handleSummarizeToggle}
+            aria-pressed={summaryPanelOpen}
+            title="Summarize thread"
+            bind:this={summaryButtonEl}
+          >
+            <i class="bx bx-pen"></i>
+            <span class="sr-only">Summarize</span>
+          </button>
+        {/if}
         {#if popoutEnabled && !isMobileView}
           <button
             type="button"
@@ -330,7 +349,7 @@
       </div>
     </header>
 
-    {#if summaryPanelOpen}
+    {#if summaryPanelOpen && summaryAvailable}
       <section class="thread-summary-popover" bind:this={summaryPopoverEl}>
         <div class="thread-summary__header">
           <div>
