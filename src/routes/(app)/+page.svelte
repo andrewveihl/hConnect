@@ -1,10 +1,11 @@
-﻿<script lang="ts">
+<script lang="ts">
   import LeftPane from '$lib/components/app/LeftPane.svelte';
   import { channelUnreadCount, dmUnreadCount } from '$lib/stores/notifications';
   import {
     activityEntries,
     activityReady,
     activityUnreadCount,
+    markActivityEntry,
     type ActivityEntry
   } from '$lib/stores/activityFeed';
   import type { NotificationItem } from '$lib/stores/notifications';
@@ -54,98 +55,75 @@
     return relativeFormatter.format(diffYear, 'year');
   };
 
-  type SmartBucket = 'signal' | 'priority' | 'ambient';
-
-  type SmartNotification = NotificationItem & {
-    score: number;
-    bucket: SmartBucket;
-    aiReason: string;
+  const describeEntry = (item: NotificationItem): string => {
+    if (item.kind === 'dm') return 'Direct message';
+    if (item.reason === 'mention' || item.isMention) return '@ mention';
+    if (item.reason === 'thread') return 'Thread reply';
+    return 'Channel update';
   };
 
-  type SmartActivityNotification = SmartNotification & { entry: ActivityEntry };
-
-  type FeedFilter = 'all' | 'signals' | 'mentions' | 'dms';
-
-  const filterOptions: { id: FeedFilter; label: string; description: string }[] = [
-    { id: 'all', label: 'Everything', description: 'Chronological view' },
-    { id: 'signals', label: 'Important', description: 'AI ranked' },
-    { id: 'mentions', label: 'Mentions', description: 'Anyone @ you' },
-    { id: 'dms', label: 'DMs', description: 'Direct conversations' }
-  ];
-
-  let activeFilter = $state<FeedFilter>('all');
-
-  const computeRecencyBoost = (timestamp: number | null): number => {
-    if (!timestamp) return 0;
-    const minutes = Math.max(0, (Date.now() - timestamp) / 60000);
-    if (minutes >= 240) return 0;
-    if (minutes <= 2) return 20;
-    return Math.max(0, 20 - minutes * 0.08);
-  };
-
-  const computeAiScore = (item: NotificationItem): number => {
-    let score = item.priority === 'high' ? 55 : 28;
-    const unread = item.unread ?? 0;
-    const highCount = item.highCount ?? 0;
-    const lowCount = item.lowCount ?? 0;
-
-    if (item.kind === 'dm') score += 28;
-    if (item.kind === 'thread') score += 12;
-    if (item.reason === 'mention' || item.isMention) score += 20;
-    if (item.reason === 'thread') score += 8;
-
-    score += Math.min(15, Math.log2(unread + 1) * 6);
-    score += Math.min(12, highCount * 4);
-    if (lowCount > 0) {
-      score += Math.min(10, Math.log(lowCount + 1) * 5);
-    }
-
-    score += computeRecencyBoost(item.lastActivity ?? null);
-    return Math.max(0, Math.min(100, Math.round(score)));
-  };
-
-  const describeAiReason = (item: NotificationItem): string => {
+  const describeReason = (item: NotificationItem): string => {
     const unread = item.unread ?? 0;
     if (item.kind === 'dm') {
-      return unread === 1 ? 'New DM' : `${formatCount(unread)} DMs`;
+      return unread === 1 ? 'New direct message' : `${formatCount(unread)} unread DMs`;
     }
     if (item.reason === 'mention' || item.isMention) {
-      return 'Mention';
+      return 'You were mentioned';
     }
     if (item.reason === 'thread') {
-      return 'Thread replies';
+      return 'Thread replies waiting';
     }
     if ((item.highCount ?? 0) > 0) {
-      return `${formatCount(item.highCount ?? 0)} priority`;
+      return `${formatCount(item.highCount ?? 0)} priority pings`;
     }
     if ((item.lowCount ?? 0) > 0) {
-      return `${formatCount(item.lowCount ?? 0)} new msgs`;
+      return `${formatCount(item.lowCount ?? 0)} new messages`;
     }
     return 'Fresh activity';
   };
 
-  const decorateNotification = (item: NotificationItem): SmartNotification => {
-    const score = computeAiScore(item);
-    const bucket: SmartBucket = score >= 75 ? 'signal' : score >= 45 ? 'priority' : 'ambient';
-    return {
-      ...item,
-      score,
-      bucket,
-      aiReason: describeAiReason(item)
-    };
+  type LocationDescriptor = { primary: string; secondary: string | null };
+
+  const describeLocation = (entry: ActivityEntry): LocationDescriptor => {
+    const { serverName, channelName, threadName, dmId } = entry.context;
+    if (dmId) {
+      const primary = serverName ?? 'Direct message';
+      const detail =
+        threadName ??
+        channelName ??
+        (entry.title && entry.title !== primary ? entry.title : null);
+      return { primary, secondary: detail ?? null };
+    }
+    if (serverName && channelName) {
+      const secondary = `#${channelName}${threadName ? ` > ${threadName}` : ''}`;
+      return { primary: serverName, secondary };
+    }
+    if (serverName) {
+      return { primary: serverName, secondary: threadName ? `> ${threadName}` : null };
+    }
+    if (channelName) {
+      return {
+        primary: `#${channelName}`,
+        secondary: threadName ? `> ${threadName}` : null
+      };
+    }
+    return { primary: entry.title || 'Activity', secondary: null };
   };
+
+  const timelineTimestamp = (entry: ActivityEntry, item: NotificationItem): number | null =>
+    item.lastActivity ?? entry.createdAt ?? entry.messageInfo.createdAt ?? null;
 
   const entryToNotification = (entry: ActivityEntry): NotificationItem => {
     const kind = entry.context.dmId
       ? 'dm'
       : entry.context.threadId
-        ? 'thread'
-        : 'channel';
+          ? 'thread'
+          : 'channel';
     const priority: 'high' | 'low' =
       entry.mentionType === 'dm' || entry.mentionType === 'direct' ? 'high' : 'low';
     const contextLabel =
       entry.context.serverName && entry.context.channelName
-        ? `${entry.context.serverName} • #${entry.context.channelName}`
+        ? `${entry.context.serverName} / #${entry.context.channelName}`
         : entry.context.serverName ??
           (entry.context.channelName ? `#${entry.context.channelName}` : 'Activity');
     const reason = kind === 'dm' ? null : ('mention' as NotificationItem['reason']);
@@ -169,56 +147,115 @@
     };
   };
 
-  const entryNotifications = $derived.by(() =>
-    $activityEntries.map((entry) => ({ entry, item: entryToNotification(entry) }))
+  type FeedRecord = { entry: ActivityEntry; item: NotificationItem };
+
+  const unreadFeed = $derived.by(
+    (): FeedRecord[] =>
+      $activityEntries
+        .filter((entry) => entry.status.unread)
+        .map((entry) => ({ entry, item: entryToNotification(entry) }))
   );
 
-  const smartFeed = $derived.by(
-    (): SmartActivityNotification[] =>
-      entryNotifications.map(({ entry, item }) => ({ ...decorateNotification(item), entry }))
+  let pendingReadIds = $state<Set<string>>(new Set<string>());
+  let clearState = $state<'idle' | 'running'>('idle');
+  let clearMessage: string | null = $state(null);
+
+  const visibleFeed = $derived.by((): FeedRecord[] =>
+    unreadFeed.filter(({ entry }) => !pendingReadIds.has(entry.id))
   );
 
-  const sortByRecency = (a: SmartNotification, b: SmartNotification) => {
-    const aTime = a.lastActivity ?? 0;
-    const bTime = b.lastActivity ?? 0;
-    if (aTime === bTime) {
-      if (a.score === b.score) return a.title.localeCompare(b.title);
-      return b.score - a.score;
+  type ActivityGroup = {
+    key: string;
+    entries: ActivityEntry[];
+    items: NotificationItem[];
+    latest: FeedRecord;
+    location: LocationDescriptor;
+    unreadTotal: number;
+    reasonSummary: string;
+    count: number;
+    contextLabel: string;
+    kind: NotificationItem['kind'];
+  };
+
+  type ActivityGroupBuilder = {
+    key: string;
+    entries: ActivityEntry[];
+    items: NotificationItem[];
+    latest: FeedRecord;
+    location: LocationDescriptor;
+    unreadTotal: number;
+    reasonSet: Set<string>;
+    contextLabel: string;
+    kind: NotificationItem['kind'];
+  };
+
+  const buildGroupKey = (entry: ActivityEntry): string => {
+    if (entry.context.dmId) return `dm:${entry.context.dmId}`;
+    const server = entry.context.serverId ?? entry.context.serverName ?? 'serverless';
+    const channel =
+      entry.context.channelId ??
+      entry.context.channelName ??
+      entry.context.threadId ??
+      entry.id;
+    return `channel:${server}:${channel}`;
+  };
+
+  const groupedFeed = $derived.by((): ActivityGroup[] => {
+    const map = new Map<string, ActivityGroupBuilder>();
+    for (const record of visibleFeed) {
+      const key = buildGroupKey(record.entry);
+      const location = describeLocation(record.entry);
+      let group = map.get(key);
+      if (!group) {
+        group = {
+          key,
+          entries: [],
+          items: [],
+          latest: record,
+          location,
+          unreadTotal: 0,
+          contextLabel: record.item.context ?? location.primary,
+          kind: record.item.kind,
+          reasonSet: new Set()
+        };
+        map.set(key, group);
+      }
+      group.entries.push(record.entry);
+      group.items.push(record.item);
+      group.unreadTotal += Math.max(1, record.item.unread ?? 0);
+      group.reasonSet.add(describeReason(record.item));
+      if ((record.item.lastActivity ?? 0) > (group.latest.item.lastActivity ?? 0)) {
+        group.latest = record;
+        group.location = location;
+        group.contextLabel = record.item.context ?? location.primary;
+        group.kind = record.item.kind;
+      }
     }
-    return bTime - aTime;
-  };
 
-  const smartHighlights = $derived.by((): SmartActivityNotification[] => {
-    const highlightPool = smartFeed.filter((item) => item.bucket !== 'ambient');
-    highlightPool.sort((a, b) => {
-      if (a.score === b.score) return sortByRecency(a, b);
-      return b.score - a.score;
-    });
-    return highlightPool.slice(0, 4);
+    return Array.from(map.values())
+      .map((group) => {
+        const reasons = Array.from(group.reasonSet).slice(0, 2);
+        return {
+          key: group.key,
+          entries: group.entries,
+          items: group.items,
+          latest: group.latest,
+          location: group.location,
+          unreadTotal: group.unreadTotal,
+          reasonSummary: reasons.join(' | ') || describeReason(group.latest.item),
+          count: group.entries.length,
+          contextLabel: group.contextLabel,
+          kind: group.kind
+        };
+      })
+      .sort((a, b) => {
+        const aTime = a.latest.item.lastActivity ?? 0;
+        const bTime = b.latest.item.lastActivity ?? 0;
+        return bTime - aTime;
+      });
   });
 
-  const filterMatchers: Record<FeedFilter, (item: SmartActivityNotification) => boolean> = {
-    all: () => true,
-    signals: (item) => item.bucket === 'signal',
-    mentions: (item) => item.reason === 'mention' || item.reason === 'thread',
-    dms: (item) => item.kind === 'dm'
-  };
-
-  const bucketCopy: Record<SmartBucket, string> = {
-    signal: 'Important',
-    priority: 'Keep up',
-    ambient: 'Background'
-  };
-
-  const filteredFeed = $derived.by((): SmartActivityNotification[] => {
-    const pool = smartFeed.filter((item) => filterMatchers[activeFilter](item));
-    pool.sort((a, b) =>
-      activeFilter === 'signals'
-        ? b.score - a.score || sortByRecency(a, b)
-        : sortByRecency(a, b)
-    );
-    return pool;
-  });
+  const shouldShowBulkClear = $derived(groupedFeed.length > 3);
 
   const payloadFromEntry = (entry: ActivityEntry): DeepLinkPayload => ({
     activityId: entry.id,
@@ -230,10 +267,6 @@
     origin: 'activity',
     targetUrl: entry.deepLink
   });
-
-  const openActivity = (entry: ActivityEntry) => {
-    void handleDeepLinkPayload(payloadFromEntry(entry));
-  };
 
   const detectPermission = (): 'default' | 'denied' | 'granted' | 'unsupported' => {
     if (typeof window === 'undefined' || typeof Notification === 'undefined') return 'unsupported';
@@ -268,6 +301,88 @@
           : 'Could not enable push notifications on this device.';
     }
   }
+
+  function addPending(ids: string[]) {
+    if (!ids.length) return;
+    const next = new Set(pendingReadIds);
+    ids.forEach((id) => next.add(id));
+    pendingReadIds = next;
+  }
+
+  function removePending(ids: string[]) {
+    if (!ids.length) return;
+    const next = new Set(pendingReadIds);
+    let changed = false;
+    ids.forEach((id) => {
+      if (next.delete(id)) changed = true;
+    });
+    if (changed) {
+      pendingReadIds = next;
+    }
+  }
+
+  async function markEntriesRead(entries: ActivityEntry[], clickedEntryId?: string) {
+    const ids = entries.map((entry) => entry.id).filter(Boolean);
+    if (!ids.length) return;
+    addPending(ids);
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        markActivityEntry(id, {
+          unread: false,
+          ...(clickedEntryId === id ? { clicked: true } : {})
+        })
+      )
+    );
+    const failedIds: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        failedIds.push(ids[index]);
+      }
+    });
+    if (failedIds.length) {
+      removePending(failedIds);
+      console.error('Failed to dismiss activity entries', failedIds);
+    }
+  }
+
+  function openActivityGroup(group: ActivityGroup) {
+    const targetEntry = group.latest.entry;
+    void markEntriesRead(group.entries, targetEntry.id);
+    void handleDeepLinkPayload(payloadFromEntry(targetEntry));
+  }
+
+  function clearGroup(group: ActivityGroup) {
+    void markEntriesRead(group.entries);
+  }
+
+  function handleCardKey(event: KeyboardEvent, callback: () => void) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      callback();
+    }
+  }
+
+  async function clearActivityFeed() {
+    if (!unreadFeed.length || clearState === 'running') return;
+    clearState = 'running';
+    clearMessage = null;
+    const ids = unreadFeed.map(({ entry }) => entry.id);
+    addPending(ids);
+    const results = await Promise.allSettled(
+      ids.map((id) => markActivityEntry(id, { unread: false }))
+    );
+    const failedIds: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        failedIds.push(ids[index]);
+      }
+    });
+    if (failedIds.length) {
+      removePending(failedIds);
+      clearMessage = 'Some alerts could not be cleared. Try again.';
+    }
+    clearState = 'idle';
+  }
 </script>
 
 <div class="flex h-dvh app-bg text-primary overflow-hidden mobile-full-bleed">
@@ -276,37 +391,35 @@
   </div>
 
   <div class="activity-surface">
-    <header class="activity-hero">
-      <div class="activity-hero__heading">
-        <p class="activity-hero__eyebrow">Smart signals</p>
+    <header class="activity-header">
+      <div class="activity-header__text">
+        <p class="activity-eyebrow">Inbox</p>
         <h1>Activity</h1>
-        <div class="activity-hero__metrics">
+        <p class="activity-description">
           {#if $activityUnreadCount === 0}
-            <span>You're all caught up.</span>
+            You're caught up on mentions and DMs.
           {:else}
-            <span>{formatCount($activityUnreadCount)} alerts</span>
-            <span>{formatCount($channelUnreadCount)} channels</span>
-            <span>{formatCount($dmUnreadCount)} DMs</span>
+            {formatCount($activityUnreadCount)} unread waiting for you.
           {/if}
+        </p>
+        <div class="activity-header__stats" role="status">
+          <span>{formatCount($channelUnreadCount)} channels</span>
+          <span>{formatCount($dmUnreadCount)} DMs</span>
         </div>
       </div>
       {#if shouldShowPushPrompt}
-        <div class="push-cta">
-          <div>
-            <p class="push-cta__eyebrow">Enable push alerts</p>
-            <h3>Never miss a mention</h3>
-            <p>
-              We'll only alert you for DMs, @mentions, and priority threads on this device.
-              {#if pushRequestState === 'success'}
-                <strong>Push enabled.</strong>
-              {:else if pushError}
-                <strong>{pushError}</strong>
-              {/if}
-            </p>
-          </div>
-          <button class="btn btn-primary" aria-busy={pushRequestState === 'loading'} onclick={requestPushEnable}>
-            {pushRequestState === 'loading' ? 'Enabling…' : 'Enable push'}
+        <div class="activity-header__actions">
+          <button
+            type="button"
+            class="enable-push-btn"
+            onclick={requestPushEnable}
+            aria-busy={pushRequestState === 'loading'}
+          >
+            {pushRequestState === 'loading' ? 'Enabling...' : 'Enable push'}
           </button>
+          {#if pushError}
+            <p class="push-inline-error" role="status">{pushError}</p>
+          {/if}
         </div>
       {/if}
     </header>
@@ -314,128 +427,112 @@
     <main class="activity-main">
       {#if !$activityReady}
         <div class="activity-placeholder">
-          <div class="spinner"></div>
+          <div class="spinner" aria-hidden="true"></div>
           <p>Syncing your servers&hellip;</p>
         </div>
-      {:else if !smartFeed.length}
+      {:else if !groupedFeed.length}
         <div class="activity-empty">
-          <i class="bx bx-party"></i>
-          <h2>Nothing demanding attention</h2>
-          <p>We’ll pin fresh messages here the moment they land.</p>
+          <i class="bx bx-inbox"></i>
+          <h2>Nothing needs your attention</h2>
+          <p>Mentions, reactions, and DMs will show up here the moment they ship.</p>
           <div class="activity-empty__actions">
             <a class="btn btn-primary" href="/dms">Jump to DMs</a>
             <a class="btn btn-secondary" href="/servers">Browse servers</a>
           </div>
         </div>
       {:else}
-        <section class="smart-section">
-          <div class="smart-section__header">
-            <div>
-              <p class="smart-section__eyebrow">AI highlights</p>
-              <h2>Signals</h2>
-            </div>
-            <span class="smart-section__badge">Live</span>
+        {#if clearMessage}
+          <p class="activity-error">{clearMessage}</p>
+        {/if}
+        {#if shouldShowBulkClear}
+          <div class="bulk-clear">
+            <button
+              type="button"
+              class="clear-feed-btn"
+              onclick={clearActivityFeed}
+              disabled={clearState === 'running'}
+              aria-busy={clearState === 'running'}
+            >
+              {clearState === 'running' ? 'Clearing...' : 'Clear all'}
+            </button>
           </div>
-
-          {#if smartHighlights.length}
-            <div class="smart-grid">
-              {#each smartHighlights as item (item.id)}
-                <button
-                  type="button"
-                  class={`smart-card smart-card--${item.bucket}`}
-                  onclick={() => openActivity(item.entry)}
-                >
-                  <div class="smart-card__badge">
-                    {bucketCopy[item.bucket]} &middot; {item.score}%
-                  </div>
-                  <div class="smart-card__title">
-                    <span>{item.context ?? 'Activity'}</span>
-                    <h3>{item.title}</h3>
-                  </div>
-                  <p class="smart-card__preview">{item.preview}</p>
-                  <div class="smart-card__meta">
-                    <span>{item.aiReason}</span>
-                    <span>{formatRelativeTime(item.lastActivity ?? null) || 'moments ago'}</span>
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class="smart-section__empty">
-              <i class="bx bx-bot"></i>
-              <p>No AI signals right now.</p>
-            </div>
-          {/if}
-        </section>
-
-        <section class="feed-section">
-          <div class="feed-section__header">
-            <div>
-              <p class="feed-section__eyebrow">Live feed</p>
-              <h2>All activity</h2>
-            </div>
-            <div class="feed-filters" role="tablist" aria-label="Activity filters">
-              {#each filterOptions as option}
-                <button
-                  type="button"
-                  class={`feed-filter ${activeFilter === option.id ? 'is-active' : ''}`}
-                  role="tab"
-                  aria-selected={activeFilter === option.id}
-                  onclick={() => (activeFilter = option.id)}
-                >
-                  <span>{option.label}</span>
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          {#if filteredFeed.length}
-            <ul class="feed-list">
-              {#each filteredFeed as item (item.id)}
-                <li>
-                  <button
-                    type="button"
-                    class={`feed-card feed-card--${item.bucket}`}
-                    onclick={() => openActivity(item.entry)}
-                    aria-label={`Open ${item.title}`}
-                  >
-                    <div class="feed-card__avatar">
-                      {#if item.photoURL}
-                        <img src={item.photoURL} alt="" loading="lazy" />
-                      {:else if item.kind === 'dm'}
-                        <span class="feed-card__avatar-initial">DM</span>
-                      {:else}
-                        <span class="feed-card__avatar-initial">#</span>
+        {/if}
+        <ul class="activity-feed" aria-live="polite">
+          {#each groupedFeed as group (group.key)}
+            {@const { entry, item } = group.latest}
+            {@const timestamp = timelineTimestamp(entry, item)}
+            {@const location = group.location}
+            <li>
+              <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+              <article
+                class={`activity-item activity-item--${group.kind}`}
+                role="button"
+                tabindex="0"
+                onclick={() => openActivityGroup(group)}
+                onkeydown={(event) => handleCardKey(event, () => openActivityGroup(group))}
+              >
+                <div class="activity-item__icon" aria-hidden="true">
+                  {#if group.kind === 'dm'}
+                    <span>DM</span>
+                  {:else if group.kind === 'thread'}
+                    <span>@</span>
+                  {:else}
+                    <span>#</span>
+                  {/if}
+                </div>
+                <div class="activity-item__body">
+                  <div class="activity-item__header">
+                    <div class="activity-item__origin">
+                      <span class="activity-item__badge">{describeEntry(item)}</span>
+                      <div class="activity-item__location">
+                        <strong>{location.primary}</strong>
+                        {#if location.secondary}
+                          <span>{location.secondary}</span>
+                        {/if}
+                      </div>
+                      {#if group.count > 1}
+                        <span class="activity-item__bundle">{group.count} updates</span>
                       {/if}
+                      <button
+                        type="button"
+                        class="activity-item__dismiss"
+                        aria-label={`Clear ${group.count} notifications`}
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          clearGroup(group);
+                        }}
+                      >
+                        Clear
+                      </button>
                     </div>
-                    <div class="feed-card__body">
-                      <div class="feed-card__top">
-                        <div class="feed-card__title-group">
-                          <span class="feed-card__context">{item.context ?? 'Activity'}</span>
-                          <h3>{item.title}</h3>
-                        </div>
-                        <span class="feed-card__time">
-                          {formatRelativeTime(item.lastActivity ?? null) || 'moments ago'}
-                        </span>
-                      </div>
-                      <p class="feed-card__preview">{item.preview}</p>
-                      <div class="feed-card__meta">
-                        <span class="feed-card__badge">{bucketCopy[item.bucket]}</span>
-                        <span class="feed-card__reason">{item.aiReason}</span>
-                        <span class="feed-card__count">+{formatCount(item.unread)}</span>
-                      </div>
-                    </div>
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {:else}
-            <div class="feed-empty">
-              <i class="bx bx-coffee"></i>
-              <p>Nothing here yet.</p>
-            </div>
-          {/if}
-        </section>
+                    <time datetime={timestamp ? new Date(timestamp).toISOString() : undefined}>
+                      {formatRelativeTime(timestamp) || 'just now'}
+                    </time>
+                  </div>
+                  <h3>{item.title}</h3>
+                  <p>{item.preview}</p>
+                  {#if group.items.length > 1}
+                    <ul class="activity-item__stack">
+                      {#each group.items.slice(0, 3) as child}
+                        <li>{child.title}</li>
+                      {/each}
+                      {#if group.items.length > 3}
+                        <li>+{group.items.length - 3} more...</li>
+                      {/if}
+                    </ul>
+                  {/if}
+                  <div class="activity-item__meta">
+                    <span class="activity-item__reason">{group.reasonSummary}</span>
+                    <span class="activity-item__volume">
+                      {group.count} {group.count === 1 ? 'notification' : 'notifications'}
+                    </span>
+                    <span class="activity-item__count">+{formatCount(group.unreadTotal)}</span>
+                  </div>
+                </div>
+              </article>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </main>
   </div>
@@ -446,110 +543,117 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
     background: var(--surface-root);
     color: var(--text-100);
+    overflow: hidden;
   }
 
-  .activity-hero {
-    display: flex;
-    justify-content: space-between;
-    gap: clamp(1rem, 2vw, 2rem);
-    padding-inline: clamp(1rem, 4vw, 2.4rem);
-    padding-top: calc(env(safe-area-inset-top) + clamp(1rem, 3vw, 1.9rem));
-    padding-bottom: clamp(1rem, 3vw, 1.6rem);
+  .activity-header {
+    padding: clamp(1.2rem, 4vw, 2.6rem);
     border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--surface-root) 70%, var(--color-panel));
-    box-shadow: 0 18px 38px rgba(6, 10, 18, 0.32);
+    display: flex;
+    flex-wrap: wrap;
+    gap: clamp(1rem, 3vw, 2.5rem);
+    align-items: flex-start;
+    background: color-mix(in srgb, var(--surface-root) 85%, transparent);
   }
 
-  .activity-hero__heading {
-    display: grid;
-    gap: 0.4rem;
-    max-width: 640px;
-  }
-
-  .activity-hero__heading h1 {
-    font-size: clamp(1.6rem, 4vw, 2.3rem);
+  .activity-header__text h1 {
+    font-size: clamp(1.7rem, 4vw, 2.4rem);
     line-height: 1.05;
-    font-weight: 600;
+    margin: 0;
   }
 
-  .activity-hero__eyebrow {
+  .activity-eyebrow {
     text-transform: uppercase;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.16em;
     font-size: 0.75rem;
     color: var(--text-60);
   }
 
-  .activity-hero__metrics {
+  .activity-description {
+    margin-top: 0.35rem;
+    color: var(--text-70);
+    font-size: 0.95rem;
+  }
+
+  .activity-header__stats {
     display: flex;
     gap: 0.6rem;
     flex-wrap: wrap;
-    margin-top: 0.4rem;
-    font-size: 0.9rem;
+    margin-top: 0.8rem;
+    font-size: 0.85rem;
     color: var(--text-70);
   }
 
-  .activity-hero__metrics span {
+  .activity-header__stats span {
     padding: 0.25rem 0.9rem;
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
   }
 
-  .push-cta {
-    flex: 1;
-    min-width: 240px;
-    background: color-mix(in srgb, var(--surface-panel) 85%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    border-radius: 1.2rem;
-    padding: 1.4rem;
+  .activity-header__actions {
+    margin-left: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.8rem;
+    gap: 0.4rem;
+    align-items: flex-end;
   }
 
-  .push-cta__eyebrow {
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    font-size: 0.72rem;
-    color: var(--text-60);
+  .clear-feed-btn {
+    border-radius: 999px;
+    padding: 0.55rem 1.3rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 75%, transparent);
+    font-weight: 600;
+    color: var(--text-100);
+    transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
   }
 
-  .push-cta h3 {
-    margin-bottom: 0.2rem;
+  .clear-feed-btn:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+    color: var(--color-accent);
   }
 
-  .push-cta p {
-    color: var(--text-70);
-    font-size: 0.92rem;
-    margin: 0;
+  .clear-feed-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
-  .push-cta button {
-    align-self: flex-start;
+  .enable-push-btn {
+    border-radius: 999px;
+    padding: 0.55rem 1.3rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    font-weight: 600;
+    color: var(--color-accent);
+    transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+  }
+
+  .enable-push-btn:hover {
+    border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 26%, transparent);
+    color: var(--text-100);
+  }
+
+  .push-inline-error {
+    font-size: 0.85rem;
+    color: var(--color-danger, #ff6b6b);
+    text-align: right;
   }
 
   .activity-main {
     flex: 1;
     overflow-y: auto;
-    --activity-pad-inline: clamp(1rem, 4vw, 2.2rem);
-    --activity-pad-top: clamp(1rem, 4vw, 2.2rem);
-    --activity-pad-bottom: clamp(2rem, 5vw, 2.6rem);
-    padding-top: var(--activity-pad-top);
-    padding-inline: var(--activity-pad-inline);
-    padding-bottom: calc(
-      var(--activity-pad-bottom) + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px)
-    );
+    padding: clamp(1.2rem, 4vw, 2.4rem);
     display: flex;
     flex-direction: column;
-    gap: clamp(1.2rem, 2vw, 2rem);
+    gap: clamp(1rem, 3vw, 1.6rem);
   }
 
   .activity-placeholder,
-  .activity-empty,
-  .feed-empty {
+  .activity-empty {
     align-self: center;
     text-align: center;
     display: grid;
@@ -566,273 +670,227 @@
     justify-content: center;
   }
 
-  .smart-section,
-  .feed-section {
-    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
-    border-radius: 1.5rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
-    padding: clamp(1.2rem, 3vw, 1.9rem);
-    box-shadow: 0 20px 40px rgba(6, 10, 18, 0.28);
-  }
-
-  .smart-section__header,
-  .feed-section__header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-
-  .smart-section__eyebrow,
-  .feed-section__eyebrow {
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.18em;
-    color: var(--text-60);
-  }
-
-  .smart-section__badge {
-    align-self: flex-start;
-    padding: 0.35rem 0.8rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
-    color: var(--color-accent);
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-  }
-
-  .smart-grid {
-    margin-top: 1.3rem;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 1rem;
-  }
-
-  .smart-card {
-    border-radius: 1.1rem;
-    padding: 1.1rem 1.2rem;
-    text-align: left;
-    display: grid;
-    gap: 0.65rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--surface-root) 90%, transparent),
-      color-mix(in srgb, var(--color-panel) 80%, transparent)
-    );
-    transition: transform 150ms ease, border-color 150ms ease;
-  }
-
-  .smart-card:hover {
-    transform: translateY(-2px);
-    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
-  }
-
-  .smart-card__badge {
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--text-60);
-  }
-
-  .smart-card__title span {
-    font-size: 0.78rem;
-    color: var(--text-60);
-  }
-
-  .smart-card__title h3 {
-    font-size: 1.1rem;
-    margin-top: 0.15rem;
-  }
-
-  .smart-card__preview {
-    color: var(--text-80);
-    line-height: 1.4;
-    max-height: 3.2rem;
-    overflow: hidden;
-  }
-
-  .smart-card__meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.8rem;
-    color: var(--text-60);
-    gap: 0.6rem;
-  }
-
-  .smart-card--signal {
-    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
-    background: linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--color-accent) 14%, transparent),
-      color-mix(in srgb, var(--surface-root) 92%, transparent)
-    );
-  }
-
-  .smart-card--priority {
-    border-color: color-mix(in srgb, var(--color-highlight, #4f7) 30%, transparent);
-  }
-
-  .smart-card--ambient {
-    opacity: 0.9;
-  }
-
-  .smart-section__empty,
-  .feed-empty {
-    border-radius: 1rem;
-    padding: 1.2rem;
-    background: color-mix(in srgb, var(--surface-root) 80%, transparent);
-    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-  }
-
-  .feed-filters {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .feed-filter {
-    border-radius: 0.9rem;
-    padding: 0.55rem 0.9rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--surface-root) 80%, transparent);
-    min-width: 120px;
-    text-align: left;
-    transition: border-color 120ms ease, background 120ms ease;
-  }
-
-  .feed-filter span {
-    display: block;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .feed-filter.is-active {
-    border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  }
-
-  .feed-list {
+  .activity-feed {
     list-style: none;
-    margin: 1.5rem 0 0;
+    margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
     gap: 0.9rem;
   }
 
-  .feed-card {
-    width: 100%;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    border-radius: 1.2rem;
-    padding: 0.95rem 1.15rem;
+  .bulk-clear {
     display: flex;
-    gap: 0.9rem;
-    background: color-mix(in srgb, var(--surface-root) 88%, transparent);
-    text-align: left;
-    transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+    justify-content: flex-end;
   }
 
-  .feed-card:hover {
-    transform: translateY(-2px);
-    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  .bulk-clear .clear-feed-btn {
     background: color-mix(in srgb, var(--color-panel) 80%, transparent);
   }
 
-  .feed-card__avatar {
-    width: 3rem;
-    height: 3rem;
-    border-radius: 0.95rem;
-    overflow: hidden;
-    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+  .activity-item {
+    width: 100%;
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 92%, transparent);
+    padding: 0.95rem 1.1rem;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.85rem;
+    text-align: left;
+    color: inherit;
+    transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    cursor: pointer;
+  }
+
+  .activity-item:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--surface-panel) 84%, transparent);
+  }
+
+  .activity-item:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
+    outline-offset: 3px;
+  }
+
+  .activity-item__icon {
+    width: 2.8rem;
+    height: 2.8rem;
+    border-radius: 0.9rem;
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
     display: grid;
     place-items: center;
     font-weight: 600;
     color: var(--text-80);
-    flex-shrink: 0;
+    font-size: 0.78rem;
+    text-transform: uppercase;
   }
 
-  .feed-card__avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+  .activity-item--dm .activity-item__icon {
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: var(--color-accent);
   }
 
-  .feed-card__avatar-initial {
-    font-size: 0.8rem;
-    letter-spacing: 0.08em;
+  .activity-item--thread .activity-item__icon {
+    background: color-mix(in srgb, var(--color-highlight, #7cf) 25%, transparent);
+    color: color-mix(in srgb, var(--color-highlight, #7cf) 60%, var(--text-100));
   }
 
-  .feed-card__body {
-    flex: 1;
+  .activity-item--channel .activity-item__icon {
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    color: var(--text-80);
+  }
+
+  .activity-item__body {
     display: grid;
     gap: 0.45rem;
   }
 
-  .feed-card__top {
+  .activity-item__header {
     display: flex;
     justify-content: space-between;
-    gap: 0.6rem;
+    gap: 0.75rem;
     flex-wrap: wrap;
+    align-items: flex-start;
   }
 
-  .feed-card__title-group span {
-    font-size: 0.78rem;
+  .activity-item__origin {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+
+  .activity-item__badge {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
+    color: var(--text-70);
+  }
+
+  .activity-item__bundle {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+    color: var(--color-accent);
+  }
+
+  .activity-item__dismiss {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    font-size: 0.72rem;
+    font-weight: 600;
     color: var(--text-60);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    cursor: pointer;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    transition: color 120ms ease, background 120ms ease;
   }
 
-  .feed-card__title-group h3 {
-    font-size: 1rem;
-    margin-top: 0.1rem;
+  .activity-item__dismiss:hover,
+  .activity-item__dismiss:focus-visible {
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    outline: none;
   }
 
-  .feed-card__time {
+  .activity-item__location {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .activity-item__location strong {
+    font-size: 0.92rem;
+    color: var(--text-90);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+
+  .activity-item__location span {
+    font-size: 0.8rem;
+    color: var(--text-60);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+
+  .activity-item__header time {
     font-size: 0.82rem;
     color: var(--text-60);
   }
 
-  .feed-card__preview {
+  .activity-item__body h3 {
+    margin: 0;
+    font-size: 1rem;
+    line-height: 1.2;
+  }
+
+  .activity-item__body p {
+    margin: 0;
     color: var(--text-80);
     line-height: 1.35;
   }
 
-  .feed-card__meta {
+  .activity-item__stack {
+    margin: 0.2rem 0 0;
+    padding-left: 1.1rem;
+    color: var(--text-70);
+    font-size: 0.82rem;
+    list-style: disc;
+  }
+
+  .activity-item__stack li {
+    margin-left: 0.4rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .activity-item__meta {
     display: flex;
     flex-wrap: wrap;
     gap: 0.6rem;
     font-size: 0.8rem;
     color: var(--text-60);
+    align-items: center;
   }
 
-  .feed-card__badge {
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    font-weight: 600;
-  }
-
-  .feed-card__reason {
+  .activity-item__reason {
     color: var(--text-60);
   }
 
-  .feed-card__count {
+  .activity-item__volume {
+    color: var(--text-70);
+    font-weight: 500;
+  }
+
+  .activity-item__count {
     margin-left: auto;
     font-weight: 600;
     color: var(--color-accent);
   }
 
-  .feed-card--signal {
-    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
-  }
-
-  .feed-card--priority {
-    border-color: color-mix(in srgb, var(--color-highlight, #4f7) 30%, transparent);
+  .activity-error {
+    color: var(--color-danger, #ff6b6b);
+    font-size: 0.9rem;
   }
 
   .spinner {
-    width: 1.7rem;
-    height: 1.7rem;
+    width: 1.6rem;
+    height: 1.6rem;
     border-radius: 999px;
     border: 0.2rem solid color-mix(in srgb, var(--color-panel) 40%, transparent);
     border-top-color: var(--color-accent);
@@ -849,60 +907,47 @@
   }
 
   @media (max-width: 1024px) {
-    .activity-hero {
+    .activity-header {
       flex-direction: column;
     }
 
-    .activity-hero__chips {
+    .activity-header__actions {
       width: 100%;
+      align-items: flex-start;
     }
 
-    .smart-grid {
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    .push-inline-error {
+      text-align: left;
     }
   }
 
   @media (max-width: 768px) {
+    .activity-header {
+      display: none;
+    }
+
     .activity-main {
-      --activity-pad-inline: 1.2rem;
-      --activity-pad-top: 1.2rem;
-      --activity-pad-bottom: 1.6rem;
+      padding: 1.2rem;
     }
 
-    .smart-section,
-    .feed-section {
-      border-radius: 1rem;
-    }
-
-    .feed-filters {
-      width: 100%;
-    }
-
-    .feed-card {
-      flex-direction: column;
-    }
-
-    .feed-card__avatar {
-      width: 2.5rem;
-      height: 2.5rem;
+    .bulk-clear {
+      justify-content: flex-start;
     }
   }
 
   @media (max-width: 520px) {
-    .activity-main {
-      --activity-pad-inline: 1rem;
-      --activity-pad-top: 1rem;
-      --activity-pad-bottom: 1.4rem;
+    .activity-item {
+      grid-template-columns: auto 1fr;
+      padding: 0.85rem 0.95rem;
     }
 
-    .feed-filter {
-      flex: 1 1 calc(50% - 0.5rem);
+    .activity-item__icon {
+      width: 2.3rem;
+      height: 2.3rem;
     }
 
-    .activity-empty__actions {
+    .activity-item__header {
       flex-direction: column;
     }
   }
 </style>
-
-

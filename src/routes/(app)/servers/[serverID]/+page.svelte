@@ -3283,7 +3283,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     <div class="mobile-panel__title">{activeThread ? 'Thread members' : 'Members'}</div>
   </div>
 
-  <div class="flex-1 overflow-y-auto">
+  <div class="flex-1 overflow-y-auto touch-pan-y">
     {#if activeThread}
       {@const threadMembers = resolveThreadMembers()}
       <ThreadMembersPane members={threadMembers} threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'} />

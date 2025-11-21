@@ -223,10 +223,7 @@
     aria-label="Conversations"
   >
       <div class="mobile-panel__body">
-        <div class="mobile-panel__list">
-          <div class="mobile-panel__header md:hidden">
-            <div class="mobile-panel__title">Conversations</div>
-          </div>
+          <div class="mobile-panel__list">
           <div class="flex-1 overflow-y-auto touch-pan-y">
           <DMsSidebar
             activeThreadId={null}

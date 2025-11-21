@@ -314,6 +314,7 @@ const dockSuppressed = $derived(settingsActive);
           class:mobile-dock__item--alert={!active && badge > 0}
           class:mobile-dock__item--notes={link.href === '/dms/notes'}
           class:mobile-dock__item--dms={link.href === '/dms'}
+          class:mobile-dock__item--activity={link.href === '/'}
           aria-label={link.label}
           aria-current={active ? 'page' : undefined}
         >
@@ -424,6 +425,10 @@ const dockSuppressed = $derived(settingsActive);
   }
 
   .mobile-dock__item--dms .mobile-dock__icon {
+    color: var(--color-accent);
+  }
+
+  .mobile-dock__item--activity .mobile-dock__icon {
     color: var(--color-accent);
   }
 
