@@ -17,11 +17,14 @@
 </script>
 
 <button
-  class="btn btn-ghost"
+  class="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] px-3 py-1 text-sm font-medium text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)] hover:bg-[color:var(--color-panel)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
   onclick={preventDefault(handleClick)}
   disabled={busy}
   aria-busy={busy}
 >
-  {#if busy}Signing out…{/if}
-  {#if !busy}<i class="bx bx-log-out mr-1"></i> Sign out{/if}
+  {#if busy}
+    <span class="flex items-center gap-2"><i class="bx bx-log-out"></i> Signing out...</span>
+  {:else}
+    <span class="flex items-center gap-2"><i class="bx bx-log-out"></i> Sign out</span>
+  {/if}
 </button>
