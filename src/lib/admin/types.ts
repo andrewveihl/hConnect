@@ -28,6 +28,9 @@ export type FeatureFlagKey =
   | 'enableInviteLinks'
   | 'enablePresence'
   | 'enableAIFeatures'
+  | 'enableAISuggestedReplies'
+  | 'enableAIPredictions'
+  | 'enableAISummaries'
   | 'enableTypingIndicators'
   | 'enableReadReceipts'
   | 'enableMessageEditing'
@@ -105,6 +108,21 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
     description: 'Expose AI assisted features.'
   },
   {
+    key: 'enableAISuggestedReplies',
+    label: 'AI Suggested Replies',
+    description: 'Offer AI drafted replies in the composer coach.'
+  },
+  {
+    key: 'enableAIPredictions',
+    label: 'AI Predicted Text',
+    description: 'Show inline ghost suggestions while typing.'
+  },
+  {
+    key: 'enableAISummaries',
+    label: 'Thread Summaries',
+    description: 'Enable AI-powered recap panels in threads.'
+  },
+  {
     key: 'enableTypingIndicators',
     label: 'Typing Indicators',
     description: 'Broadcast typing states.'
@@ -149,6 +167,9 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
   enableInviteLinks: true,
   enablePresence: true,
   enableAIFeatures: true,
+  enableAISuggestedReplies: true,
+  enableAIPredictions: true,
+  enableAISummaries: true,
   enableTypingIndicators: true,
   enableReadReceipts: true,
   enableMessageEditing: true,

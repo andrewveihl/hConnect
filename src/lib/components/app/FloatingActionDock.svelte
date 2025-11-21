@@ -131,13 +131,16 @@
     if (!dockEl) return;
     event.stopPropagation();
     const type = (event.pointerType || 'mouse').toLowerCase();
+    const target = event.target as HTMLElement | null;
+    const startedOnSuperAdmin = target?.closest('.super-admin-fab') != null;
     const allowDrag =
-      isMobile &&
-      (type === 'touch' ||
-        type === 'pen' ||
-        type === '' ||
-        type === 'unknown' ||
-        type === 'mouse');
+      (isMobile &&
+        (type === 'touch' ||
+          type === 'pen' ||
+          type === '' ||
+          type === 'unknown' ||
+          type === 'mouse')) ||
+      (!isMobile && startedOnSuperAdmin && type === 'mouse');
     if (!allowDrag) return;
     pointerId = event.pointerId;
     dragOffset = {
