@@ -219,9 +219,9 @@ let serverDisplayName = $state('Server');
     mentionRolesStop = onSnapshot(
       roleQuery,
       (snap) => {
-        roleMentionOptions = snap.docs.map((docSnap) =>
-          buildRoleMentionEntry(docSnap.id, docSnap.data())
-        );
+        roleMentionOptions = snap.docs
+          .filter((docSnap) => (docSnap.data() as any)?.mentionable !== false)
+          .map((docSnap) => buildRoleMentionEntry(docSnap.id, docSnap.data()));
         updateMentionOptionList();
       },
       () => {
