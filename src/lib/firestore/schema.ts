@@ -1,12 +1,8 @@
-export type PermissionKey =
-  | 'manageServer' | 'manageRoles' | 'manageChannels' | 'kickMembers' | 'banMembers'
-  | 'reorderChannels'
-  | 'viewChannels' | 'sendMessages' | 'manageMessages' | 'connectVoice' | 'speakVoice';
+import type {
+  PermissionBitset,
+  PermissionKey,
+  PermissionMap,
+  RoleDefinition
+} from '$lib/permissions/permissions';
 
-export type Role = {
-  id: string;
-  name: string;
-  color?: string | null;
-  position: number;
-  permissions: Record<PermissionKey, boolean>;
-};
+export type { PermissionBitset, PermissionKey, PermissionMap, RoleDefinition as Role };

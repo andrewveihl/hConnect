@@ -1,12 +1,16 @@
 export type ServerSettingsSectionId =
-  | 'overview'
-  | 'roles'
+  | 'profile'
+  | 'insights'
   | 'channels'
-  | 'permissions'
+  | 'engagement'
+  | 'members'
+  | 'roles'
   | 'invites'
-  | 'moderation'
+  | 'access'
   | 'integrations'
   | 'audit-log'
+  | 'bans'
+  | 'welcome'
   | 'danger';
 
 export type ServerSettingsSection = {
@@ -18,46 +22,58 @@ export type ServerSettingsSection = {
 
 export const serverSettingsSections: ServerSettingsSection[] = [
   {
-    id: 'overview',
-    group: 'Server Overview',
-    label: 'Overview',
-    keywords: ['profile', 'icon', 'appearance', 'branding']
+    id: 'profile',
+    group: 'Server',
+    label: 'Server Profile',
+    keywords: ['profile', 'icon', 'banner', 'branding', 'appearance']
   },
   {
-    id: 'roles',
-    group: 'Access',
-    label: 'Roles',
-    keywords: ['permissions', 'access', 'colors']
+    id: 'insights',
+    group: 'Server',
+    label: 'Server Insights',
+    keywords: ['analytics', 'stats', 'growth']
   },
   {
     id: 'channels',
-    group: 'Access',
+    group: 'Content',
     label: 'Channels',
-    keywords: ['text', 'voice', 'order', 'reorder']
+    keywords: ['text', 'voice', 'forum', 'order', 'reorder']
   },
   {
-    id: 'permissions',
-    group: 'Access',
-    label: 'Permissions',
-    keywords: ['manage', 'channel', 'role']
+    id: 'engagement',
+    group: 'Content',
+    label: 'Engagement',
+    keywords: ['activity', 'events', 'metrics', 'coming soon']
+  },
+  {
+    id: 'members',
+    group: 'People',
+    label: 'Members',
+    keywords: ['people', 'roster', 'grid']
+  },
+  {
+    id: 'roles',
+    group: 'People',
+    label: 'Roles',
+    keywords: ['permissions', 'access', 'colors', 'display']
   },
   {
     id: 'invites',
-    group: 'Members',
+    group: 'People',
     label: 'Invites',
-    keywords: ['members', 'people', 'domain', 'auto']
+    keywords: ['pending', 'auto', 'domain', 'send']
   },
   {
-    id: 'moderation',
-    group: 'Members',
-    label: 'Moderation',
-    keywords: ['ban', 'kick', 'safety']
+    id: 'access',
+    group: 'People',
+    label: 'Access',
+    keywords: ['permissions', 'coming soon', 'gates']
   },
   {
     id: 'integrations',
     group: 'Automation',
     label: 'Integrations',
-    keywords: ['bots', 'apps', 'webhooks']
+    keywords: ['bots', 'apps', 'webhooks', 'tickets', 'domains']
   },
   {
     id: 'audit-log',
@@ -66,28 +82,42 @@ export const serverSettingsSections: ServerSettingsSection[] = [
     keywords: ['history', 'log', 'activity']
   },
   {
+    id: 'bans',
+    group: 'Safety',
+    label: 'Bans',
+    keywords: ['moderation', 'safety', 'blocked']
+  },
+  {
+    id: 'welcome',
+    group: 'Content',
+    label: 'Welcome Screen',
+    keywords: ['onboarding', 'first run', 'coming soon']
+  },
+  {
     id: 'danger',
-    group: 'Danger Zone',
-    label: 'Delete Server',
+    group: 'Danger',
+    label: 'Danger Zone',
     keywords: ['delete', 'danger', 'reset']
   }
 ];
 
-export const defaultServerSettingsSection: ServerSettingsSectionId = 'overview';
+export const defaultServerSettingsSection: ServerSettingsSectionId = 'profile';
 
 const sectionAliases: Record<string, ServerSettingsSectionId> = {
-  member: 'invites',
-  members: 'invites',
+  member: 'members',
+  members: 'members',
   invite: 'invites',
   danger: 'danger',
   delete: 'danger',
   'delete-server': 'danger',
-  perms: 'permissions',
-  permission: 'permissions',
-  moderation: 'moderation',
-  mods: 'moderation',
+  perms: 'roles',
+  permission: 'access',
+  permissions: 'access',
+  moderation: 'bans',
+  mods: 'bans',
   audit: 'audit-log',
-  'audit-log': 'audit-log'
+  'audit-log': 'audit-log',
+  overview: 'profile'
 };
 
 export function resolveServerSettingsSection(value: string | null | undefined): ServerSettingsSectionId {
@@ -99,21 +129,8 @@ export function resolveServerSettingsSection(value: string | null | undefined): 
   return sectionAliases[normalized] ?? defaultServerSettingsSection;
 }
 
-export type ServerPanelSectionId = 'overview' | 'members' | 'channels' | 'roles' | 'danger';
+export type ServerPanelSectionId = ServerSettingsSectionId;
 
 export function mapServerSectionToPanel(id: ServerSettingsSectionId): ServerPanelSectionId {
-  switch (id) {
-    case 'roles':
-    case 'permissions':
-      return 'roles';
-    case 'channels':
-      return 'channels';
-    case 'invites':
-    case 'moderation':
-      return 'members';
-    case 'danger':
-      return 'danger';
-    default:
-      return 'overview';
-  }
+  return id;
 }

@@ -17,29 +17,21 @@ import {
   setDoc,
   updateDoc,
   writeBatch,
+  type DocumentData,
+  type Firestore,
   type Unsubscribe
 } from 'firebase/firestore';
-
-type PermissionKey =
-  | 'manageServer'
-  | 'manageRoles'
-  | 'manageChannels'
-  | 'kickMembers'
-  | 'banMembers'
-  | 'reorderChannels'
-  | 'viewChannels'
-  | 'sendMessages'
-  | 'manageMessages'
-  | 'connectVoice'
-  | 'speakVoice';
-
-type RoleDoc = {
-  id: string;
-  name: string;
-  color: string | null;
-  position: number;
-  permissions: Record<PermissionKey, boolean>;
-};
+import {
+  ALL_PERMISSIONS_MASK,
+  DEFAULT_EVERYONE_PERMISSIONS,
+  bitsAsNumber,
+  PERMISSION_KEYS,
+  permissionMapFromBits,
+  resolveEffectivePermissions,
+  toPermissionBits,
+  type PermissionMap,
+  type RoleDefinition
+} from '$lib/permissions/permissions';
 
 export type RoleName = 'owner' | 'admin' | 'member';
 
@@ -53,26 +45,258 @@ export type ServerDoc = {
   createdAt: any;
   systemChannelId?: string | null;
   defaultRoleId?: string | null;
+  ownerRoleId?: string | null;
+  everyoneRoleId?: string | null;
 };
 
-const DEFAULT_PERMS: Record<PermissionKey, boolean> = {
-  manageServer: false,
-  manageRoles: false,
-  manageChannels: false,
-  kickMembers: false,
-  banMembers: false,
-  reorderChannels: false,
-  viewChannels: true,
-  sendMessages: true,
-  manageMessages: false,
-  connectVoice: true,
-  speakVoice: true,
+type RoleDoc = RoleDefinition & {
+  permissions: PermissionMap;
+  permissionBits: number;
 };
 
 function dlog(...args: any[]) {
   if (typeof window !== 'undefined' && (window as any).__DEBUG) {
     console.debug('[servers.ts]', ...args);
   }
+}
+
+type LegacyPermissions = {
+  manageServer: boolean;
+  manageRoles: boolean;
+  manageChannels: boolean;
+  reorderChannels: boolean;
+  viewChannels: boolean;
+  sendMessages: boolean;
+  manageMessages: boolean;
+  kickMembers: boolean;
+  banMembers: boolean;
+  connectVoice: boolean;
+  speakVoice: boolean;
+};
+
+const LEGACY_PERMISSION_KEYS: Record<keyof LegacyPermissions, string> = {
+  manageServer: 'MANAGE_SERVER',
+  manageRoles: 'MANAGE_ROLES',
+  manageChannels: 'MANAGE_CHANNELS',
+  reorderChannels: 'MANAGE_CHANNELS',
+  viewChannels: 'VIEW_CHANNEL',
+  sendMessages: 'SEND_MESSAGES',
+  manageMessages: 'MANAGE_MESSAGES',
+  kickMembers: 'KICK_MEMBERS',
+  banMembers: 'BAN_MEMBERS',
+  connectVoice: 'CONNECT_VOICE',
+  speakVoice: 'SPEAK_VOICE'
+};
+
+function legacyPermsFrom(map: Record<string, boolean>): LegacyPermissions {
+  const legacy: Record<string, boolean> = {};
+  for (const key in LEGACY_PERMISSION_KEYS) {
+    const permKey = LEGACY_PERMISSION_KEYS[key as keyof LegacyPermissions];
+    legacy[key] = !!map[permKey];
+  }
+  return legacy as LegacyPermissions;
+}
+
+function roleTagFrom(perms: LegacyPermissions, isOwner: boolean): RoleName {
+  if (isOwner) return 'owner';
+  if (perms.manageServer || perms.manageRoles) return 'admin';
+  return 'member';
+}
+
+function camelFromKey(key: string): string {
+  return key
+    .toLowerCase()
+    .replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
+function normalizePermissionMap(raw: any): PermissionMap {
+  const normalized: PermissionMap = {};
+  for (const perm of PERMISSION_KEYS) {
+    const camel = camelFromKey(perm);
+    const plural = camel.endsWith('s') ? camel : `${camel}s`;
+    if (raw && typeof raw === 'object' && raw[perm] !== undefined) {
+      normalized[perm] = !!raw[perm];
+    } else if (raw && typeof raw === 'object' && raw[camel] !== undefined) {
+      normalized[perm] = !!raw[camel];
+    } else if (raw && typeof raw === 'object' && raw[plural] !== undefined) {
+      normalized[perm] = !!raw[plural];
+    }
+  }
+  return normalized;
+}
+
+function normalizeRoleDoc(serverId: string, id: string, data: DocumentData | undefined): RoleDoc {
+  const permissionsRaw = (data?.permissions ?? {}) as PermissionMap | number;
+  const bitsRaw =
+    typeof data?.permissionBits === 'number'
+      ? BigInt(data.permissionBits)
+      : typeof permissionsRaw === 'number'
+        ? BigInt(permissionsRaw)
+        : null;
+  const bits = bitsRaw ?? toPermissionBits(permissionsRaw ?? 0);
+  const map =
+    permissionsRaw && typeof permissionsRaw === 'object' && !Array.isArray(permissionsRaw)
+      ? normalizePermissionMap(permissionsRaw)
+      : permissionMapFromBits(bits);
+
+  return {
+    id,
+    serverId,
+    name: typeof data?.name === 'string' ? data.name : 'Role',
+    color: typeof data?.color === 'string' ? data.color : null,
+    description: typeof data?.description === 'string' ? data.description : null,
+    position: typeof data?.position === 'number' ? data.position : 0,
+    isOwnerRole: !!data?.isOwnerRole,
+    isEveryoneRole: !!data?.isEveryoneRole,
+    mentionable: !!data?.mentionable,
+    allowMassMentions: !!data?.allowMassMentions,
+    permissions: map,
+    permissionBits: bitsAsNumber(bits)
+  };
+}
+
+async function loadRolesMap(db: Firestore, serverId: string): Promise<Record<string, RoleDoc>> {
+  const snap = await getDocs(collection(db, 'servers', serverId, 'roles'));
+  const map: Record<string, RoleDoc> = {};
+  snap.forEach((docSnap) => {
+    map[docSnap.id] = normalizeRoleDoc(serverId, docSnap.id, docSnap.data());
+  });
+  return map;
+}
+
+function normalizedRoleIds(ids: Array<string | null | undefined>): string[] {
+  const set = new Set<string>();
+  ids.forEach((id) => {
+    if (typeof id === 'string' && id.trim().length) {
+      set.add(id);
+    }
+  });
+  return Array.from(set);
+}
+
+function permissionSnapshot(args: {
+  rolesById: Record<string, RoleDoc | undefined>;
+  memberRoleIds: string[];
+  isServerOwner: boolean;
+  ownerRoleIds?: string[] | null;
+}) {
+  const resolved = resolveEffectivePermissions({
+    rolesById: args.rolesById,
+    memberRoleIds: args.memberRoleIds,
+    isServerOwner: args.isServerOwner,
+    isSuperAdmin: false,
+    ownerRoleIds: args.ownerRoleIds ?? null
+  });
+  const legacyPerms = legacyPermsFrom(resolved.map);
+
+  return {
+    permissions: resolved.map,
+    permissionBits: bitsAsNumber(resolved.bits),
+    legacyPerms,
+    topRolePosition: resolved.topRolePosition,
+    roleTag: roleTagFrom(legacyPerms, resolved.isOwner)
+  };
+}
+
+export async function ensureSystemRoles(serverId: string) {
+  const db = getDb();
+  const serverRef = doc(db, 'servers', serverId);
+  const serverSnap = await getDoc(serverRef);
+  if (!serverSnap.exists()) return null;
+
+  const serverData = serverSnap.data() as ServerDoc;
+  const rolesCol = collection(db, 'servers', serverId, 'roles');
+  const rolesById = await loadRolesMap(db, serverId);
+
+  let everyoneRole =
+    Object.values(rolesById).find((role) => role.isEveryoneRole) ??
+    (serverData.defaultRoleId ? rolesById[serverData.defaultRoleId] : undefined);
+  let ownerRole = Object.values(rolesById).find((role) => role.isOwnerRole);
+
+  const writes: Promise<unknown>[] = [];
+  const createdAt = serverTimestamp();
+
+  if (!everyoneRole) {
+    const everyoneRef = doc(rolesCol);
+    const bits = DEFAULT_EVERYONE_PERMISSIONS;
+    const payload: RoleDoc = {
+      id: everyoneRef.id,
+      serverId,
+      name: '@everyone',
+      color: null,
+      description: 'Default role for all members',
+      position: 0,
+      isOwnerRole: false,
+      isEveryoneRole: true,
+      mentionable: false,
+      allowMassMentions: false,
+      permissions: permissionMapFromBits(bits),
+      permissionBits: bitsAsNumber(bits)
+    };
+    everyoneRole = payload;
+    rolesById[everyoneRef.id] = payload;
+    writes.push(setDoc(everyoneRef, { ...payload, createdAt, updatedAt: createdAt }));
+  }
+
+  if (!ownerRole) {
+    const ownerRef = doc(rolesCol);
+    const bits = ALL_PERMISSIONS_MASK;
+    const payload: RoleDoc = {
+      id: ownerRef.id,
+      serverId,
+      name: 'Owner',
+      color: null,
+      description: 'Server owner with full permissions',
+      position: 1000,
+      isOwnerRole: true,
+      isEveryoneRole: false,
+      mentionable: false,
+      allowMassMentions: true,
+      permissions: permissionMapFromBits(bits),
+      permissionBits: bitsAsNumber(bits)
+    };
+    ownerRole = payload;
+    rolesById[ownerRef.id] = payload;
+    writes.push(setDoc(ownerRef, { ...payload, createdAt, updatedAt: createdAt }));
+  }
+
+  const serverUpdates: Record<string, unknown> = {};
+  if (everyoneRole && serverData.everyoneRoleId !== everyoneRole.id) {
+    serverUpdates.everyoneRoleId = everyoneRole.id;
+  }
+  if (ownerRole && serverData.ownerRoleId !== ownerRole.id) {
+    serverUpdates.ownerRoleId = ownerRole.id;
+  }
+  if (everyoneRole && serverData.defaultRoleId !== everyoneRole.id) {
+    serverUpdates.defaultRoleId = everyoneRole.id;
+  }
+  if (Object.keys(serverUpdates).length) {
+    writes.push(updateDoc(serverRef, serverUpdates));
+  }
+
+  if (writes.length) {
+    await Promise.all(writes);
+  }
+
+  if (everyoneRole) {
+    const memberSnap = await getDocs(collection(db, 'servers', serverId, 'members'));
+    for (const member of memberSnap.docs) {
+      const data = member.data() as any;
+      const roleIds = normalizedRoleIds([
+        ...(Array.isArray(data.roleIds) ? (data.roleIds as string[]) : []),
+        everyoneRole.id,
+        ownerRole && (data.role === 'owner' || member.id === serverData.owner) ? ownerRole.id : null
+      ]);
+      await updateDoc(member.ref, { roleIds });
+      await recomputeMemberPermissions(serverId, member.id);
+    }
+  }
+
+  return {
+    ownerRoleId: ownerRole?.id ?? null,
+    everyoneRoleId: everyoneRole?.id ?? null,
+    rolesById
+  };
 }
 
 /**
@@ -114,28 +338,57 @@ export async function removeUserMembership(serverId: string, uid: string) {
 export async function addMemberToServer(
   serverId: string,
   uid: string,
-  extra: { role?: RoleName } = {}
+  extra: { role?: RoleName; roleIds?: string[] } = {}
 ) {
   const db = getDb();
   const memRef = doc(db, 'servers', serverId, 'members', uid);
-  const snap = await getDoc(memRef);
-  dlog('addMemberToServer: exists?', snap.exists());
-
-  if (!snap.exists()) {
-    await setDoc(memRef, {
-      uid,
-      role: extra.role ?? ('member' as RoleName),
-      nickname: null,
-      joinedAt: serverTimestamp(),
-      muted: false,
-      deafened: false,
-      perms: {
-        ...DEFAULT_PERMS,
-      },
-    });
-  } else if (extra.role) {
-    await setDoc(memRef, { role: extra.role }, { merge: true });
+  const [memberSnap, serverSnap] = await Promise.all([getDoc(memRef), getDoc(doc(db, 'servers', serverId))]);
+  if (!serverSnap.exists()) {
+    throw new Error('Server not found');
   }
+
+  const serverData = serverSnap.data() as ServerDoc;
+  const ensured = await ensureSystemRoles(serverId);
+  const everyoneRoleId = ensured?.everyoneRoleId ?? serverData.everyoneRoleId ?? serverData.defaultRoleId ?? null;
+  const ownerRoleId = ensured?.ownerRoleId ?? serverData.ownerRoleId ?? null;
+  const existingRoles =
+    memberSnap.exists() && Array.isArray((memberSnap.data() as any)?.roleIds)
+      ? ((memberSnap.data() as any).roleIds as string[])
+      : [];
+  const roleIds = normalizedRoleIds([
+    ...existingRoles,
+    ...(extra.roleIds ?? []),
+    everyoneRoleId,
+    extra.role === 'owner' || serverData.owner === uid ? ownerRoleId : null
+  ]);
+  const rolesById = ensured?.rolesById ?? (await loadRolesMap(db, serverId));
+  const snapshot = permissionSnapshot({
+    rolesById,
+    memberRoleIds: roleIds,
+    isServerOwner: serverData.owner === uid,
+    ownerRoleIds: ownerRoleId ? [ownerRoleId] : null
+  });
+
+  dlog('addMemberToServer', { serverId, uid, roleIds, roleTag: snapshot.roleTag });
+
+  const payload: Record<string, unknown> = {
+    uid,
+    role: snapshot.roleTag,
+    roleIds,
+    permissions: snapshot.permissions,
+    permissionBits: snapshot.permissionBits,
+    perms: snapshot.legacyPerms,
+    topRolePosition: snapshot.topRolePosition
+  };
+
+  if (!memberSnap.exists()) {
+    payload.nickname = null;
+    payload.joinedAt = serverTimestamp();
+    payload.muted = false;
+    payload.deafened = false;
+  }
+
+  await setDoc(memRef, payload, { merge: true });
 }
 
 /**
@@ -143,15 +396,59 @@ export async function addMemberToServer(
  */
 export async function joinServer(serverId: string, uid: string) {
   const db = getDb();
-  const sRef = doc(db, 'servers', serverId);
-  const s = await getDoc(sRef);
-  if (!s.exists()) throw new Error('Server not found');
+  const serverRef = doc(db, 'servers', serverId);
+  const serverSnap = await getDoc(serverRef);
+  if (!serverSnap.exists()) throw new Error('Server not found');
 
-  const data = s.data() as ServerDoc;
+  const data = serverSnap.data() as ServerDoc;
   dlog('joinServer', { serverId, uid, serverName: data.name });
 
-  await addMemberToServer(serverId, uid, { role: 'member' });
+  await addMemberToServer(serverId, uid, { role: 'member', roleIds: data.defaultRoleId ? [data.defaultRoleId] : [] });
   await upsertUserMembership(serverId, uid, { name: data.name, icon: (data as any).icon ?? null });
+}
+
+export async function recomputeMemberPermissions(serverId: string, uid: string) {
+  const db = getDb();
+  const [serverSnap, memberSnap, rolesById] = await Promise.all([
+    getDoc(doc(db, 'servers', serverId)),
+    getDoc(doc(db, 'servers', serverId, 'members', uid)),
+    loadRolesMap(db, serverId)
+  ]);
+
+  if (!serverSnap.exists() || !memberSnap.exists()) return;
+
+  const serverData = serverSnap.data() as ServerDoc;
+  const memberData = memberSnap.data() as any;
+  const ownerRoleId = serverData.ownerRoleId ?? null;
+  const roleIds = normalizedRoleIds([
+    ...(Array.isArray(memberData.roleIds) ? (memberData.roleIds as string[]) : []),
+    serverData.everyoneRoleId ?? serverData.defaultRoleId ?? null
+  ]);
+
+  const snapshot = permissionSnapshot({
+    rolesById,
+    memberRoleIds: roleIds,
+    isServerOwner: serverData.owner === uid,
+    ownerRoleIds: ownerRoleId ? [ownerRoleId] : null
+  });
+
+  await updateDoc(memberSnap.ref, {
+    role: snapshot.roleTag,
+    roleIds,
+    permissions: snapshot.permissions,
+    permissionBits: snapshot.permissionBits,
+    perms: snapshot.legacyPerms,
+    topRolePosition: snapshot.topRolePosition
+  });
+}
+
+export async function recomputeAllMemberPermissions(serverId: string) {
+  const db = getDb();
+  await ensureSystemRoles(serverId);
+  const snap = await getDocs(collection(db, 'servers', serverId, 'members'));
+  for (const docSnap of snap.docs) {
+    await recomputeMemberPermissions(serverId, docSnap.id);
+  }
 }
 
 /**
@@ -164,65 +461,84 @@ export async function createServer(
   const db = getDb();
 
   const serverRef = doc(collection(db, 'servers'));
+  const createdAt = serverTimestamp();
   await setDoc(serverRef, {
     name: data.name,
     emoji: data.emoji ?? null,
     icon: data.icon ?? null,
     owner: uid,
     isPublic: !!data.isPublic,
-    createdAt: serverTimestamp(),
+    createdAt,
     systemChannelId: null,
     defaultRoleId: null,
+    ownerRoleId: null,
+    everyoneRoleId: null
   });
 
   // Roles
   const rolesCol = collection(db, 'servers', serverRef.id, 'roles');
   const everyoneRef = doc(rolesCol);
-  const adminRef = doc(rolesCol);
+  const ownerRef = doc(rolesCol);
 
-  const everyone: RoleDoc = {
+  const everyoneBits = DEFAULT_EVERYONE_PERMISSIONS;
+  const ownerBits = ALL_PERMISSIONS_MASK;
+
+  const everyoneRole: RoleDoc = {
     id: everyoneRef.id,
-    name: 'Everyone',
+    serverId: serverRef.id,
+    name: '@everyone',
     color: null,
+    description: 'Default role for all members',
     position: 0,
-    permissions: { ...DEFAULT_PERMS },
-  };
-  const admin: RoleDoc = {
-    id: adminRef.id,
-    name: 'Admin',
-    color: null,
-    position: 100,
-    permissions: {
-      ...DEFAULT_PERMS,
-      manageServer: true,
-      manageRoles: true,
-      manageChannels: true,
-      manageMessages: true,
-      reorderChannels: true,
-      kickMembers: true,
-      banMembers: true,
-    },
+    isOwnerRole: false,
+    isEveryoneRole: true,
+    mentionable: false,
+    allowMassMentions: false,
+    permissions: permissionMapFromBits(everyoneBits),
+    permissionBits: bitsAsNumber(everyoneBits)
   };
 
-  await Promise.all([setDoc(everyoneRef, everyone), setDoc(adminRef, admin)]);
+  const ownerRole: RoleDoc = {
+    id: ownerRef.id,
+    serverId: serverRef.id,
+    name: 'Owner',
+    color: null,
+    description: 'Server owner with full permissions',
+    position: 1000,
+    isOwnerRole: true,
+    isEveryoneRole: false,
+    mentionable: false,
+    allowMassMentions: true,
+    permissions: permissionMapFromBits(ownerBits),
+    permissionBits: bitsAsNumber(ownerBits)
+  };
+
+  await Promise.all([
+    setDoc(everyoneRef, { ...everyoneRole, createdAt, updatedAt: createdAt }),
+    setDoc(ownerRef, { ...ownerRole, createdAt, updatedAt: createdAt })
+  ]);
 
   // Owner as member with full perms
+  const ownerRoles = [ownerRole.id, everyoneRole.id];
+  const ownerSnapshot = permissionSnapshot({
+    rolesById: { [ownerRole.id]: ownerRole, [everyoneRole.id]: everyoneRole },
+    memberRoleIds: ownerRoles,
+    isServerOwner: true,
+    ownerRoleIds: [ownerRole.id]
+  });
+
   await setDoc(doc(db, 'servers', serverRef.id, 'members', uid), {
     uid,
-    role: 'owner' as RoleName,
-    roleIds: [admin.id, everyone.id],
+    role: ownerSnapshot.roleTag,
+    roleIds: ownerRoles,
     nickname: null,
-    joinedAt: serverTimestamp(),
+    joinedAt: createdAt,
     muted: false,
     deafened: false,
-    perms: {
-      ...DEFAULT_PERMS,
-      manageServer: true,
-      manageRoles: true,
-      manageChannels: true,
-      manageMessages: true,
-      reorderChannels: true,
-    },
+    permissions: ownerSnapshot.permissions,
+    permissionBits: ownerSnapshot.permissionBits,
+    perms: ownerSnapshot.legacyPerms,
+    topRolePosition: ownerSnapshot.topRolePosition
   });
 
   // Default channels
@@ -244,10 +560,15 @@ export async function createServer(
     position: 1,
     bitrate: 64000,
     userLimit: null,
-    createdAt: serverTimestamp(),
+    createdAt,
   });
 
-  await updateDoc(serverRef, { systemChannelId: generalRef.id, defaultRoleId: everyone.id });
+  await updateDoc(serverRef, {
+    systemChannelId: generalRef.id,
+    defaultRoleId: everyoneRole.id,
+    everyoneRoleId: everyoneRole.id,
+    ownerRoleId: ownerRole.id
+  });
 
   // Rail mapping
   await upsertUserMembership(serverRef.id, uid, { name: data.name, icon: data.icon ?? null });
