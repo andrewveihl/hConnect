@@ -146,11 +146,40 @@ let channelPrivacyError: string | null = $state(null);
     position?: number;
     permissions?: Partial<Record<RolePermissionKey, boolean>>;
   };
+  const MEMBER_PERMISSIONS: Record<RolePermissionKey, boolean> = {
+    manageServer: false,
+    manageRoles: false,
+    manageChannels: false,
+    kickMembers: false,
+    banMembers: false,
+    reorderChannels: false,
+    viewChannels: true,
+    sendMessages: true,
+    manageMessages: false,
+    connectVoice: true,
+    speakVoice: true
+  };
+  const ADMIN_PERMISSIONS: Record<RolePermissionKey, boolean> = {
+    ...MEMBER_PERMISSIONS,
+    manageServer: true,
+    manageRoles: true,
+    manageChannels: true,
+    manageMessages: true,
+    reorderChannels: true,
+    kickMembers: true,
+    banMembers: true
+  };
+  function permsForRole(role: 'admin' | 'member'): Record<RolePermissionKey, boolean> {
+    return role === 'admin' ? { ...ADMIN_PERMISSIONS } : { ...MEMBER_PERMISSIONS };
+  }
   let roles: Role[] = $state([]);
   let sortedRoles: Role[] = $state([]);
   let assignableRoles: Role[] = $state([]);
   let newRoleName = $state('');
   let newRoleColor = $state('#5865f2');
+  let showRoleModal = $state(false);
+  let roleCreateBusy = $state(false);
+  let roleNameInputEl: HTMLInputElement | null = $state(null);
   let roleUpdateBusy: Record<string, boolean> = $state({});
   let roleError: string | null = $state(null);
   let roleCollapsed: Record<string, boolean> = $state({});
@@ -182,6 +211,7 @@ let channelPrivacyError: string | null = $state(null);
   let touchStartY = 0;
   let touchStartAt = 0;
   let touchStartTarget: EventTarget | null = null;
+  let offMyMember: Unsubscribe | null = null;
 
   function ownerFrom(data: any) {
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
@@ -244,14 +274,15 @@ let channelPrivacyError: string | null = $state(null);
 
     // admin if role is 'admin' in members or owner
     if (!isOwner && $user?.uid) {
-      const memberSnap = await getDoc(doc(db, 'servers', serverId!, 'members', $user.uid));
-      const role = memberSnap.exists() ? (memberSnap.data() as any).role : null;
-      isAdmin = role === 'admin';
+      const memberRef = doc(db, 'servers', serverId!, 'members', $user.uid);
+      const memberSnap = await getDoc(memberRef);
+      const memberData = memberSnap.exists() ? (memberSnap.data() as any) : null;
+      syncAdminFromMember(memberData, memberRef);
     } else {
       isAdmin = true; // owner is admin+
+      allowed = true;
     }
 
-    allowed = isOwner || isAdmin;
     if (!allowed) goto(`/servers/${serverId}`);
   }
 
@@ -266,6 +297,54 @@ let channelPrivacyError: string | null = $state(null);
       members = snap.docs.map((d) => ({ uid: d.id, ...(d.data() as any) }));
       membersReady = true;
     });
+  }
+
+  function watchMyMembership() {
+    if (!$user?.uid) return null;
+    const db = getDb();
+    const ref = doc(db, 'servers', serverId!, 'members', $user.uid);
+    return onSnapshot(
+      ref,
+      (snap) => {
+        if (!snap.exists()) {
+          if (!isOwner) {
+            isAdmin = false;
+            allowed = false;
+          }
+          return;
+        }
+        const data = snap.data() as any;
+        syncAdminFromMember(data, ref);
+      },
+      (err) => console.error('[ServerSettings] watchMyMembership error', err)
+    );
+  }
+
+  $effect(() => {
+    if (!serverId || !$user?.uid) {
+      offMyMember?.();
+      offMyMember = null;
+      return;
+    }
+    offMyMember?.();
+    offMyMember = watchMyMembership();
+  });
+
+  function openRoleModal() {
+    if (!(isOwner || isAdmin)) return;
+    roleError = null;
+    showRoleModal = true;
+    queueMicrotask(() => {
+      roleNameInputEl?.focus();
+    });
+  }
+
+  function closeRoleModal() {
+    showRoleModal = false;
+    roleCreateBusy = false;
+    roleError = null;
+    newRoleName = '';
+    newRoleColor = '#5865f2';
   }
 
   function watchBans() {
@@ -666,6 +745,7 @@ let channelPrivacyError: string | null = $state(null);
       offChannels = watchChannels();
       offProfiles = watchProfiles();
       offRoles = watchRoles();
+      offMyMember = watchMyMembership();
       offDirectory = subscribeServerDirectory(serverId!, (entries) => {
         const next: Record<string, MentionDirectoryEntry> = {};
         for (const entry of entries) {
@@ -683,6 +763,7 @@ let channelPrivacyError: string | null = $state(null);
       offChannels?.();
       offProfiles?.();
       offRoles?.();
+      offMyMember?.();
       offDirectory?.();
       offInvites?.();
       inviteProfileStops.forEach((stop) => stop());
@@ -953,10 +1034,31 @@ let channelPrivacyError: string | null = $state(null);
     if (!isOwner && role === 'admin' && !isAdmin) return;
     const db = getDb();
     try {
-      await updateDoc(doc(db, 'servers', serverId!, 'members', uid), { role });
+      await updateDoc(doc(db, 'servers', serverId!, 'members', uid), {
+        role,
+        perms: permsForRole(role)
+      });
     } catch (e) {
       console.error(e);
       alert('Failed to update role.');
+    }
+  }
+
+  function syncAdminFromMember(data: any, ref?: ReturnType<typeof doc>) {
+    if (isOwner) {
+      isAdmin = true;
+      allowed = true;
+      return;
+    }
+    const role = data?.role;
+    const perms = (data?.perms ?? {}) as Partial<Record<RolePermissionKey, boolean>>;
+    const hasManageServer = perms?.manageServer === true;
+    isAdmin = role === 'admin' || hasManageServer;
+    allowed = isOwner || isAdmin;
+    if (ref && role === 'admin' && !hasManageServer) {
+      void updateDoc(ref, { perms: permsForRole('admin') }).catch((err) =>
+        console.error('[ServerSettings] failed to sync admin perms', err)
+      );
     }
   }
 
@@ -1004,10 +1106,11 @@ let channelPrivacyError: string | null = $state(null);
   }
 
   async function createRole() {
-    if (!isAdmin) return;
+    if (!(isOwner || isAdmin) || roleCreateBusy) return;
     const name = newRoleName.trim();
     if (!name) return;
     const db = getDb();
+    roleCreateBusy = true;
     try {
       const ref = await addDoc(collection(db, 'servers', serverId!, 'roles'), {
         name,
@@ -1016,12 +1119,15 @@ let channelPrivacyError: string | null = $state(null);
         position: sortedRoles.length,
         permissions: {}
       });
+      closeRoleModal();
       newRoleName = '';
       newRoleColor = '#5865f2';
       roleCollapsed = { ...roleCollapsed, [ref.id]: false };
     } catch (e) {
       console.error(e);
       alert('Failed to create role.');
+    } finally {
+      roleCreateBusy = false;
     }
   }
 
@@ -2326,26 +2432,16 @@ async function clearPendingInvites() {
 
       {#if tab === 'roles'}
         <div class="settings-card space-y-4">
-          <form class="settings-role-create" onsubmit={preventDefault(createRole)}>
-            <input
-              class="flex-1 rounded bg-white/10 px-3 py-2"
-              placeholder="Role name (e.g. Moderator)"
-              bind:value={newRoleName}
-            />
-            <input
-              class="h-10 w-20 rounded bg-white/10 border border-white/10"
-              type="color"
-              bind:value={newRoleColor}
-              title="Role color"
-            />
+          <div class="settings-role-create">
             <button
-              type="submit"
+              type="button"
               class="px-4 py-2 rounded bg-[#5865f2] hover:bg-[#4955d4] disabled:opacity-60"
-              disabled={!newRoleName.trim() || !isAdmin}
+              disabled={!(isOwner || isAdmin)}
+              onclick={openRoleModal}
             >
-              Create
+              New role
             </button>
-          </form>
+          </div>
 
           {#if roleError}
             <p class="settings-status settings-status--error">{roleError}</p>
@@ -3346,6 +3442,105 @@ async function clearPendingInvites() {
     flex-wrap: wrap;
     gap: 0.75rem;
     align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .role-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--color-app-overlay, rgba(0, 0, 0, 0.55)) 80%, transparent);
+    display: grid;
+    place-items: center;
+    z-index: 60;
+    padding: 16px;
+  }
+
+  .role-modal {
+    background: var(--color-panel);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-lg);
+    padding: 20px clamp(18px, 2vw, 22px);
+    width: min(480px, 100%);
+    box-shadow: var(--shadow-elevated, 0 20px 80px rgba(0, 0, 0, 0.45));
+    animation: pop 140ms ease-out;
+    display: grid;
+    gap: 14px;
+  }
+
+  @keyframes pop {
+    0% {
+      transform: scale(0.94) translateY(8px);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1) translateY(0);
+      opacity: 1;
+    }
+  }
+
+  .role-modal__header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .role-modal__field {
+    display: grid;
+    gap: 6px;
+    color: var(--color-text-primary);
+  }
+
+  .role-modal__field span {
+    font-size: 13px;
+    color: var(--text-70);
+  }
+
+  .role-modal__field--inline {
+    grid-template-columns: auto 80px;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .role-modal__input {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    color: var(--color-text-primary);
+  }
+
+  .role-modal__color {
+    width: 100%;
+    height: 40px;
+    border-radius: 8px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+  }
+
+  .role-modal__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 6px;
+  }
+
+  .btn.primary {
+    background: var(--button-primary-bg, #5865f2);
+    color: var(--button-primary-text, #ffffff);
+  }
+
+  .btn.primary:hover:not(:disabled) {
+    background: var(--button-primary-hover, #4955d4);
+  }
+
+  .btn.ghost {
+    background: var(--button-ghost-bg, rgba(255, 255, 255, 0.08));
+    border: 1px solid var(--button-ghost-border, rgba(255, 255, 255, 0.12));
+    color: var(--button-ghost-text, var(--color-text-primary));
   }
 
   .btn-danger {
@@ -3478,11 +3673,62 @@ async function clearPendingInvites() {
       width: 100%;
     }
 
-    .settings-role-header {
-      align-items: flex-start;
-    }
+  .settings-role-header {
+    align-items: flex-start;
   }
+}
 </style>
+
+{#if showRoleModal}
+  <div class="role-modal-backdrop" onclick={() => (!roleCreateBusy && closeRoleModal())}>
+    <form
+      class="role-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Create role"
+      onsubmit={preventDefault(createRole)}
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="role-modal__header">
+        <h3>Create a role</h3>
+      </div>
+      <label class="role-modal__field">
+        <span>Role name</span>
+        <input
+          bind:this={roleNameInputEl}
+          class="role-modal__input"
+          placeholder="Role name"
+          bind:value={newRoleName}
+          required
+        />
+      </label>
+      <label class="role-modal__field role-modal__field--inline">
+        <span>Color</span>
+        <input
+          class="role-modal__color"
+          type="color"
+          bind:value={newRoleColor}
+          title="Role color"
+        />
+      </label>
+      {#if roleError}
+        <p class="settings-status settings-status--error">{roleError}</p>
+      {/if}
+      <div class="role-modal__actions">
+        <button type="button" class="btn ghost" onclick={closeRoleModal} disabled={roleCreateBusy}>
+          Cancel
+        </button>
+        <button
+          type="submit"
+          class="btn primary"
+          disabled={roleCreateBusy || !newRoleName.trim() || !(isOwner || isAdmin)}
+        >
+          {roleCreateBusy ? 'Creating...' : 'Create role'}
+        </button>
+      </div>
+    </form>
+  </div>
+{/if}
 
 
 

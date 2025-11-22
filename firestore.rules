@@ -39,17 +39,51 @@ service cloud.firestore {
       return isSuperAdminUser() || isServerOwner(serverId) || hasPerm(serverId, "manageServer");
     }
 
-    function canViewChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "viewChannels") || isMember(serverId); }
-    function canSendInChannel(serverId) { return isServerAdmin(serverId) || hasPerm(serverId, "sendMessages"); }
-    function canConnectVoice(serverId) {
-      return isServerAdmin(serverId)
-        || hasPerm(serverId, "connectVoice")
-        || canViewChannel(serverId);
+    function memberRoleIds(serverId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.roleIds is list
+        ? get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.roleIds
+        : [];
     }
-    function canSpeakVoice(serverId) {
+
+    function channelDocExists(serverId, channelId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId));
+    }
+
+    function channelDoc(serverId, channelId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId));
+    }
+
+    // Private channel gating: admins allowed; private channels require overlap between allowedRoleIds and member roleIds.
+    // Public channels are handled by base membership/perm checks in canViewChannel.
+    function channelAllowsMember(serverId, channelId) {
+      if (isServerAdmin(serverId)) return true;
+      if (!channelDocExists(serverId, channelId)) return false;
+      let data = channelDoc(serverId, channelId).data;
+      let isPrivate = data.isPrivate == true;
+      let allowed = data.allowedRoleIds is list ? data.allowedRoleIds : [];
+      if (!isPrivate) return true;
+      let roles = memberRoleIds(serverId);
+      return (roles is list) && allowed.hasAny(roles);
+    }
+
+    function canViewChannel(serverId, channelId) {
       return isServerAdmin(serverId)
-        || hasPerm(serverId, "speakVoice")
-        || canConnectVoice(serverId);
+        || ((channelId == null ? true : channelAllowsMember(serverId, channelId))
+          && (hasPerm(serverId, "viewChannels") || isMember(serverId)));
+    }
+    function canSendInChannel(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (canViewChannel(serverId, channelId) && hasPerm(serverId, "sendMessages"));
+    }
+    function canConnectVoice(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (canViewChannel(serverId, channelId) && hasPerm(serverId, "connectVoice"));
+    }
+    function canSpeakVoice(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (canViewChannel(serverId, channelId) && (hasPerm(serverId, "speakVoice") || hasPerm(serverId, "connectVoice")));
     }
 
     function currentUserEmail() {
@@ -104,13 +138,13 @@ service cloud.firestore {
     }
 
     function canReadThread(serverId, channelId, threadId) {
-      return canViewChannel(serverId)
+      return canViewChannel(serverId, channelId)
         || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
         || hasThreadPermission(serverId, channelId, threadId, "canRead");
     }
 
     function canPostThread(serverId, channelId, threadId) {
-      return canSendInChannel(serverId)
+      return canSendInChannel(serverId, channelId)
         || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
         || hasThreadPermission(serverId, channelId, threadId, "canPost");
     }
@@ -269,31 +303,24 @@ service cloud.firestore {
       }
 
       match /channels/{channelId} {
-        allow read: if canViewChannel(serverId);
+        allow read: if canViewChannel(serverId, channelId);
         allow create, update, delete: if isServerAdmin(serverId);
 
         match /messages/{messageId} {
-          allow read: if canViewChannel(serverId);
-          allow create: if canSendInChannel(serverId);
-          allow update: if isSignedIn() && (
-            request.auth.uid == resource.data.uid ||
-            hasPerm(serverId, "manageMessages") ||
-            (canViewChannel(serverId) && isReactionOnlyUpdate())
-          );
-          allow delete: if isSignedIn() && (
+
             request.auth.uid == resource.data.uid || hasPerm(serverId, "manageMessages")
           );
         }
 
         match /members/{uid} {
-          allow read: if canViewChannel(serverId);
+          allow read: if canViewChannel(serverId, channelId);
           allow create: if isSignedIn() && request.auth.uid == uid;
           allow update, delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
         }
 
         match /threads/{threadId} {
           allow read: if canReadThread(serverId, channelId, threadId);
-          allow create: if canSendInChannel(serverId)
+          allow create: if canSendInChannel(serverId, channelId)
             && isSignedIn()
             && request.resource.data.createdBy == request.auth.uid;
           allow update: if canPostThread(serverId, channelId, threadId) || isServerAdmin(serverId);
@@ -313,31 +340,31 @@ service cloud.firestore {
         }
 
         match /calls/{callId} {
-          allow read: if canViewChannel(serverId);
-          allow create, update: if canConnectVoice(serverId);
+          allow read: if canViewChannel(serverId, channelId);
+          allow create, update: if canConnectVoice(serverId, channelId);
           allow delete: if isServerAdmin(serverId);
 
           match /offerCandidates/{candidateId} {
-            allow read: if canViewChannel(serverId);
-            allow create, delete: if canConnectVoice(serverId);
+            allow read: if canViewChannel(serverId, channelId);
+            allow create, delete: if canConnectVoice(serverId, channelId);
             allow update: if false;
           }
 
           match /answerCandidates/{candidateId} {
-            allow read: if canViewChannel(serverId);
-            allow create, delete: if canConnectVoice(serverId);
+            allow read: if canViewChannel(serverId, channelId);
+            allow create, delete: if canConnectVoice(serverId, channelId);
             allow update: if false;
           }
 
           match /descriptions/{descriptionId} {
-            allow read: if canViewChannel(serverId);
-            allow create, update, delete: if canConnectVoice(serverId);
+            allow read: if canViewChannel(serverId, channelId);
+            allow create, update, delete: if canConnectVoice(serverId, channelId);
           }
 
           match /participants/{uid} {
-            allow read: if canViewChannel(serverId);
-            allow create, update: if isSignedIn() && request.auth.uid == uid && canConnectVoice(serverId);
-            allow delete: if (isSignedIn() && request.auth.uid == uid) || canSpeakVoice(serverId);
+            allow read: if canViewChannel(serverId, channelId);
+            allow create, update: if isSignedIn() && request.auth.uid == uid && canConnectVoice(serverId, channelId);
+            allow delete: if (isSignedIn() && request.auth.uid == uid) || canSpeakVoice(serverId, channelId);
           }
         }
       }
