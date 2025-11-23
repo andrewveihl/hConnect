@@ -183,18 +183,18 @@
                         onchange={(event) =>
                           toggleRole(role.id, (event.currentTarget as HTMLInputElement).checked)}
                       />
-                      <span>{role.name || 'Role'}</span>
-                    </label>
-                  {/each}
-                </div>
-                {#if !selectedRoleIds.length}
-                  <p class="text-[11px] text-white/45">
-                    No roles selected yet. Everyone will still see this channel until you pick one.
-                  </p>
-                {/if}
+                    <span>{role.name || 'Role'}</span>
+                  </label>
+                {/each}
+              </div>
+              {#if !selectedRoleIds.length}
+                <p class="text-[11px] text-white/45">
+                  No roles selected yet. Until you add at least one role, only admins can view this private channel.
+                </p>
               {/if}
-            </div>
-          {/if}
+            {/if}
+          </div>
+        {/if}
 
           {#if errorMsg}
             <div class="text-sm text-red-400">{errorMsg}</div>

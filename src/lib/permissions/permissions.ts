@@ -38,7 +38,10 @@ export const PERMISSION_KEYS = [
   'MUTE_MEMBERS',
   'DEAFEN_MEMBERS',
   'MOVE_MEMBERS',
-  'PRIORITY_SPEAKER'
+  'PRIORITY_SPEAKER',
+  // Visibility / shell
+  'VIEW_MEMBER_LIST',
+  'VIEW_SERVER_HOME'
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
@@ -82,6 +85,7 @@ export interface RoleDefinition {
   isEveryoneRole?: boolean;
   mentionable?: boolean;
   allowMassMentions?: boolean;
+  showInMemberList?: boolean;
   permissions: PermissionBitset | number | PermissionMap;
   createdAt?: any;
   updatedAt?: any;
@@ -285,6 +289,7 @@ export function coerceRole(role: Partial<RoleDefinition> & { id: string; serverI
     isEveryoneRole: !!role.isEveryoneRole,
     mentionable: role.mentionable ?? false,
     allowMassMentions: role.allowMassMentions ?? false,
+    showInMemberList: role.showInMemberList ?? true,
     permissions: toPermissionBits(role.permissions ?? 0n)
   };
 }

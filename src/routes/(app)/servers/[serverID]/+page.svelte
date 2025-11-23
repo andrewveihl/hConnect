@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
@@ -112,13 +112,13 @@ let latestInboundMessage: any = $state(null);
 let aiConversationContext: any[] = $state([]);
 let aiAssistEnabled = $state(true);
 let replyTarget: ReplyReferenceInput | null = $state(null);
-let lastReplyChannelId: string | null = $state(null);
+let lastReplyChannelId: string | null = null;
 let profiles: Record<string, any> = $state({});
 let pendingUploads: PendingUploadPreview[] = $state([]);
 let threadPendingUploads: PendingUploadPreview[] = $state([]);
 let floatingThreadPendingUploads: PendingUploadPreview[] = $state([]);
 let scrollToBottomSignal = $state(0);
-let lastPendingChannelId: string | null = $state(null);
+let lastPendingChannelId: string | null = null;
 let lastThreadUploadThreadId: string | null = null;
 let lastFloatingUploadThreadId: string | null = null;
 let pendingThreadId: string | null = null;
@@ -160,7 +160,8 @@ let serverDisplayName = $state('Server');
   let roleMentionOptions: MentionDirectoryEntry[] = $state([]);
   let mentionDirectoryStop: Unsubscribe | null = $state(null);
   let mentionRolesStop: Unsubscribe | null = $state(null);
-  let lastMentionServer: string | null = $state(null);
+  let lastMentionServer: string | null = null;
+  let isCurrentServerMember = false;
 
   const canonicalHandle = (value: string) =>
     (value ?? '')
@@ -830,7 +831,11 @@ let serverDisplayName = $state('Server');
 
   function subscribeServerThreads(currServerId: string, uid: string) {
     const database = db();
-    const q = query(collectionGroup(database, 'threads'), where('serverId', '==', currServerId));
+    const q = query(
+      collectionGroup(database, 'threads'),
+      where('serverId', '==', currServerId),
+      where('memberUids', 'array-contains', uid)
+    );
     clearServerThreads();
     serverThreadsScope = `${currServerId}:${uid}`;
     serverThreadsUnsub = onSnapshot(
@@ -850,7 +855,12 @@ let serverDisplayName = $state('Server');
         threadsByChannel = nextMap;
       },
       (err) => {
-        console.error('[threads] failed to subscribe to server threads', err);
+        if ((err as any)?.code === 'permission-denied') {
+          console.warn('[threads] permission denied for server threads', err);
+        } else {
+          console.error('[threads] failed to subscribe to server threads', err);
+        }
+        clearServerThreads();
       }
     );
   }
@@ -1224,9 +1234,10 @@ function sidebarThreadList() {
   let mobilePaneTracking = false;
   let mobilePaneStartX = 0;
   let mobilePaneStartY = 0;
-  let lastVoiceVisible = $state(false);
-  let lastIsMobile = $state(false);
-let channelHeaderEl: { focusHeader?: () => void } | null = null;
+  let lastVoiceVisible = false;
+  let lastIsMobile = false;
+  let lastShowThreadPanel = false;
+  let channelHeaderEl: { focusHeader?: () => void } | null = null;
   const pendingChannelRedirect = $derived.by(() => Boolean(requestedChannelId && !activeChannel));
   const channelPanelInteractive = $derived.by(() => showChannels && !pendingChannelRedirect);
 
@@ -2490,10 +2501,11 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   let lastScrollChannelId: string | null = null;
   run(() => {
     const currentChannelId = activeChannel?.id ?? null;
-    if (currentChannelId && currentChannelId !== lastScrollChannelId) {
+    const prev = untrack(() => lastScrollChannelId);
+    if (currentChannelId && currentChannelId !== prev) {
       lastScrollChannelId = currentChannelId;
       triggerScrollToBottom();
-    } else if (!currentChannelId) {
+    } else if (!currentChannelId && prev !== null) {
       lastScrollChannelId = null;
     }
   });
@@ -2519,7 +2531,8 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   }
   run(() => {
     const scope = serverId ?? null;
-    if (scope !== threadServerScope) {
+    const prev = untrack(() => threadServerScope);
+    if (scope !== prev) {
       threadServerScope = scope;
       resetThreadState({ resetCache: true });
     }
@@ -2535,7 +2548,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     }
   });
   run(() => {
-    const currentFloating = floatingThread;
+    const currentFloating = untrack(() => floatingThread);
     if (!currentFloating?.thread) return;
     const parentId = currentFloating.thread.parentChannelId ?? currentFloating.thread.channelId ?? null;
     const updated =
@@ -2547,22 +2560,27 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   });
   run(() => {
     const currentMentionServer = serverId ?? null;
-    if (currentMentionServer !== lastMentionServer) {
+    const currentUid = $user?.uid ?? null;
+    const prevMentionServer = untrack(() => lastMentionServer);
+    if (currentMentionServer !== prevMentionServer) {
       mentionDirectoryStop?.();
       mentionRolesStop?.();
       memberMentionOptions = [];
       roleMentionOptions = [];
       mentionOptions = [];
-      lastMentionServer = currentMentionServer;
-      if (currentMentionServer) {
+      lastMentionServer = currentUid ? currentMentionServer : null;
+      isCurrentServerMember = false;
+      if (currentMentionServer && currentUid) {
         mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
           memberMentionOptions = entries;
+          isCurrentServerMember = entries.some((entry) => entry.uid === currentUid);
           updateMentionOptionList();
         });
         startRoleMentionWatch(currentMentionServer);
       } else {
         mentionDirectoryStop = null;
         mentionRolesStop = null;
+        isCurrentServerMember = false;
       }
     }
   });
@@ -2571,12 +2589,15 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   });
   // subscribe to channels
   run(() => {
-    if (serverId) {
+    if (serverId && $user?.uid) {
+      const currentActive = untrack(() => activeChannel);
+      const currentShowMembers = untrack(() => showMembers);
+      const currentShowChannels = untrack(() => showChannels);
       const database = db();
       const q = query(collection(database, 'servers', serverId, 'channels'), orderBy('position'));
       clearChannelsUnsub();
       channelsUnsub = onSnapshot(q, (snap) => {
-        channels = snap.docs.map((d) => {
+        const nextChannels = snap.docs.map((d) => {
           const x: any = d.data();
           const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'channel';
           const type = x.type === 'voice' ? 'voice' : 'text';
@@ -2586,13 +2607,13 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
         const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
         const requestedId = requestedChannelId;
 
-        if (!activeChannel && channels.length) {
+        if (!currentActive && nextChannels.length) {
           if (requestedId) {
-            const target = channels.find((c) => c.id === requestedId);
+            const target = nextChannels.find((c) => c.id === requestedId);
             if (target) {
               pickChannel(target.id);
             } else if (isDesktop) {
-              pickChannel(channels[0].id);
+              pickChannel(nextChannels[0].id);
             } else {
               activeChannel = null;
               showMembers = false;
@@ -2600,31 +2621,31 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
             }
           } else if (isDesktop) {
             // desktop: auto-pick first channel
-            pickChannel(channels[0].id);
+            pickChannel(nextChannels[0].id);
           } else {
             // mobile: show channel list first
             activeChannel = null;
             showMembers = false;
             showChannels = true;
           }
-        } else if (activeChannel) {
-          const updated = channels.find((c) => c.id === activeChannel!.id);
+        } else if (currentActive) {
+          const updated = nextChannels.find((c) => c.id === currentActive!.id);
           if (updated) {
             activeChannel = updated;
-          } else if (channels.length) {
+          } else if (nextChannels.length) {
             if (requestedId) {
-              const target = channels.find((c) => c.id === requestedId);
+              const target = nextChannels.find((c) => c.id === requestedId);
               if (target) {
                 pickChannel(target.id);
               } else if (isDesktop) {
-                pickChannel(channels[0].id);
+                pickChannel(nextChannels[0].id);
               } else {
                 activeChannel = null;
                 showMembers = false;
                 showChannels = true;
               }
             } else if (isDesktop) {
-              pickChannel(channels[0].id);
+              pickChannel(nextChannels[0].id);
             } else {
               activeChannel = null;
               showMembers = false;
@@ -2634,10 +2655,11 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
             activeChannel = null;
             clearMessagesUnsub();
             messages = [];
-            showChannels = false;
-            showMembers = false;
+            showChannels = currentShowChannels && false;
+            showMembers = currentShowMembers && false;
           }
         }
+        channels = nextChannels;
       });
     } else {
       clearChannelsUnsub();
@@ -2650,32 +2672,37 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   });
   run(() => {
     const channelId = activeChannel?.id ?? null;
-    if (channelId !== lastReplyChannelId) {
+    const prevReply = untrack(() => lastReplyChannelId);
+    const prevPending = untrack(() => lastPendingChannelId);
+    if (channelId !== prevReply) {
       lastReplyChannelId = channelId;
       replyTarget = null;
     }
-    if (channelId !== lastPendingChannelId) {
+    if (channelId !== prevPending) {
       lastPendingChannelId = channelId;
       pendingUploads = [];
     }
   });
   run(() => {
     const threadId = activeThread?.id ?? null;
-    if (threadId !== lastThreadUploadThreadId) {
+    const prev = untrack(() => lastThreadUploadThreadId);
+    if (threadId !== prev) {
       lastThreadUploadThreadId = threadId;
       threadPendingUploads = [];
     }
   });
   run(() => {
     const floatingId = floatingThread?.thread?.id ?? null;
-    if (floatingId !== lastFloatingUploadThreadId) {
+    const prev = untrack(() => lastFloatingUploadThreadId);
+    if (floatingId !== prev) {
       lastFloatingUploadThreadId = floatingId;
       floatingThreadPendingUploads = [];
     }
   });
   run(() => {
     const visible = !!(voiceState && voiceState.visible);
-    if (visible !== lastVoiceVisible) {
+    const prev = untrack(() => lastVoiceVisible);
+    if (visible !== prev) {
       lastVoiceVisible = visible;
       if (isMobile) {
         mobileVoicePane = visible ? 'call' : 'chat';
@@ -2722,26 +2749,23 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     currentUserPhotoURL = deriveCurrentPhotoURL();
   });
   run(() => {
-    if (isMobile !== lastIsMobile) {
-      lastIsMobile = isMobile;
-      if (!isMobile) {
-        mobileVoicePane = 'chat';
-      } else if (voiceState?.visible) {
-        mobileVoicePane = 'call';
-      }
+    const prev = untrack(() => lastIsMobile);
+    if (isMobile === prev) return;
+    lastIsMobile = isMobile;
+    if (!isMobile) {
+      mobileVoicePane = 'chat';
+    } else if (voiceState?.visible) {
+      mobileVoicePane = 'call';
     }
   });
   run(() => {
-    if (!isMobile || mobileVoicePane !== 'chat' || !activeThread) {
-      if (showThreadPanel) {
-        showThreadPanel = false;
-      }
-      return;
-    }
-    if (!showThreadPanel) {
-      showThreadPanel = true;
+    const shouldShow = isMobile && mobileVoicePane === 'chat' && !!activeThread;
+    showThreadPanel = shouldShow;
+    const prev = untrack(() => lastShowThreadPanel);
+    if (shouldShow && !prev) {
       scheduleThreadRead();
     }
+    lastShowThreadPanel = shouldShow;
   });
   run(() => {
     if ($user?.uid) {
@@ -2848,7 +2872,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
   });
   run(() => {
     const uid = $user?.uid ?? null;
-    if (serverId && uid) {
+    if (serverId && uid && isCurrentServerMember) {
       const scopeKey = `${serverId}:${uid}`;
       if (serverThreadsScope !== scopeKey) {
         subscribeServerThreads(serverId, uid);
@@ -2886,7 +2910,7 @@ let channelHeaderEl: { focusHeader?: () => void } | null = null;
     aiAssistEnabled = prefs?.aiAssist?.enabled !== false;
   });
   run(() => {
-    if (serverId) {
+    if (serverId && isCurrentServerMember) {
       serverMetaUnsub?.();
       const database = db();
       const ref = doc(database, 'servers', serverId);

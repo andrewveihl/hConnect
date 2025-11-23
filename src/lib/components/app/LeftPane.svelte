@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import { goto } from '$app/navigation';
   import { browser } from '$app/environment';
@@ -62,10 +62,11 @@ import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settin
   let statusError: string | null = $state(null);
   let statusButtonEl: HTMLButtonElement | null = $state(null);
   let statusMenuEl: HTMLDivElement | null = $state(null);
-  let presenceUnsub: (() => void) | null = $state(null);
-  let dmRailUnsub: Unsubscribe | null = $state(null);
+  let presenceUnsub: (() => void) | null = null;
+  let dmRailUnsub: Unsubscribe | null = null;
   let dmMetadata: Record<string, { title: string; photoURL: string | null }> = $state({});
   let serverList: ServerRailEntry[] = $state([]);
+  let stopUserWatch: (() => void) | null = null;
   let dragPreview: ServerRailEntry[] = $state([]);
   let draggingServerId: string | null = $state(null);
   let reorderSaving = $state(false);
@@ -97,29 +98,44 @@ const isSuperAdmin = $derived(
   })()
 );
 
-  run(() => {
-    if ($user) {
-      unsub?.();
-      unsub = subscribeUserServers($user.uid, (rows) => {
-        servers = rows ?? [];
-        const incomingIds = servers.map((entry) => entry.id);
-        if (pendingOrderIds) {
-          serverList = mergeServerData(serverList.length ? serverList : servers, servers);
-          if (arraysEqual(incomingIds, pendingOrderIds)) {
-            pendingOrderIds = null;
-            if (!draggingServerId && !dragCandidateId) {
-              serverList = servers;
-            }
-          }
-        } else if (!draggingServerId && !dragCandidateId) {
+  function handleServerRows(rows: ServerRailEntry[] = []) {
+    servers = rows ?? [];
+    const incomingIds = servers.map((entry) => entry.id);
+    if (pendingOrderIds) {
+      serverList = mergeServerData(serverList.length ? serverList : servers, servers);
+      if (arraysEqual(incomingIds, pendingOrderIds)) {
+        pendingOrderIds = null;
+        if (!draggingServerId && !dragCandidateId) {
           serverList = servers;
-        } else {
-          serverList = mergeServerData(serverList.length ? serverList : servers, servers);
         }
-      });
+      }
+    } else if (!draggingServerId && !dragCandidateId) {
+      serverList = servers;
+    } else {
+      serverList = mergeServerData(serverList.length ? serverList : servers, servers);
     }
+  }
+
+  function restartServerSubscription(uid: string | null) {
+    unsub?.();
+    unsub = undefined;
+    servers = [];
+    serverList = [];
+    if (!uid) {
+      pendingOrderIds = null;
+      return;
+    }
+    unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? []));
+  }
+
+  onMount(() => {
+    restartServerSubscription($user?.uid ?? null);
+    stopUserWatch = user.subscribe((next) => {
+      restartServerSubscription(next?.uid ?? null);
+    });
   });
 
+  onDestroy(() => stopUserWatch?.());
   onDestroy(() => unsub?.());
   onDestroy(() => dmRailUnsub?.());
   onDestroy(() => stopAutoScroll());
@@ -209,7 +225,8 @@ const dmAlerts = $derived.by(() => {
   });
 
   run(() => {
-    dmRailUnsub?.();
+    const prev = untrack(() => dmRailUnsub);
+    prev?.();
     dmMetadata = {};
     const uid = $user?.uid;
     if (!uid) return;
@@ -234,7 +251,8 @@ const dmAlerts = $derived.by(() => {
   });
 
   run(() => {
-    presenceUnsub?.();
+    const prev = untrack(() => presenceUnsub);
+    prev?.();
     myPresenceState = 'offline';
     myOverrideActive = false;
     myOverrideState = null;

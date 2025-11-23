@@ -150,6 +150,7 @@ function normalizeRoleDoc(serverId: string, id: string, data: DocumentData | und
     isEveryoneRole: !!data?.isEveryoneRole,
     mentionable: !!data?.mentionable,
     allowMassMentions: !!data?.allowMassMentions,
+    showInMemberList: data?.showInMemberList !== false,
     permissions: map,
     permissionBits: bitsAsNumber(bits)
   };
@@ -267,7 +268,8 @@ export async function ensureSystemRoles(serverId: string) {
   if (ownerRole && serverData.ownerRoleId !== ownerRole.id) {
     serverUpdates.ownerRoleId = ownerRole.id;
   }
-  if (everyoneRole && serverData.defaultRoleId !== everyoneRole.id) {
+  const defaultRoleMissing = serverData.defaultRoleId && !rolesById[serverData.defaultRoleId];
+  if (everyoneRole && (!serverData.defaultRoleId || defaultRoleMissing)) {
     serverUpdates.defaultRoleId = everyoneRole.id;
   }
   if (Object.keys(serverUpdates).length) {
