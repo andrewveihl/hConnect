@@ -230,6 +230,8 @@ let roleMemberSearch = $state('');
   ] as const;
   type RolePermissionKey =
     | 'viewServer'
+    | 'viewMemberList'
+    | 'viewServerHome'
     | 'manageServer'
     | 'manageRoles'
     | 'manageChannels'
@@ -275,6 +277,7 @@ let roleMemberSearch = $state('');
     isEveryoneRole?: boolean;
     mentionable?: boolean;
     allowMassMentions?: boolean;
+    showInMemberList?: boolean;
   };
   let roles: Role[] = $state([]);
   let sortedRoles: Role[] = $state([]);
@@ -287,6 +290,8 @@ let roleMemberSearch = $state('');
   let roleNameInputEl: HTMLInputElement | null = $state(null);
   let roleUpdateBusy: Record<string, boolean> = $state({});
   let roleError: string | null = $state(null);
+  let defaultRoleError: string | null = $state(null);
+  let defaultRoleSelection = $state('');
   let roleCollapsed: Record<string, boolean> = $state({});
   let roleSearch = $state('');
   let roleDetailTab: Record<string, 'display' | 'permissions' | 'members'> = $state({});
@@ -415,6 +420,8 @@ let roleMemberSearch = $state('');
     const data = snap.data() as any;
     serverName = data?.name ?? 'Server';
     serverIcon = data?.icon ?? null;
+    serverDefaultRoleId = typeof data?.defaultRoleId === 'string' ? data.defaultRoleId : null;
+    defaultRoleSelection = serverDefaultRoleId ?? '';
     const appearance = data?.settings?.appearance ?? {};
     accentColor = typeof appearance.accentColor === 'string' ? appearance.accentColor : DEFAULT_ACCENT;
     sidebarColor = typeof appearance.sidebarColor === 'string' ? appearance.sidebarColor : DEFAULT_SIDEBAR;
@@ -548,7 +555,14 @@ let roleMemberSearch = $state('');
     const db = getDb();
     const qRef = query(collection(db, 'servers', serverId!, 'roles'), orderBy('position'));
     return onSnapshot(qRef, (snap) => {
-      roles = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Role));
+      roles = snap.docs.map((d) => {
+        const data = d.data() as any;
+        return {
+          id: d.id,
+          ...data,
+          showInMemberList: data?.showInMemberList !== false
+        } as Role;
+      });
     });
   }
 
@@ -718,6 +732,16 @@ let roleMemberSearch = $state('');
     channelDetailRoles = Array.isArray(match.allowedRoleIds) ? [...match.allowedRoleIds] : channelDetailRoles;
   });
   run(() => {
+    if (!channelDetailPrivate) {
+      if (channelDetailRoles.length) {
+        channelDetailRoles = [];
+      }
+      if (channelDetailSection === 'access') {
+        channelDetailSection = 'overview';
+      }
+    }
+  });
+  run(() => {
     sortedRoles = [...roles].sort((a, b) => {
       const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
       const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
@@ -732,7 +756,14 @@ let roleMemberSearch = $state('');
   });
   let everyoneRole = $derived(sortedRoles.find((r) => r.isEveryoneRole));
   let defaultRoleTarget: Role | null = $state(null);
+  let serverDefaultRoleId: string | null = $state(null);
+  let defaultRoleSaveBusy = $state(false);
   run(() => {
+    const chosen = sortedRoles.find((r) => r.id === serverDefaultRoleId);
+    if (chosen) {
+      defaultRoleTarget = chosen;
+      return;
+    }
     const flag = sortedRoles.find((r) => r.isEveryoneRole);
     if (flag) {
       defaultRoleTarget = flag;
@@ -740,6 +771,9 @@ let roleMemberSearch = $state('');
     }
     const byName = sortedRoles.find((r) => (r.name ?? '').trim().toLowerCase() === 'everyone');
     defaultRoleTarget = byName ?? null;
+    if (defaultRoleSelection && !sortedRoles.find((r) => r.id === defaultRoleSelection)) {
+      defaultRoleSelection = '';
+    }
   });
   let filteredRoles = $derived(
     sortedRoles.filter((role) => {
@@ -851,63 +885,108 @@ let roleMemberSearch = $state('');
       inviteDefaultRoleSelection = nextDefaultRole;
     }
   });
-  const rolePermissionOptions: Array<{ key: RolePermissionKey; label: string; description: string }> = [
+  const rolePermissionGroups: Array<{
+    title: string;
+    description?: string;
+    items: Array<{ key: RolePermissionKey; label: string; description: string }>;
+  }> = [
     {
-      key: 'viewServer',
-      label: 'View server',
-      description: 'Be visible in the member list and access the server shell.'
+      title: 'Access',
+      description: 'Baseline visibility and participation.',
+      items: [
+        {
+          key: 'viewMemberList',
+          label: 'Appear in member list',
+          description: 'Be visible to other members.'
+        },
+        {
+          key: 'viewServerHome',
+          label: 'Open server home',
+          description: 'Open the server shell/landing page.'
+        },
+        {
+          key: 'viewChannels',
+          label: 'View channels',
+          description: 'See channel list and enter public channels.'
+        },
+        {
+          key: 'readMessageHistory',
+          label: 'Read history',
+          description: 'Scroll back to earlier messages.'
+        }
+      ]
     },
     {
-      key: 'manageServer',
-      label: 'Manage server',
-      description: 'Adjust server profile, appearance, and automation.'
+      title: 'Messaging',
+      description: 'What this role can do in text channels.',
+      items: [
+        {
+          key: 'sendMessages',
+          label: 'Send messages',
+          description: 'Post messages and add reactions.'
+        },
+        {
+          key: 'manageMessages',
+          label: 'Manage messages',
+          description: 'Delete, pin, or moderate chat content.'
+        }
+      ]
     },
     {
-      key: 'manageRoles',
-      label: 'Manage roles',
-      description: 'Create, edit, or delete roles and permissions.'
+      title: 'Voice',
+      description: 'Voice channel participation.',
+      items: [
+        {
+          key: 'connectVoice',
+          label: 'Connect to voice',
+          description: 'Join voice channels and calls.'
+        },
+        {
+          key: 'speakVoice',
+          label: 'Speak in voice',
+          description: 'Talk once connected.'
+        }
+      ]
     },
     {
-      key: 'manageChannels',
-      label: 'Manage channels',
-      description: 'Create, edit, archive, or delete channels.'
+      title: 'Member moderation',
+      description: 'Tools to manage members.',
+      items: [
+        {
+          key: 'kickMembers',
+          label: 'Kick members',
+          description: 'Remove members without banning.'
+        },
+        {
+          key: 'banMembers',
+          label: 'Ban members',
+          description: 'Permanently ban members from the server.'
+        }
+      ]
     },
     {
-      key: 'manageMessages',
-      label: 'Manage messages',
-      description: 'Delete, pin, or moderate chat content.'
-    },
-    {
-      key: 'sendMessages',
-      label: 'Send messages',
-      description: 'Post text messages and reactions.'
-    },
-    {
-      key: 'viewChannels',
-      label: 'View channels',
-      description: 'Access text and voice channels.'
-    },
-    {
-      key: 'kickMembers',
-      label: 'Kick members',
-      description: 'Remove members without banning.'
-    },
-    {
-      key: 'banMembers',
-      label: 'Ban members',
-      description: 'Permanently ban members from the server.'
-    },
-    {
-      key: 'connectVoice',
-      label: 'Connect to voice',
-      description: 'Join voice channels.'
-    },
-    {
-      key: 'speakVoice',
-      label: 'Speak in voice',
-      description: 'Talk in voice channels once connected.'
+      title: 'Admin & structure',
+      description: 'Server-wide settings and structure.',
+      items: [
+        {
+          key: 'manageServer',
+          label: 'Manage server',
+          description: 'Adjust server profile, appearance, and automation.'
+        },
+        {
+          key: 'manageRoles',
+          label: 'Manage roles',
+          description: 'Create, edit, or delete roles and permissions.'
+        },
+        {
+          key: 'manageChannels',
+          label: 'Manage channels',
+          description: 'Create, reorder, archive, or delete channels.'
+        }
+      ]
     }
   ];
+  const rolePermissionOptions = rolePermissionGroups.flatMap((group) => group.items);
 
   // NEW: watch first N profiles ordered by nameLower (users who have logged in)
   function watchProfiles() {
@@ -1353,6 +1432,7 @@ let roleMemberSearch = $state('');
         isEveryoneRole: false,
         mentionable: !!newRoleMentionable,
         allowMassMentions: false,
+        showInMemberList: true,
         ...permissionPayload
       });
       closeRoleModal();
@@ -1505,9 +1585,10 @@ let roleMemberSearch = $state('');
 
   function resolveMemberRoles(member: EnrichedMember): Role[] {
     if (!Array.isArray(member.roleIds) || member.roleIds.length === 0) return [];
-    return member.roleIds
+    const resolved = member.roleIds
       .map((id) => sortedRoles.find((r) => r.id === id))
       .filter((r): r is Role => Boolean(r));
+    return resolved.filter((role) => role.showInMemberList !== false);
   }
 
   async function updateRoleDoc(roleId: string, updates: Record<string, unknown>) {
@@ -1549,6 +1630,10 @@ let roleMemberSearch = $state('');
     await updateRoleDoc(roleId, { mentionable: enabled });
   }
 
+  async function setRoleShowInMemberList(roleId: string, enabled: boolean) {
+    await updateRoleDoc(roleId, { showInMemberList: enabled });
+  }
+
   async function moveRole(roleId: string, direction: 'up' | 'down') {
     if (!isAdmin) return;
     const current = sortedRoles;
@@ -1577,6 +1662,35 @@ let roleMemberSearch = $state('');
       const next = { ...roleUpdateBusy };
       delete next[roleId];
       roleUpdateBusy = next;
+    }
+  }
+
+  async function saveDefaultRole() {
+    if (!(isOwner || isAdmin) || defaultRoleSaveBusy) return;
+    const chosenId = defaultRoleSelection || serverDefaultRoleId;
+    const chosen = sortedRoles.find((r) => r.id === chosenId);
+    if (!chosen) {
+      defaultRoleError = 'Pick a role to set as default.';
+      return;
+    }
+    if (chosen.isOwnerRole) {
+      defaultRoleError = 'Owner role cannot be the default.';
+      return;
+    }
+    defaultRoleSaveBusy = true;
+    const db = getDb();
+    try {
+      await updateDoc(doc(db, 'servers', serverId!), { defaultRoleId: chosen.id });
+      serverDefaultRoleId = chosen.id;
+      defaultRoleSelection = chosen.id;
+      defaultRoleTarget = chosen;
+      defaultRoleError = null;
+      await recomputeAllMemberPermissions(serverId!);
+    } catch (err) {
+      console.error(err);
+      defaultRoleError = 'Failed to update default role.';
+    } finally {
+      defaultRoleSaveBusy = false;
     }
   }
 
@@ -1724,6 +1838,7 @@ let roleMemberSearch = $state('');
   }
 
   function toggleChannelDetailRole(roleId: string, enabled: boolean) {
+    if (!channelDetailPrivate) return;
     channelDetailRoles = enabled
       ? Array.from(new Set([...(channelDetailRoles ?? []), roleId]))
       : channelDetailRoles.filter((id) => id !== roleId);
@@ -2542,11 +2657,15 @@ async function clearPendingInvites() {
       {/if}      {#if tab === 'roles'}
         <div class="settings-card flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div class="settings-card__subtitle">Default permissions, display, and member assignment.</div>
-          <div class="flex flex-wrap items-center gap-2">
-            <input class="input input--compact w-64" placeholder="Search roles" bind:value={roleSearch} />
+          <div class="flex w-full items-center gap-2 lg:flex-1">
+            <input
+              class="input input--compact flex-1 min-w-[220px]"
+              placeholder="Search roles"
+              bind:value={roleSearch}
+            />
             <button
               type="button"
-              class="btn btn-primary btn-sm"
+              class="btn btn-primary btn-sm whitespace-nowrap"
               disabled={!(isOwner || isAdmin)}
               onclick={openRoleModal}
             >
@@ -2559,7 +2678,8 @@ async function clearPendingInvites() {
           class="settings-card settings-card--muted space-y-2 p-4 cursor-pointer"
           role="button"
           tabindex="0"
-          onclick={() => {
+          onclick={(event) => {
+            event.stopPropagation();
             if (!defaultRoleTarget) return;
             roleDetailId = defaultRoleTarget.id;
             roleDetailSection = 'permissions';
@@ -2581,6 +2701,36 @@ async function clearPendingInvites() {
             <span>{countEnabledPerms((defaultRoleTarget ?? { permissions: {} }) as Role)} permissions</span>
             <span class="text-xs text-white/60">Click to edit</span>
           </div>
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+            <select
+              class="input input--compact flex-1 min-w-[180px]"
+              bind:value={defaultRoleSelection}
+              disabled={!(isOwner || isAdmin) || defaultRoleSaveBusy}
+              onclick={(event) => event.stopPropagation()}
+              onchange={() => (defaultRoleError = null)}
+            >
+              <option value="">Select a role</option>
+              {#each sortedRoles.filter((r) => !r.isOwnerRole) as role}
+                <option value={role.id} selected={role.id === serverDefaultRoleId}>
+                  {role.name}{role.id === serverDefaultRoleId ? ' (current)' : ''}
+                </option>
+              {/each}
+            </select>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm whitespace-nowrap"
+              disabled={!(isOwner || isAdmin) || defaultRoleSaveBusy || !defaultRoleSelection}
+              onclick={(event) => {
+                event.stopPropagation();
+                void saveDefaultRole();
+              }}
+            >
+              {defaultRoleSaveBusy ? 'Saving…' : 'Set default role'}
+            </button>
+          </div>
+          {#if defaultRoleError}
+            <p class="text-xs text-red-300">{defaultRoleError}</p>
+          {/if}
         </div>
 
         {#if roleError}
@@ -2597,7 +2747,8 @@ async function clearPendingInvites() {
                   type="button"
                   class="settings-role-summary"
                   aria-expanded="false"
-                  onclick={() => {
+                  onclick={(event) => {
+                    event.stopPropagation();
                     roleDetailId = role.id;
                     roleDetailSection = 'display';
                     roleDetailModalOpen = true;
@@ -3161,6 +3312,10 @@ async function clearPendingInvites() {
     color: inherit;
     display: inline-flex;
     align-items: center;
+  }
+
+  .settings-role-member-chip--more {
+    color: rgba(255, 255, 255, 0.75);
   }
 
   .settings-header {
@@ -3957,6 +4112,35 @@ async function clearPendingInvites() {
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   }
 
+  .settings-permission-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+
+  .settings-permission-group {
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-lg);
+    padding: 0.9rem;
+    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
+  }
+
+  .settings-permission-group__header {
+    margin-bottom: 0.6rem;
+  }
+
+  .settings-permission-group__title {
+    font-weight: 700;
+    font-size: 0.95rem;
+  }
+
+  .settings-permission-group__description {
+    font-size: 0.82rem;
+    color: var(--text-70);
+    margin: 0.15rem 0 0;
+  }
+
   .settings-permission {
     display: flex;
     gap: 0.55rem;
@@ -3982,6 +4166,12 @@ async function clearPendingInvites() {
     display: block;
     font-size: 0.75rem;
     color: var(--text-60);
+  }
+
+  .settings-role-permissions__hint {
+    font-size: 0.8rem;
+    color: var(--text-60);
+    margin-top: 0.25rem;
   }
 
   .settings-role-header__tagline {
@@ -4023,11 +4213,23 @@ async function clearPendingInvites() {
 
   .role-modal--wide {
     width: min(720px, 100%);
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
   }
   .role-modal--mid {
     width: min(460px, 92vw);
     max-height: min(80vh, 720px);
     overflow-y: auto;
+  }
+
+  .role-modal__scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+    display: grid;
+    gap: 14px;
   }
 
   @keyframes pop {
@@ -4441,9 +4643,15 @@ async function clearPendingInvites() {
         <button class:active-chip={channelDetailSection === 'overview'} type="button" onclick={() => (channelDetailSection = 'overview')}>
           Overview
         </button>
-        <button class:active-chip={channelDetailSection === 'access'} type="button" onclick={() => (channelDetailSection = 'access')}>
-          Access
-        </button>
+        {#if channelDetailPrivate}
+          <button
+            class:active-chip={channelDetailSection === 'access'}
+            type="button"
+            onclick={() => (channelDetailSection = 'access')}
+          >
+            Access
+          </button>
+        {/if}
       </div>
 
       {#if channelDetailSection === 'overview'}
@@ -4457,19 +4665,26 @@ async function clearPendingInvites() {
           <span>Private channel</span>
         </label>
       {:else}
-        <p class="text-xs text-white/70">Choose who can view this channel when it is private.</p>
-        <div class="flex flex-wrap gap-2">
-          {#each sortedRoles as role}
-            <label class="settings-chip">
-              <input
-                type="checkbox"
-                checked={channelDetailRoles.includes(role.id)}
-                onchange={(e) => toggleChannelDetailRole(role.id, (e.currentTarget as HTMLInputElement).checked)}
-              />
-              <span>{role.name}</span>
-            </label>
-          {/each}
-        </div>
+        {#if !channelDetailPrivate}
+          <p class="text-xs text-white/70">This channel is public. Turn on "Private channel" in Overview to restrict access by role.</p>
+        {:else}
+          <p class="text-xs text-white/70">Choose who can view this channel when it is private.</p>
+          <div class="flex flex-wrap gap-2">
+            {#each sortedRoles as role}
+              <label class="settings-chip">
+                <input
+                  type="checkbox"
+                  checked={channelDetailRoles.includes(role.id)}
+                  onchange={(e) => toggleChannelDetailRole(role.id, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                <span>{role.name}</span>
+              </label>
+            {/each}
+          </div>
+          {#if !channelDetailRoles.length}
+            <p class="settings-status text-[11px] text-white/60">Only admins can see this private channel until you add at least one allowed role.</p>
+          {/if}
+        {/if}
       {/if}
 
       {#if channelError}
@@ -4545,108 +4760,140 @@ async function clearPendingInvites() {
           </button>
         </div>
       </div>
+      <div class="role-modal__scroll">
+        <div class="settings-chip-row mb-2">
+          <button class:active-chip={roleDetailSection === 'display'} type="button" onclick={() => (roleDetailSection = 'display')}>
+            Display
+          </button>
+          <button class:active-chip={roleDetailSection === 'permissions'} type="button" onclick={() => (roleDetailSection = 'permissions')}>
+            Permissions
+          </button>
+          <button class:active-chip={roleDetailSection === 'members'} type="button" onclick={() => (roleDetailSection = 'members')}>
+            Members
+          </button>
+        </div>
 
-      <div class="settings-chip-row mb-2">
-        <button class:active-chip={roleDetailSection === 'display'} type="button" onclick={() => (roleDetailSection = 'display')}>
-          Display
-        </button>
-        <button class:active-chip={roleDetailSection === 'permissions'} type="button" onclick={() => (roleDetailSection = 'permissions')}>
-          Permissions
-        </button>
-        <button class:active-chip={roleDetailSection === 'members'} type="button" onclick={() => (roleDetailSection = 'members')}>
-          Members
-        </button>
-      </div>
-
-      {#if activeRole}
-        {#if roleDetailSection === 'display'}
-          <div class="settings-role-header">
-            <div class="settings-role-header__meta">
-              <input
-                class="settings-role-name"
-                value={activeRole.name}
-                aria-label="Role name"
-                onblur={(e) => setRoleName(activeRole.id, (e.currentTarget as HTMLInputElement).value)}
-                disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
-              />
-              <input
-                class="settings-role-color"
-                type="color"
-                aria-label="Role color"
-                value={activeRole.color ?? '#5865f2'}
-                oninput={(e) => setRoleColor(activeRole.id, (e.currentTarget as HTMLInputElement).value)}
-                disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
-                title="Role color"
-              />
-            </div>
-            <div class="settings-role-header__actions">
-              <label class="settings-switch settings-switch--inline">
+        {#if activeRole}
+          {#if roleDetailSection === 'display'}
+            <div class="settings-role-header">
+              <div class="settings-role-header__meta">
                 <input
-                  type="checkbox"
-                  checked={activeRole.mentionable !== false}
-                  onchange={(e) => setRoleMentionable(activeRole.id, (e.currentTarget as HTMLInputElement).checked)}
+                  class="settings-role-name"
+                  value={activeRole.name}
+                  aria-label="Role name"
+                  onblur={(e) => setRoleName(activeRole.id, (e.currentTarget as HTMLInputElement).value)}
                   disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
                 />
-                <span>Allow mentions</span>
-              </label>
-            </div>
-          </div>
-        {:else if roleDetailSection === 'permissions'}
-          <div class="settings-role-permissions">
-            {#each rolePermissionOptions as option}
-              <label class="settings-permission">
                 <input
-                  type="checkbox"
-                  checked={roleHasPermission(activeRole, option.key)}
+                  class="settings-role-color"
+                  type="color"
+                  aria-label="Role color"
+                  value={activeRole.color ?? '#5865f2'}
+                  oninput={(e) => setRoleColor(activeRole.id, (e.currentTarget as HTMLInputElement).value)}
                   disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
-                  onchange={(e) =>
-                    toggleRolePermission(
-                      activeRole.id,
-                      option.key,
-                      (e.currentTarget as HTMLInputElement).checked
-                    )}
+                  title="Role color"
                 />
-                <span>
-                  <strong>{option.label}</strong>
-                  <small>{option.description}</small>
-                </span>
-              </label>
-            {/each}
-          </div>
-        {:else}
-          {@const roleMembers = membersWithProfiles.filter((m) => Array.isArray(m.roleIds) && m.roleIds.includes(activeRole.id))}
-          <div class="flex items-center gap-2 mb-2">
-            <input
-              class="input input--compact flex-1"
-              placeholder="Search members"
-              bind:value={roleMemberSearch}
-            />
-            <span class="text-xs text-white/60">{roleMembers.length} members</span>
-          </div>
-          {#if roleMembers.length === 0}
-            <div class="text-white/60 text-sm">No members assigned.</div>
-          {:else}
-            <div class="flex flex-wrap gap-2">
-              {#each roleMembers.filter((m) => {
-                const term = roleMemberSearch.trim().toLowerCase();
-                if (!term) return true;
-                return (m.displayName ?? '').toLowerCase().includes(term) || m.uid.toLowerCase().includes(term);
-              }) as member}
-                <span class="settings-role-member-chip">
-                  {member.displayName || member.uid}
-                  {#if isAdmin}
-                    <button type="button" aria-label="Remove role" onclick={() => toggleMemberRole(member.uid, activeRole.id, false)}>
-                      <i class="bx bx-x"></i>
-                    </button>
-                  {/if}
-                </span>
+              </div>
+              <div class="settings-role-header__actions">
+                <label class="settings-switch settings-switch--inline">
+                  <input
+                    type="checkbox"
+                    checked={activeRole.mentionable !== false}
+                    onchange={(e) => setRoleMentionable(activeRole.id, (e.currentTarget as HTMLInputElement).checked)}
+                    disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
+                  />
+                  <span>Allow mentions</span>
+                </label>
+                <label class="settings-switch settings-switch--inline">
+                  <input
+                    type="checkbox"
+                    checked={activeRole.showInMemberList !== false}
+                    onchange={(e) => setRoleShowInMemberList(activeRole.id, (e.currentTarget as HTMLInputElement).checked)}
+                    disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
+                  />
+                  <span>Show on members bar</span>
+                </label>
+              </div>
+            </div>
+          {:else if roleDetailSection === 'permissions'}
+            <div class="settings-permission-groups">
+              {#each rolePermissionGroups as group}
+                <div class="settings-permission-group">
+                  <div class="settings-permission-group__header">
+                    <div class="settings-permission-group__title">{group.title}</div>
+                    {#if group.description}
+                      <p class="settings-permission-group__description">{group.description}</p>
+                    {/if}
+                  </div>
+                  <div class="settings-role-permissions">
+                    {#each group.items as option}
+                      <label class="settings-permission">
+                        <input
+                          type="checkbox"
+                          checked={roleHasPermission(activeRole, option.key)}
+                          disabled={!isAdmin || roleUpdateBusy[activeRole.id]}
+                          onchange={(e) =>
+                            toggleRolePermission(
+                              activeRole.id,
+                              option.key,
+                              (e.currentTarget as HTMLInputElement).checked
+                            )}
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          <small>{option.description}</small>
+                        </span>
+                      </label>
+                    {/each}
+                  </div>
+                </div>
               {/each}
+              <p class="settings-role-permissions__hint">
+                Private channels still require an allowed role on the channel to be visible.
+              </p>
             </div>
+          {:else}
+            {@const roleMembers = membersWithProfiles.filter((m) => Array.isArray(m.roleIds) && m.roleIds.includes(activeRole.id))}
+            {@const roleMemberTerm = roleMemberSearch.trim().toLowerCase()}
+            {@const filteredRoleMembers = roleMembers.filter((m) => {
+              if (!roleMemberTerm) return true;
+              return (m.displayName ?? '').toLowerCase().includes(roleMemberTerm) || m.uid.toLowerCase().includes(roleMemberTerm);
+            })}
+            {@const maxRoleMembersToShow = 12}
+            {@const visibleRoleMembers = filteredRoleMembers.slice(0, maxRoleMembersToShow)}
+            {@const remainingRoleMembers = Math.max(filteredRoleMembers.length - visibleRoleMembers.length, 0)}
+            <div class="flex items-center gap-2 mb-2">
+              <input
+                class="input input--compact flex-1"
+                placeholder="Search members"
+                bind:value={roleMemberSearch}
+              />
+              <span class="text-xs text-white/60">{roleMembers.length} members</span>
+            </div>
+            {#if roleMembers.length === 0}
+              <div class="text-white/60 text-sm">No members assigned.</div>
+            {:else}
+              <div class="flex flex-wrap gap-2">
+                {#each visibleRoleMembers as member}
+                  <span class="settings-role-member-chip">
+                    {member.displayName || member.uid}
+                    {#if isAdmin}
+                      <button type="button" aria-label="Remove role" onclick={() => toggleMemberRole(member.uid, activeRole.id, false)}>
+                        <i class="bx bx-x"></i>
+                      </button>
+                    {/if}
+                  </span>
+                {/each}
+                {#if remainingRoleMembers > 0}
+                  <span class="settings-role-member-chip settings-role-member-chip--more">+{remainingRoleMembers} more</span>
+                {/if}
+              </div>
+            {/if}
           {/if}
+        {:else}
+          <div class="text-white/60">Role not found.</div>
         {/if}
-      {:else}
-        <div class="text-white/60">Role not found.</div>
-      {/if}
+      </div>
     </div>
   </div>
 {/if}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
@@ -38,12 +38,13 @@
     [key: string]: unknown;
   };
 
-  type RoleDoc = {
-    id: string;
-    name: string;
-    color?: string | null;
-    position?: number;
-  };
+type RoleDoc = {
+  id: string;
+  name: string;
+  color?: string | null;
+  position?: number;
+  showInMemberList?: boolean;
+};
 
   type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
@@ -82,18 +83,26 @@
   let rows: MemberRow[] = $state([]);
   let groupedRows: MemberGroup[] = $state([]);
   let selectedUid: string | null = $state(null);
-  let selectedMember: MemberRow | null = $state(null);
-  let selectedProfile: ProfileDoc | null = $state(null);
+  const selectedMember = $derived.by(() =>
+    selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null
+  );
+  const selectedProfile = $derived.by(() => (selectedUid ? profiles[selectedUid] ?? null : null));
   let popoverPos = $state({ top: 0, left: 0 });
   let cardLoading = $state(false);
   let cardError: string | null = $state(null);
   let isMobileView = $state(false);
-  let canMessageSelected = $state(false);
+  const canMessageSelected = $derived.by(
+    () => Boolean(selectedMember && me?.uid && selectedMember.uid !== me?.uid)
+  );
   let mediaQuery: MediaQueryList | null = null;
   let me: any = $state(null);
-  let myMember: MemberDoc | null = $state(null);
-  let myBaseRole: 'owner' | 'admin' | 'member' | null = $state(null);
-  let canInviteMembers = $state(false);
+  const myMember = $derived.by(() => (me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null));
+  const myBaseRole = $derived.by(() =>
+    typeof (myMember as any)?.role === 'string'
+      ? ((myMember as any).role as 'owner' | 'admin' | 'member')
+      : null
+  );
+  const canInviteMembers = $derived.by(() => myBaseRole === 'owner' || myBaseRole === 'admin');
   const INITIAL_MEMBER_BATCH = 60;
   const MEMBER_BATCH_SIZE = 40;
   const LAZY_LOAD_THRESHOLD = 20;
@@ -120,8 +129,8 @@
     me = $user;
   });
 
-  let membersUnsub: Unsubscribe | null = $state(null);
-  let rolesUnsub: Unsubscribe | null = $state(null);
+  let membersUnsub: Unsubscribe | null = null;
+  let rolesUnsub: Unsubscribe | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
   let currentServer: string | null = $state(null);
@@ -133,50 +142,26 @@
     offline: 'Offline'
   };
   const MAX_VISIBLE_MEMBER_ROLES = 2;
-  run(() => {
-    selectedMember = selectedUid ? rows.find((row) => row.uid === selectedUid) ?? null : null;
-  });
-  run(() => {
-    selectedProfile = selectedUid ? profiles[selectedUid] ?? null : null;
-  });
-  run(() => {
-    canMessageSelected = Boolean(selectedMember && me?.uid && selectedMember.uid !== me.uid);
-  });
-  run(() => {
-    myMember = me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null;
-  });
-  run(() => {
-    myBaseRole =
-      typeof (myMember as any)?.role === 'string'
-        ? ((myMember as any).role as 'owner' | 'admin' | 'member')
-        : null;
-  });
-  run(() => {
-    canInviteMembers = myBaseRole === 'owner' || myBaseRole === 'admin';
-  });
-  run(() => {
-    if (!canInviteMembers && showInviteDialog) {
-      showInviteDialog = false;
-    }
-  });
-  run(() => {
-    const total = rows.length;
-    shouldLazyLoad = total > LAZY_LOAD_THRESHOLD;
+  // derived above
 
-    if (!shouldLazyLoad) {
-      visibleMemberCount = total;
-      allMembersVisible = true;
-      return;
+  function syncVisibilityState(total: number) {
+    const lazy = total > LAZY_LOAD_THRESHOLD;
+    shouldLazyLoad = lazy;
+
+    let nextVisible = visibleMemberCount;
+    if (!lazy) {
+      nextVisible = total;
+    } else if (nextVisible < INITIAL_MEMBER_BATCH) {
+      nextVisible = Math.min(INITIAL_MEMBER_BATCH, total);
+    } else if (nextVisible > total) {
+      nextVisible = total;
     }
 
-    if (visibleMemberCount < INITIAL_MEMBER_BATCH) {
-      visibleMemberCount = Math.min(INITIAL_MEMBER_BATCH, total);
-    } else if (visibleMemberCount > total) {
-      visibleMemberCount = total;
+    if (nextVisible !== visibleMemberCount) {
+      visibleMemberCount = nextVisible;
     }
-
-    allMembersVisible = visibleMemberCount >= total;
-  });
+    allMembersVisible = nextVisible >= total;
+  }
 
   function pickString(value: unknown): string | undefined {
     if (typeof value === 'string') {
@@ -399,7 +384,7 @@
       const roleIds = Array.isArray((member as any)?.roleIds) ? ((member as any).roleIds as string[]) : [];
       const resolvedRoles = roleIds
         .map((id) => roles[id])
-        .filter((role): role is RoleDoc => !!role)
+        .filter((role): role is RoleDoc => !!role && role.showInMemberList !== false)
         .sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
       return {
         uid: member.uid,
@@ -415,9 +400,12 @@
     rows = computed.sort((a, b) =>
       a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
     );
+    syncVisibilityState(rows.length);
+    recomputeBuckets();
+    recomputeVisibleGroups();
   }
 
-  run(() => {
+  function recomputeBuckets() {
     const buckets = createBucketMap();
     for (const row of rows) {
       const bucket = buckets[row.status] ?? buckets.offline;
@@ -429,9 +417,9 @@
       label: statusLabels[status],
       members: buckets[status]
     }));
-  });
+  }
 
-  run(() => {
+  function recomputeVisibleGroups() {
     const buckets = statusBuckets;
     if (!shouldLazyLoad) {
       const clone = createBucketMap();
@@ -459,7 +447,7 @@
     }
 
     visibleGroupMap = limited;
-  });
+  }
 
   onMount(() => {
     if (!browser) return;
@@ -569,6 +557,7 @@
     const next = Math.min(rows.length, visibleMemberCount + MEMBER_BATCH_SIZE);
     if (next !== visibleMemberCount) {
       visibleMemberCount = next;
+      syncVisibilityState(rows.length);
     }
   }
 
@@ -639,7 +628,8 @@
             id: roleSnap.id,
             name: data?.name ?? 'Role',
             color: data?.color ?? null,
-            position: data?.position ?? 0
+            position: data?.position ?? 0,
+            showInMemberList: data?.showInMemberList !== false
           };
         });
         roles = next;
@@ -657,59 +647,73 @@
     currentServer = server;
     visibleMemberCount = INITIAL_MEMBER_BATCH;
 
-    membersUnsub?.();
+    const prevMembersUnsub = untrack(() => membersUnsub);
+    prevMembersUnsub?.();
     cleanupProfiles();
     subscribeRoles(server);
 
     const database = db();
-    membersUnsub = onSnapshot(collection(database, 'servers', server, 'members'), (snap) => {
-      const uids: string[] = [];
-      const nextMembers: Record<string, MemberDoc> = {};
+    membersUnsub = onSnapshot(
+      collection(database, 'servers', server, 'members'),
+      (snap) => {
+        const uids: string[] = [];
+        const nextMembers: Record<string, MemberDoc> = {};
 
-      for (const docSnap of snap.docs) {
-        const data = (docSnap.data?.() ?? {}) as any;
-        const uid = getUidFromMemberDoc(docSnap, data);
-        uids.push(uid);
-        nextMembers[uid] = { uid, ...data };
-      }
-
-      members = nextMembers;
-      updateRows();
-
-      for (const uid in profileUnsubs) {
-        if (!uids.includes(uid)) {
-          profileUnsubs[uid]?.();
-          delete profileUnsubs[uid];
-          const { [uid]: _drop, ...rest } = profiles;
-          profiles = rest;
-          unsubscribePresence(uid);
+        for (const docSnap of snap.docs) {
+          const data = (docSnap.data?.() ?? {}) as any;
+          const uid = getUidFromMemberDoc(docSnap, data);
+          uids.push(uid);
+          nextMembers[uid] = { uid, ...data };
         }
-      }
 
-      uids.forEach((uid) => {
-        if (!profileUnsubs[uid]) {
-          profileUnsubs[uid] = onSnapshot(doc(database, 'profiles', uid), (ps) => {
-            profiles = { ...profiles, [uid]: ps.data() ?? {} };
-            updateRows();
-          });
+        members = nextMembers;
+        updateRows();
+
+        for (const uid in profileUnsubs) {
+          if (!uids.includes(uid)) {
+            profileUnsubs[uid]?.();
+            delete profileUnsubs[uid];
+            const { [uid]: _drop, ...rest } = profiles;
+            profiles = rest;
+            unsubscribePresence(uid);
+          }
         }
-        subscribePresence(database, uid);
-      });
-    });
+
+        uids.forEach((uid) => {
+          if (!profileUnsubs[uid]) {
+            profileUnsubs[uid] = onSnapshot(doc(database, 'profiles', uid), (ps) => {
+              profiles = { ...profiles, [uid]: ps.data() ?? {} };
+              updateRows();
+            });
+          }
+          subscribePresence(database, uid);
+        });
+      },
+      (error) => {
+        console.warn('[members] failed to subscribe to server members', error);
+        members = {};
+        profiles = {};
+        cleanupProfiles();
+        syncVisibilityState(0);
+      }
+    );
   }
 
   run(() => {
-    if (serverId) {
+    if (serverId && $user?.uid) {
       subscribeMembers(serverId);
     } else {
-      membersUnsub?.();
+      const prevMembersUnsub = untrack(() => membersUnsub);
+      prevMembersUnsub?.();
       membersUnsub = null;
-      rolesUnsub?.();
+      const prevRolesUnsub = untrack(() => rolesUnsub);
+      prevRolesUnsub?.();
       rolesUnsub = null;
       roles = {};
       cleanupProfiles();
       currentServer = null;
       visibleMemberCount = INITIAL_MEMBER_BATCH;
+      syncVisibilityState(0);
     }
   });
 
