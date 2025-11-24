@@ -244,6 +244,39 @@ service cloud.firestore {
         || (canViewChannel(serverId, channelId) && (hasPerm(serverId, "speakVoice") || hasPerm(serverId, "connectVoice")));
     }
 
+    // Ticket AI access gates
+    function ticketAiSettingsPath(serverId) {
+      return /databases/$(database)/documents/servers/$(serverId)/ticketAiSettings/current;
+    }
+
+    function ticketAiAllowedRoleIds(serverId) {
+      let settingsDoc = ticketAiSettingsPath(serverId);
+      return exists(settingsDoc)
+        && get(settingsDoc).data.allowedRoleIds is list
+        ? get(settingsDoc).data.allowedRoleIds
+        : [];
+    }
+
+    function memberHasTicketAiAccess(serverId) {
+      return isSignedIn()
+        && memberRoleIds(serverId) is list
+        && ticketAiAllowedRoleIds(serverId).hasAny(memberRoleIds(serverId));
+    }
+
+    function canViewTicketAi(serverId) {
+      return isSuperAdminUser()
+        || isServerOwner(serverId)
+        || isServerAdmin(serverId)
+        || memberHasTicketAiAccess(serverId);
+    }
+
+    function canManageTicketAi(serverId) {
+      return isSuperAdminUser()
+        || isServerOwner(serverId)
+        || isServerAdmin(serverId)
+        || memberHasTicketAiAccess(serverId);
+    }
+
     function currentUserEmail() {
       return isSignedIn() && request.auth.token.email is string
         ? request.auth.token.email
@@ -466,11 +499,11 @@ service cloud.firestore {
         allow delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
       }
 
-    match /channels/{channelId} {
-      // Members can always load channel metadata; signed-in users can load public channels.
-      allow read: if (resource != null && resource.data.isPrivate != true && isSignedIn())
-                  || isMember(serverId)
-                  || canViewChannel(serverId, channelId);
+      match /channels/{channelId} {
+        // Members can always load channel metadata; signed-in users can load public channels.
+        allow read: if (resource != null && resource.data.isPrivate != true && isSignedIn())
+                    || isMember(serverId)
+                    || canViewChannel(serverId, channelId);
       allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
 
         match /messages/{messageId} {
@@ -548,6 +581,25 @@ service cloud.firestore {
             allow delete: if (isSignedIn() && request.auth.uid == uid) || canSpeakVoice(serverId, channelId);
           }
         }
+      }
+
+      // Ticket AI (Issue analytics)
+      match /ticketAiSettings/{settingsId} {
+        allow read: if canViewTicketAi(serverId);
+        allow create, update: if canManageTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
+      }
+
+      match /ticketAiIssues/{issueId} {
+        allow read: if canViewTicketAi(serverId);
+        // Writes are performed by privileged backend only.
+        allow create, update, delete: if isSuperAdminUser();
+      }
+
+      match /ticketAiReports/{reportId} {
+        allow read: if canViewTicketAi(serverId);
+        allow create, update: if canManageTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
       }
     }
 
