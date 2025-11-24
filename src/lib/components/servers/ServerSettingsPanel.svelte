@@ -10,6 +10,7 @@
   import { sendServerInvite, type ServerInvite } from '$lib/firestore/invites';
 import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 import LeftPane from '$lib/components/app/LeftPane.svelte';
+import TicketAIModal from '$lib/components/servers/TicketAIModal.svelte';
 import { bitsAsNumber, PERMISSION_KEYS, toPermissionBits } from '$lib/permissions/permissions';
 
 import {
@@ -168,6 +169,7 @@ let memberRolePickerFor: string | null = $state(null);
 let roleAssignTarget: EnrichedMember | null = $state(null);
 let roleAssignModalOpen = $state(false);
 let domainModalOpen = $state(false);
+let ticketAiModalOpen = $state(false);
 let banSearch = $state('');
 let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
 let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
@@ -2921,10 +2923,19 @@ async function clearPendingInvites() {
             <div class="settings-card__title">Bots</div>
             <p class="settings-card__subtitle">Bring assistants and helpers into channels. Coming soon.</p>
           </div>
-          <div class="settings-card settings-card--muted">
-            <div class="settings-card__title">Ticket tracking</div>
-            <p class="settings-card__subtitle">Route tickets into queues. Coming soon.</p>
-          </div>
+          <button
+            type="button"
+            class="settings-card settings-card--muted text-left hover:border-[color:var(--color-accent)] transition"
+            onclick={() => (ticketAiModalOpen = true)}
+          >
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="settings-card__title">Ticket AI (Issue analytics)</div>
+                <p class="settings-card__subtitle">Monitor issue threads and export response metrics.</p>
+              </div>
+              <span class="text-xs uppercase tracking-[0.2em] text-emerald-300">New</span>
+            </div>
+          </button>
           <button
             type="button"
             class="settings-card settings-card--muted text-left hover:border-[color:var(--color-accent)] transition"
@@ -4436,11 +4447,24 @@ async function clearPendingInvites() {
       width: 100%;
     }
 
-  .settings-role-header {
+.settings-role-header {
     align-items: flex-start;
   }
 }
 </style>
+
+{#if ticketAiModalOpen && serverId}
+  <TicketAIModal
+    open={ticketAiModalOpen}
+    serverId={serverId}
+    serverName={serverName}
+    channels={channels}
+    roles={roles}
+    currentUserId={$user?.uid ?? null}
+    members={membersWithProfiles}
+    on:close={() => (ticketAiModalOpen = false)}
+  />
+{/if}
 
 {#if channelModalOpen}
   <div

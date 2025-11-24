@@ -8,6 +8,7 @@ import {
   handleThreadMessage,
   sendTestPushForUid
 } from './notifications';
+import { handleTicketAiThreadMessage } from './ticketAi';
 export { requestDomainAutoInvite } from './domainInvites';
 
 export const onChannelMessageCreated = onDocumentCreated(
@@ -20,7 +21,7 @@ export const onChannelMessageCreated = onDocumentCreated(
 export const onThreadMessageCreated = onDocumentCreated(
   'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}',
   async (event) => {
-    await handleThreadMessage(event);
+    await Promise.all([handleThreadMessage(event), handleTicketAiThreadMessage(event)]);
   }
 );
 
