@@ -85,7 +85,6 @@
     >
       <header class="flex items-center justify-between border-b border-[color:var(--color-border-subtle)] px-4 py-3">
         <div>
-          <p class="text-xs uppercase tracking-[0.16em] text-[color:var(--text-70)]">User Settings</p>
           <h2 class="text-lg font-semibold text-[color:var(--color-text-primary)]">User Settings</h2>
         </div>
         <button
