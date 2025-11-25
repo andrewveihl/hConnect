@@ -388,13 +388,9 @@ const SPECIAL_MENTION_LOOKUP = new Map(
   }
 
   function flattenReplyChain(reply: ReplyPreview | null | undefined) {
-    const chain: ReplyPreview[] = [];
-    let current: ReplyPreview | null | undefined = reply;
-    while (current) {
-      chain.unshift(current);
-      current = current.parent ?? null;
-    }
-    return chain;
+    // Only show the immediate parent reply, not the entire chain
+    if (!reply) return [];
+    return [reply];
   }
 
   function replyAuthorLabel(reply: ReplyPreview | null | undefined) {
@@ -421,13 +417,18 @@ const SPECIAL_MENTION_LOOKUP = new Map(
     }
   }
 
+  function replyAvatar(entry: ReplyPreview | null | undefined) {
+    if (!entry?.authorId) return null;
+    return avatarUrlFor({ uid: entry.authorId });
+  }
+
   function shouldIgnoreReplyIntent(target: EventTarget | null) {
     if (!(target instanceof Element)) return false;
     return Boolean(target.closest('button, a, input, textarea, select, label, [data-reply-ignore]'));
   }
 
-  function handleReplyClick(event: MouseEvent | KeyboardEvent, message: ChatMessage) {
-    if (shouldIgnoreReplyIntent(event.target as EventTarget | null)) return;
+  function handleReplyClick(event: MouseEvent | KeyboardEvent, message: ChatMessage, force = false) {
+    if (!force && shouldIgnoreReplyIntent(event.target as EventTarget | null)) return;
     dispatch('reply', { message });
   }
 
@@ -1005,8 +1006,8 @@ onMount(() => {
   }
 
   .message-block--mine {
-    align-items: flex-end;
-    text-align: right;
+    align-items: flex-start;
+    text-align: left;
   }
 
   .message-block--other {
@@ -1018,11 +1019,12 @@ onMount(() => {
     width: 100%;
     display: flex;
     align-items: flex-start;
-    gap: 0.6rem;
+    gap: 0.65rem;
+    position: relative;
   }
 
   .message-layout--mine {
-    flex-direction: row-reverse;
+    flex-direction: row;
   }
 
   .message-layout--continued {
@@ -1040,7 +1042,7 @@ onMount(() => {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    padding-bottom: 1rem;
+    padding-bottom: 0.6rem;
     flex: 0 1 auto;
     align-self: flex-start;
     width: fit-content;
@@ -1048,9 +1050,9 @@ onMount(() => {
   }
 
   .message-content--mine {
-    align-items: flex-end;
-    text-align: right;
-    align-self: flex-end;
+    align-items: flex-start;
+    text-align: left;
+    align-self: flex-start;
   }
 
   .message-heading-row {
@@ -1132,9 +1134,9 @@ onMount(() => {
   }
 
   .message-avatar {
-    width: 2.5rem;
-    height: 2.5rem;
-    min-width: 2.5rem;
+    width: 2.2rem;
+    height: 2.2rem;
+    min-width: 2.2rem;
     border-radius: 9999px;
     border: 1px solid var(--chat-bubble-other-border);
     background: color-mix(in srgb, var(--chat-bubble-other-bg) 35%, transparent);
@@ -1143,6 +1145,8 @@ onMount(() => {
     overflow: hidden;
     box-shadow: 0 8px 20px rgba(6, 9, 12, 0.25);
     flex: 0 0 auto;
+    margin-top: 1.35rem;
+    transform: translateY(2px);
   }
 
   .message-layout--mine .message-avatar {
@@ -1162,14 +1166,14 @@ onMount(() => {
   }
 
   .message-body {
+    position: relative;
     margin-top: 0.1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.24rem;
+    gap: 0;
     max-width: 100%;
     align-items: flex-start;
-    align-self: flex-start;
-    width: fit-content;
+    align-self: stretch;
   }
 
   .message-action-bar {
@@ -1241,153 +1245,208 @@ onMount(() => {
     position: relative;
     display: inline-flex;
     flex-direction: column;
-    gap: 0.24rem;
-    align-items: flex-start;
-    width: fit-content;
+    gap: 0.2rem;
+    align-items: stretch;
+    width: 100%;
     max-width: 100%;
+    margin-left: 0;
+    margin-top: 0;
+  }
+
+  .message-body:has(.reply-thread) .message-payload {
+    margin-top: 0.24rem;
   }
 
   .message-payload--mine {
-    align-items: flex-end;
+    align-items: stretch;
+    margin-left: 0;
+  }
+  
+  .message-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    font-size: 0.94rem;
+    line-height: 1.2;
+    padding-left: 0;
   }
 
-  .reply-preview {
-    position: relative;
-    display: inline-flex;
-    flex-direction: column;
-    gap: 0.18rem;
-    padding: 0.55rem 0.95rem 0.55rem 1.25rem;
-    border-radius: 1.15rem;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 10px 20px rgba(6, 9, 12, 0.25);
-    max-width: min(520px, 100%);
-    align-self: flex-start;
+  .message-header__dot {
+    color: var(--text-55);
+    font-size: 0.8rem;
   }
 
-  .reply-preview--mine {
-    background: color-mix(in srgb, var(--chat-bubble-self-bg) 60%, transparent);
-    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 85%, transparent);
-    color: var(--chat-bubble-self-text);
-    align-self: flex-end;
+  .message-timestamp-inline {
+    font-size: 0.8rem;
+    color: var(--text-55);
   }
 
-  .reply-preview--other {
-    background: color-mix(in srgb, var(--chat-bubble-other-bg) 65%, transparent);
-    border-color: color-mix(in srgb, var(--chat-bubble-other-border) 80%, transparent);
-    color: var(--chat-bubble-other-text);
-  }
-
-  .reply-preview__indicator {
-    position: absolute;
-    left: 0.65rem;
-    top: 0.45rem;
-    bottom: 0.45rem;
-    width: 2px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    pointer-events: none;
-  }
-
-  .reply-preview--mine .reply-preview__indicator {
-    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 35%);
-  }
-
-  .reply-preview--other .reply-preview__indicator {
-    background: color-mix(in srgb, var(--chat-bubble-other-border) 80%, var(--color-accent) 30%);
-  }
-
-  .reply-preview__content {
+  .reply-thread {
     display: flex;
     flex-direction: column;
-    gap: 0.12rem;
-    min-width: 0;
+    align-items: flex-start;
+    gap: 0.15rem;
+    position: relative;
+    padding: 0;
+    margin: 0 0 0.35rem 0;
   }
 
-  .reply-preview__author {
-    font-weight: 600;
-    font-size: 0.78rem;
+  .reply-thread--mine {
+    align-items: flex-start;
+  }
+
+  .reply-elbow {
+    display: none;
+  }
+
+  .reply-elbow__horizontal {
+    display: none;
+  }
+
+  .reply-elbow__vertical {
+    display: none;
+  }
+
+  .reply-inline {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    color: var(--text-65);
+    font-size: 0.9rem;
+    padding: 0.35rem 0.5rem;
+    margin: 0;
+    position: relative;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 0.4rem;
+    border-left: 2px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+  }
+
+  .reply-thread--mine .reply-inline {
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    border-left-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  }
+
+  .reply-inline__avatar {
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 999px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+
+  .reply-inline__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .reply-inline__avatar span {
+    font-weight: 700;
+    font-size: 0.8rem;
     color: inherit;
   }
 
-  .reply-preview__text {
-    font-size: 0.78rem;
-    color: color-mix(in srgb, currentColor 80%, transparent);
-    word-break: break-word;
-    font-style: italic;
+  .reply-inline__text {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    flex-wrap: nowrap;
   }
 
+  .reply-inline__author {
+    font-weight: 700;
+    color: var(--text-80);
+    white-space: nowrap;
+  }
+
+  .reply-inline__snippet {
+    color: var(--text-60);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+@media (max-width: 640px) {
   .reply-thread {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.1rem;
+    padding: 0;
+    margin: 0 0 0.3rem 0;
+    gap: 0.2rem;
+    position: relative;
   }
 
   .reply-thread--mine {
-    align-items: flex-end;
+    padding: 0;
   }
 
-  .reply-thread__line {
-    width: 2px;
-    height: 0.65rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    display: inline-block;
+  .reply-inline {
+    padding: 0.3rem 0.45rem;
+    margin: 0;
+    font-size: 0.85rem;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 0.35rem;
+    border-left: 2px solid rgba(255, 255, 255, 0.2);
   }
 
-  .reply-thread__line--mine {
-    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 30%);
+  .reply-thread--mine .reply-inline {
+    background: rgba(255, 255, 255, 0.12);
+    border-left-color: rgba(255, 255, 255, 0.35);
   }
 
-  .reply-thread__line--other {
-    background: color-mix(in srgb, var(--chat-bubble-other-border) 75%, var(--color-accent) 30%);
+  .reply-elbow {
+    display: none;
   }
 
-  .reply-thread {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.1rem;
+  .reply-elbow__horizontal {
+    display: none;
   }
 
-  .reply-thread--mine {
-    align-items: flex-end;
+  .reply-elbow__vertical {
+    display: none;
   }
 
-  .reply-thread__line {
-    width: 2px;
-    height: 0.65rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    display: inline-block;
+  .reply-thread--mine .reply-inline__author {
+    color: rgba(255, 255, 255, 0.95);
   }
 
-  .reply-thread__line--mine {
-    background: color-mix(in srgb, var(--chat-bubble-self-border) 80%, var(--color-accent) 30%);
+  .reply-thread--mine .reply-inline__snippet {
+    color: rgba(255, 255, 255, 0.75);
   }
 
-  .reply-thread__line--other {
-    background: color-mix(in srgb, var(--chat-bubble-other-border) 75%, var(--color-accent) 30%);
+  .reply-inline__avatar {
+    width: 1.15rem;
+    height: 1.15rem;
   }
+
+  .reply-inline__avatar span {
+    font-size: 0.65rem;
+  }
+}
 
   .message-bubble {
     position: relative;
-    display: inline-block;
-    width: fit-content;
-    max-width: min(100%, 700px);
-    padding: 0.8rem 1.35rem;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    padding: 0.12rem 0;
     margin: 0.08rem 0;
-    border-radius: 1.35rem;
+    border-radius: 0.5rem;
     border: 0;
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.45;
+    line-height: 1.5;
     text-align: left;
-    font-size: clamp(1rem, 1.3vw, 1.18rem);
-    box-shadow: 0 12px 34px rgba(9, 12, 16, 0.25);
+    font-size: 1rem;
+    box-shadow: none;
     background-clip: padding-box;
     isolation: isolate;
     transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
+    color: var(--color-text-primary);
   }
 
   .system-message {
@@ -1402,38 +1461,26 @@ onMount(() => {
   }
 
   .message-bubble--mine {
-    background: var(--chat-bubble-self-bg);
-    color: var(--chat-bubble-self-text);
+    background: transparent;
+    color: var(--color-text-primary);
   }
 
   .message-bubble--other {
-    background: var(--chat-bubble-other-bg);
-    color: var(--chat-bubble-other-text);
+    background: transparent;
+    color: var(--color-text-primary);
   }
 
   .message-bubble--first-other::before,
   .message-bubble--first-mine::before {
-    content: '';
-    position: absolute;
-    bottom: 0.1rem;
-    width: 0.95rem;
-    height: 0.95rem;
-    pointer-events: none;
-    border-radius: 1rem;
+    content: none;
   }
 
   .message-bubble--first-other::before {
-    left: -0.45rem;
-    background: var(--chat-bubble-other-bg);
-    clip-path: polygon(0% 100%, 100% 0%, 100% 100%);
-    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.2);
+    content: none;
   }
 
   .message-bubble--first-mine::before {
-    right: -0.45rem;
-    background: var(--chat-bubble-self-bg);
-    clip-path: polygon(100% 100%, 0% 0%, 0% 100%);
-    box-shadow: 0 8px 18px rgba(9, 12, 16, 0.2);
+    content: none;
   }
 
   .message-bubble--first-other::after,
@@ -1442,9 +1489,9 @@ onMount(() => {
   }
 
   .message-bubble--compact {
-    text-align: center;
-    padding-left: 1.4rem;
-    padding-right: 1.4rem;
+    text-align: left;
+    padding-left: 0;
+    padding-right: 0;
     font-size: clamp(1.05rem, 1.3vw, 1.22rem);
   }
 
@@ -1467,7 +1514,80 @@ onMount(() => {
     }
 
     .message-layout--mine.message-layout--continued {
-      padding-right: calc(1.75rem + 0.45rem);
+      padding-right: 0;
+      padding-left: 0;
+    }
+
+    /* Mobile: Hide avatar for user messages */
+    .message-layout--mine .message-avatar {
+      display: none;
+    }
+
+    /* Mobile: Show avatar for other users */
+    .message-layout:not(.message-layout--mine) .message-avatar {
+      width: 2rem;
+      height: 2rem;
+      min-width: 2rem;
+    }
+
+    /* Mobile: User messages styled with teal background */
+    .message-bubble--mine {
+      background: #33c8bf !important;
+      color: #ffffff !important;
+      border-radius: 1.25rem;
+      padding: 0.7rem 0.95rem !important;
+    }
+
+    .message-bubble--mine .chat-mention {
+      color: #ffffff !important;
+      background: rgba(0, 0, 0, 0.15) !important;
+      border-color: rgba(0, 0, 0, 0.2) !important;
+      text-shadow: none !important;
+    }
+
+    /* Mobile: Other users' messages with subtle background */
+    .message-bubble--other {
+      background: rgba(255, 255, 255, 0.08) !important;
+      color: var(--color-text-primary) !important;
+      border-radius: 1.25rem;
+      padding: 0.7rem 0.95rem !important;
+    }
+
+    /* Mobile: User message content takes full width without avatar */
+    .message-layout--mine .message-content {
+      width: 100%;
+      max-width: 85%;
+      margin-left: auto;
+    }
+
+    /* Mobile: Other users' content aligns left with avatar */
+    .message-layout:not(.message-layout--mine) .message-content {
+      max-width: calc(100% - 2.5rem);
+    }
+
+    /* Adjust author name color for user messages on mobile */
+    .message-author--mine {
+      color: rgba(255, 255, 255, 0.95) !important;
+    }
+
+    /* Adjust timestamp color for user messages on mobile */
+    .message-bubble--mine .message-timestamp-inline {
+      color: rgba(255, 255, 255, 0.7) !important;
+    }
+
+    .message-bubble--mine .message-header__dot {
+      color: rgba(255, 255, 255, 0.6) !important;
+    }
+
+    /* Adjust action bar positioning for mobile */
+    .message-action-bar--mine {
+      right: auto;
+      left: -2.5rem;
+    }
+
+    .message-action-bar--other {
+      left: auto;
+      right: -2.5rem;
     }
   }
 
@@ -2322,15 +2442,8 @@ onMount(() => {
       {@const isSystem = (m as any)?.type === 'system'}
       {@const mine = !isSystem && isMine(m)}
       {@const continued = !isSystem && i > 0 && sameBlock(messages[i - 1], m)}
-      {@const firstInBlock = !continued}
-      {@const nextInBlock = !isSystem && i < messages.length - 1 && sameBlock(m, messages[i + 1])}
-      {@const lastInBlock = !isSystem && !nextInBlock}
-      {@const isReplyTarget = !isSystem && replyTargetId && (m?.id === replyTargetId || (m as any)?.messageId === replyTargetId)}
-      {@const showBubbleTail = lastInBlock || Boolean(isReplyTarget)}
       {@const reactions = isSystem ? [] : reactionsFor(m)}
       {@const hasReactions = reactions.length > 0}
-      {@const sameMinuteAsPrev = !isSystem && i > 0 && sameMinute(messages[i - 1], m)}
-      {@const sameMinuteAsNext = !isSystem && i < messages.length - 1 && sameMinute(m, messages[i + 1])}
       {@const minuteKey = isSystem ? null : minuteKeyFor(m)}
       {@const minuteHovered = minuteKey && hoveredMinuteKey === minuteKey}
       {@const showAdd = !isSystem && Boolean(
@@ -2371,42 +2484,46 @@ onMount(() => {
           class={`message-block w-full max-w-3xl ${mine ? 'message-block--mine' : 'message-block--other'} ${minuteHovered ? 'is-minute-hovered' : ''}`}
           style={`margin-top: ${(continued ? 0 : 0.15)}rem;`}
         >
-          {#if firstInBlock}
-            <div class={`message-heading-row ${mine ? 'message-heading-row--mine' : ''}`}>
-              <span class={`message-author ${mine ? 'message-author--mine' : ''}`}>{mine ? 'You' : nameFor(m)}</span>
-            </div>
-          {/if}
-
           <div
-            class={`message-layout ${mine ? 'message-layout--mine' : ''} ${continued ? 'message-layout--continued' : ''}`}
+            class={`message-layout ${mine ? 'message-layout--mine' : ''} ${continued ? 'message-layout--continued' : ''} ${replyRef ? 'message-layout--has-reply' : ''}`}
           >
-            {#if firstInBlock}
-              <div class="message-avatar">
-                {#if avatarUrlFor(m)}
-                  <img src={avatarUrlFor(m)} alt={nameFor(m)} loading="lazy" />
-                {:else}
-                  <span>{initialsFor(nameFor(m))}</span>
-                {/if}
-              </div>
-            {/if}
+            <div class="message-avatar">
+              {#if avatarUrlFor(m)}
+                <img src={avatarUrlFor(m)} alt={nameFor(m)} loading="lazy" />
+              {:else}
+                <span>{initialsFor(nameFor(m))}</span>
+              {/if}
+            </div>
 
             <div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
               <div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
-                {#if replyRef && !hideReplyPreview}
-                  {@const replyChain = flattenReplyChain(replyRef)}
-                  <div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
-                    {#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
-                      {@const entryMine = currentUserId && entry.authorId === currentUserId}
-                      <div class={`reply-preview ${entryMine ? 'reply-preview--mine' : 'reply-preview--other'}`}>
-                        <div class="reply-preview__indicator" aria-hidden="true"></div>
-                        <div class="reply-preview__content">
-                          <div class="reply-preview__author">{replyAuthorLabel(entry)}</div>
-                          <div class="reply-preview__text">{replyPreviewText(entry)}</div>
+                    {#if replyRef && !hideReplyPreview}
+                      {@const replyChain = flattenReplyChain(replyRef)}
+                      {#if replyChain.length}
+                        <div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
+                      <span class="reply-elbow" aria-hidden="true">
+                        <span class="reply-elbow__vertical"></span>
+                        <span class="reply-elbow__horizontal"></span>
+                      </span>
+                          {#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
+                            {@const entryAvatar = replyAvatar(entry)}
+                            {@const entryAuthor = replyAuthorLabel(entry)}
+                            <div class="reply-inline">
+                              <div class="reply-inline__avatar">
+                            {#if entryAvatar}
+                              <img src={entryAvatar} alt={entryAuthor} loading="lazy" />
+                            {:else}
+                              <span>{initialsFor(entryAuthor)}</span>
+                            {/if}
+                          </div>
+                          <div class="reply-inline__text">
+                            <span class="reply-inline__author">{entryAuthor}</span>
+                            <span class="reply-inline__snippet">{replyPreviewText(entry)}</span>
+                          </div>
                         </div>
-                      </div>
-                      <span class={`reply-thread__line ${entryMine ? 'reply-thread__line--mine' : 'reply-thread__line--other'}`} aria-hidden="true"></span>
-                    {/each}
-                  </div>
+                      {/each}
+                    </div>
+                  {/if}
                 {/if}
                 <div
                   class={`message-payload ${mine ? 'message-payload--mine' : ''}`}
@@ -2420,6 +2537,13 @@ onMount(() => {
                     }
                   }}
                 >
+                  <div class="message-header">
+                    <span class={`message-author ${mine ? 'message-author--mine' : ''}`}>{mine ? 'You' : nameFor(m)}</span>
+                    {#if (m as any).createdAt}
+                      <span class="message-header__dot" aria-hidden="true">•</span>
+                      <span class="message-timestamp-inline">{formatTime((m as any).createdAt)}</span>
+                    {/if}
+                  </div>
                   {#if currentUserId}
                     <div class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}>
                       <button
@@ -2430,7 +2554,7 @@ onMount(() => {
                         onclick={(event) => {
                           event.stopPropagation();
                           event.preventDefault();
-                          handleReplyClick(event, m);
+                          handleReplyClick(event, m, true);
                         }}
                         onpointerdown={(event) => event.stopPropagation()}
                       >
@@ -2475,7 +2599,7 @@ onMount(() => {
                   {#if !m.type || m.type === 'text' || String(m.type) === 'normal'}
                     {@const compactBubble = shouldCenterBubble(m)}
                     <div
-                      class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${showBubbleTail ? (mine ? 'message-bubble--first-mine' : 'message-bubble--first-other') : ''} ${compactBubble ? 'message-bubble--compact' : ''}`}
+                      class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${compactBubble ? 'message-bubble--compact' : ''}`}
                     >
                       {#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
                         {#if isMentionSegment(segment)}
@@ -2666,14 +2790,6 @@ onMount(() => {
                     </div>
                   {/if}
                 </div>
-                {#if !isSystem && (m as any).createdAt && !sameMinuteAsNext}
-                  <div
-                    class={`message-inline-timestamp ${mine ? 'message-inline-timestamp--mine' : ''} ${showTimestampMobile ? 'is-mobile-visible' : ''}`}
-                    aria-hidden={!hasHoverSupport && !showTimestampMobile}
-                  >
-                    {formatTime((m as any).createdAt)}
-                  </div>
-                {/if}
               </div>
 
               </div>
