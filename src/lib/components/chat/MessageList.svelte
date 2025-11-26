@@ -493,6 +493,7 @@ let isMobileViewport = $state(false);
   let hoveredMessageId: string | null = $state(null);
   let touchActionMessageId: string | null = $state(null);
   let hoveredMinuteKey: string | null = $state(null);
+  let hoverLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
   let reactionMenuFor: string | null = $state(null);
   let reactionMenuAnchor: HTMLElement | null = null;
   let reactionMenuEl: HTMLDivElement | null = $state(null);
@@ -801,6 +802,11 @@ onMount(() => {
 
   function onMessagePointerEnter(messageId: string, minuteKey: string | null) {
     if (!hasHoverSupport) return;
+    // Clear any pending timeout when re-entering
+    if (hoverLeaveTimeout) {
+      clearTimeout(hoverLeaveTimeout);
+      hoverLeaveTimeout = null;
+    }
     hoveredMessageId = messageId;
     hoveredMinuteKey = minuteKey;
   }
@@ -808,13 +814,28 @@ onMount(() => {
   function onMessagePointerLeave(messageId: string, minuteKey: string | null) {
     if (!hasHoverSupport) return;
     if (reactionMenuFor === messageId) return;
-    hoveredMessageId = null;
-    if (hoveredMinuteKey === minuteKey) {
-      hoveredMinuteKey = null;
+
+    // Add a small delay before hiding the action bar
+    // This prevents it from disappearing when moving slowly from message to action bar
+    if (hoverLeaveTimeout) {
+      clearTimeout(hoverLeaveTimeout);
     }
+
+    hoverLeaveTimeout = setTimeout(() => {
+      hoveredMessageId = null;
+      if (hoveredMinuteKey === minuteKey) {
+        hoveredMinuteKey = null;
+      }
+      hoverLeaveTimeout = null;
+    }, 150);
   }
 
   function onMessageFocusIn(messageId: string, minuteKey: string | null) {
+    // Clear any pending timeout when focusing
+    if (hoverLeaveTimeout) {
+      clearTimeout(hoverLeaveTimeout);
+      hoverLeaveTimeout = null;
+    }
     hoveredMessageId = messageId;
     hoveredMinuteKey = minuteKey;
   }
@@ -823,10 +844,19 @@ onMount(() => {
     const next = event.relatedTarget as HTMLElement | null;
     if (next && next.closest?.(`[data-message-id="${messageId}"]`)) return;
     if (reactionMenuFor === messageId) return;
-    hoveredMessageId = null;
-    if (hoveredMinuteKey === minuteKey) {
-      hoveredMinuteKey = null;
+
+    // Add a small delay for focus out as well
+    if (hoverLeaveTimeout) {
+      clearTimeout(hoverLeaveTimeout);
     }
+
+    hoverLeaveTimeout = setTimeout(() => {
+      hoveredMessageId = null;
+      if (hoveredMinuteKey === minuteKey) {
+        hoveredMinuteKey = null;
+      }
+      hoverLeaveTimeout = null;
+    }, 150);
   }
 
   function clearLongPressTimer() {
@@ -1186,6 +1216,7 @@ onMount(() => {
     transition: opacity 120ms ease, transform 120ms ease;
     direction: ltr;
     transform: translateY(calc(-100% - 0.35rem));
+    padding-bottom: 0.35rem;
   }
 
   .message-action-bar--other {
@@ -2545,7 +2576,11 @@ onMount(() => {
                     {/if}
                   </div>
                   {#if currentUserId}
-                    <div class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}>
+                    <div
+                      class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}
+                      onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
+                      onpointerleave={() => onMessagePointerLeave(m.id, minuteKey)}
+                    >
                       <button
                         type="button"
                         class="message-action"
