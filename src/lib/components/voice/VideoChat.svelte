@@ -4,9 +4,9 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { get } from 'svelte/store';
-  import { getDb } from '$lib/firebase';
-  import { user } from '$lib/stores/user';
-  import {
+import { getDb } from '$lib/firebase';
+import { user } from '$lib/stores/user';
+import {
     appendVoiceDebugEvent,
     removeVoiceDebugSection,
     setVoiceDebugSection,
@@ -14,9 +14,22 @@
   } from '$lib/utils/voiceDebugContext';
   import { copyTextToClipboard } from '$lib/utils/clipboard';
 import { resolveProfilePhotoURL } from '$lib/utils/profile';
-  import { voiceSession } from '$lib/stores/voice';
+import { voiceSession } from '$lib/stores/voice';
 import type { VoiceSession } from '$lib/stores/voice';
   import { voiceActivity } from '$lib/stores/voiceActivity';
+  import {
+    loadVoicePreferences,
+    voicePreferences,
+    type VoicePreferences as UserVoicePreferences
+  } from '$lib/stores/voicePreferences';
+  import {
+    resetVoiceClientState,
+    setVoiceClientControls,
+    updateVoiceClientState
+  } from '$lib/stores/voiceClient';
+  import { openSettings } from '$lib/stores/settingsUI';
+  import MediaStage from '$lib/components/voice/MediaStage.svelte';
+  const MediaStageAny = MediaStage as any;
 import {
   PUBLIC_ENABLE_TURN_FALLBACK,
   PUBLIC_TURN_URLS,
@@ -149,7 +162,20 @@ import {
   let audioRefs = new Map<string, HTMLAudioElement>();
   let videoRefs = new Map<string, HTMLVideoElement>();
   let participantControls = $state(new Map<string, ParticipantControls>());
+  let participantModeration = $state(
+    new Map<string, { serverMuted: boolean; serverDeafened: boolean }>()
+  );
+  let speakingLevels = $state(new Map<string, number>());
+  let chatMessages = $state<{ id: string; text: string; ts: number; author: string }[]>([
+    { id: 'seed-1', text: 'Welcome to call chat. Say hi!', ts: Date.now(), author: 'System' }
+  ]);
+  let chatDraft = $state('');
+  let sideChatWidth = $state(360);
+  let chatResizeActive = $state(false);
+  let chatResizeStartX = 0;
+  let chatResizeStartWidth = 360;
   let menuOpenFor = $state<string | null>(null);
+  let volumeMenu: { uid: string; x: number; y: number } | null = $state(null);
   let longPressTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let isTouchDevice = false;
 
@@ -193,6 +219,7 @@ import {
   let participants = $state<ParticipantState[]>([]);
   let participantMedia = $state<ParticipantMedia[]>([]);
   let participantTiles = $state<ParticipantTile[]>([]);
+  let speakingNow = $derived(new Set(speakingLevels.keys()));
   let session: VoiceSession | null = null;
   let activeSessionKey = $state<string | null>(null);
   let sessionQueue: Promise<void> = Promise.resolve();
@@ -205,8 +232,16 @@ import {
   });
   let isJoined = $state(false);
   let isConnecting = $state(false);
-  let isMicMuted = $state(true);
-  let isCameraOff = $state(true);
+  const initialVoicePrefs = loadVoicePreferences();
+  let currentPrefs: UserVoicePreferences = initialVoicePrefs;
+  let lastPrefs: UserVoicePreferences = initialVoicePrefs;
+  let prefsStop = voicePreferences.subscribe((prefs) => {
+    lastPrefs = currentPrefs;
+    currentPrefs = prefs;
+    applyPreferenceChanges(lastPrefs, currentPrefs);
+  });
+  let isMicMuted = $state(initialVoicePrefs.muteOnJoin);
+  let isCameraOff = $state(initialVoicePrefs.videoOffOnJoin);
   let remoteConnected = $state(false);
   let screenStream: MediaStream | null = null;
   let isScreenSharing = $state(false);
@@ -214,14 +249,42 @@ import {
 let shouldRestoreCameraOnShareEnd = false;
 let audioNeedsUnlock = $state(false);
 let isPlaybackMuted = $state(false);
-let inactivityTimer: number | null = null;
-let voiceActivityUnsub: (() => void) | null = null;
-let visibilityUnsub: (() => void) | null = null;
+  let inactivityTimer: number | null = null;
+  let voiceActivityUnsub: (() => void) | null = null;
+  let visibilityUnsub: (() => void) | null = null;
   interface Props {
     layout?: 'standalone' | 'embedded';
+    sidePanelOpen?: boolean;
+    sidePanelTab?: 'chat' | 'members';
+    stageOnly?: boolean;
+    showChatToggle?: boolean;
   }
 
-  let { layout = 'standalone' }: Props = $props();
+  let {
+    layout = 'standalone',
+    sidePanelOpen = false,
+    sidePanelTab = 'chat',
+    stageOnly = false,
+    showChatToggle = true
+  }: Props = $props();
+  const UI_PREFS_STORAGE_KEY = 'hconnect:voice:ui-prefs';
+  type VoiceUiPrefs = {
+    gridMode: 'equal' | 'focus';
+    showSelfInGrid: boolean;
+  };
+  let gridMode = $state<VoiceUiPrefs['gridMode']>('equal');
+  let showSelfInGrid = $state(true);
+  let lastActiveSpeaker = $state<string | null>(null);
+  let controlsVisible = $state(false);
+  let controlHideTimer: ReturnType<typeof setTimeout> | null = null;
+  const CONTROL_HIDE_DELAY_MS = 1800;
+  let callShellEl = $state<HTMLElement | null>(null);
+  let callStageEl = $state<HTMLElement | null>(null);
+  let isFullscreen = $state(false);
+  let popoutMode = $state(false);
+  let moreMenuOpen = $state(false);
+  let selfPreviewEl = $state<HTMLVideoElement | null>(null);
+  const showChrome = $derived(true);
   let compactMediaQuery: MediaQueryList | null = null;
   let compactMatch = $state(false);
   let isCompact = $state(false);
@@ -235,6 +298,39 @@ let visibilityUnsub: (() => void) | null = null;
   let publishedCandidateCount = $state(0);
   let appliedCandidateCount = $state(0);
 
+  function readUiPrefs(): VoiceUiPrefs {
+    if (!browser) return { gridMode: 'equal', showSelfInGrid: true };
+    try {
+      const raw = localStorage.getItem(UI_PREFS_STORAGE_KEY);
+      if (!raw) return { gridMode: 'equal', showSelfInGrid: true };
+      const parsed = JSON.parse(raw);
+      const gridMode = parsed?.gridMode === 'focus' ? 'focus' : 'equal';
+      const showSelfInGrid = parsed?.showSelfInGrid !== false;
+      return { gridMode, showSelfInGrid };
+    } catch {
+      return { gridMode: 'equal', showSelfInGrid: true };
+    }
+  }
+
+  function persistUiPrefs(prefs: VoiceUiPrefs) {
+    if (!browser) return;
+    try {
+      localStorage.setItem(UI_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+      /* ignore storage failures */
+    }
+  }
+
+  run(() => {
+    const prefs = readUiPrefs();
+    gridMode = prefs.gridMode;
+    showSelfInGrid = prefs.showSelfInGrid;
+  });
+
+  run(() => {
+    persistUiPrefs({ gridMode, showSelfInGrid });
+  });
+
   type AudioMonitor = {
     stream: MediaStream;
     source: MediaStreamAudioSourceNode;
@@ -246,6 +342,12 @@ let visibilityUnsub: (() => void) | null = null;
 
   let audioContext: AudioContext | null = null;
   let audioMonitors = new Map<string, AudioMonitor>();
+  type AudioPlaybackNode = {
+    stream: MediaStream;
+    source: MediaStreamAudioSourceNode;
+    gain: GainNode;
+  };
+  let audioPlayback = new Map<string, AudioPlaybackNode>();
   let speakingParticipants = $state(new Set<string>());
   let permissionPreflight: Promise<void> | null = null;
   let permissionWarningShown = false;
@@ -281,7 +383,12 @@ let visibilityUnsub: (() => void) | null = null;
   let debugPanelDrag: DebugPanelDragState | null = null;
   let isDebugPanelDragging = $state(false);
   let debugPanelDrawerEl: HTMLElement | null = $state(null);
-  const dispatch = createEventDispatcher<{ openMobileChat: void }>();
+  const dispatch = createEventDispatcher<{
+    openMobileChat: void;
+    toggleSideChat: void;
+    toggleSideMembers: void;
+    openChannelChat: void;
+  }>();
 
   const DEFAULT_STUN_SERVERS = [
     'stun:stun.l.google.com:19302',
@@ -1265,6 +1372,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const next = new Set(speakingParticipants);
     if (speaking) {
       next.add(uid);
+      lastActiveSpeaker = uid;
+      speakingLevels = new Map(speakingLevels).set(uid, Date.now());
     } else {
       next.delete(uid);
     }
@@ -1589,6 +1698,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const keys = Array.from(audioMonitors.keys());
     keys.forEach((uid) => stopAudioMonitor(uid));
     speakingParticipants = new Set();
+    lastActiveSpeaker = null;
     if (audioContext && audioMonitors.size === 0) {
       audioContext.suspend?.().catch(() => {});
     }
@@ -1597,6 +1707,9 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   let statusMessage = $state('');
   let errorMessage = $state('');
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let callStartedAt: number | null = null;
+  let callDuration = $state('00:00');
+  let callTimer: ReturnType<typeof setInterval> | null = null;
   const RECONNECT_DELAY_MS = 3500;
   let lastPresencePayload: Record<string, unknown> | null = null;
   let presenceDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -1627,7 +1740,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
 
-  const DEFAULT_VOLUME = 0.85;
+  const DEFAULT_VOLUME = 1;
   const STORAGE_PREFIX = 'hconnect:voice:controls:';
 
   type QuickStatItem = {
@@ -1721,15 +1834,18 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const onPointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof HTMLElement)) {
         menuOpenFor = null;
+        moreMenuOpen = false;
         return;
       }
       if (!event.target.closest('[data-voice-menu]')) {
         menuOpenFor = null;
+        moreMenuOpen = false;
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         menuOpenFor = null;
+        moreMenuOpen = false;
         if (debugPanelVisible) {
           toggleDebugPanel(false);
           event.preventDefault();
@@ -1751,6 +1867,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         emitVoiceActivity('document-visible');
       }
     };
+    let onFullscreenChange: (() => void) | null = null;
 
     if (browser && typeof window !== 'undefined') {
       let storedDebug = false;
@@ -1796,8 +1913,15 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       window.addEventListener('pointerdown', onPointerDown);
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('resize', onResize);
+      onFullscreenChange = () => {
+        isFullscreen = !!document.fullscreenElement;
+        if (!isFullscreen) {
+          showControlsBar();
+        }
+      };
       if (typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', onVisibilityChange);
+        document.addEventListener('fullscreenchange', onFullscreenChange);
         visibilityUnsub = () => document.removeEventListener('visibilitychange', onVisibilityChange);
       }
       compactMediaQuery = window.matchMedia('(max-width: 780px)');
@@ -1815,6 +1939,15 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         window.removeEventListener('resize', onResize);
         visibilityUnsub?.();
         visibilityUnsub = null;
+        if (typeof document !== 'undefined') {
+          if (onFullscreenChange) {
+            try {
+              document.removeEventListener('fullscreenchange', onFullscreenChange);
+            } catch {
+              /* ignore cleanup errors */
+            }
+          }
+        }
         if (compactMediaQuery && handleCompactChange) {
           compactMediaQuery.removeEventListener('change', handleCompactChange);
           compactMediaQuery = null;
@@ -1849,6 +1982,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     voiceUnsubscribe?.();
     serverMetaUnsub?.();
     memberUnsub?.();
+    prefsStop?.();
+    resetVoiceClientState();
     hangUp().catch(() => {});
     removeVoiceDebugSection('call.session');
     removeVoiceDebugSection('call.participants');
@@ -1864,6 +1999,14 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     return name.trim().charAt(0).toUpperCase() || '?';
   }
 
+  function resolveGridColumns(count: number): number {
+    if (count <= 1) return 1;
+    if (count === 2) return 2;
+    if (count <= 4) return 2;
+    if (count <= 9) return 3;
+    return typeof window !== 'undefined' && window.innerWidth < 1280 ? 3 : 4;
+  }
+
   function storageKeyForControls(uid: string): string {
     const self = currentUserId ?? 'anon';
     return `${STORAGE_PREFIX}${self}:${uid}`;
@@ -1877,7 +2020,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       const parsed = JSON.parse(raw) as Partial<ParticipantControls>;
       const volume =
         typeof parsed.volume === 'number' && Number.isFinite(parsed.volume)
-          ? Math.min(Math.max(parsed.volume, 0), 1)
+          ? Math.min(Math.max(parsed.volume, 0), 2)
           : DEFAULT_VOLUME;
       const muted = typeof parsed.muted === 'boolean' ? parsed.muted : false;
       return { volume, muted };
@@ -1911,12 +2054,19 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   function applyParticipantControls(uid: string) {
     const controls = participantControls.get(uid);
     if (!controls) return;
+    const moderation = participantModeration.get(uid);
+    const forcedMute = !!(moderation?.serverMuted || moderation?.serverDeafened);
     const audio = audioRefs.get(uid);
     if (audio) {
-      const shouldMute = controls.muted || isPlaybackMuted;
-      audio.volume = shouldMute ? 0 : controls.volume;
-      audio.muted = shouldMute;
-      if (!shouldMute) {
+      const clampedVolume = Math.min(Math.max(controls.volume, 0), 2);
+      const shouldMute = controls.muted || isPlaybackMuted || forcedMute;
+      const hasPlaybackNode = audioPlayback.has(uid);
+      const fallbackVolume = shouldMute ? 0 : Math.min(clampedVolume, 1);
+      const stream = uid === currentUserId ? null : remoteStreams.get(uid) ?? null;
+      ensureAudioPlayback(uid, stream, shouldMute, shouldMute ? 0 : clampedVolume);
+      audio.volume = hasPlaybackNode ? 0 : fallbackVolume;
+      audio.muted = shouldMute || hasPlaybackNode;
+      if (!shouldMute && !hasPlaybackNode) {
         audio.play?.().catch(() => {});
       }
     }
@@ -1948,7 +2098,86 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     applyParticipantControls(uid);
   }
 
+  function moderationState(uid: string) {
+    return participantModeration.get(uid) ?? { serverMuted: false, serverDeafened: false };
+  }
+
+  function toggleServerMute(uid: string) {
+    const current = moderationState(uid);
+    const next = { ...current, serverMuted: !current.serverMuted };
+    participantModeration = new Map(participantModeration).set(uid, next);
+    applyParticipantControls(uid);
+  }
+
+  function toggleServerDeafen(uid: string) {
+    const current = moderationState(uid);
+    const next = {
+      ...current,
+      serverMuted: true,
+      serverDeafened: !current.serverDeafened
+    };
+    participantModeration = new Map(participantModeration).set(uid, next);
+    applyParticipantControls(uid);
+  }
+
+  function destroyAudioPlayback(uid: string) {
+    const existing = audioPlayback.get(uid);
+    if (!existing) return;
+    try {
+      existing.source.disconnect();
+    } catch {
+      /* ignore disconnect errors */
+    }
+    try {
+      existing.gain.disconnect();
+    } catch {
+      /* ignore disconnect errors */
+    }
+    audioPlayback.delete(uid);
+  }
+
+  function ensureAudioPlayback(uid: string, stream: MediaStream | null, muted: boolean, volume: number) {
+    if (!browser || uid === currentUserId || !stream) {
+      destroyAudioPlayback(uid);
+      return;
+    }
+    const existing = audioPlayback.get(uid);
+    if (existing?.stream === stream) {
+      existing.gain.gain.value = muted ? 0 : volume;
+      return;
+    }
+    destroyAudioPlayback(uid);
+    const ctx = ensureAudioContext();
+    if (!ctx) return;
+    try {
+      const source = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      gain.gain.value = muted ? 0 : volume;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      audioPlayback.set(uid, { stream, source, gain });
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Failed to create audio playback node', err);
+    }
+  }
+
+  function applyOutputDeviceAll() {
+    if (!currentPrefs.outputDeviceId) return;
+    audioRefs.forEach((audio) => {
+      const sink = (audio as any)?.setSinkId;
+      if (typeof sink === 'function') {
+        sink.call(audio, currentPrefs.outputDeviceId).catch(() => {});
+      }
+    });
+  }
+
   function attachStreamToRefs(uid: string, stream: MediaStream | null) {
+    if (!stream) {
+      destroyAudioPlayback(uid);
+    }
     const audio = audioRefs.get(uid);
     if (audio && audio.srcObject !== stream) {
       audio.srcObject = stream;
@@ -1968,6 +2197,10 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
               });
           } else {
             audioNeedsUnlock = false;
+          }
+          const sink = (audio as any)?.setSinkId;
+          if (typeof sink === 'function' && currentPrefs.outputDeviceId) {
+            sink.call(audio, currentPrefs.outputDeviceId).catch(() => {});
           }
         } catch (err: any) {
           if (err?.name === 'NotAllowedError') {
@@ -2280,6 +2513,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       watchedMemberKey = null;
       serverOwnerId = null;
       myPerms = null;
+      resetVoiceClientState();
       if (hadSession || isJoined || isConnecting) {
         await hangUp();
       }
@@ -2296,6 +2530,11 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
     serverId = next.serverId;
     channelId = next.channelId;
+
+    if (!sameSession) {
+      isMicMuted = next.joinMuted ?? currentPrefs.muteOnJoin;
+      isCameraOff = next.joinVideoOff ?? currentPrefs.videoOffOnJoin;
+    }
 
     if (sameSession) {
       if (!isJoined && !isConnecting) {
@@ -2919,11 +3158,39 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     capturePeerDiagnostics(connection, 'sync-local-tracks');
   }
 
-  async function acquireTrack(kind: 'audio' | 'video'): Promise<boolean> {
-    const constraints: MediaStreamConstraints = {
-      audio: kind === 'audio',
-      video: kind === 'video'
+  function videoConstraintsFromPrefs(prefs: UserVoicePreferences) {
+    const quality = prefs.videoQuality ?? '720p';
+    const map: Record<UserVoicePreferences['videoQuality'], { width: number; height: number }> = {
+      '1080p': { width: 1920, height: 1080 },
+      '720p': { width: 1280, height: 720 },
+      '480p': { width: 854, height: 480 }
     };
+    const target = map[quality];
+    return {
+      width: { ideal: target.width },
+      height: { ideal: target.height }
+    };
+  }
+
+  async function acquireTrack(kind: 'audio' | 'video', prefs: UserVoicePreferences = currentPrefs): Promise<boolean> {
+    const constraints: MediaStreamConstraints =
+      kind === 'audio'
+        ? {
+            audio: {
+              deviceId: prefs.inputDeviceId ? { exact: prefs.inputDeviceId } : undefined,
+              echoCancellation: prefs.echoCancellation,
+              noiseSuppression: prefs.noiseSuppression,
+              autoGainControl: prefs.autoGain
+            },
+            video: false
+          }
+        : {
+            audio: false,
+            video: {
+              deviceId: prefs.cameraDeviceId ? { exact: prefs.cameraDeviceId } : undefined,
+              ...videoConstraintsFromPrefs(prefs)
+            }
+          };
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -3871,7 +4138,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
       await updateParticipantPresence({ joinedAt: serverTimestamp(), status: 'active' as const });
       isJoined = true;
-      statusMessage = 'Waiting for others to join...';
+      startCallTimer();
       emitVoiceActivity('joined');
       voiceDebug('joinChannel ready', { joinRole, isOfferer });
     callUnsub = onSnapshot(docRef, (snapshot) => {
@@ -4155,6 +4422,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
     clearReconnectTimer();
     clearInactivityTimer();
+    stopCallTimer();
     lastPresencePayload = null;
     lastParticipantsSnapshot = null;
     if (presenceDebounce) {
@@ -4275,6 +4543,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       node.pause?.();
       node.srcObject = null;
     });
+    audioPlayback.forEach((_, uid) => destroyAudioPlayback(uid));
+    audioPlayback = new Map();
     audioRefs = new Map();
     videoRefs = new Map();
     if (localVideoEl) {
@@ -4574,6 +4844,109 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     audioRefs.forEach((_, uid) => applyParticipantControls(uid));
   }
 
+  function toggleDeafenSelf() {
+    const next = !isPlaybackMuted;
+    isPlaybackMuted = next;
+    if (next) {
+      isMicMuted = true;
+    }
+    audioRefs.forEach((_, uid) => applyParticipantControls(uid));
+    showControlsBar();
+  }
+
+  function toggleGridMode() {
+    gridMode = gridMode === 'equal' ? 'focus' : 'equal';
+    persistUiPrefs({ gridMode, showSelfInGrid });
+  }
+
+  function toggleShowSelf() {
+    showSelfInGrid = !showSelfInGrid;
+    persistUiPrefs({ gridMode, showSelfInGrid });
+    showControlsBar();
+  }
+
+  function openVolumeMenu(event: MouseEvent, uid: string) {
+    event.preventDefault();
+    menuOpenFor = null;
+    const controls = getParticipantControls(uid);
+    setParticipantVolume(uid, controls.volume);
+    volumeMenu = { uid, x: event.clientX, y: event.clientY };
+  }
+
+  function closeVolumeMenu() {
+    volumeMenu = null;
+  }
+
+  function applyPreferenceChanges(prev: UserVoicePreferences, next: UserVoicePreferences) {
+    if (prev.outputDeviceId !== next.outputDeviceId) {
+      applyOutputDeviceAll();
+    }
+    const audioChanged =
+      prev.inputDeviceId !== next.inputDeviceId ||
+      prev.echoCancellation !== next.echoCancellation ||
+      prev.noiseSuppression !== next.noiseSuppression ||
+      prev.autoGain !== next.autoGain;
+    if (audioChanged && !isMicMuted && isJoined) {
+      acquireTrack('audio', next).catch(() => {});
+    }
+    const videoChanged =
+      prev.cameraDeviceId !== next.cameraDeviceId || prev.videoQuality !== next.videoQuality;
+    if (videoChanged && !isCameraOff && isJoined) {
+      acquireTrack('video', next).catch(() => {});
+    }
+  }
+
+  const VOICE_TAB_KEY = 'hconnect:settings:voiceTab';
+  function setVoiceSettingsTab(tab: 'voice' | 'video') {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(VOICE_TAB_KEY, tab);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  function openVoiceSettingsPanel(tab: 'voice' | 'video' = 'voice') {
+    setVoiceSettingsTab(tab);
+    openSettings({ section: 'voice' as any });
+    moreMenuOpen = false;
+  }
+
+  function openSelfPreview() {
+    showSelfInGrid = false;
+    persistUiPrefs({ gridMode, showSelfInGrid });
+    showControlsBar();
+  }
+
+  function toggleSideChatPanel() {
+    dispatch('toggleSideChat');
+    showControlsBar();
+  }
+
+  function toggleSideMembersPanel() {
+    dispatch('toggleSideMembers');
+    showControlsBar();
+  }
+
+  function togglePopout() {
+    popoutMode = !popoutMode;
+    showControlsBar();
+    scheduleControlsHide();
+  }
+
+  async function toggleFullscreen() {
+    if (!browser) return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (callShellEl?.requestFullscreen) {
+        await callShellEl.requestFullscreen();
+      }
+    } catch (err) {
+      console.warn('Failed to toggle fullscreen', err);
+    }
+  }
+
   async function refreshDevices() {
     voiceDebug('refreshDevices invoked', { hasAudioTrack, hasVideoTrack, isMicMuted, isCameraOff });
     const tasks: Promise<boolean>[] = [];
@@ -4617,6 +4990,18 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   function handleMinimize() {
     voiceSession.setVisible(false);
   }
+
+  run(() => {
+    setVoiceClientControls({
+      toggleMute: () => toggleMic(),
+      toggleDeafen: () => togglePlaybackMute(),
+      toggleVideo: () => toggleCamera(),
+      toggleScreenShare: () => toggleScreenShare(),
+      leave: () => handleLeave(),
+      showCall: () => voiceSession.setVisible(true),
+      openSettings: () => openVoiceSettingsPanel()
+    });
+  });
 
   function clearReconnectTimer() {
     if (reconnectTimer) {
@@ -4829,18 +5214,159 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     if (disabled) classes.push('call-control-button--disabled');
     return classes.join(' ');
   }
+
+  function showControlsBar() {
+    controlsVisible = true;
+    if (controlHideTimer) {
+      clearTimeout(controlHideTimer);
+      controlHideTimer = null;
+    }
+  }
+
+  function scheduleControlsHide(immediate = false) {
+    if (compactMatch) return;
+    if (controlHideTimer) {
+      clearTimeout(controlHideTimer);
+    }
+    const delay = immediate ? 450 : CONTROL_HIDE_DELAY_MS;
+    controlHideTimer = setTimeout(() => {
+      controlsVisible = false;
+      controlHideTimer = null;
+    }, delay);
+  }
+
+  function handleStagePointerMove() {
+    showControlsBar();
+    scheduleControlsHide();
+  }
+
+  function handleStageLeave() {
+    scheduleControlsHide();
+  }
+
+  function formatDuration(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const base = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    return hours > 0 ? `${hours}:${base}` : base;
+  }
+
+  function updateCallDuration() {
+    if (!callStartedAt) {
+      callDuration = '00:00';
+      return;
+    }
+    const elapsed = Date.now() - callStartedAt;
+    callDuration = formatDuration(elapsed);
+  }
+
+  function startCallTimer() {
+    stopCallTimer();
+    callStartedAt = Date.now();
+    updateCallDuration();
+    callTimer = setInterval(updateCallDuration, 1000);
+  }
+
+  function stopCallTimer() {
+    if (callTimer) {
+      clearInterval(callTimer);
+      callTimer = null;
+    }
+    callStartedAt = null;
+    callDuration = '00:00';
+  }
+
+  function handleFullscreenChange() {
+    if (typeof document === 'undefined') return;
+    if (!document.fullscreenElement) {
+      fullscreenUid = null;
+    }
+  }
+
+  onMount(() => {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('fullscreenchange', handleFullscreenChange);
+      return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    }
+  });
+
+  function toggleTileFullscreen(uid: string) {
+    if (typeof document === 'undefined') return;
+    const target = tileRefs.get(uid);
+    if (!target) return;
+    if (document.fullscreenElement && fullscreenUid === uid) {
+      document.exitFullscreen?.();
+      return;
+    }
+    target.requestFullscreen?.().then(() => {
+      fullscreenUid = uid;
+    });
+  }
+
+  function openMiniPlayer(tile: ParticipantTile) {
+    miniPlayer = { uid: tile.uid, name: tile.displayName, stream: tile.stream };
+  }
+
+  function closeMiniPlayer() {
+    miniPlayer = null;
+    if (miniVideoEl) {
+      miniVideoEl.srcObject = null;
+    }
+  }
+
+  function handleChatResizeStart(event: PointerEvent) {
+    if (!(sidePanelOpen && sidePanelTab === 'chat')) return;
+    chatResizeActive = true;
+    chatResizeStartX = event.clientX;
+    chatResizeStartWidth = sideChatWidth;
+    window.addEventListener('pointermove', handleChatResizeMove);
+    window.addEventListener('pointerup', handleChatResizeEnd);
+    event.preventDefault();
+  }
+
+  function handleChatResizeMove(event: PointerEvent) {
+    if (!chatResizeActive) return;
+    const delta = chatResizeStartX - event.clientX;
+    sideChatWidth = clampChatWidth(chatResizeStartWidth + delta);
+  }
+
+  function handleChatResizeEnd() {
+    if (!chatResizeActive) return;
+    chatResizeActive = false;
+    window.removeEventListener('pointermove', handleChatResizeMove);
+    window.removeEventListener('pointerup', handleChatResizeEnd);
+  }
+
+  function sendChatMessage() {
+    const text = chatDraft.trim();
+    if (!text) return;
+    chatMessages = [{ id: crypto.randomUUID?.() ?? String(Date.now()), text, ts: Date.now(), author: 'You' }, ...chatMessages];
+    chatDraft = '';
+  }
   let hasAudioTrack = $derived(!!(localStream && localStream.getAudioTracks().length));
   let hasVideoTrack = $derived(!!(localStream && localStream.getVideoTracks().length));
   let micButtonLabel = $derived(hasAudioTrack && !isMicMuted ? 'Mute mic' : 'Enable mic');
   let cameraButtonLabel = $derived(hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video');
   let screenShareButtonLabel = $derived(isScreenSharing ? 'Stop sharing' : 'Share screen');
-  let playbackButtonLabel = $derived(isPlaybackMuted ? 'Unmute call audio' : 'Mute call audio');
-  let playbackButtonText = $derived(isPlaybackMuted ? 'Unmute' : 'Mute audio');
   let isEmbedded = $derived(layout === 'embedded');
   run(() => {
     isCompact = isEmbedded && compactMatch;
   });
   let participantCount = $derived(participants.length);
+  run(() => {
+    updateVoiceClientState({
+      connected: isJoined,
+      muted: isMicMuted,
+      deafened: isPlaybackMuted,
+      videoEnabled: !isCameraOff && !isScreenSharing,
+      screenSharing: isScreenSharing,
+      channelName: sessionChannelName || null,
+      serverName: sessionServerName || null,
+      participantCount
+    });
+  });
   let quickStatsItems = $derived((() => {
     const callDocPath = callRef?.path ?? 'none';
     const compactCallDoc = compactIdentifier(callDocPath);
@@ -5015,17 +5541,24 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   run(() => {
     participantTiles = participantMedia.map((media) => {
       const base = participants.find((p) => p.uid === media.uid);
+      const moderation = participantModeration.get(media.uid);
+      const forcedMute = !!(moderation?.serverMuted || moderation?.serverDeafened);
       const controls = media.isSelf
         ? { volume: 1, muted: false }
-        : participantControls.get(media.uid) ?? { volume: DEFAULT_VOLUME, muted: false };
+        : { volume: DEFAULT_VOLUME, muted: false, ...(participantControls.get(media.uid) ?? {}) };
       const streamAudioActive = media.stream
         ? media.stream.getAudioTracks().some((track) => track.readyState !== 'ended')
         : false;
       const streamVideoActive = streamHasLiveVideo(media.stream);
       const resolvedHasAudio = media.isSelf
         ? localHasAudio || streamAudioActive
-        : media.hasAudio || streamAudioActive;
-      const resolvedHasVideo = media.isSelf ? localHasVideo || streamVideoActive : media.hasVideo || streamVideoActive;
+        : (media.hasAudio || streamAudioActive) && !forcedMute;
+      const resolvedHasVideo = media.isSelf
+        ? localHasVideo || streamVideoActive
+        : media.hasVideo || streamVideoActive;
+      const decoratedControls = media.isSelf
+        ? controls
+        : { ...controls, muted: controls.muted || forcedMute };
       const basePhotoURL = base?.photoURL ?? null;
       const selfPhotoURL = selfIdentity?.photoURL ?? selfIdentity?.authPhotoURL ?? null;
       return {
@@ -5034,17 +5567,81 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         hasVideo: resolvedHasVideo,
         displayName: media.isSelf ? 'You' : base?.displayName ?? 'Member',
         photoURL: media.isSelf ? selfPhotoURL ?? basePhotoURL : basePhotoURL,
-        controls,
+        controls: decoratedControls,
         screenSharing: base?.screenSharing ?? false,
         isSpeaking: speakingParticipants.has(media.uid)
       };
     });
   });
+  let displayTiles = $derived(showSelfInGrid ? participantTiles : participantTiles.filter((tile) => !tile.isSelf));
+  let selfTile: ParticipantTile | null = $derived(participantTiles.find((tile) => tile.isSelf) ?? null);
+  let focusedTile: ParticipantTile | null = $derived(
+    (() => {
+    if (gridMode !== 'focus') return null;
+    const screenSharer = displayTiles.find((tile) => tile.screenSharing);
+    if (screenSharer) return screenSharer;
+    if (lastActiveSpeaker) {
+      const remembered = displayTiles.find((tile) => tile.uid === lastActiveSpeaker);
+      if (remembered) return remembered;
+    }
+    const active = displayTiles.find((tile) => tile.isSpeaking && !tile.screenSharing);
+    return active ?? displayTiles[0] ?? null;
+    })()
+  );
+  let secondaryTiles = $derived(focusedTile ? displayTiles.filter((tile) => tile.uid !== focusedTile.uid) : displayTiles);
+  let gridColumns = $derived(resolveGridColumns(displayTiles.length));
+  let gridTiles = $derived(
+    gridMode === 'focus' && focusedTile ? [focusedTile, ...secondaryTiles] : displayTiles
+  );
+  // Always render the call grid even when nobody is sending video so tile sizing stays consistent.
+  let mediaMode: 'voice' | 'video' = $derived(gridTiles.length ? 'video' : 'voice');
+  let tileRefs = new Map<string, HTMLElement>();
+  let fullscreenUid = $state<string | null>(null);
+  let miniPlayer = $state<{ uid: string; name: string; stream: MediaStream | null } | null>(null);
+  let miniVideoEl = $state<HTMLVideoElement | null>(null);
+  run(() => {
+    if (miniVideoEl && miniPlayer?.stream) {
+      miniVideoEl.srcObject = miniPlayer.stream;
+      miniVideoEl.play?.().catch(() => {});
+    } else if (miniVideoEl) {
+      miniVideoEl.srcObject = null;
+    }
+  });
+  const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+  const clampChatWidth = (value: number) => clampValue(value, 260, 640);
   run(() => {
     remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
   });
   run(() => {
+    const activeUids = new Set(participantMedia.map((tile) => tile.uid));
+    let changed = false;
+    participantModeration.forEach((_, uid) => {
+      if (!activeUids.has(uid)) {
+        participantModeration.delete(uid);
+        changed = true;
+      }
+    });
+    if (changed) {
+      participantModeration = new Map(participantModeration);
+    }
+  });
+  run(() => {
     localVideoEl && localStream && (localVideoEl.srcObject = localStream);
+    if (selfPreviewEl && localStream) {
+      selfPreviewEl.srcObject = localStream;
+    }
+  });
+  run(() => {
+    if (isJoined && !compactMatch && layout !== 'embedded') {
+      showControlsBar();
+      scheduleControlsHide();
+    } else {
+      controlsVisible = true;
+      if (controlHideTimer) {
+        clearTimeout(controlHideTimer);
+        controlHideTimer = null;
+      }
+    }
   });
   run(() => {
     const seenUids = new Set<string>();
@@ -5119,9 +5716,16 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   class="voice-root"
   class:voice-root--embedded={isEmbedded}
   class:voice-root--compact={isCompact}
+  class:voice-root--minimal={stageOnly}
 >
-  <div class="call-shell" class:call-shell--embedded={isEmbedded}>
-    {#if debugLoggingEnabled && !isCompact}
+  <div
+    class="call-shell"
+    class:call-shell--embedded={isEmbedded}
+    class:call-shell--popout={popoutMode}
+    class:call-shell--minimal={stageOnly}
+    bind:this={callShellEl}
+  >
+    {#if debugLoggingEnabled && !isCompact && showChrome}
       <div class="call-debug-banner">
         <i class="bx bx-bug"></i>
         Debug logging active - open the browser console to view `[voice]` events.
@@ -5130,222 +5734,407 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         </button>
       </div>
     {/if}
-    {#if !isCompact}
-      <header class="call-header">
-        <div class="call-header__info">
-          <div class="call-header__icon">
-            <i class="bx bx-hash"></i>
-          </div>
-          <div>
-            <div class="call-header__title">#{sessionChannelName || 'Voice channel'}</div>
-            {#if sessionServerName}
-              <div class="call-header__subtitle">{sessionServerName}</div>
-            {/if}
-          </div>
-        </div>
-        <div class="call-header__actions">
-          <div class="call-header__count">
-            <i class="bx bx-user-voice"></i>
-            <span>{participantCount}</span>
-          </div>
-          <div class="call-status">
-            <span class={`call-status__dot ${remoteConnected ? 'call-status__dot--online' : ''}`}>
-              {#if remoteConnected}
-                <span class="call-status__pulse"></span>
+    {#if !stageOnly}
+      {#if !isCompact}
+        <header class="call-header">
+          <div class="call-header__info">
+            <div class="call-header__icon">
+              <i class="bx bx-hash"></i>
+            </div>
+            <div>
+              <div class="call-header__title">#{sessionChannelName || 'Voice channel'}</div>
+              {#if sessionServerName}
+                <div class="call-header__subtitle">{sessionServerName}</div>
               {/if}
-            </span>
-            <span class="call-status__label">{remoteConnected ? 'Voice connected' : 'Connecting'}</span>
+            </div>
           </div>
-          {#if debugLoggingEnabled}
+          <div class="call-header__actions">
+            <div class="call-header__count">
+              <i class="bx bx-user-voice"></i>
+              <span>{participantCount}</span>
+            </div>
+            <div class="call-status">
+              <span class={`call-status__dot ${remoteConnected ? 'call-status__dot--online' : ''}`}>
+                {#if remoteConnected}
+                  <span class="call-status__pulse"></span>
+                {/if}
+              </span>
+              <span class="call-status__label">{remoteConnected ? 'Voice connected' : 'Connecting'}</span>
+            </div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-tertiary)]">
+              {callDuration}
+            </div>
+            {#if showChatToggle}
+              <button
+                type="button"
+                class={`call-header__chat ${sidePanelOpen && sidePanelTab === 'chat' ? 'call-header__chat--active' : ''}`}
+                onclick={toggleSideChatPanel}
+                aria-pressed={sidePanelOpen && sidePanelTab === 'chat'}
+                aria-label="Open call chat"
+              >
+                <i class="bx bx-message-dots"></i>
+                <span>Call chat</span>
+              </button>
+            {/if}
+            {#if debugLoggingEnabled}
+              <button
+                type="button"
+                class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
+                onclick={() => toggleDebugPanel()}
+                aria-pressed={debugPanelVisible}
+                aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
+              >
+                <i class="bx bx-bug"></i>
+                <span class="call-header__debug-label">Debug</span>
+                {#if voiceErrorCount > 0}
+                  <span class="call-header__debug-count" aria-label={`Detected ${voiceErrorCount} error${voiceErrorCount === 1 ? '' : 's'}`}>
+                    {voiceErrorCount}
+                  </span>
+                {:else if voiceWarnCount > 0}
+                  <span class="call-header__debug-count call-header__debug-count--warn">{voiceWarnCount}</span>
+                {/if}
+                {#if hasDebugAlerts}
+                  <span class="call-header__debug-pulse" aria-hidden="true"></span>
+                {/if}
+              </button>
+            {/if}
             <button
               type="button"
-              class={`call-header__debug ${debugPanelVisible ? 'call-header__debug--active' : ''} ${hasDebugAlerts ? 'call-header__debug--alert' : ''}`}
-              onclick={() => toggleDebugPanel()}
-              aria-pressed={debugPanelVisible}
-              aria-label={hasDebugAlerts ? 'Open debug panel (issues detected)' : 'Open debug panel'}
+              class="call-header__minimize"
+              onclick={handleMinimize}
+              aria-label="Hide call"
             >
-              <i class="bx bx-bug"></i>
-              <span class="call-header__debug-label">Debug</span>
-              {#if voiceErrorCount > 0}
-                <span class="call-header__debug-count" aria-label={`Detected ${voiceErrorCount} error${voiceErrorCount === 1 ? '' : 's'}`}>
-                  {voiceErrorCount}
-                </span>
-              {:else if voiceWarnCount > 0}
-                <span class="call-header__debug-count call-header__debug-count--warn">{voiceWarnCount}</span>
-              {/if}
-              {#if hasDebugAlerts}
-                <span class="call-header__debug-pulse" aria-hidden="true"></span>
-              {/if}
+              <i class="bx bx-minus"></i>
+              <span class="call-header__minimize-label">Hide</span>
             </button>
-          {/if}
-          <button
-            type="button"
-            class="call-header__minimize"
-            onclick={handleMinimize}
-            aria-label="Hide call"
-          >
-            <i class="bx bx-minus"></i>
-            <span class="call-header__minimize-label">Hide</span>
+          </div>
+        </header>
+      {:else}
+        <div class="compact-call-header">
+          <div class="compact-call-header__title">
+            <i class="bx bx-hash"></i>
+            <span>#{sessionChannelName || 'Voice channel'}</span>
+          </div>
+          <div class="compact-call-header__meta">
+            <span class={`compact-call-header__status ${remoteConnected ? 'is-online' : ''}`}>
+              {remoteConnected ? 'Connected' : 'Connecting'}
+            </span>
+            <span class="compact-call-header__count">
+              <i class="bx bx-user-voice"></i>
+              {participantCount}
+            </span>
+          </div>
+        </div>
+      {/if}
+    {/if}
+    {#if popoutMode}
+      <div class="call-popout-placeholder">
+        <div class="call-popout-placeholder__body">
+          <div>
+            <p class="call-popout-placeholder__title">Call popped out</p>
+            <p class="call-popout-placeholder__subtitle">Keep this tab open. Click return to bring the call back.</p>
+          </div>
+          <button type="button" class="call-popout-placeholder__action" onclick={togglePopout}>
+            Return call here
           </button>
-        </div>
-      </header>
-    {:else}
-      <div class="compact-call-header">
-        <div class="compact-call-header__title">
-          <i class="bx bx-hash"></i>
-          <span>#{sessionChannelName || 'Voice channel'}</span>
-        </div>
-        <div class="compact-call-header__meta">
-          <span class={`compact-call-header__status ${remoteConnected ? 'is-online' : ''}`}>
-            {remoteConnected ? 'Connected' : 'Connecting'}
-          </span>
-          <span class="compact-call-header__count">
-            <i class="bx bx-user-voice"></i>
-            {participantCount}
-          </span>
         </div>
       </div>
     {/if}
-    <section class="call-stage" class:call-stage--embedded={isEmbedded}>
-      {#if isJoined && participantTiles.length}
-        <div class="call-grid">
-          {#each participantTiles as tile (tile.uid)}
-            <article
-              class={`call-tile ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking' : ''}`}
-              data-voice-menu
-              ontouchstart={() => handleLongPressStart(tile.uid)}
+    <section
+      class="call-stage"
+      class:call-stage--embedded={isEmbedded}
+      role="group"
+      aria-label="Call stage"
+      onpointermove={handleStagePointerMove}
+      onmouseenter={handleStagePointerMove}
+      onpointerleave={handleStageLeave}
+      bind:this={callStageEl}
+    >
+      {#if isJoined && gridTiles.length}
+        <MediaStageAny
+          mode={mediaMode}
+          tiles={gridTiles}
+          gridColumns={gridColumns}
+          focusedTileId={gridMode === 'focus' && focusedTile ? focusedTile.uid : null}
+          gridMode={gridMode === 'focus' ? 'focus' : 'grid'}
+          showSelf={showSelfInGrid}
+          muteActive={!isMicMuted}
+          videoActive={!isCameraOff && !isScreenSharing}
+          shareActive={isScreenSharing}
+          shareDisabled={isScreenSharePending}
+          moreOpen={moreMenuOpen}
+          onToggleMute={toggleMic}
+          onToggleVideo={toggleCamera}
+          onToggleShare={() => toggleScreenShare()}
+          onOpenMore={() => {
+            moreMenuOpen = !moreMenuOpen;
+            showControlsBar();
+          }}
+          onToggleGrid={toggleGridMode}
+          onToggleSelf={toggleShowSelf}
+          onOpenSettings={() => openVoiceSettingsPanel()}
+          controlsVisibleOverride={isEmbedded ? true : controlsVisible}
+        >
+          <div
+            slot="video"
+            class={`call-grid ${gridMode === 'focus' && focusedTile ? 'call-grid--focus' : ''} ${gridTiles.length === 1 ? 'call-grid--single' : ''} grid w-full`}
+            style={`--call-grid-cols:${gridColumns};grid-template-columns:repeat(${Math.min(gridColumns, 4)},minmax(0,1fr));`}
+          >
+            {#each gridTiles as tile (tile.uid)}
+              <article
+                class={`call-tile relative isolate overflow-hidden rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/80 shadow-sm ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking ring-2 ring-[color:var(--color-accent)] ring-offset-1 ring-offset-[color:var(--color-panel)]' : ''} ${gridMode === 'focus' && focusedTile && tile.uid === focusedTile.uid ? 'call-tile--focus-main' : ''}`}
+                data-voice-menu
+                ontouchstart={() => handleLongPressStart(tile.uid)}
               ontouchend={() => handleLongPressEnd(tile.uid)}
               ontouchcancel={() => handleLongPressEnd(tile.uid)}
+              oncontextmenu={(event) => openVolumeMenu(event, tile.uid)}
             >
-              <div class="call-tile__media">
-                <video
-                  use:videoSink={tile.uid}
-                  autoplay
-                  playsinline
-                  muted={tile.isSelf}
-                  class:call-tile__video-visible={streamHasLiveVideo(tile.stream)}
-                ></video>
-                {#if !streamHasLiveVideo(tile.stream)}
-                  <div class="call-avatar">
-                    <div class="call-avatar__image">
-                      {#if tile.photoURL}
-                        <img src={tile.photoURL} alt={tile.displayName} loading="lazy" />
-                      {:else}
-                        <span>{avatarInitial(tile.displayName)}</span>
+                <div class="call-tile__media relative flex h-full w-full flex-col items-center justify-center bg-[color:var(--color-panel-muted)]/70">
+                  <video
+                    use:videoSink={tile.uid}
+                    autoplay
+                    playsinline
+                    muted={tile.isSelf}
+                    class="absolute inset-0 h-full w-full object-cover opacity-0 transition-opacity duration-150"
+                    class:call-tile__video-visible={streamHasLiveVideo(tile.stream)}
+                    class:opacity-100={streamHasLiveVideo(tile.stream)}
+                  ></video>
+                  {#if !streamHasLiveVideo(tile.stream)}
+                    <div class="flex h-full w-full items-center justify-center bg-[color:var(--color-panel-muted)]/70">
+                      <div class="grid h-20 w-20 place-items-center overflow-hidden rounded-2xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] text-lg font-bold text-[color:var(--color-text-primary)] shadow-inner">
+                        {#if tile.photoURL}
+                          <img src={tile.photoURL} alt={tile.displayName} loading="lazy" class="h-full w-full object-cover" />
+                        {:else}
+                          <span>{avatarInitial(tile.displayName)}</span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/if}
+                  {#if !tile.isSelf}
+                    <audio use:audioSink={tile.uid} autoplay playsinline class="hidden"></audio>
+                  {/if}
+                  <div class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-[color:var(--color-panel)]/85 px-3 py-2 text-xs text-[color:var(--color-text-primary)] backdrop-blur">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <span class="truncate text-sm font-semibold leading-tight" title={tile.displayName}>
+                        {tile.isSelf ? 'You' : tile.displayName}
+                      </span>
+                      {#if tile.isSelf}
+                        <span class="rounded-sm bg-[color:var(--color-border-subtle)]/80 px-1.5 py-0.5 text-[10px] font-semibold tracking-tight text-[color:var(--color-text-secondary)]">
+                          YOU
+                        </span>
                       {/if}
                     </div>
-                    <span class="call-avatar__hint">
-                      {tile.hasVideo ? 'Video starting...' : 'Camera disabled'}
-                    </span>
+                    <div class="flex items-center gap-2 text-[color:var(--color-text-secondary)]">
+                      {#if tile.screenSharing}
+                        <span class="rounded-sm bg-[color:var(--color-accent)]/90 px-2 py-0.5 text-[10px] font-bold uppercase text-[color:var(--color-text-inverse)]">
+                          Live
+                        </span>
+                      {/if}
+                      <i class={`bx ${tile.hasAudio ? 'bx-microphone' : 'bx-microphone-off text-[color:var(--color-danger,#ef4444)]'}`}></i>
+                      <i class={`bx ${tile.hasVideo ? 'bx-video' : 'bx-video-off text-[color:var(--color-danger,#ef4444)]'}`}></i>
+                    </div>
                   </div>
-                {/if}
-                {#if !tile.isSelf}
-                  <audio use:audioSink={tile.uid} autoplay playsinline class="hidden"></audio>
-                {/if}
-                <div class="call-tile__overlay">
-                  <div class="call-tile__details">
-                    <span class="call-tile__name">{tile.displayName}</span>
-                    {#if tile.isSelf}
-                      <span class="call-pill">You</span>
-                    {/if}
-                    {#if !tile.isSelf && tile.controls.muted}
-                      <span class="call-pill call-pill--muted">Muted</span>
-                    {/if}
-                    {#if tile.screenSharing}
-                      <span class="call-pill call-pill--share">
-                        <i class="bx bx-desktop"></i>
-                        Sharing
-                      </span>
-                    {/if}
-                  </div>
-                  <div class="call-tile__icons">
-                    <i class={`bx ${tile.hasAudio ? 'bx-microphone' : 'bx-microphone-off'} ${tile.hasAudio ? '' : 'is-off'}`}></i>
-                    <i class={`bx ${tile.hasVideo ? 'bx-video' : 'bx-video-off'} ${tile.hasVideo ? '' : 'is-off'}`}></i>
-                  </div>
-                </div>
-                {#if !tile.isSelf}
                   <button
                     type="button"
-                    class="call-tile__menu-button"
+                    class={`call-tile__menu-button absolute right-3 bottom-3 inline-flex h-9 w-9 items-center justify-center rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/80 text-[color:var(--color-text-primary)] shadow-sm backdrop-blur transition hover:border-[color:var(--color-accent)] ${tile.isSelf ? 'call-tile__menu-button--self' : ''}`}
                     onclick={stopPropagation(() => openMenu(tile.uid))}
                     data-voice-menu
-                    aria-label={`Voice options for ${tile.displayName}`}
+                    aria-label={`Voice options for ${tile.isSelf ? 'you' : tile.displayName}`}
                   >
                     <i class="bx bx-dots-vertical-rounded"></i>
                   </button>
-                {/if}
-              </div>
-
-              {#if menuOpenFor === tile.uid && !tile.isSelf}
-                <div class="call-tile__menu-panel" data-voice-menu>
-                  <div class="call-menu__header">
-                    <span>{tile.displayName}</span>
-                    <button type="button" onclick={closeMenu} aria-label="Close participant menu">
-                      <i class="bx bx-x"></i>
-                    </button>
-                  </div>
-                  <div class="call-menu__section">
-                    <div class="call-menu__label">
-                      <span>Volume</span>
-                      <span>{Math.round(tile.controls.volume * 100)}%</span>
-                    </div>
-                    <input
-                      class="call-menu__slider"
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="5"
-                      value={Math.round(tile.controls.volume * 100)}
-                      oninput={(event) => {
-                        const target = event.currentTarget as HTMLInputElement;
-                        setParticipantVolume(tile.uid, Number(target.value) / 100);
-                      }}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    class="call-menu__action"
-                    onclick={() => toggleParticipantMute(tile.uid)}
-                  >
-                    <span>{tile.controls.muted ? 'Unmute for me' : 'Mute for me'}</span>
-                    <i class={`bx ${tile.controls.muted ? 'bx-volume-full' : 'bx-volume-mute'}`}></i>
-                  </button>
-                  {#if canKickMembers}
-                    <button
-                      type="button"
-                      class="call-menu__action call-menu__action--danger"
-                      onclick={() => {
-                        const target = participants.find((p) => p.uid === tile.uid);
-                        if (target) kickParticipant(target);
-                        closeMenu();
-                      }}
-                    >
-                      <span>Remove from channel</span>
-                      <i class="bx bx-user-x"></i>
-                    </button>
-                  {/if}
                 </div>
-              {/if}
-            </article>
-          {/each}
+
+                {#if menuOpenFor === tile.uid}
+                  <div class="call-tile__menu-panel" data-voice-menu>
+                    <div class="call-menu__header">
+                      <span>{tile.isSelf ? 'You' : tile.displayName}</span>
+                      <button type="button" onclick={closeMenu} aria-label="Close participant menu">
+                        <i class="bx bx-x"></i>
+                      </button>
+                    </div>
+                    {#if tile.isSelf}
+                      <button type="button" class="call-menu__action" onclick={toggleMic}>
+                        <div>
+                          <span>{isMicMuted ? 'Unmute mic' : 'Mute mic'}</span>
+                          <small>Control your microphone</small>
+                        </div>
+                        <i class={`bx ${isMicMuted ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
+                      </button>
+                      <button type="button" class="call-menu__action" onclick={toggleDeafenSelf}>
+                        <div>
+                          <span>{isPlaybackMuted ? 'Undeafen' : 'Deafen'}</span>
+                          <small>Mute incoming audio and your mic</small>
+                        </div>
+                        <i class={`bx ${isPlaybackMuted ? 'bx-volume-full' : 'bx-volume-mute'}`}></i>
+                      </button>
+                    <button type="button" class="call-menu__action" onclick={toggleCamera}>
+                      <div>
+                        <span>{isCameraOff ? 'Turn camera on' : 'Turn camera off'}</span>
+                        <small>Control your video</small>
+                      </div>
+                      <i class={`bx ${isCameraOff ? 'bx-video-off' : 'bx-video'}`}></i>
+                    </button>
+                    <button type="button" class="call-menu__action" onclick={openSelfPreview}>
+                      <div>
+                        <span>Preview camera</span>
+                        <small>Open a floating self view</small>
+                      </div>
+                      <i class="bx bx-user-circle"></i>
+                    </button>
+                    <button type="button" class="call-menu__action" onclick={() => openVoiceSettingsPanel('voice')}>
+                      <div>
+                        <span>Change input device</span>
+                        <small>Jump to Voice settings</small>
+                      </div>
+                      <i class="bx bx-slider-alt"></i>
+                    </button>
+                    <button type="button" class="call-menu__action" onclick={() => openVoiceSettingsPanel('video')}>
+                      <div>
+                        <span>Change camera</span>
+                        <small>Jump to Video settings</small>
+                      </div>
+                      <i class="bx bx-slider"></i>
+                    </button>
+                    {:else}
+                      <div class="call-menu__section">
+                        <div class="call-menu__label">
+                          <span>Volume</span>
+                          <span>{Math.round(tile.controls.volume * 100)}%</span>
+                        </div>
+                        <input
+                          class="call-menu__slider"
+                          type="range"
+                          min="0"
+                          max="200"
+                          step="5"
+                          value={Math.round(tile.controls.volume * 100)}
+                          oninput={(event) => {
+                            const target = event.currentTarget as HTMLInputElement;
+                            setParticipantVolume(tile.uid, Number(target.value) / 100);
+                          }}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        class="call-menu__action"
+                        onclick={() => toggleParticipantMute(tile.uid)}
+                      >
+                        <div>
+                          <span>{tile.controls.muted ? 'Unmute for me' : 'Mute for me'}</span>
+                          <small>Local mute for your ears</small>
+                        </div>
+                        <i class={`bx ${tile.controls.muted ? 'bx-volume-full' : 'bx-volume-mute'}`}></i>
+                      </button>
+                      <button type="button" class="call-menu__action">
+                        <div>
+                          <span>View profile</span>
+                          <small>Open user card (soon)</small>
+                        </div>
+                        <i class="bx bx-id-card"></i>
+                      </button>
+                      {#if canKickMembers}
+                        <button
+                          type="button"
+                          class="call-menu__action"
+                          onclick={() => toggleServerMute(tile.uid)}
+                        >
+                          <div>
+                            <span>{moderationState(tile.uid).serverMuted ? 'Undo server mute' : 'Server mute'}</span>
+                            <small>Silence this user in the call</small>
+                          </div>
+                          <i class={`bx ${moderationState(tile.uid).serverMuted ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                        </button>
+                        <button
+                          type="button"
+                          class="call-menu__action"
+                          onclick={() => toggleServerDeafen(tile.uid)}
+                        >
+                          <div>
+                            <span>{moderationState(tile.uid).serverDeafened ? 'Undo server deafen' : 'Server deafen'}</span>
+                            <small>Mute and deafen for moderation</small>
+                          </div>
+                          <i class={`bx ${moderationState(tile.uid).serverDeafened ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                        </button>
+                        <button type="button" class="call-menu__action">
+                          <div>
+                            <span>Manage roles</span>
+                            <small>Open roles (soon)</small>
+                          </div>
+                          <i class="bx bx-shield-quarter"></i>
+                        </button>
+                        <button
+                          type="button"
+                          class="call-menu__action call-menu__action--danger"
+                          onclick={() => {
+                            const target = participants.find((p) => p.uid === tile.uid);
+                            if (target) kickParticipant(target);
+                            closeMenu();
+                          }}
+                        >
+                          <span>Disconnect from voice</span>
+                          <i class="bx bx-user-x"></i>
+                        </button>
+                      {/if}
+                      <div class="call-menu__note">
+                        <span class="call-menu__label">Roles</span>
+                        <span class="call-menu__roles">Member - Permissions synced</span>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </article>
+            {/each}
+          </div>
+        </MediaStageAny>
+        <div class="call-stage__actions">
+          <button
+            type="button"
+            class="call-stage__icon-button"
+            aria-label="Open channel messages"
+            onclick={() => dispatch('openChannelChat')}
+          >
+            <i class="bx bx-message-dots"></i>
+          </button>
         </div>
       {:else}
-        <div class="call-empty">
-          <div class="call-empty__card">
-            <div class="call-empty__icon">
-              <i class="bx bx-video"></i>
+        <div class="call-empty" aria-label="Call preview">
+          <div class="call-empty__tile">
+            <div class="call-empty__avatar">
+              {#if $user?.photoURL}
+                <img src={resolveProfilePhotoURL($user.photoURL)} alt="Your avatar" />
+              {:else}
+                <i class="bx bx-user"></i>
+              {/if}
             </div>
-            <h3>Join the conversation</h3>
-            <p>Connect your mic or camera to get started.</p>
+            <div class="call-empty__label">
+              {sessionChannelName || 'Voice channel'}
+            </div>
+            <div class="call-empty__hint">Preview ready — join to start</div>
           </div>
         </div>
       {/if}
     </section>
 
+    {#if !showSelfInGrid && selfTile && localStream}
+      <div class="self-preview">
+        <div class="self-preview__header">
+          <span>Self preview</span>
+          <span class="self-preview__pill">Hidden from grid</span>
+        </div>
+        <video playsinline autoplay muted bind:this={selfPreviewEl}></video>
+      </div>
+    {/if}
+
+    {#if showChrome}
     <footer
       class="call-controls"
       class:call-controls--embedded={isEmbedded}
-      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 1rem)"
+      class:call-controls--visible={controlsVisible}
+      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 1.4rem)"
+      onpointerenter={showControlsBar}
+      onpointerleave={() => scheduleControlsHide()}
+      onfocusin={showControlsBar}
     >
       {#if !isJoined}
         <div class="call-controls__row call-controls__row--join">
@@ -5357,9 +6146,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
             <i class="bx bx-phone"></i>
             {isConnecting ? 'Connecting...' : 'Join Voice'}
           </button>
-          {#if statusMessage}
-            <span class="call-status-message">{statusMessage}</span>
-          {/if}
         </div>
       {:else}
         <div class="call-controls__row call-controls__row--connected">
@@ -5372,10 +6158,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                 </button>
                 <span class="call-status-message">Your browser blocked auto-play.</span>
               </div>
-            {:else if statusMessage}
-              <span class="call-status-message">{statusMessage}</span>
-            {:else if !remoteConnected}
-              <span class="call-status-message">Reconnecting...</span>
+            {:else}
+              <span class="call-status-message" aria-hidden="true"></span>
             {/if}
           </div>
           <div class="call-controls__group call-controls__group--main">
@@ -5384,6 +6168,16 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                 <i class={`bx ${isMicMuted ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
               </button>
               <span>{isMicMuted ? 'Muted' : 'Mute'}</span>
+            </div>
+            <div class="call-controls__item">
+              <button
+                class={controlClasses({ active: isPlaybackMuted })}
+                onclick={toggleDeafenSelf}
+                aria-label={isPlaybackMuted ? 'Undeafen' : 'Deafen'}
+              >
+                <i class={`bx ${isPlaybackMuted ? 'bx-volume-mute' : 'bx-headphone'}`}></i>
+              </button>
+              <span>{isPlaybackMuted ? 'Deafened' : 'Deafen'}</span>
             </div>
             <div class="call-controls__item">
               <button
@@ -5408,15 +6202,46 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                 <span>{isScreenSharing ? 'Stop share' : 'Share'}</span>
               </div>
             {/if}
-            <div class="call-controls__item">
+            <div class="call-controls__item call-controls__item--more">
               <button
-                class={controlClasses({ active: !isPlaybackMuted })}
-                onclick={togglePlaybackMute}
-                aria-label={playbackButtonLabel}
+                class={controlClasses()}
+                onclick={() => {
+                  moreMenuOpen = !moreMenuOpen;
+                  showControlsBar();
+                }}
+                aria-haspopup="true"
+                aria-expanded={moreMenuOpen}
+                aria-label="More call options"
+                data-voice-menu
               >
-                <i class={`bx ${isPlaybackMuted ? 'bx-volume-mute' : 'bx-volume-full'}`}></i>
+                <i class="bx bx-dots-horizontal-rounded"></i>
               </button>
-              <span>{playbackButtonText}</span>
+              <span>More</span>
+              {#if moreMenuOpen}
+                <div class="call-more-menu" data-voice-menu>
+                  <button type="button" onclick={toggleGridMode}>
+                    <div>
+                      <span>Grid view</span>
+                      <small>{gridMode === 'focus' ? 'Focus screen share/active speaker' : 'Equal tiles'}</small>
+                    </div>
+                    <i class={`bx ${gridMode === 'focus' ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                  </button>
+                  <button type="button" onclick={toggleShowSelf}>
+                    <div>
+                      <span>Show my own camera</span>
+                      <small>{showSelfInGrid ? 'Visible in grid' : 'Hidden with mini preview'}</small>
+                    </div>
+                    <i class={`bx ${showSelfInGrid ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                  </button>
+                  <button type="button" onclick={() => openVoiceSettingsPanel()}>
+                    <div>
+                      <span>Voice and video settings</span>
+                      <small>Open user settings</small>
+                    </div>
+                    <i class="bx bx-cog"></i>
+                  </button>
+                </div>
+              {/if}
             </div>
             {#if compactMatch}
               <div class="call-controls__item call-controls__item--leave call-controls__item--leave-inline">
@@ -5424,27 +6249,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                   <i class="bx bx-phone-off"></i>
                 </button>
                 <span>Leave</span>
-              </div>
-            {/if}
-            {#if !compactMatch}
-              <div class="call-controls__item call-controls__item--collapse">
-                <button class={controlClasses()} type="button" onclick={handleMinimize} aria-label="Minimize call">
-                  <i class="bx bx-window-alt"></i>
-                </button>
-                <span>Collapse</span>
-              </div>
-            {/if}
-            {#if !compactMatch}
-              <div class="call-controls__item call-controls__item--messages">
-                <button
-                  type="button"
-                  class={controlClasses()}
-                  onclick={openMobileChatPanel}
-                  aria-label="Open message thread"
-                >
-                  <i class="bx bx-message-dots"></i>
-                </button>
-                <span>Messages</span>
               </div>
             {/if}
           </div>
@@ -5461,6 +6265,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         </div>
       {/if}
     </footer>
+    {/if}
   </div>
 
   {#if debugLoggingEnabled}
@@ -5754,17 +6559,64 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       {errorMessage}
     </div>
   {/if}
+
+  {#if volumeMenu}
+    <div
+      class="volume-menu-backdrop"
+      role="presentation"
+      tabindex="-1"
+      onclick={closeVolumeMenu}
+      onkeydown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          closeVolumeMenu();
+        }
+      }}
+    ></div>
+    <div
+      class="volume-menu"
+      style={`left:${volumeMenu.x}px; top:${volumeMenu.y}px`}
+      role="dialog"
+      aria-label="Volume"
+    >
+      <div class="volume-menu__row">
+        <span>Volume</span>
+        <span>{Math.round((getParticipantControls(volumeMenu.uid).volume ?? 1) * 100)}%</span>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="200"
+        step="5"
+        value={Math.round((getParticipantControls(volumeMenu.uid).volume ?? 1) * 100)}
+        oninput={(event) => {
+          if (!volumeMenu) return;
+          const value = Number(event.currentTarget.value);
+          setParticipantVolume(volumeMenu.uid, value / 100);
+        }}
+      />
+    </div>
+  {/if}
 </div>
 
 <style>
 .voice-root {
-    --voice-root-padding: clamp(0.75rem, 2vw, 1.5rem);
+    --voice-root-padding: clamp(0.5rem, 1.4vw, 1rem);
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 0.75rem;
     min-height: 100%;
     padding: var(--voice-root-padding);
     color: var(--text-100);
+}
+
+.voice-root--minimal {
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  min-height: 100vh;
+  background: #202225;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .voice-root--compact {
@@ -5804,15 +6656,23 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   max-width: min(480px, 100%);
 }
 
-.voice-root--compact .call-tile {
-  min-height: clamp(200px, 55vh, 360px);
-  width: min(420px, 100%);
-}
+  .voice-root--compact .call-tile {
+    min-height: clamp(200px, 55vh, 360px);
+    width: min(420px, 100%);
+  }
 
   .voice-root--compact .call-controls {
+    position: relative;
+    left: 0;
+    bottom: 0;
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
     padding: 0.45rem;
     margin-top: auto;
+    width: 100%;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+    box-shadow: none;
   }
 
   .voice-root--compact .call-controls__item span {
@@ -5876,57 +6736,81 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   .voice-root--embedded {
     min-height: auto;
-    padding: clamp(0.65rem, 2vw, 1.1rem);
-    gap: clamp(0.9rem, 1.7vw, 1.3rem);
+    padding: clamp(0.55rem, 1.4vw, 0.9rem);
+    gap: clamp(0.7rem, 1.2vw, 1rem);
     width: 100%;
   }
 
-  .call-shell {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    gap: 1.25rem;
-    border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--color-panel-muted) 90%, transparent);
-    border: 1px solid var(--color-border-subtle);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    padding: clamp(1rem, 2.5vw, 1.75rem);
+.call-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 0.6rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  box-shadow: 0 4px 12px rgba(5, 8, 18, 0.18);
+  padding: clamp(0.65rem, 1.6vw, 0.95rem);
+  min-height: auto;
+  overflow: visible;
+}
+
+.call-shell--embedded {
+  flex: none;
+  min-height: auto;
+  box-shadow: 0 3px 10px rgba(8, 12, 24, 0.18);
+  background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+  overflow: visible;
+}
+
+.call-shell--minimal {
+  padding: 0;
+  background: #202225;
+  border: none;
+  box-shadow: none;
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+}
+
+  .call-shell--popout {
+    position: fixed;
+    inset: clamp(0.75rem, 2vw, 1.2rem);
+    z-index: 60;
+    max-width: min(1200px, calc(100vw - 1.5rem));
+    max-height: calc(100vh - 1.5rem);
+    overflow: hidden;
   }
 
-  .call-shell--embedded {
-    flex: none;
-    box-shadow:
-      0 12px 28px rgba(8, 12, 24, 0.32),
-      inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    background: color-mix(in srgb, var(--color-panel) 86%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 68%, transparent);
-  }
+.call-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+}
 
-  .call-header {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .call-header__info {
-    display: flex;
-    align-items: center;
-    gap: 0.9rem;
+.call-header__info {
+  display: flex;
+  align-items: center;
+    gap: 0.65rem;
     min-width: 0;
   }
 
-  .call-header__icon {
-    width: 3rem;
-    height: 3rem;
-    border-radius: 0.9rem;
-    display: grid;
-    place-items: center;
-    background: color-mix(in srgb, var(--color-panel) 65%, transparent);
-    color: var(--text-80);
-    font-size: 1.25rem;
-  }
+.call-header__icon {
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 0.55rem;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--color-panel) 65%, transparent);
+  color: var(--text-80);
+  font-size: 1.1rem;
+}
 
   @media (max-width: 640px) {
     .call-header__icon {
@@ -5959,47 +6843,72 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
-  .call-header__title {
-    font-size: clamp(1rem, 2vw, 1.25rem);
-    font-weight: 600;
-    color: var(--text-100);
-    max-width: 22ch;
-    overflow: hidden;
+.call-header__title {
+  font-size: clamp(0.92rem, 1.9vw, 1rem);
+  font-weight: 600;
+  color: var(--text-100);
+  max-width: 22ch;
+  overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .call-header__subtitle {
-    font-size: 0.7rem;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--text-55);
+.call-header__subtitle {
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-55);
+}
+
+.call-header__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.call-header__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.6rem;
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--color-panel) 50%, transparent);
+  color: var(--text-80);
+  font-size: 0.82rem;
+}
+
+.call-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-55);
+}
+
+.call-header__chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.38rem 0.65rem;
+  border-radius: 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+  background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+  color: var(--text-80);
+  font-weight: 600;
+  font-size: 0.82rem;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+  .call-header__chat:hover {
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    color: var(--text-90);
   }
 
-  .call-header__actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.85rem;
-  }
-
-  .call-header__count {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    padding: 0.4rem 0.8rem;
-    border-radius: var(--radius-pill);
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    color: var(--text-80);
-    font-size: 0.85rem;
-  }
-
-  .call-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-55);
+  .call-header__chat--active {
+    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 95%, white);
   }
 
   .call-status__dot {
@@ -6034,13 +6943,13 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
-  .call-header__debug {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    padding: 0.45rem 0.9rem;
-    border-radius: var(--radius-pill);
+.call-header__debug {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.65rem;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
     background: color-mix(in srgb, var(--color-panel) 40%, transparent);
     color: var(--text-70);
@@ -6164,38 +7073,227 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
-  .call-stage {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    background: linear-gradient(
-      160deg,
-      color-mix(in srgb, var(--color-panel) 56%, transparent),
-      color-mix(in srgb, var(--color-panel-muted) 42%, transparent)
-    );
-    border-radius: var(--radius-lg);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    padding: clamp(0.65rem, 2vw, 1.05rem);
-  }
+.call-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+  border-radius: 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  padding: clamp(0.5rem, 1vw, 0.75rem);
+  padding-bottom: clamp(0.85rem, 2.4vh, 1.5rem);
+  justify-content: center;
+  align-items: center;
+}
 
-  .call-stage--embedded {
-    flex: none;
-    min-height: clamp(140px, 38vh, 360px);
-    max-height: clamp(200px, 44vh, 420px);
-    border-radius: var(--radius-lg);
-    padding: clamp(0.45rem, 1.2vw, 0.75rem);
-    background: color-mix(in srgb, var(--color-panel-muted) 82%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
-  }
+.call-shell:not(.call-shell--embedded) .call-stage {
+  min-height: clamp(240px, 40vh, 520px);
+  padding-bottom: clamp(0.4rem, 0.9vw, 0.75rem);
+}
 
-  .call-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: clamp(0.75rem, 2vw, 1.25rem);
+.call-stage--embedded {
+  flex: none;
+  min-height: clamp(200px, 38vh, 420px);
+  max-height: clamp(260px, 48vh, 520px);
+  border-radius: 0.65rem;
+  padding: clamp(0.45rem, 1vw, 0.7rem);
+  background: color-mix(in srgb, var(--color-panel-muted) 76%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 52%, transparent);
+}
+
+  .call-shell--minimal .call-stage {
+    background: #202225;
+    border: none;
+    padding: clamp(1.25rem, 3vw, 2rem);
+    min-height: calc(100vh - 2rem);
     width: 100%;
-    align-content: start;
-    align-items: stretch;
+    align-items: center;
+    justify-content: center;
+    background-image: radial-gradient(circle at 10% 20%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px),
+      radial-gradient(circle at 80% 30%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px),
+      radial-gradient(circle at 50% 80%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px);
+    background-size: 120px 120px;
   }
+
+.call-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
+  gap: 0.4rem;
+  width: 100%;
+  max-width: calc(var(--call-grid-cols, 1) * 780px);
+  margin: 0 auto;
+  align-content: center;
+  align-items: stretch;
+  justify-items: stretch;
+}
+
+.call-grid--single {
+  grid-template-columns: minmax(0, 560px);
+  max-width: 640px;
+  justify-content: center;
+}
+
+.call-shell--minimal .call-grid {
+  grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
+  justify-content: stretch;
+  justify-items: stretch;
+  gap: 0.4rem;
+  width: 100%;
+  max-width: calc(var(--call-grid-cols, 1) * 780px);
+  margin: 0 auto;
+}
+
+  .call-stage__overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .call-stage__actions {
+    position: absolute;
+    top: 0.35rem;
+    right: 0.35rem;
+    display: inline-flex;
+    gap: 0.25rem;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-6px);
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+
+  .call-stage:hover .call-stage__actions,
+  .call-stage:focus-within .call-stage__actions {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  .call-stage--embedded .call-stage__actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .call-stage__icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 0.35rem;
+    width: 38px;
+    height: 38px;
+    background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    color: var(--text-85);
+    font-size: 1.05rem;
+    transition: transform 120ms ease, background 160ms ease, border-color 160ms ease;
+  }
+
+  .call-stage__icon-button--active {
+    background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    color: color-mix(in srgb, var(--color-accent) 95%, white);
+  }
+
+  .call-stage__icon-button:hover,
+  .call-stage__icon-button:focus-visible {
+    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-strong) 70%, transparent);
+  }
+
+  .call-popout-placeholder {
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    border-radius: 0.9rem;
+    padding: 0.85rem 1rem;
+    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+    color: var(--text-70);
+  }
+
+  .call-popout-placeholder__body {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .call-popout-placeholder__title {
+    font-weight: 700;
+    color: var(--text-90);
+    margin: 0 0 0.25rem;
+  }
+
+  .call-popout-placeholder__subtitle {
+    margin: 0;
+    font-size: 0.9rem;
+  }
+
+  .call-popout-placeholder__action {
+    border-radius: 0.65rem;
+    padding: 0.6rem 1.1rem;
+    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 65%, transparent);
+    color: var(--text-95);
+    font-weight: 600;
+  }
+
+  .self-preview {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    border-radius: 0.9rem;
+    padding: 0.6rem;
+    background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .self-preview__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--text-80);
+  }
+
+  .self-preview__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    font-size: 0.75rem;
+    color: var(--text-70);
+  }
+
+  .self-preview video {
+    width: 100%;
+    border-radius: 0.7rem;
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+.call-grid--focus {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-auto-rows: auto;
+  align-items: start;
+  gap: 0.5rem;
+}
+
+.call-tile--focus-main {
+  grid-column: 1 / -1;
+  min-height: clamp(260px, 56vh, 640px);
+  --call-tile-aspect: 16 / 9;
+}
+
+.call-grid--focus .call-tile:not(.call-tile--focus-main) {
+  grid-row: 2;
+  --call-tile-target-height: clamp(120px, 18vh, 180px);
+  max-height: 190px;
+}
   .call-debug-banner {
     display: flex;
     align-items: center;
@@ -6989,93 +8087,155 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     color: var(--text-100);
   }
 
-  @media (min-width: 1200px) {
-    .call-grid {
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+@media (min-width: 1200px) {
+  .call-grid {
+      --call-tile-min-width: clamp(300px, 24vw, 420px);
     }
   }
 
   @media (min-width: 1600px) {
     .call-grid {
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      --call-tile-min-width: clamp(320px, 22vw, 460px);
     }
   }
 
-  .call-tile {
-    position: relative;
-    border-radius: 0.85rem;
-    overflow: hidden;
-    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-    display: flex;
-    flex-direction: column;
-    transition: box-shadow 0.18s ease, border-color 0.18s ease;
-    min-height: 220px;
-  }
+.call-tile {
+  position: relative;
+  border-radius: 0.65rem;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 120ms ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  --call-tile-aspect: 16 / 9;
+  min-height: clamp(200px, 28vw, 360px);
+  width: 100%;
+  min-width: 0;
+  outline: none;
+  aspect-ratio: var(--call-tile-aspect, 16 / 9);
+}
 
   @supports (aspect-ratio: 16 / 9) {
     .call-tile {
-      aspect-ratio: var(--call-tile-aspect, 16 / 9);
       min-height: 0;
     }
   }
 
-  .call-tile--self {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 35%, transparent);
+.call-tile--self {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 32%, transparent);
+}
+
+.call-tile--sharing {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-strong) 50%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+  .call-shell--minimal .call-tile {
+    max-width: none;
+    min-width: 0;
+    min-height: clamp(180px, 24vw, 320px);
   }
 
-  .call-tile--sharing {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-strong) 55%, transparent);
-    border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+.call-tile--speaking {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 80%, #5865f2 10%), 0 4px 10px rgba(0, 0, 0, 0.2);
+  border-color: color-mix(in srgb, var(--color-accent) 72%, #5865f2 12%);
+  transition: transform 140ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.call-tile:focus-visible {
+  border-color: #4ea4ff;
+  box-shadow:
+      0 0 0 3px #4ea4ff,
+      0 10px 28px rgba(0, 0, 0, 0.28);
   }
 
-  .call-tile--speaking {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success, #16a34a) 70%, transparent);
-    border-color: color-mix(in srgb, var(--color-success, #16a34a) 60%, transparent);
+  .call-tile--speaking:focus-visible {
+    box-shadow:
+      0 0 0 3px #4ea4ff,
+      0 0 0 6px rgba(88, 101, 242, 0.5),
+      0 14px 42px rgba(0, 0, 0, 0.4);
+    border-color: #4ea4ff;
   }
 
-  .call-tile__media {
-    position: relative;
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.64);
+  .call-tile:focus-visible .call-tile__menu-button {
+    opacity: 1;
   }
 
-  .call-tile__media video {
-    width: 100%;
-    height: 100%;
-    object-fit: var(--call-video-object-fit, contain);
-    background: rgba(0, 0, 0, 0.85);
-    display: none;
-  }
+.call-tile:hover {
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+  border-color: color-mix(in srgb, #ffffff 10%, rgba(54, 57, 63, 0.7));
+}
+
+.call-tile__media {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-panel-muted) 72%, rgba(0, 0, 0, 0.4));
+  overflow: hidden;
+  min-height: 0;
+}
+
+.call-tile__media video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
 
   .call-tile__media video.call-tile__video-visible {
-    display: block;
+    opacity: 1;
   }
 
-  .call-avatar {
-    margin: auto;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.75rem;
-    color: var(--text-70);
+  .call-avatar,
+  .call-voice-row {
+    position: relative;
+    z-index: 1;
   }
+
+.call-avatar {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-70);
+  transform: none;
+  transition: opacity 140ms ease, transform 140ms ease, scale 140ms ease;
+  padding: 0.25rem;
+}
+
+.call-avatar--video {
+  position: absolute;
+  top: 0.55rem;
+  left: 0.55rem;
+  transform: none;
+  gap: 0.25rem;
+  opacity: 0.9;
+  scale: 0.9;
+  z-index: 2;
+}
 
   .call-avatar__image {
-    width: clamp(4.5rem, 24vw, 6.5rem);
-    height: clamp(4.5rem, 24vw, 6.5rem);
+    width: clamp(44px, 7vw, 56px);
+    height: clamp(44px, 7vw, 56px);
     border-radius: 999px;
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 2px solid rgba(255, 255, 255, 0.08);
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--color-panel) 55%, transparent);
     font-size: 1.6rem;
-    font-weight: 600;
+    font-weight: 700;
     color: var(--text-80);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.03);
   }
 
   .call-avatar__image img {
@@ -7091,87 +8251,149 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     color: var(--text-50);
   }
 
-  .call-tile__overlay {
-    pointer-events: none;
-    position: absolute;
-    inset: auto 0 0 0;
+  .call-voice-row {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.9rem 1.1rem;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.68), transparent 85%);
-    font-size: 0.85rem;
-    color: var(--text-100);
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 0;
+  justify-content: center;
+}
+
+.call-voice-row .call-avatar {
+  margin: 0;
+  transform: none;
+    padding: 0;
   }
 
-  .call-tile__details {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    min-width: 0;
-  }
+.call-voice-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  align-items: center;
+}
 
-  .call-tile__name {
-    font-weight: 600;
-    max-width: 18ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+.call-voice-name {
+  font-weight: 700;
+  color: #ffffff;
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-  .call-pill {
-    pointer-events: auto;
-    background: rgba(255, 255, 255, 0.16);
-    border-radius: var(--radius-pill);
-    padding: 0.15rem 0.55rem;
-    font-size: 0.65rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-80);
-  }
-
-  .call-pill--muted {
-    background: color-mix(in srgb, var(--color-danger) 25%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 85%, white);
-  }
-
-  .call-pill--share {
+  .call-voice-icons {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
-    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
-    color: color-mix(in srgb, var(--color-accent) 85%, white);
+    gap: 0.35rem;
+    color: #b9bbbe;
+    font-size: 0.95rem;
   }
 
-  .call-tile__icons {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
+.call-voice-icons .is-off {
+  color: #b9bbbe;
+}
+
+.call-tile__icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+    color: #b9bbbe;
     font-size: 1.05rem;
   }
 
   .call-tile__icons .is-off {
-    color: color-mix(in srgb, var(--color-danger) 65%, white);
+    color: #b9bbbe;
+  }
+
+.call-tile__footer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: color-mix(in srgb, var(--color-panel) 80%, rgba(0, 0, 0, 0.55));
+  border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.call-tile__footer-name {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+  color: #ffffff;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 0.25rem;
+}
+
+.call-tile__footer-text {
+  font-weight: 600;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-tile__footer-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.12rem 0.4rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  border-radius: 0.4rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #dfe2e6;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.call-tile__footer-pill--share {
+  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  color: color-mix(in srgb, var(--color-accent) 92%, white);
+}
+
+.call-tile__footer-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #e5e7eb;
+  font-size: 0.95rem;
+  transition: color 140ms ease;
+}
+
+.call-tile__footer-icons .is-off {
+  color: #9ca3af;
+}
+
+.call-tile:hover .call-tile__footer {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+  .call-tile:hover .call-tile__footer-icons {
+    color: #ffffff;
   }
 
   .call-tile__menu-button {
-    position: absolute;
-    top: 0.8rem;
-    right: 0.9rem;
-    width: 2.4rem;
-    height: 2.4rem;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.6);
-    color: rgba(255, 255, 255, 0.9);
-    display: grid;
-    place-items: center;
     opacity: 0;
-    transition: opacity 120ms ease;
+    transform: translateY(6px);
+    pointer-events: none;
+    transition: opacity 120ms ease, transform 120ms ease;
   }
 
   .call-tile:hover .call-tile__menu-button,
   .call-tile__menu-button:focus-visible {
     opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
   }
 
   .call-tile__menu-button:focus-visible {
@@ -7181,10 +8403,10 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   .call-tile__menu-panel {
     position: absolute;
-    top: 1rem;
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(240px, 90%);
+    right: 0.85rem;
+    bottom: 4.25rem;
+    transform: none;
+    width: min(260px, 92%);
     border-radius: 1rem;
     padding: 1rem;
     background: color-mix(in srgb, var(--color-panel) 80%, transparent);
@@ -7226,6 +8448,47 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     gap: 0.6rem;
   }
 
+  .volume-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+  }
+
+  .volume-menu {
+    position: fixed;
+    z-index: 81;
+    transform: translate(-50%, -50%);
+    width: 220px;
+    padding: 0.9rem;
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, var(--color-panel) 82%, black 15%);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
+    color: var(--text-90);
+  }
+
+  .volume-menu__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    margin-bottom: 0.4rem;
+  }
+
+  .volume-menu input[type='range'] {
+    width: 100%;
+  }
+
+  .call-menu__note {
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
   .call-menu__label {
     display: flex;
     justify-content: space-between;
@@ -7263,6 +8526,11 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     color: var(--text-100);
   }
 
+  .call-menu__roles {
+    color: var(--text-70);
+    font-weight: 500;
+  }
+
   .call-menu__action--danger {
     background: color-mix(in srgb, var(--color-danger) 20%, transparent);
     color: color-mix(in srgb, var(--color-danger) 90%, white);
@@ -7272,67 +8540,164 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     background: color-mix(in srgb, var(--color-danger) 32%, transparent);
   }
 
-  .call-empty {
-    margin: auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    text-align: center;
-  }
-
-  .call-empty__card {
+  .call-more-menu {
+    position: absolute;
+    bottom: calc(100% + 0.5rem);
+    right: 0;
+    min-width: 240px;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    align-items: center;
-    max-width: 320px;
-    color: var(--text-70);
+    gap: 0.25rem;
+    padding: 0.5rem;
+    border-radius: 0.9rem;
+    background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+    box-shadow: var(--shadow-elevated);
+    z-index: 24;
   }
 
-  .call-empty__icon {
-    width: 3.5rem;
-    height: 3.5rem;
-    border-radius: 1rem;
-    display: grid;
-    place-items: center;
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    color: var(--text-80);
-    font-size: 1.5rem;
-  }
-
-  .call-empty__card h3 {
-    color: var(--text-90);
-    font-size: 1rem;
-    font-weight: 600;
-  }
-
-  .call-empty__card p {
-    font-size: 0.9rem;
-    color: var(--text-60);
-    line-height: 1.4;
-  }
-
-  .call-controls {
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--color-border-subtle);
-    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
-    padding: clamp(0.9rem, 2vw, 1.25rem);
-  }
-
-  .call-controls--embedded {
-    border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--color-panel) 82%, transparent);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 56%, transparent);
-  }
-
-  .call-controls__row {
+  .call-more-menu button {
+    width: 100%;
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
+    gap: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 0.75rem;
+    background: transparent;
+    border: none;
+    color: var(--text-85);
+    text-align: left;
   }
+
+  .call-more-menu button:hover,
+  .call-more-menu button:focus-visible {
+    background: color-mix(in srgb, var(--color-panel-muted) 35%, transparent);
+    color: var(--text-100);
+  }
+
+  .call-more-menu small {
+    display: block;
+    color: var(--text-60);
+    font-size: 0.75rem;
+  }
+
+.call-empty {
+  margin: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(1rem, 2vw, 1.5rem);
+  width: 100%;
+  text-align: center;
+}
+
+.call-empty__tile {
+  width: min(520px, 96%);
+  aspect-ratio: 16 / 9;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--color-panel) 75%, rgba(0, 0, 0, 0.2));
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.call-empty__avatar {
+  width: 82px;
+  height: 82px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-panel-muted) 70%, rgba(0, 0, 0, 0.3));
+  border: 2px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.call-empty__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.call-empty__avatar i {
+  font-size: 1.8rem;
+  color: var(--text-70);
+}
+
+.call-empty__label {
+  color: var(--text-95);
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.call-empty__hint {
+  color: var(--text-60);
+  font-size: 0.9rem;
+}
+
+.call-controls {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(3rem, 8vh, 5rem);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  width: auto;
+  max-width: calc(100% - 1.5rem);
+  border-radius: 0.9rem;
+  border: none;
+  background: none;
+  padding: 0.2rem 0.35rem;
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  pointer-events: none;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease,
+    background 180ms ease,
+    border-color 180ms ease;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 6;
+  backdrop-filter: blur(8px);
+}
+
+.call-controls--visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.call-controls--embedded {
+  position: relative;
+  inset: auto;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+  border-color: color-mix(in srgb, var(--color-border-subtle) 58%, transparent);
+  box-shadow: none;
+  backdrop-filter: none;
+  margin-top: 0.35rem;
+}
+
+.call-controls__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+}
 
   .call-controls__row--join {
     justify-content: center;
@@ -7368,13 +8733,13 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   .call-status-message {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: var(--text-60);
   }
 
-  .call-controls__status {
-    min-width: 0;
-  }
+.call-controls__status {
+  display: none;
+}
 
   .call-audio-unlock {
     display: flex;
@@ -7384,36 +8749,47 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     flex-wrap: wrap;
   }
 
-  .call-controls__group {
-    display: inline-flex;
-    align-items: center;
-    gap: 1.1rem;
-    flex-wrap: wrap;
-  }
+.call-controls__group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
 
-  .call-controls__group--main {
-    flex: 1 1 auto;
-    justify-content: center;
-  }
+.call-controls__group--main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: center;
+  gap: 0.15rem;
+  align-items: center;
+}
 
-  .call-controls__group--exit {
-    gap: 0.75rem;
-  }
+.call-controls__group--exit {
+  gap: 0.15rem;
+  align-items: center;
+  padding-left: 0;
+  margin-left: 0;
+  border-left: none;
+}
 
-  .call-controls__item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-55);
-  }
+.call-controls__item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--text-70);
+}
 
-  .call-controls__item span {
-    max-width: 6rem;
-    text-align: center;
+.call-controls__item span {
+  display: none;
+}
+
+  .call-controls__item--more {
+    position: relative;
   }
 
   .call-controls__item--leave span {
@@ -7424,34 +8800,36 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     flex: 0 0 auto;
   }
 
-  .call-control-button {
-    display: grid;
-    place-items: center;
-    width: 3rem;
-    height: 3rem;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(0, 0, 0, 0.35);
-    color: rgba(255, 255, 255, 0.85);
-    font-size: 1.2rem;
-    transition: transform 120ms ease, background 150ms ease, color 150ms ease;
-  }
+.call-control-button {
+  display: grid;
+  place-items: center;
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+  background: color-mix(in srgb, #1f1f1f 85%, rgba(0, 0, 0, 0.35));
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 1.25rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transition: transform 120ms ease, background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
 
   .call-control-button:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: color-mix(in srgb, var(--color-panel) 90%, rgba(0, 0, 0, 0.2));
     color: var(--text-100);
+    border-color: color-mix(in srgb, var(--color-border-strong) 70%, transparent);
   }
 
   .call-control-button--active {
-    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
-    color: color-mix(in srgb, var(--color-accent) 85%, white);
-    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 60%, rgba(0, 0, 0, 0.35));
+    color: color-mix(in srgb, var(--color-accent) 96%, white);
+    border-color: color-mix(in srgb, var(--color-accent) 75%, transparent);
   }
 
   .call-control-button--danger {
-    background: color-mix(in srgb, var(--color-danger) 25%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 85%, white);
-    border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 60%, rgba(0, 0, 0, 0.25));
+    color: color-mix(in srgb, var(--color-danger) 96%, white);
+    border-color: color-mix(in srgb, var(--color-danger) 70%, transparent);
   }
 
   .call-control-button--danger:hover {
@@ -7541,7 +8919,9 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   @media (max-width: 480px) {
     .call-grid {
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      --call-tile-min-width: 170px;
+      grid-template-columns: repeat(auto-fit, minmax(var(--call-tile-min-width), 1fr));
+      max-width: 100%;
     }
 
     .call-controls__group--main {
@@ -7559,6 +8939,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   }
 </style>
+
 
 
 

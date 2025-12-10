@@ -17,6 +17,8 @@ import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte'
   import ThreadPane from '$lib/components/chat/ThreadPane.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
   import VoiceLobby from '$lib/components/voice/VoiceLobby.svelte';
+  import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
+  import VoiceParticipantsPanel from '$lib/components/voice/VoiceParticipantsPanel.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
 
@@ -152,6 +154,70 @@ let floatingThreadDragActive = $state(false);
 let floatingThreadDragStart = { x: 0, y: 0 };
 let floatingThreadWindowStart = { x: 0, y: 0 };
 let floatingHeaderPointerId: number | null = null;
+let channelMessagesPopout = $state(false);
+let channelMessagesPopoutChannelId: string | null = $state(null);
+let channelMessagesPopoutChannelName = $state('');
+let channelMessagesPopoutPosition = $state({ x: 0, y: 0 });
+let channelMessagesDragActive = $state(false);
+let channelMessagesDragStart = { x: 0, y: 0 };
+let channelMessagesWindowStart = { x: 0, y: 0 };
+let channelMessagesPointerId: number | null = null;
+const CHANNEL_POP_MIN_WIDTH = 360;
+const CHANNEL_POP_MAX_WIDTH = 1200;
+const CHANNEL_POP_MIN_HEIGHT = 320;
+const CHANNEL_POP_MAX_HEIGHT = 1000;
+let channelMessagesWidth = $state(520);
+let channelMessagesHeight = $state(520);
+let channelMessagesResizeActive = $state(false);
+let channelMessagesResizeEdge = $state<
+  'left' | 'right' | 'top' | 'bottom' | 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | null
+>(null);
+let channelMessagesResizeStartX = 0;
+let channelMessagesResizeStartY = 0;
+let channelMessagesResizeStartWidth = 520;
+let channelMessagesResizeStartHeight = 520;
+let channelMessagesResizeStartPos = { x: 0, y: 0 };
+let channelMessagesResizePointerId: number | null = null;
+const CHANNEL_POP_MIN_VISIBLE = 180;
+const CHANNEL_POP_RESIZE_DEADBAND = 3;
+let popoutMessages: any[] = $state([]);
+let popoutProfiles: Record<string, any> = $state({});
+let popoutMessagesUnsub: (() => void) | null = null;
+const popoutProfileUnsubs: Record<string, Unsubscribe> = {};
+let popoutEarliestLoaded: any = null;
+let popoutReplyTarget = $state<ReplyReferenceInput | null>(null);
+let lastPopoutReplyChannelId: string | null = null;
+let popoutPendingUploads: PendingUploadPreview[] = $state([]);
+let lastPopoutPendingChannelId: string | null = null;
+let popoutScrollToBottomSignal = $state(0);
+const CALL_PANEL_MIN = 320;
+const CALL_PANEL_MAX = 1600;
+const FLOATING_CHAT_DEFAULT_WIDTH = 480;
+const FLOATING_CHAT_DEFAULT_HEIGHT = 520;
+const FLOATING_CHAT_MARGIN = 24;
+let callPanelWidth = $state(420);
+let callPanelResizeActive = $state(false);
+let callPanelResizeStartX = 0;
+let callPanelResizeStartWidth = 360;
+let callPanelTab = $state<'chat' | 'members'>('chat');
+let callPanelOpen = $state(false);
+let floatingCallChatVisible = $state(false);
+let floatingCallChatPosition = $state({ x: 0, y: 0 });
+let floatingCallChatDragActive = $state(false);
+let floatingCallChatDragStart = { x: 0, y: 0 };
+let floatingCallChatWindowStart = { x: 0, y: 0 };
+let floatingCallChatWidth = $state(FLOATING_CHAT_DEFAULT_WIDTH);
+let floatingCallChatResizeActive = $state(false);
+let floatingCallChatResizeStartX = 0;
+let floatingCallChatResizeStartWidth = 480;
+let floatingCallChatHeight = $state(FLOATING_CHAT_DEFAULT_HEIGHT);
+let floatingCallChatResizeStartY = 0;
+let floatingCallChatResizeStartHeight = 520;
+let floatingCallChatResizeStartPos = { x: 0, y: 0 };
+let floatingCallChatResizeEdge: 'left' | 'right' | 'top' | 'bottom' | 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | null =
+  null;
+let callChatHeaderPointerId: number | null = null;
+let lastVoiceVisible = $state(false);
 const profileUnsubs: Record<string, Unsubscribe> = {};
 let serverDisplayName = $state('Server');
   let serverMetaUnsub: Unsubscribe | null = $state(null);
@@ -311,6 +377,76 @@ let serverDisplayName = $state('Server');
     }
   }
 
+  function normalizePopoutProfile(uid: string, data: any, previous: any = popoutProfiles[uid] ?? {}) {
+    const merged = { ...previous, ...data };
+    const displayName =
+      pickString(merged?.name) ??
+      pickString(merged?.displayName) ??
+      pickString(previous.displayName) ??
+      pickString(previous.name) ??
+      pickString(merged?.email) ??
+      'Member';
+
+    const name =
+      pickString(merged?.name) ??
+      pickString(previous.name) ??
+      pickString(merged?.displayName) ??
+      displayName;
+
+    const photoURL = resolveProfilePhotoURL(merged);
+
+    return {
+      ...merged,
+      uid,
+      displayName,
+      name,
+      photoURL
+    };
+  }
+
+  function updatePopoutProfileCache(uid: string, patch: any) {
+    if (!uid) return;
+    const next = normalizePopoutProfile(uid, patch ?? {}, popoutProfiles[uid]);
+    const prev = popoutProfiles[uid];
+    if (!prev) {
+      popoutProfiles = { ...popoutProfiles, [uid]: next };
+      return;
+    }
+    if (
+      prev.displayName === next.displayName &&
+      prev.photoURL === next.photoURL &&
+      prev.name === next.name
+    ) {
+      const merged = { ...prev, ...next };
+      if (merged !== prev) {
+        popoutProfiles = { ...popoutProfiles, [uid]: merged };
+      }
+      return;
+    }
+    popoutProfiles = { ...popoutProfiles, [uid]: next };
+  }
+
+  function ensurePopoutProfileSubscription(database: ReturnType<typeof db>, uid: string) {
+    if (!uid || popoutProfileUnsubs[uid]) return;
+    popoutProfileUnsubs[uid] = onSnapshot(
+      doc(database, 'profiles', uid),
+      (snap) => {
+        updatePopoutProfileCache(uid, snap.data() ?? {});
+      },
+      () => {
+        popoutProfileUnsubs[uid]?.();
+        delete popoutProfileUnsubs[uid];
+      }
+    );
+  }
+
+  function cleanupPopoutProfileSubscriptions() {
+    for (const uid in popoutProfileUnsubs) {
+      popoutProfileUnsubs[uid]?.();
+      delete popoutProfileUnsubs[uid];
+    }
+  }
+
   function normalizePoll(raw: any) {
     const question = pickString(raw?.question) ?? '';
     const options = Array.isArray(raw?.options) ? raw.options : [];
@@ -357,7 +493,7 @@ let serverDisplayName = $state('Server');
 
   function clipReply(value: string | null | undefined, limit = REPLY_SNIPPET_LIMIT) {
     if (!value) return '';
-    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+    return value.length > limit ? `${value.slice(0, limit - 1)}Ã¢â‚¬Â¦` : value;
   }
 
   function describeReplyPreview(raw: any, type: string) {
@@ -475,6 +611,23 @@ let serverDisplayName = $state('Server');
   function restoreReply(ref: ReplyReferenceInput | null) {
     if (ref?.messageId) {
       replyTarget = ref;
+    }
+  }
+
+  function consumePopoutReply(explicit?: ReplyReferenceInput | null) {
+    const candidate =
+      explicit && explicit.messageId
+        ? explicit
+        : popoutReplyTarget && popoutReplyTarget.messageId
+          ? popoutReplyTarget
+          : null;
+    popoutReplyTarget = null;
+    return candidate && candidate.messageId ? candidate : null;
+  }
+
+  function restorePopoutReply(ref: ReplyReferenceInput | null) {
+    if (ref?.messageId) {
+      popoutReplyTarget = ref;
     }
   }
 
@@ -634,7 +787,7 @@ let serverDisplayName = $state('Server');
     return Math.random().toString(36).slice(2);
   };
 
-  type PendingUploadScope = 'channel' | 'thread' | 'floatingThread';
+  type PendingUploadScope = 'channel' | 'thread' | 'floatingThread' | 'popout';
 
   function getPendingUploadList(scope: PendingUploadScope) {
     switch (scope) {
@@ -642,6 +795,8 @@ let serverDisplayName = $state('Server');
         return threadPendingUploads;
       case 'floatingThread':
         return floatingThreadPendingUploads;
+      case 'popout':
+        return popoutPendingUploads;
       case 'channel':
       default:
         return pendingUploads;
@@ -655,6 +810,9 @@ let serverDisplayName = $state('Server');
         break;
       case 'floatingThread':
         floatingThreadPendingUploads = next;
+        break;
+      case 'popout':
+        popoutPendingUploads = next;
         break;
       case 'channel':
       default:
@@ -759,8 +917,24 @@ let serverDisplayName = $state('Server');
     voiceState = value;
   });
 
+  run(() => {
+    const visible = !!voiceState?.visible;
+    const inLobby = showVoiceLobby;
+    const hasVoiceSession = !!voiceState;
 
+    if (!hasVoiceSession && !inLobby) {
+      callPanelOpen = false;
+      closeFloatingCallChat();
+    } else if (isMobile) {
+      callPanelOpen = false;
+      closeFloatingCallChat();
+    } else if (!visible && !inLobby) {
+      // Keep open when minimized/hidden on desktop, just record last visibility.
+      callPanelOpen = callPanelOpen;
+    }
 
+    lastVoiceVisible = visible;
+  });
 
 
   // listeners
@@ -899,6 +1073,28 @@ let serverDisplayName = $state('Server');
     }
   }
 
+  async function loadOlderPopoutMessages(currServerId: string, channelId: string) {
+    try {
+      const database = db();
+      if (!popoutEarliestLoaded) return;
+      const q = query(
+        collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
+        orderBy('createdAt', 'asc'),
+        endBefore(popoutEarliestLoaded),
+        limitToLast(PAGE_SIZE)
+      );
+      const snap = await getDocs(q);
+      const older: any[] = [];
+      snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
+      popoutMessages = [...older, ...popoutMessages];
+      if (older.length) {
+        popoutEarliestLoaded = older[0]?.createdAt ?? popoutEarliestLoaded;
+      }
+    } catch (err) {
+      console.error('Failed to load older popout messages', err);
+    }
+  }
+
   function subscribeMessages(currServerId: string, channelId: string) {
     const database = db();
     const q = query(
@@ -951,6 +1147,55 @@ let serverDisplayName = $state('Server');
           void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
         }
       } catch {}
+    });
+  }
+
+  function clearPopoutMessagesUnsub() {
+    popoutMessagesUnsub?.();
+    popoutMessagesUnsub = null;
+  }
+
+  function subscribePopoutMessages(currServerId: string, channelId: string) {
+    const database = db();
+    const q = query(
+      collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
+      orderBy('createdAt', 'asc'),
+      limitToLast(PAGE_SIZE)
+    );
+    clearPopoutMessagesUnsub();
+    cleanupPopoutProfileSubscriptions();
+    popoutProfiles = {};
+    if ($user?.uid) {
+      updatePopoutProfileCache($user.uid, {
+        displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
+        email: pickString($user.email) ?? undefined
+      });
+    }
+    popoutMessagesUnsub = onSnapshot(q, (snap) => {
+      const nextMessages: any[] = [];
+      const seen = new Set<string>();
+
+      for (const docSnap of snap.docs) {
+        const raw: any = docSnap.data();
+        const msg = toChatMessage(docSnap.id, raw);
+        nextMessages.push(msg);
+
+        if (msg?.uid && msg.uid !== 'unknown') {
+          seen.add(msg.uid);
+          if (pickString(msg.displayName)) {
+            updatePopoutProfileCache(msg.uid, {
+              displayName: msg.displayName
+            });
+          }
+        }
+      }
+
+      popoutMessages = nextMessages;
+      popoutScrollToBottomSignal = Date.now();
+      if (popoutMessages.length) {
+        popoutEarliestLoaded = popoutMessages[0]?.createdAt ?? null;
+      }
+      seen.forEach((uid) => ensurePopoutProfileSubscription(database, uid));
     });
   }
 
@@ -1162,12 +1407,21 @@ function sidebarThreadList() {
     const next = selectChannelObject(id);
     activeChannel = next;
     messages = [];
+    clearMessagesUnsub();
     resetThreadState();
 
     if (next.type === 'voice') {
-      clearMessagesUnsub();
-      cleanupProfileSubscriptions();
-      profiles = {};
+      subscribeMessages(serverId, id);
+      subscribeThreads(serverId, id);
+      if ($user?.uid) {
+        const last = messages[messages.length - 1];
+        const at = last?.createdAt ?? null;
+        const lastId = last?.id ?? null;
+        void markChannelRead($user.uid, serverId, id, { at, lastMessageId: lastId });
+      }
+      // Hide member pane while showing voice preview to reduce clutter.
+      showMembers = false;
+      desktopMembersVisible = false;
       if (voiceState && voiceState.serverId === serverId && voiceState.channelId === next.id) {
         voiceSession.setVisible(true);
       } else if (voiceState) {
@@ -1205,7 +1459,7 @@ function sidebarThreadList() {
     }
   }
 
-  function joinSelectedVoiceChannel() {
+  function joinSelectedVoiceChannel(options: { muted?: boolean; videoOff?: boolean } = {}) {
     if (!serverId || !activeChannel || activeChannel.type !== 'voice') return;
     if (
       voiceState &&
@@ -1215,7 +1469,13 @@ function sidebarThreadList() {
       voiceSession.setVisible(true);
       return;
     }
-    voiceSession.join(serverId, activeChannel.id, activeChannel.name ?? 'Voice channel', serverDisplayName);
+    voiceSession.join(
+      serverId,
+      activeChannel.id,
+      activeChannel.name ?? 'Voice channel',
+      serverDisplayName,
+      { muted: options.muted ?? false, videoOff: options.videoOff ?? false }
+    );
     voiceSession.setVisible(true);
   }
 
@@ -1234,12 +1494,23 @@ function sidebarThreadList() {
   let mobilePaneTracking = false;
   let mobilePaneStartX = 0;
   let mobilePaneStartY = 0;
-  let lastVoiceVisible = false;
   let lastIsMobile = false;
   let lastShowThreadPanel = false;
   let channelHeaderEl: { focusHeader?: () => void } | null = null;
   const pendingChannelRedirect = $derived.by(() => Boolean(requestedChannelId && !activeChannel));
   const channelPanelInteractive = $derived.by(() => showChannels && !pendingChannelRedirect);
+  const activeServerCall = $derived.by(
+    () =>
+      Boolean(
+        voiceState &&
+          voiceState.visible &&
+          serverId &&
+          activeChannel?.id &&
+          voiceState.serverId === serverId &&
+          voiceState.channelId === activeChannel.id
+      )
+  );
+  const voiceDesktopLayout = $derived.by(() => !isMobile && isVoiceChannelView && activeServerCall);
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 120;
@@ -1300,6 +1571,408 @@ function sidebarThreadList() {
       event.preventDefault();
       threadPaneWidth = clampThreadWidth(threadPaneWidth + step);
     }
+  }
+
+  const clampCallPanelWidth = (value: number) =>
+    clamp(
+      value,
+      CALL_PANEL_MIN,
+      Math.min(CALL_PANEL_MAX, Math.floor((typeof window !== 'undefined' ? window.innerWidth : 1600) * 0.65))
+    );
+  const clampFloatingCallChatWidth = (value: number) =>
+    clamp(
+      value,
+      320,
+      Math.min(1200, Math.floor((typeof window !== 'undefined' ? window.innerWidth : 1600) * 0.7))
+    );
+  const clampFloatingCallChatHeight = (value: number) =>
+    clamp(
+      value,
+      280,
+      Math.min(1100, Math.floor((typeof window !== 'undefined' ? window.innerHeight : 1000) * 0.9))
+    );
+
+  const defaultFloatingChatPosition = (width: number, height: number) => {
+    if (typeof window === 'undefined') return { x: 0, y: 0 };
+    const x = Math.max(FLOATING_CHAT_MARGIN, window.innerWidth - width - FLOATING_CHAT_MARGIN * 2);
+    const y = Math.max(FLOATING_CHAT_MARGIN, window.innerHeight - height - FLOATING_CHAT_MARGIN * 2);
+    return { x, y };
+  };
+
+  const defaultChannelPopoutPosition = (width: number, height: number) => {
+    if (typeof window === 'undefined') return { x: 0, y: 0 };
+    const x = Math.max(FLOATING_CHAT_MARGIN, window.innerWidth - width - FLOATING_CHAT_MARGIN * 2);
+    const y = Math.max(FLOATING_CHAT_MARGIN, window.innerHeight - height - FLOATING_CHAT_MARGIN * 2);
+    return { x, y };
+  };
+
+  const clampChannelPopoutPosition = (pos: { x: number; y: number }, width: number, height: number) => {
+    if (typeof window === 'undefined') return pos;
+    const minVisible = CHANNEL_POP_MIN_VISIBLE;
+    const margin = FLOATING_CHAT_MARGIN;
+    const minX = margin - Math.max(width - minVisible, 0);
+    const maxX = Math.max(margin, window.innerWidth - margin - Math.min(width - minVisible, width));
+    const minY = margin - Math.max(height - minVisible, 0);
+    const maxY = Math.max(margin, window.innerHeight - margin - Math.min(height - minVisible, height));
+    return {
+      x: Math.min(Math.max(pos.x, minX), maxX),
+      y: Math.min(Math.max(pos.y, minY), maxY)
+    };
+  };
+
+  function toggleCallPanel(tab: 'chat' | 'members') {
+    if (!isMobile && tab === 'chat') {
+      if (floatingCallChatVisible) {
+        closeFloatingCallChat();
+        return;
+      }
+      callPanelOpen = false;
+      openCallChatPopout();
+      return;
+    }
+    if (callPanelOpen && callPanelTab === tab) {
+      callPanelOpen = false;
+      return;
+    }
+    closeFloatingCallChat();
+    callPanelTab = tab;
+    callPanelOpen = true;
+  }
+
+  function openCallPanel(tab: 'chat' | 'members') {
+    if (!isMobile && tab === 'chat') {
+      openCallChatPopout();
+      return;
+    }
+    closeFloatingCallChat();
+    callPanelTab = tab;
+    callPanelOpen = true;
+  }
+
+  function openChannelMessages() {
+    if (isMobile) {
+      mobileVoicePane = 'chat';
+      return;
+    }
+    closeFloatingCallChat();
+    callPanelOpen = false;
+    const width = clamp(channelMessagesWidth, CHANNEL_POP_MIN_WIDTH, CHANNEL_POP_MAX_WIDTH);
+    const height = clamp(channelMessagesHeight, CHANNEL_POP_MIN_HEIGHT, CHANNEL_POP_MAX_HEIGHT);
+    channelMessagesWidth = width;
+    channelMessagesHeight = height;
+    if (channelMessagesPopoutPosition.x === 0 && channelMessagesPopoutPosition.y === 0) {
+      channelMessagesPopoutPosition = defaultChannelPopoutPosition(width, height);
+    }
+    const targetChannelId = activeChannel?.id ?? null;
+    channelMessagesPopoutChannelId = targetChannelId;
+    channelMessagesPopoutChannelName = activeChannel?.name ?? '';
+    popoutReplyTarget = null;
+    popoutPendingUploads = [];
+    popoutMessages = [];
+    popoutEarliestLoaded = null;
+    clearPopoutMessagesUnsub();
+    cleanupPopoutProfileSubscriptions();
+    if (serverId && targetChannelId) {
+      subscribePopoutMessages(serverId, targetChannelId);
+    }
+    channelMessagesPopout = true;
+  }
+
+  function closeChannelMessagesPopout() {
+    stopChannelMessagesDrag();
+    stopChannelMessagesResize();
+    channelMessagesPopout = false;
+    channelMessagesPopoutChannelId = null;
+    channelMessagesPopoutChannelName = '';
+    popoutMessages = [];
+    popoutProfiles = {};
+    popoutReplyTarget = null;
+    popoutPendingUploads = [];
+    popoutEarliestLoaded = null;
+    clearPopoutMessagesUnsub();
+    cleanupPopoutProfileSubscriptions();
+  }
+
+  function handleCallPanelResizeStart(event: PointerEvent) {
+    if (isMobile || !callPanelOpen) return;
+    callPanelResizeActive = true;
+    callPanelResizeStartX = event.clientX;
+    callPanelResizeStartWidth = callPanelWidth;
+    window.addEventListener('pointermove', handleCallPanelResizeMove);
+    window.addEventListener('pointerup', stopCallPanelResize);
+    event.preventDefault();
+  }
+
+  function handleCallPanelResizeMove(event: PointerEvent) {
+    if (!callPanelResizeActive) return;
+    const delta = callPanelResizeStartX - event.clientX;
+    callPanelWidth = clampCallPanelWidth(callPanelResizeStartWidth + delta);
+  }
+
+  function stopCallPanelResize() {
+    if (!callPanelResizeActive) return;
+    callPanelResizeActive = false;
+    window.removeEventListener('pointermove', handleCallPanelResizeMove);
+    window.removeEventListener('pointerup', stopCallPanelResize);
+  }
+
+  function handleCallPanelResizeKeydown(event: KeyboardEvent) {
+    if (!callPanelOpen) return;
+    const step = event.shiftKey ? 36 : 18;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      callPanelWidth = clampCallPanelWidth(callPanelWidth - step);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      callPanelWidth = clampCallPanelWidth(callPanelWidth + step);
+    }
+  }
+
+  function openCallChatPopout() {
+    if (isMobile) return;
+    callPanelTab = 'chat';
+    callPanelOpen = false;
+    const nextWidth = clampFloatingCallChatWidth(floatingCallChatWidth);
+    const nextHeight = clampFloatingCallChatHeight(floatingCallChatHeight);
+    floatingCallChatWidth = nextWidth;
+    floatingCallChatHeight = nextHeight;
+    floatingCallChatVisible = true;
+    floatingCallChatPosition = defaultFloatingChatPosition(nextWidth, nextHeight);
+    floatingCallChatDragActive = false;
+    floatingCallChatResizeActive = false;
+    callChatHeaderPointerId = null;
+    callPanelOpen = false;
+  }
+
+  function closeFloatingCallChat() {
+    if (!floatingCallChatVisible) return;
+    floatingCallChatVisible = false;
+    floatingCallChatDragActive = false;
+    floatingCallChatResizeActive = false;
+    callPanelOpen = false;
+    callChatHeaderPointerId = null;
+    floatingCallChatPosition = { x: 0, y: 0 };
+    floatingCallChatResizeEdge = null;
+    resetFloatingCallChatListeners();
+  }
+
+  function dockFloatingCallChat() {
+    floatingCallChatVisible = false;
+    floatingCallChatDragActive = false;
+    floatingCallChatResizeActive = false;
+    callChatHeaderPointerId = null;
+    floatingCallChatResizeEdge = null;
+    resetFloatingCallChatListeners();
+    callPanelTab = 'chat';
+    callPanelOpen = true;
+  }
+
+  function resetFloatingCallChatSize() {
+    const nextWidth = clampFloatingCallChatWidth(FLOATING_CHAT_DEFAULT_WIDTH);
+    const nextHeight = clampFloatingCallChatHeight(FLOATING_CHAT_DEFAULT_HEIGHT);
+    floatingCallChatWidth = nextWidth;
+    floatingCallChatHeight = nextHeight;
+    floatingCallChatPosition = defaultFloatingChatPosition(nextWidth, nextHeight);
+  }
+
+  function resetFloatingCallChatListeners() {
+    window.removeEventListener('pointermove', handleFloatingCallChatPointerMove);
+    window.removeEventListener('pointerup', stopFloatingCallChatDrag);
+    window.removeEventListener('pointercancel', stopFloatingCallChatDrag);
+    window.removeEventListener('pointermove', handleFloatingCallChatResizeMove);
+    window.removeEventListener('pointerup', stopFloatingCallChatResize);
+    window.removeEventListener('pointercancel', stopFloatingCallChatResize);
+  }
+
+  // Channel popout drag/resize
+  function handleChannelMessagesPointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('.channel-popout-close')) return;
+    channelMessagesDragActive = true;
+    channelMessagesPointerId = event.pointerId;
+    channelMessagesDragStart = { x: event.clientX, y: event.clientY };
+    channelMessagesWindowStart = { ...channelMessagesPopoutPosition };
+    window.addEventListener('pointermove', handleChannelMessagesPointerMove, { passive: false });
+    window.addEventListener('pointerup', stopChannelMessagesDrag);
+    window.addEventListener('pointercancel', stopChannelMessagesDrag);
+    event.preventDefault();
+  }
+
+  function handleChannelMessagesPointerMove(event: PointerEvent) {
+    if (!channelMessagesDragActive || event.pointerId !== channelMessagesPointerId) return;
+    const dx = event.clientX - channelMessagesDragStart.x;
+    const dy = event.clientY - channelMessagesDragStart.y;
+    const nextPos = clampChannelPopoutPosition({
+      x: channelMessagesWindowStart.x + dx,
+      y: channelMessagesWindowStart.y + dy
+    }, channelMessagesWidth, channelMessagesHeight);
+    channelMessagesPopoutPosition = nextPos;
+    event.preventDefault();
+  }
+
+  function stopChannelMessagesDrag(event?: PointerEvent) {
+    if (!channelMessagesDragActive) return;
+    if (event && event.pointerId !== channelMessagesPointerId) return;
+    channelMessagesDragActive = false;
+    channelMessagesPointerId = null;
+    window.removeEventListener('pointermove', handleChannelMessagesPointerMove);
+    window.removeEventListener('pointerup', stopChannelMessagesDrag);
+    window.removeEventListener('pointercancel', stopChannelMessagesDrag);
+  }
+
+  function handleChannelMessagesResizeStart(edge: typeof channelMessagesResizeEdge, event: PointerEvent) {
+    if (!channelMessagesPopout || !edge) return;
+    if (event.button !== 0) return;
+    (event.currentTarget as HTMLElement | null)?.setPointerCapture(event.pointerId);
+    channelMessagesResizePointerId = event.pointerId;
+    channelMessagesResizeActive = true;
+    channelMessagesResizeEdge = edge;
+    channelMessagesResizeStartX = event.clientX;
+    channelMessagesResizeStartY = event.clientY;
+    channelMessagesResizeStartWidth = channelMessagesWidth;
+    channelMessagesResizeStartHeight = channelMessagesHeight;
+    channelMessagesResizeStartPos = { ...channelMessagesPopoutPosition };
+    window.addEventListener('pointermove', handleChannelMessagesResizeMove);
+    window.addEventListener('pointerup', stopChannelMessagesResize);
+    window.addEventListener('pointercancel', stopChannelMessagesResize);
+    event.preventDefault();
+  }
+
+  function handleChannelMessagesResizeMove(event: PointerEvent) {
+    if (!channelMessagesResizeActive || !channelMessagesResizeEdge) return;
+    if (channelMessagesResizePointerId !== null && event.pointerId !== channelMessagesResizePointerId) return;
+    const deltaX = channelMessagesResizeStartX - event.clientX;
+    const deltaY = channelMessagesResizeStartY - event.clientY;
+    const edge = channelMessagesResizeEdge;
+    const beyondDeadband = Math.abs(deltaX) > CHANNEL_POP_RESIZE_DEADBAND || Math.abs(deltaY) > CHANNEL_POP_RESIZE_DEADBAND;
+    let nextWidth = channelMessagesWidth;
+    let nextHeight = channelMessagesHeight;
+    let nextPos = { ...channelMessagesPopoutPosition };
+
+    if (beyondDeadband) {
+      if (edge.includes('left')) {
+        nextWidth = clamp(channelMessagesResizeStartWidth + deltaX, CHANNEL_POP_MIN_WIDTH, CHANNEL_POP_MAX_WIDTH);
+        const appliedDelta = nextWidth - channelMessagesResizeStartWidth;
+        nextPos.x = channelMessagesResizeStartPos.x - appliedDelta;
+      }
+      if (edge.includes('right')) {
+        nextWidth = clamp(channelMessagesResizeStartWidth - deltaX, CHANNEL_POP_MIN_WIDTH, CHANNEL_POP_MAX_WIDTH);
+      }
+      if (edge.includes('top')) {
+        nextHeight = clamp(channelMessagesResizeStartHeight + deltaY, CHANNEL_POP_MIN_HEIGHT, CHANNEL_POP_MAX_HEIGHT);
+        const appliedDelta = nextHeight - channelMessagesResizeStartHeight;
+        nextPos.y = channelMessagesResizeStartPos.y - appliedDelta;
+      }
+      if (edge.includes('bottom')) {
+        nextHeight = clamp(channelMessagesResizeStartHeight - deltaY, CHANNEL_POP_MIN_HEIGHT, CHANNEL_POP_MAX_HEIGHT);
+      }
+    }
+
+    channelMessagesWidth = nextWidth;
+    channelMessagesHeight = nextHeight;
+    channelMessagesPopoutPosition = clampChannelPopoutPosition(nextPos, nextWidth, nextHeight);
+  }
+
+  function stopChannelMessagesResize(event?: PointerEvent) {
+    if (!channelMessagesResizeActive) return;
+    if (event && event.pointerId && channelMessagesResizePointerId !== null && event.pointerId !== channelMessagesResizePointerId)
+      return;
+    channelMessagesResizeActive = false;
+    channelMessagesResizeEdge = null;
+    channelMessagesResizePointerId = null;
+    window.removeEventListener('pointermove', handleChannelMessagesResizeMove);
+    window.removeEventListener('pointerup', stopChannelMessagesResize);
+    window.removeEventListener('pointercancel', stopChannelMessagesResize);
+  }
+
+  function handleFloatingCallChatPointerDown(event: PointerEvent) {
+    if (!floatingCallChatVisible) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('.call-chat-popout__action')) return;
+    if (event.button !== 0) return;
+    floatingCallChatDragActive = true;
+    callChatHeaderPointerId = event.pointerId;
+    floatingCallChatDragStart = { x: event.clientX, y: event.clientY };
+    floatingCallChatWindowStart = { ...floatingCallChatPosition };
+    window.addEventListener('pointermove', handleFloatingCallChatPointerMove, { passive: false });
+    window.addEventListener('pointerup', stopFloatingCallChatDrag);
+    window.addEventListener('pointercancel', stopFloatingCallChatDrag);
+    event.preventDefault();
+  }
+
+  function handleFloatingCallChatPointerMove(event: PointerEvent) {
+    if (!floatingCallChatDragActive || event.pointerId !== callChatHeaderPointerId) return;
+    const dx = event.clientX - floatingCallChatDragStart.x;
+    const dy = event.clientY - floatingCallChatDragStart.y;
+    floatingCallChatPosition = {
+      x: floatingCallChatWindowStart.x + dx,
+      y: floatingCallChatWindowStart.y + dy
+    };
+    event.preventDefault();
+  }
+
+  function stopFloatingCallChatDrag(event?: PointerEvent) {
+    if (!floatingCallChatDragActive) return;
+    if (event && event.pointerId !== callChatHeaderPointerId) return;
+    floatingCallChatDragActive = false;
+    callChatHeaderPointerId = null;
+    resetFloatingCallChatListeners();
+  }
+
+  function handleFloatingCallChatResizeStart(edge: typeof floatingCallChatResizeEdge, event: PointerEvent) {
+    if (!floatingCallChatVisible || !edge) return;
+    floatingCallChatResizeActive = true;
+    floatingCallChatResizeEdge = edge;
+    floatingCallChatResizeStartX = event.clientX;
+    floatingCallChatResizeStartY = event.clientY;
+    floatingCallChatResizeStartWidth = floatingCallChatWidth;
+    floatingCallChatResizeStartHeight = floatingCallChatHeight;
+    floatingCallChatResizeStartPos = { ...floatingCallChatPosition };
+    window.addEventListener('pointermove', handleFloatingCallChatResizeMove);
+    window.addEventListener('pointerup', stopFloatingCallChatResize);
+    window.addEventListener('pointercancel', stopFloatingCallChatResize);
+    event.preventDefault();
+  }
+
+  function handleFloatingCallChatResizeMove(event: PointerEvent) {
+    if (!floatingCallChatResizeActive || !floatingCallChatResizeEdge) return;
+    const deltaX = floatingCallChatResizeStartX - event.clientX;
+    const deltaY = floatingCallChatResizeStartY - event.clientY;
+    const edge = floatingCallChatResizeEdge;
+    let nextWidth = floatingCallChatWidth;
+    let nextHeight = floatingCallChatHeight;
+    let nextPos = { ...floatingCallChatPosition };
+
+    if (edge.includes('left')) {
+      nextWidth = clampFloatingCallChatWidth(floatingCallChatResizeStartWidth + deltaX);
+      const appliedDelta = nextWidth - floatingCallChatResizeStartWidth;
+      nextPos.x = floatingCallChatResizeStartPos.x - appliedDelta;
+    }
+    if (edge.includes('right')) {
+      nextWidth = clampFloatingCallChatWidth(floatingCallChatResizeStartWidth - deltaX);
+    }
+    if (edge.includes('top')) {
+      nextHeight = clampFloatingCallChatHeight(floatingCallChatResizeStartHeight + deltaY);
+      const appliedDelta = nextHeight - floatingCallChatResizeStartHeight;
+      nextPos.y = floatingCallChatResizeStartPos.y - appliedDelta;
+    }
+    if (edge.includes('bottom')) {
+      nextHeight = clampFloatingCallChatHeight(floatingCallChatResizeStartHeight - deltaY);
+    }
+
+    floatingCallChatWidth = nextWidth;
+    floatingCallChatHeight = nextHeight;
+    floatingCallChatPosition = nextPos;
+  }
+
+  function stopFloatingCallChatResize() {
+    if (!floatingCallChatResizeActive) return;
+    floatingCallChatResizeActive = false;
+    floatingCallChatResizeEdge = null;
+    window.removeEventListener('pointermove', handleFloatingCallChatResizeMove);
+    window.removeEventListener('pointerup', stopFloatingCallChatResize);
+    window.removeEventListener('pointercancel', stopFloatingCallChatResize);
   }
 
   function resetFloatingThreadDragListeners() {
@@ -1668,23 +2341,28 @@ function sidebarThreadList() {
   onDestroy(() => {
     clearChannelsUnsub();
     clearMessagesUnsub();
+    clearPopoutMessagesUnsub();
     resetThreadState();
     clearServerThreads();
     cleanupProfileSubscriptions();
+    cleanupPopoutProfileSubscriptions();
     unsubscribeVoice();
     serverMetaUnsub?.();
     serverMetaUnsub = null;
     mentionDirectoryStop?.();
     mentionDirectoryStop = null;
-    mentionRolesStop?.();
-    mentionRolesStop = null;
-    lastMentionServer = null;
-    memberMentionOptions = [];
-    roleMentionOptions = [];
-    mentionOptions = [];
-    closeFloatingThread();
-    stopThreadResize();
-  });
+        mentionRolesStop?.();
+        mentionRolesStop = null;
+        lastMentionServer = null;
+        memberMentionOptions = [];
+        roleMentionOptions = [];
+        mentionOptions = [];
+        closeFloatingCallChat();
+        closeFloatingThread();
+        stopThreadResize();
+        stopCallPanelResize();
+        stopFloatingCallChatResize();
+      });
 
   // Persist read state when tab is hidden
   if (typeof window !== 'undefined') {
@@ -1856,6 +2534,156 @@ function sidebarThreadList() {
       });
     } catch (err) {
       restoreReply(replyRef);
+      console.error(err);
+      alert(`Failed to share form: ${err}`);
+    }
+  }
+
+  async function handlePopoutSend(payload: string | { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }) {
+    const raw = typeof payload === 'string' ? payload : payload?.text ?? '';
+    const trimmed = raw?.trim?.() ?? '';
+    if (!trimmed) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!channelMessagesPopoutChannelId) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumePopoutReply(typeof payload === 'object' ? payload?.replyTo ?? null : null);
+    const mentionList = normalizeMentionSendList(
+      typeof payload === 'object' ? payload?.mentions ?? [] : []
+    );
+    try {
+      await sendChannelMessage(serverId, channelMessagesPopoutChannelId, {
+        type: 'text',
+        text: trimmed,
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        mentions: mentionList,
+        replyTo: replyRef ?? undefined
+      });
+    } catch (err) {
+      restorePopoutReply(replyRef);
+      console.error(err);
+      alert(`Failed to send message: ${err}`);
+    }
+  }
+
+  async function handlePopoutSendGif(detail: string | { url: string; replyTo?: ReplyReferenceInput | null }) {
+    const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
+    if (!trimmed) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!channelMessagesPopoutChannelId) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumePopoutReply(typeof detail === 'object' ? detail?.replyTo ?? null : null);
+    try {
+      await sendChannelMessage(serverId, channelMessagesPopoutChannelId, {
+        type: 'gif',
+        url: trimmed,
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+    } catch (err) {
+      restorePopoutReply(replyRef);
+      console.error(err);
+      alert(`Failed to share GIF: ${err}`);
+    }
+  }
+
+  async function handlePopoutUploadFiles(request: { files: File[]; replyTo?: ReplyReferenceInput | null }) {
+    const selection = Array.from(request?.files ?? []).filter((file): file is File => file instanceof File);
+    if (!selection.length) return;
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!channelMessagesPopoutChannelId) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumePopoutReply(request?.replyTo ?? null);
+    let replyUsed = false;
+    const identity = {
+      uid: $user.uid,
+      displayName: deriveCurrentDisplayName(),
+      photoURL: deriveCurrentPhotoURL()
+    };
+    for (const file of selection) {
+      const pending = registerPendingUpload(file, 'popout');
+      try {
+        const uploaded = await uploadChannelFile({
+          serverId,
+          channelId: channelMessagesPopoutChannelId,
+          uid: $user.uid,
+          file,
+          onProgress: (progress) => pending.update(progress ?? 0)
+        });
+        await sendChannelMessage(serverId, channelMessagesPopoutChannelId, {
+          type: 'file',
+          file: {
+            name: file.name || uploaded.name,
+            url: uploaded.url,
+            size: file.size ?? uploaded.size,
+            contentType: file.type || uploaded.contentType,
+            storagePath: uploaded.storagePath
+          },
+          ...identity,
+          replyTo: !replyUsed && replyRef ? replyRef : undefined
+        });
+        pending.finish(true);
+        if (replyRef && !replyUsed) {
+          replyUsed = true;
+        }
+      } catch (err) {
+        pending.finish(false);
+        if (replyRef && !replyUsed) {
+          restorePopoutReply(replyRef);
+        }
+        console.error(err);
+        alert(`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+    }
+  }
+
+  async function handlePopoutCreatePoll(poll: { question: string; options: string[]; replyTo?: ReplyReferenceInput | null }) {
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!channelMessagesPopoutChannelId) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumePopoutReply(poll?.replyTo ?? null);
+    try {
+      await sendChannelMessage(serverId, channelMessagesPopoutChannelId, {
+        type: 'poll',
+        poll: {
+          question: poll.question,
+          options: poll.options
+        },
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+    } catch (err) {
+      restorePopoutReply(replyRef);
+      console.error(err);
+      alert(`Failed to create poll: ${err}`);
+    }
+  }
+
+  async function handlePopoutCreateForm(form: { title: string; questions: string[]; replyTo?: ReplyReferenceInput | null }) {
+    if (!serverId) { alert('Missing server id.'); return; }
+    if (!channelMessagesPopoutChannelId) { alert('Pick a channel first.'); return; }
+    if (!$user) { alert('Sign in to send messages.'); return; }
+    const replyRef = consumePopoutReply(form?.replyTo ?? null);
+    try {
+      await sendChannelMessage(serverId, channelMessagesPopoutChannelId, {
+        type: 'form',
+        form: {
+          title: form.title,
+          questions: form.questions
+        },
+        uid: $user.uid,
+        displayName: deriveCurrentDisplayName(),
+        photoURL: deriveCurrentPhotoURL(),
+        replyTo: replyRef ?? undefined
+      });
+    } catch (err) {
+      restorePopoutReply(replyRef);
       console.error(err);
       alert(`Failed to share form: ${err}`);
     }
@@ -2268,9 +3096,50 @@ function sidebarThreadList() {
     }
   }
 
+  async function handlePopoutVote(event: CustomEvent<{ messageId: string; optionIndex: number }>) {
+    if (!serverId || !channelMessagesPopoutChannelId || !$user) return;
+    const { messageId, optionIndex } = event.detail ?? {};
+    if (!messageId || optionIndex === undefined) return;
+    try {
+      await voteOnChannelPoll(serverId, channelMessagesPopoutChannelId, messageId, $user.uid, optionIndex);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to record vote: ${err}`);
+    }
+  }
+
+  async function handlePopoutFormSubmit(event: CustomEvent<{ messageId: string; answers: string[] }>) {
+    if (!serverId || !channelMessagesPopoutChannelId || !$user) return;
+    const { messageId, answers } = event.detail ?? {};
+    if (!messageId || !answers) return;
+    try {
+      await submitChannelForm(serverId, channelMessagesPopoutChannelId, messageId, $user.uid, answers);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to submit form: ${err}`);
+    }
+  }
+
+  async function handlePopoutReaction(event: CustomEvent<{ messageId: string; emoji: string }>) {
+    if (!serverId || !channelMessagesPopoutChannelId || !$user) return;
+    const { messageId, emoji } = event.detail ?? {};
+    if (!messageId || !emoji) return;
+    try {
+      await toggleChannelReaction(serverId, channelMessagesPopoutChannelId, messageId, $user.uid, emoji);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to toggle reaction: ${err}`);
+    }
+  }
+
   function handleReplyRequest(event: CustomEvent<{ message: any }>) {
     const ref = buildReplyReference(event.detail?.message);
     if (ref) replyTarget = ref;
+  }
+
+  function handlePopoutReplyRequest(event: CustomEvent<{ message: any }>) {
+    const ref = buildReplyReference(event.detail?.message);
+    if (ref) popoutReplyTarget = ref;
   }
 
   function activateThreadView(thread: ChannelThread, rootMessage: any) {
@@ -2300,11 +3169,11 @@ function sidebarThreadList() {
     }
   }
 
-  async function openThreadFromMessage(message: any) {
+  async function openThreadFromMessage(message: any, channelIdOverride?: string | null) {
     if (!message) return;
     if (!serverId) { alert('Missing server id.'); return; }
-    if (!activeChannel?.id) { alert('Pick a channel first.'); return; }
-    const channelId = activeChannel.id;
+    const channelId = channelIdOverride ?? activeChannel?.id ?? null;
+    if (!channelId) { alert('Pick a channel first.'); return; }
     let existing =
       channelThreads.find((thread) => thread.createdFromMessageId === message.id) ??
       (threadsByChannel[channelId]?.find(
@@ -2347,7 +3216,7 @@ function sidebarThreadList() {
         : [];
       pendingThreadId = await createChannelThread({
         serverId,
-        channelId: activeChannel.id,
+        channelId,
         sourceMessageId: message.id,
         sourceMessageText:
           pickString(message?.text) ??
@@ -2664,10 +3533,20 @@ function sidebarThreadList() {
     } else {
       clearChannelsUnsub();
       clearMessagesUnsub();
+      clearPopoutMessagesUnsub();
+      cleanupPopoutProfileSubscriptions();
       channels = [];
       activeChannel = null;
       messages = [];
       profiles = {};
+      channelMessagesPopout = false;
+      channelMessagesPopoutChannelId = null;
+      channelMessagesPopoutChannelName = '';
+      popoutMessages = [];
+      popoutProfiles = {};
+      popoutReplyTarget = null;
+      popoutPendingUploads = [];
+      popoutEarliestLoaded = null;
     }
   });
   run(() => {
@@ -2681,6 +3560,19 @@ function sidebarThreadList() {
     if (channelId !== prevPending) {
       lastPendingChannelId = channelId;
       pendingUploads = [];
+    }
+  });
+  run(() => {
+    const channelId = channelMessagesPopoutChannelId;
+    const prevReply = untrack(() => lastPopoutReplyChannelId);
+    const prevPending = untrack(() => lastPopoutPendingChannelId);
+    if (channelId !== prevReply) {
+      lastPopoutReplyChannelId = channelId;
+      popoutReplyTarget = null;
+    }
+    if (channelId !== prevPending) {
+      lastPopoutPendingChannelId = channelId;
+      popoutPendingUploads = [];
     }
   });
   run(() => {
@@ -2713,14 +3605,13 @@ function sidebarThreadList() {
     isVoiceChannelView = activeChannel?.type === 'voice';
   });
   run(() => {
-    isViewingActiveVoiceChannel =
-      Boolean(
-        isVoiceChannelView &&
-          voiceState &&
-          serverId &&
-          voiceState.serverId === serverId &&
-          voiceState.channelId === activeChannel?.id
-      );
+    isViewingActiveVoiceChannel = Boolean(
+      isVoiceChannelView &&
+        voiceState?.visible &&
+        serverId &&
+        voiceState.serverId === serverId &&
+        voiceState.channelId === activeChannel?.id
+    );
   });
   run(() => {
     showVoiceLobby = Boolean(isVoiceChannelView && !isViewingActiveVoiceChannel);
@@ -2955,6 +3846,24 @@ function sidebarThreadList() {
       voiceSession.setVisible(false);
     }
   });
+  run(() => {
+    if (channelMessagesPopout && channelMessagesPopoutChannelId && serverId) {
+      const stillExists = channels.some((c) => c.id === channelMessagesPopoutChannelId);
+      if (!stillExists) {
+        closeChannelMessagesPopout();
+      }
+    }
+  });
+  run(() => {
+    if (!channelMessagesPopoutChannelId) {
+      channelMessagesPopoutChannelName = '';
+      return;
+    }
+    const name = findChannelName(channelMessagesPopoutChannelId);
+    if (name) {
+      channelMessagesPopoutChannelName = name;
+    }
+  });
 </script>
 
 <!-- Layout summary:
@@ -2990,7 +3899,8 @@ function sidebarThreadList() {
             channel={activeChannel}
             thread={activeThread}
             channelsVisible={showChannels}
-            membersVisible={isMobile ? showMembers : (!activeThread && desktopMembersVisible)}
+            membersVisible={!voiceState?.visible && (isMobile ? showMembers : desktopMembersVisible)}
+            showMessageShortcut={true}
             onToggleChannels={() => {
               showChannels = true;
               showMembers = false;
@@ -3004,11 +3914,12 @@ function sidebarThreadList() {
                 desktopMembersVisible = desktopMembersWideEnough ? desktopMembersPreferred : false;
               }
             }}
+            onOpenMessages={openChannelMessages}
             onExitThread={() => closeThreadView()}
           />
 
           <div class="flex-1 panel-muted flex flex-col min-h-0">
-        {#if isMobile && voiceState && voiceState.visible}
+        {#if isMobile && voiceState}
           <div class="mobile-call-wrapper md:hidden" ontouchstart={handleMobilePaneTouchStart} ontouchmove={handleMobilePaneTouchMove} ontouchend={handleMobilePaneTouchEnd}>
             <div class="mobile-call-tabs">
               <button
@@ -3031,114 +3942,232 @@ function sidebarThreadList() {
               </button>
             </div>
 
-            {#if mobileVoicePane === 'call'}
-              <div class="mobile-call-card">
-                <VideoChat layout="embedded" on:openMobileChat={() => setMobileVoicePane('chat')} />
+            <div class={`mobile-call-card ${mobileVoicePane === 'call' && voiceState.visible ? '' : 'hidden'}`}>
+              <VideoChat layout="embedded" showChatToggle={false} on:openMobileChat={() => setMobileVoicePane('chat')} on:openChannelChat={openChannelMessages} />
+            </div>
+
+            <div class={`mobile-chat-card ${mobileVoicePane === 'chat' ? '' : 'hidden'}`}>
+              <ChannelMessagePane
+                hasChannel={Boolean(serverId && activeChannel)}
+                channelName={activeChannel?.name ?? ''}
+                {messages}
+                {profiles}
+                currentUserId={$user?.uid ?? null}
+                {mentionOptions}
+                {replyTarget}
+                threadStats={threadStats}
+                defaultSuggestionSource={latestInboundMessage}
+                conversationContext={aiConversationContext}
+                aiAssistEnabled={aiAssistEnabled}
+                threadLabel={activeChannel?.name ?? ''}
+                {pendingUploads}
+                {scrollToBottomSignal}
+                scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+                listClass="message-scroll-region flex-1 overflow-y-auto p-3"
+                inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
+                inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+                onVote={handleVote}
+                onSubmitForm={handleFormSubmit}
+                onReact={handleReaction}
+                onLoadMore={() => {
+                  if (serverId && activeChannel?.id) {
+                    loadOlderMessages(serverId, activeChannel.id);
+                  }
+                }}
+                onSend={handleSend}
+                onSendGif={handleSendGif}
+                onCreatePoll={handleCreatePoll}
+                onCreateForm={handleCreateForm}
+                onUploadFiles={handleUploadFiles}
+                on:reply={handleReplyRequest}
+                on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+                on:cancelReply={() => (replyTarget = null)}
+              />
+            </div>
+          </div>
+      {:else}
+        {#if showVoiceLobby}
+          <div class="px-3 pt-1 md:px-5 md:pt-0 mb-3">
+            <VoiceLobby
+              serverId={serverId}
+              channelId={activeChannel?.id ?? null}
+              channelName={activeChannel?.name ?? 'Voice channel'}
+              serverName={serverDisplayName}
+              inviteUrl={voiceInviteUrl}
+              currentUserAvatar={currentUserPhotoURL}
+              currentUserName={currentUserDisplayName}
+              connectedChannelId={voiceState?.channelId ?? null}
+              connectedChannelName={voiceState?.channelName ?? null}
+              connectedServerId={voiceState?.serverId ?? null}
+              connectedServerName={voiceState?.serverName ?? voiceState?.serverId ?? null}
+              on:joinVoice={(event) => joinSelectedVoiceChannel(event.detail ?? {})}
+              on:joinMuted={(event) => joinSelectedVoiceChannel({ muted: true, ...(event.detail ?? {}) })}
+              on:startStreaming={(event) => joinSelectedVoiceChannel(event.detail ?? {})}
+              on:returnToSession={() => voiceSession.setVisible(true)}
+              on:openChat={openChannelMessages}
+            />
+          </div>
+        {/if}
+
+        {#if !isMobile && voiceState}
+          {#if voiceDesktopLayout}
+            <div class={`desktop-call-layout ${voiceState.visible ? '' : 'hidden'}`}>
+              <div class="desktop-call-main">
+                <VideoChat
+                  layout="standalone"
+                  sidePanelOpen={false}
+                  sidePanelTab={callPanelTab}
+                  stageOnly={true}
+                  showChatToggle={false}
+                  on:openMobileChat={() => {}}
+                  on:toggleSideChat={() => {}}
+                  on:toggleSideMembers={() => {}}
+                  on:openChannelChat={openChannelMessages}
+                />
               </div>
-            {:else}
-              <div class="mobile-chat-card">
+            </div>
+          {:else}
+            <div class={`flex-none mb-3 md:mb-4 ${voiceState.visible ? '' : 'hidden'}`}>
+              <VideoChat
+                layout="embedded"
+                sidePanelOpen={false}
+                sidePanelTab={callPanelTab}
+                stageOnly={false}
+                showChatToggle={false}
+                on:openMobileChat={() => {}}
+                on:toggleSideChat={() => {}}
+                on:toggleSideMembers={() => {}}
+                on:openChannelChat={openChannelMessages}
+              />
+            </div>
+          {/if}
+        {/if}
+        {#if voiceState && !voiceState.visible}
+          <div class="sticky bottom-0 z-10 mt-3 border-t border-subtle bg-[color:var(--color-panel)]/80 px-2 py-2 backdrop-blur">
+            <VoiceMiniPanel serverId={serverId} session={voiceState} />
+          </div>
+        {/if}
+
+        {#if channelMessagesPopout && !isMobile}
+          <div class="channel-popout-overlay">
+            <div
+              class="channel-popout-window"
+              style={`left:${channelMessagesPopoutPosition.x}px; top:${channelMessagesPopoutPosition.y}px; width:${channelMessagesWidth}px; height:${channelMessagesHeight}px`}
+            >
+              <div
+                class="channel-popout-header"
+                class:channel-popout-header--dragging={channelMessagesDragActive}
+                onpointerdown={handleChannelMessagesPointerDown}
+              >
+                <div class="channel-popout-title">
+                  <span>Channel messages</span>
+                  {#if channelMessagesPopoutChannelName}
+                    <small>#{channelMessagesPopoutChannelName}</small>
+                  {/if}
+                </div>
+                <button
+                  type="button"
+                  class="channel-popout-close"
+                  aria-label="Close channel messages"
+                  onclick={closeChannelMessagesPopout}
+                >
+                  <i class="bx bx-x"></i>
+                </button>
+              </div>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--left ${channelMessagesResizeActive && channelMessagesResizeEdge?.includes('left') ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (left edge)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('left', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--right ${channelMessagesResizeActive && channelMessagesResizeEdge?.includes('right') ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (right edge)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('right', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--top ${channelMessagesResizeActive && channelMessagesResizeEdge?.includes('top') ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (top edge)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('top', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--bottom ${channelMessagesResizeActive && channelMessagesResizeEdge?.includes('bottom') ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (bottom edge)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('bottom', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--bottom-right ${channelMessagesResizeActive && channelMessagesResizeEdge === 'bottom-right' ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (bottom right corner)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('bottom-right', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--bottom-left ${channelMessagesResizeActive && channelMessagesResizeEdge === 'bottom-left' ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (bottom left corner)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('bottom-left', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--top-right ${channelMessagesResizeActive && channelMessagesResizeEdge === 'top-right' ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (top right corner)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('top-right', event)}
+              ></button>
+              <button
+                type="button"
+                class={`channel-popout-resize channel-popout-resize--top-left ${channelMessagesResizeActive && channelMessagesResizeEdge === 'top-left' ? 'is-active' : ''}`}
+                aria-label="Resize channel popout (top left corner)"
+                onpointerdown={(event) => handleChannelMessagesResizeStart('top-left', event)}
+              ></button>
+              <div class="channel-popout-body">
                 <ChannelMessagePane
-                  hasChannel={Boolean(serverId && activeChannel)}
-                  channelName={activeChannel?.name ?? ''}
-                  {messages}
-                  {profiles}
+                  hasChannel={Boolean(serverId && channelMessagesPopoutChannelId)}
+                  channelName={channelMessagesPopoutChannelName ?? ''}
+                  messages={popoutMessages}
+                  profiles={popoutProfiles}
                   currentUserId={$user?.uid ?? null}
                   {mentionOptions}
-                  {replyTarget}
+                  replyTarget={popoutReplyTarget}
                   threadStats={threadStats}
                   defaultSuggestionSource={latestInboundMessage}
                   conversationContext={aiConversationContext}
                   aiAssistEnabled={aiAssistEnabled}
-                  threadLabel={activeChannel?.name ?? ''}
-                  {pendingUploads}
-                  {scrollToBottomSignal}
-                  scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+                  threadLabel={channelMessagesPopoutChannelName ?? ''}
+                  pendingUploads={popoutPendingUploads}
+                  scrollToBottomSignal={popoutScrollToBottomSignal}
+                  scrollContextKey={`popout:${serverId ?? 'server'}:${channelMessagesPopoutChannelId ?? 'none'}`}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
                   inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
                   inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
                   emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-                  onVote={handleVote}
-                  onSubmitForm={handleFormSubmit}
-                  onReact={handleReaction}
+                  onVote={handlePopoutVote}
+                  onSubmitForm={handlePopoutFormSubmit}
+                  onReact={handlePopoutReaction}
                   onLoadMore={() => {
-                    if (serverId && activeChannel?.id) {
-                      loadOlderMessages(serverId, activeChannel.id);
+                    if (serverId && channelMessagesPopoutChannelId) {
+                      loadOlderPopoutMessages(serverId, channelMessagesPopoutChannelId);
                     }
                   }}
-                  onSend={handleSend}
-                  onSendGif={handleSendGif}
-                  onCreatePoll={handleCreatePoll}
-                  onCreateForm={handleCreateForm}
-                  onUploadFiles={handleUploadFiles}
-                  on:reply={handleReplyRequest}
-                  on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
-                  on:cancelReply={() => (replyTarget = null)}
+                  onSend={handlePopoutSend}
+                  onSendGif={handlePopoutSendGif}
+                  onCreatePoll={handlePopoutCreatePoll}
+                  onCreateForm={handlePopoutCreateForm}
+                  onUploadFiles={handlePopoutUploadFiles}
+                  on:reply={handlePopoutReplyRequest}
+                  on:thread={(event) => void openThreadFromMessage(event.detail?.message, channelMessagesPopoutChannelId)}
+                  on:cancelReply={() => (popoutReplyTarget = null)}
                 />
               </div>
-            {/if}
+            </div>
           </div>
-        {:else}
-          {#if showVoiceLobby}
-            <div class="voice-lobby-container">
-              <VoiceLobby
-                serverId={serverId}
-                channelId={activeChannel?.id ?? null}
-                channelName={activeChannel?.name ?? 'Voice channel'}
-                serverName={serverDisplayName}
-                inviteUrl={voiceInviteUrl}
-                currentUserAvatar={currentUserPhotoURL}
-                currentUserName={currentUserDisplayName}
-                connectedChannelId={voiceState?.channelId ?? null}
-                connectedChannelName={voiceState?.channelName ?? null}
-                connectedServerId={voiceState?.serverId ?? null}
-                connectedServerName={voiceState?.serverName ?? voiceState?.serverId ?? null}
-                on:joinVoice={() => joinSelectedVoiceChannel()}
-                on:startStreaming={() => joinSelectedVoiceChannel()}
-                on:returnToSession={() => voiceSession.setVisible(true)}
-              />
-            </div>
-          {/if}
+        {/if}
 
-          {#if voiceState && voiceState.visible}
-            <div class="flex-none mb-4 md:mb-5">
-              <VideoChat layout="embedded" on:openMobileChat={() => setMobileVoicePane('chat')} />
-            </div>
-          {/if}
 
-          {#if voiceState && !voiceState.visible}
-            <div class="shrink-0 border-b border-subtle px-3 py-2 text-sm text-soft flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-              <div class="flex-1 truncate">
-                <span class="font-semibold text-primary">Voice connected</span>
-                <span class="ml-1 text-soft flex flex-wrap items-center gap-1">
-                  <span>#{voiceState.channelName}</span>
-                  <span class="text-white/40">&bull;</span>
-                  <span class="text-[11px] uppercase tracking-wide text-white/60 md:text-xs">
-                    {voiceState.serverName ?? voiceState.serverId}
-                  </span>
-                  {#if serverId && voiceState.serverId !== serverId}
-                    <span class="rounded-full bg-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-white/60">other server</span>
-                  {/if}
-                </span>
-              </div>
-              <div class="flex flex-wrap items-center gap-2">
-                <button
-                  class="bg-white/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-white/25"
-                  type="button"
-                  onclick={() => voiceSession.setVisible(true)}
-                >
-                  Return to voice
-                </button>
-                <button
-                  class="btn btn-danger px-3 py-1.5 text-sm font-medium"
-                  type="button"
-                  onclick={() => voiceSession.leave()}
-                >
-                  Leave
-                </button>
-              </div>
-            </div>
-          {/if}
-
+        {#if !voiceDesktopLayout && !showVoiceLobby}
           <ChannelMessagePane
             hasChannel={Boolean(serverId && activeChannel)}
             channelName={activeChannel?.name ?? ''}
@@ -3174,12 +4203,13 @@ function sidebarThreadList() {
             on:cancelReply={() => (replyTarget = null)}
           />
         {/if}
+      {/if}
           </div>
         </div>
 
-        {#if activeThread || desktopMembersVisible}
+        {#if !voiceState?.visible && ((activeThread && !voiceDesktopLayout) || desktopMembersVisible)}
           <div class="server-columns__members hidden lg:flex items-stretch">
-            {#if activeThread}
+            {#if activeThread && !voiceDesktopLayout}
               <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
               <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
               <div
@@ -3325,21 +4355,6 @@ function sidebarThreadList() {
     {/if}
   </div>
 </div>
-
-{#if !isMobile && !activeThread && desktopMembersWideEnough && !desktopMembersVisible}
-  <button
-    type="button"
-    class="members-pane-handle hidden lg:flex"
-    aria-label="Show members panel"
-    title="Show members"
-    onclick={() => {
-      desktopMembersPreferred = true;
-      desktopMembersVisible = true;
-    }}
-  >
-    <i class="bx bx-chevron-left text-xl" aria-hidden="true"></i>
-  </button>
-{/if}
 
 <!-- Thread panel (slides from right) -->
 <div
@@ -3735,6 +4750,388 @@ function sidebarThreadList() {
     outline: none;
   }
 
+  .channel-popout-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    pointer-events: none;
+  }
+
+  .channel-popout-window {
+    position: absolute;
+    right: 1.25rem;
+    bottom: 1.25rem;
+    width: min(520px, 46vw);
+    max-height: min(82vh, 760px);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 1rem;
+    box-shadow: 0 22px 58px rgba(5, 8, 20, 0.45);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    pointer-events: auto;
+  }
+
+  .channel-popout-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    padding: 0.75rem 0.9rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+
+  .channel-popout-header--dragging {
+    cursor: grabbing;
+  }
+
+  .channel-popout-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .channel-popout-title span {
+    font-weight: 700;
+    color: var(--color-text-primary);
+    line-height: 1.2;
+  }
+
+  .channel-popout-title small {
+    color: var(--color-text-secondary);
+    font-size: 0.85rem;
+  }
+
+  .channel-popout-close {
+    width: 34px;
+    height: 34px;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    color: var(--color-text-primary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .channel-popout-close:hover,
+  .channel-popout-close:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    outline: none;
+  }
+
+  .channel-popout-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0.65rem 0.75rem 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .channel-popout-body :global(.message-scroll-region) {
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    border-radius: 0.9rem;
+  }
+
+  .channel-popout-body :global(.chat-input-region) {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 0.9rem;
+  }
+
+  .channel-popout-resize {
+    position: absolute;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: none;
+    pointer-events: auto;
+  }
+
+  .channel-popout-resize.is-active {
+    border-color: color-mix(in srgb, var(--color-accent) 75%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+
+  .channel-popout-resize--left,
+  .channel-popout-resize--right {
+    top: 6px;
+    bottom: 6px;
+    width: 18px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    cursor: col-resize;
+    box-shadow: 0 4px 12px rgba(4, 6, 14, 0.18);
+  }
+
+  .channel-popout-resize--left {
+    left: -14px;
+  }
+
+  .channel-popout-resize--right {
+    right: -14px;
+  }
+
+  .channel-popout-resize--top,
+  .channel-popout-resize--bottom {
+    left: 12px;
+    right: 12px;
+    height: 18px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    cursor: row-resize;
+    box-shadow: 0 4px 12px rgba(4, 6, 14, 0.18);
+  }
+
+  .channel-popout-resize--top {
+    top: -14px;
+  }
+
+  .channel-popout-resize--bottom {
+    bottom: -14px;
+  }
+
+  .channel-popout-resize--bottom-right,
+  .channel-popout-resize--bottom-left,
+  .channel-popout-resize--top-right,
+  .channel-popout-resize--top-left {
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    box-shadow: 0 4px 12px rgba(4, 6, 14, 0.18);
+  }
+
+  .channel-popout-resize--bottom-right {
+    right: -14px;
+    bottom: -14px;
+    cursor: nwse-resize;
+  }
+
+  .channel-popout-resize--bottom-left {
+    left: -14px;
+    bottom: -14px;
+    cursor: nesw-resize;
+  }
+
+  .channel-popout-resize--top-right {
+    right: -14px;
+    top: -14px;
+    cursor: nesw-resize;
+  }
+
+  .channel-popout-resize--top-left {
+    left: -14px;
+    top: -14px;
+    cursor: nwse-resize;
+  }
+
+
+  .call-chat-popout-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    pointer-events: none;
+  }
+
+  .call-chat-popout-window {
+    width: min(520px, calc(100vw - 2.5rem));
+    max-height: min(82vh, 760px);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 1rem;
+    box-shadow: 0 22px 58px rgba(5, 8, 20, 0.45);
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: absolute;
+    min-width: 320px;
+    min-height: 280px;
+    resize: none;
+  }
+
+  .call-chat-popout-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    padding: 0.75rem 0.9rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+
+  .call-chat-popout-header--dragging {
+    cursor: grabbing;
+  }
+
+.call-chat-popout-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+}
+
+.call-chat-popout-title span {
+    font-weight: 700;
+    color: var(--color-text-primary);
+    line-height: 1.2;
+}
+
+  .call-chat-popout-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .call-chat-popout__action {
+    width: 34px;
+    height: 34px;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    color: var(--color-text-primary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .call-chat-popout__action:hover,
+  .call-chat-popout__action:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+    outline: none;
+  }
+
+  .call-chat-popout__action--close {
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 18%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger, #ef4444) 55%, transparent);
+    color: color-mix(in srgb, var(--color-danger, #ef4444) 90%, white);
+  }
+
+  .call-chat-popout__resize {
+    position: absolute;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: none;
+    pointer-events: auto;
+  }
+
+  .call-chat-popout__resize.is-active {
+    border-color: color-mix(in srgb, var(--color-accent) 75%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+
+  .call-chat-popout__resize--left,
+  .call-chat-popout__resize--right {
+    top: 6px;
+    bottom: 6px;
+    width: 18px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    cursor: col-resize;
+    box-shadow: 0 4px 16px rgba(4, 6, 14, 0.2);
+  }
+
+  .call-chat-popout__resize--left {
+    left: -14px;
+  }
+
+  .call-chat-popout__resize--right {
+    right: -14px;
+  }
+
+  .call-chat-popout__resize--top,
+  .call-chat-popout__resize--bottom {
+    left: 14px;
+    right: 14px;
+    height: 18px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    cursor: row-resize;
+    box-shadow: 0 4px 16px rgba(4, 6, 14, 0.2);
+  }
+
+  .call-chat-popout__resize--top {
+    top: -14px;
+  }
+
+  .call-chat-popout__resize--bottom {
+    bottom: -14px;
+  }
+
+  .call-chat-popout__resize--bottom-right,
+  .call-chat-popout__resize--bottom-left,
+  .call-chat-popout__resize--top-right,
+  .call-chat-popout__resize--top-left {
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    box-shadow: 0 4px 16px rgba(4, 6, 14, 0.2);
+    cursor: nwse-resize;
+  }
+
+  .call-chat-popout__resize--bottom-right {
+    right: -14px;
+    bottom: -14px;
+    cursor: nwse-resize;
+  }
+
+  .call-chat-popout__resize--bottom-left {
+    left: -14px;
+    bottom: -14px;
+    cursor: nesw-resize;
+  }
+
+  .call-chat-popout__resize--top-right {
+    right: -14px;
+    top: -14px;
+    cursor: nesw-resize;
+  }
+
+  .call-chat-popout__resize--top-left {
+    left: -14px;
+    top: -14px;
+    cursor: nwse-resize;
+  }
+
+  .call-chat-popout-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0.75rem 0.9rem 0.9rem;
+    gap: 0.6rem;
+  }
+
+  .call-chat-popout-body :global(.message-scroll-region) {
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    border-radius: 0.9rem;
+  }
+
+  .call-chat-popout-body :global(.chat-input-region) {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 0.9rem;
+  }
+
   .mobile-panel__channels :global(.sidebar-surface) {
     flex: 1;
     min-height: 0;
@@ -3743,10 +5140,154 @@ function sidebarThreadList() {
     border: none !important;
   }
 
-  .voice-lobby-container {
-    padding: 1.25rem 1.5rem 0;
+  .desktop-call-layout {
+    display: flex;
+    min-height: calc(100vh - 120px);
+    align-items: center;
+    justify-content: center;
+    width: 100%;
   }
 
+  .desktop-call-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    min-height: calc(100vh - 120px);
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .call-chat-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 70;
+  }
+
+  .call-chat-window {
+    position: absolute;
+    right: clamp(2.5rem, 10vw, 6rem);
+    top: calc(76px + env(safe-area-inset-top, 0px));
+    bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+    width: min(720px, 55vw);
+    min-width: 320px;
+    max-width: min(1200px, 70vw);
+    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 1rem;
+    box-shadow:
+      0 22px 58px rgba(5, 8, 20, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    pointer-events: auto;
+    position: absolute;
+  }
+
+  .call-chat-window__rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -10px;
+    width: 14px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    cursor: col-resize;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    box-shadow: 0 4px 16px rgba(4, 6, 14, 0.25);
+  }
+
+  .call-chat-window__rail.is-active {
+    border-color: color-mix(in srgb, var(--color-accent) 75%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+
+  .call-chat-window__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    padding: 0.75rem 0.9rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
+  }
+
+.call-chat-window__title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.call-chat-window__title span {
+    font-weight: 700;
+    color: var(--color-text-primary);
+    line-height: 1.2;
+}
+
+  .call-chat-window__actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .call-chat-window__action {
+    width: 34px;
+    height: 34px;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    color: var(--color-text-primary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .call-chat-window__action:hover,
+  .call-chat-window__action:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    outline: none;
+  }
+
+  .call-chat-window__close {
+    width: 34px;
+    height: 34px;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .call-chat-window__close:hover,
+  .call-chat-window__close:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    outline: none;
+  }
+
+  .call-chat-window__content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0.5rem 0.75rem 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .call-chat-window__content :global(.message-scroll-region) {
+    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    border-radius: 0.9rem;
+  }
+
+  .call-chat-window__content :global(.chat-input-region) {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 0.9rem;
+  }
 
   .mobile-call-wrapper {
     display: flex;
@@ -3861,17 +5402,6 @@ function sidebarThreadList() {
   @media (min-width: 768px) {
     .mobile-call-wrapper {
       display: none;
-    }
-    .voice-lobby-container {
-      padding: 0 1.5rem 0;
-      margin-bottom: 1.5rem;
-    }
-
-  }
-
-  @media (max-width: 767px) {
-    .voice-lobby-container {
-      padding: 0.75rem 0.9rem 0;
     }
   }
 </style>

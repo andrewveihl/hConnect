@@ -3,6 +3,7 @@
   import { cubicOut } from 'svelte/easing';
 
   import SettingsPanel from '$lib/components/settings/SettingsPanel.svelte';
+  import { goto } from '$app/navigation';
   import { settingsSections, type SettingsSection, type SettingsSectionId } from '$lib/settings/sections';
   import { user } from '$lib/stores/user';
 
@@ -82,6 +83,10 @@
     activeSection = id;
     detailSection = id;
     dispatch('section', id);
+    const section = settingsSections.find((s) => s.id === id);
+    if (section?.path) {
+      goto(section.path, { replaceState: true, keepFocus: true, noScroll: true });
+    }
   }
 
   function goBack() {

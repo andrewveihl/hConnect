@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
 
   import SettingsPanel from '$lib/components/settings/SettingsPanel.svelte';
+  import { goto } from '$app/navigation';
   import { settingsSections, type SettingsSection, type SettingsSectionId } from '$lib/settings/sections';
 
   interface Props {
@@ -60,9 +61,12 @@
     }
   }
 
-  function pickSection(id: SettingsSectionId) {
-    activeSection = id;
-    dispatch('section', id);
+  function pickSection(section: SettingsSection) {
+    activeSection = section.id;
+    dispatch('section', section.id);
+    if (section.path) {
+      goto(section.path, { replaceState: true, keepFocus: true, noScroll: true });
+    }
   }
 </script>
 
@@ -123,7 +127,7 @@
                         ? 'bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
                         : 'text-[color:var(--color-text-secondary)] hover:bg-[color:var(--color-panel-muted)]'
                     }`}
-                    onclick={() => pickSection(section.id)}
+                    onclick={() => pickSection(section)}
                   >
                     {section.label}
                   </button>

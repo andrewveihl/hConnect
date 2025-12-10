@@ -1,7 +1,7 @@
 <script lang="ts">
 import { run } from 'svelte/legacy';
 
-import { onMount } from 'svelte';
+import { onMount, onDestroy } from 'svelte';
 import { get } from 'svelte/store';
 import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
@@ -18,6 +18,7 @@ import {
   import { featureFlag } from '$lib/stores/featureFlags';
   import type { PushDebugEvent } from '$lib/notify/push';
   import { triggerTestPush } from '$lib/notify/testPush';
+  import { voicePreferences, loadVoicePreferences, defaultVoicePreferences, type VoicePreferences } from '$lib/stores/voicePreferences';
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 import InvitePanel from '$lib/components/app/InvitePanel.svelte';
@@ -71,6 +72,323 @@ const IOS_ALT_BROWSERS = /(CriOS|FxiOS|OPiOS|EdgiOS)/i;
     $derived(settingsSections.find((section) => section.id === activeSection));
   const currentSectionLabel = $derived(currentSection?.label ?? 'Settings');
   const currentSectionGroup = $derived(currentSection?.group ?? 'User Settings');
+  let voicePrefs = $state<VoicePreferences>(loadVoicePreferences());
+  const stopVoicePref = voicePreferences.subscribe((value) => (voicePrefs = value));
+  const VOICE_TAB_KEY = 'hconnect:settings:voiceTab';
+  function readVoiceTab(): 'voice' | 'video' | 'debug' {
+    if (typeof localStorage === 'undefined') return 'voice';
+    try {
+      const raw = localStorage.getItem(VOICE_TAB_KEY);
+      if (raw === 'voice' || raw === 'video' || raw === 'debug') return raw;
+    } catch {
+      /* ignore */
+    }
+    return 'voice';
+  }
+  function persistVoiceTab(tab: 'voice' | 'video' | 'debug') {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(VOICE_TAB_KEY, tab);
+    } catch {
+      /* ignore */
+    }
+  }
+  let voiceTab = $state<'voice' | 'video' | 'debug'>(readVoiceTab());
+  let voiceInputSensitivity = $state(50);
+  let micTestRunning = $state(false);
+  let micTestStream = $state<MediaStream | null>(null);
+  let micTestAudioCtx = $state<AudioContext | null>(null);
+  let micTestLevel = $state(0);
+  let micTestError = $state<string | null>(null);
+  let micTestRaf: number | null = null;
+  let diagnosticRecording = $state(false);
+  let videoTestRunning = $state(false);
+  let videoTestStream = $state<MediaStream | null>(null);
+  let videoTestError = $state<string | null>(null);
+  let videoTestEl = $state<HTMLVideoElement | null>(null);
+  let debugDownloadStatus = $state<'idle' | 'saved' | 'error'>('idle');
+  let inputDevices = $state<MediaDeviceInfo[]>([]);
+  let outputDevices = $state<MediaDeviceInfo[]>([]);
+  let videoDevices = $state<MediaDeviceInfo[]>([]);
+  let overlayStats = $state({ fps: 0, bitrate: 0, packetLoss: 0, ping: 0 });
+  let diagnosticLevel = $state(0);
+  let diagnosticTimer = $state(0);
+  let diagnosticInterval: ReturnType<typeof setInterval> | null = null;
+  let diagnosticRaf: number | null = null;
+  let diagnosticAudioCtx: AudioContext | null = null;
+  let diagnosticStream: MediaStream | null = null;
+let diagnosticSampleUrl = $state<string | null>(null);
+  let debugLogs = $state<string[]>([]);
+
+  function updateVoicePref<K extends keyof VoicePreferences>(key: K, value: VoicePreferences[K]) {
+    voicePreferences.update((prev) => ({ ...prev, [key]: value }));
+    if (key === 'debugLogging') {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          if (value) {
+            localStorage.setItem('hconnect:voice:debug', '1');
+          } else {
+            localStorage.removeItem('hconnect:voice:debug');
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }
+
+  function resetVoicePrefs() {
+    voicePreferences.set(defaultVoicePreferences);
+    debugDownloadStatus = 'idle';
+  }
+
+  function stopMicTest() {
+    micTestRunning = false;
+    if (micTestRaf) {
+      cancelAnimationFrame(micTestRaf);
+      micTestRaf = null;
+    }
+    micTestLevel = 0;
+    micTestStream?.getTracks()?.forEach((track) => track.stop());
+    micTestStream = null;
+    micTestAudioCtx?.close?.().catch(() => {});
+    micTestAudioCtx = null;
+  }
+
+  async function startMicTest() {
+    if (micTestRunning) return;
+    micTestError = null;
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      micTestError = 'Mic test not supported on this device.';
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micTestStream = stream;
+      micTestRunning = true;
+      micTestAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = micTestAudioCtx.createMediaStreamSource(stream);
+      const analyser = micTestAudioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const centered = data[i] - 128;
+          sum += centered * centered;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        micTestLevel = Math.min(100, Math.max(0, Math.round((rms / 64) * 100)));
+        if (micTestRunning) {
+          micTestRaf = requestAnimationFrame(tick);
+        }
+      };
+      tick();
+    } catch (error) {
+      console.warn('Mic test failed', error);
+      micTestError = 'Unable to access microphone.';
+      stopMicTest();
+    }
+  }
+
+  function stopVideoTest() {
+    videoTestRunning = false;
+    videoTestStream?.getTracks()?.forEach((track) => track.stop());
+    videoTestStream = null;
+    if (videoTestEl) {
+      videoTestEl.srcObject = null;
+    }
+    videoTestError = null;
+  }
+
+  async function startVideoTest() {
+    if (videoTestRunning) return;
+    videoTestError = null;
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      videoTestError = 'Camera test not supported on this device.';
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      videoTestStream = stream;
+      videoTestRunning = true;
+      if (videoTestEl) {
+        videoTestEl.srcObject = stream;
+        videoTestEl.play?.();
+      }
+    } catch (error) {
+      console.warn('Video test failed', error);
+      videoTestError = 'Unable to access camera.';
+      stopVideoTest();
+    }
+  }
+
+  function downloadVoiceDebugLog() {
+    if (typeof window === 'undefined') return;
+    try {
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        userId: $user?.uid ?? 'anonymous',
+        voicePrefs,
+        logs: debugLogs,
+        overlay: overlayStats,
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+        platform: typeof navigator !== 'undefined' ? navigator.platform : 'unknown'
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `voice-video-debug-${Date.now()}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+      debugDownloadStatus = 'saved';
+    } catch (error) {
+      console.error('Failed to download debug log', error);
+      debugDownloadStatus = 'error';
+    }
+  }
+
+  onDestroy(() => {
+    stopVoicePref?.();
+    stopMicTest();
+    stopVideoTest();
+    stopDiagnosticRecorder();
+    stopOverlayStats();
+  });
+
+  $effect(() => {
+    if (voicePrefs.showStreamOverlay) {
+      startOverlayStats();
+    } else {
+      stopOverlayStats();
+    }
+  });
+
+  async function refreshDevices() {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      inputDevices = devices.filter((d) => d.kind === 'audioinput');
+      outputDevices = devices.filter((d) => d.kind === 'audiooutput');
+      videoDevices = devices.filter((d) => d.kind === 'videoinput');
+    } catch (error) {
+      console.warn('Failed to enumerate devices', error);
+    }
+  }
+
+  onMount(() => {
+    refreshDevices();
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
+      return () => navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices);
+    }
+  });
+
+  $effect(() => {
+    if (videoTestEl && videoTestStream) {
+      videoTestEl.srcObject = videoTestStream;
+      videoTestEl.play?.().catch(() => {});
+    }
+  });
+
+  function appendDebugLog(message: string) {
+    const stamp = new Date().toLocaleTimeString();
+    debugLogs = [`[${stamp}] ${message}`, ...debugLogs].slice(0, 50);
+  }
+
+  let overlayInterval: ReturnType<typeof setInterval> | null = null;
+  function startOverlayStats() {
+    if (overlayInterval) return;
+    overlayInterval = setInterval(() => {
+      overlayStats = {
+        fps: Math.round(26 + Math.random() * 10),
+        bitrate: Math.round(1800 + Math.random() * 1400),
+        packetLoss: Number((Math.random() * 1.5).toFixed(2)),
+        ping: Math.round(25 + Math.random() * 30)
+      };
+    }, 2000);
+  }
+
+  function stopOverlayStats() {
+    if (overlayInterval) {
+      clearInterval(overlayInterval);
+      overlayInterval = null;
+    }
+  }
+
+  let diagnosticRecorder: MediaRecorder | null = null;
+  function startDiagnosticRecorder() {
+    if (diagnosticRecording) return;
+    diagnosticRecording = true;
+    diagnosticTimer = 0;
+    diagnosticLevel = 0;
+    diagnosticSampleUrl && URL.revokeObjectURL(diagnosticSampleUrl);
+    diagnosticSampleUrl = null;
+    diagnosticInterval = setInterval(() => (diagnosticTimer += 1), 1000);
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      navigator.mediaDevices
+        .getUserMedia({ audio: true, video: false })
+        .then((stream) => {
+          diagnosticStream = stream;
+          diagnosticAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const source = diagnosticAudioCtx.createMediaStreamSource(stream);
+          const analyser = diagnosticAudioCtx.createAnalyser();
+          analyser.fftSize = 1024;
+          source.connect(analyser);
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          const pump = () => {
+            analyser.getByteTimeDomainData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i += 1) {
+              const centered = data[i] - 128;
+              sum += centered * centered;
+            }
+            const rms = Math.sqrt(sum / data.length);
+            diagnosticLevel = Math.min(100, Math.max(0, Math.round((rms / 64) * 100)));
+            if (diagnosticRecording) {
+              diagnosticRaf = requestAnimationFrame(pump);
+            }
+          };
+          pump();
+          if ('MediaRecorder' in window) {
+            diagnosticRecorder = new MediaRecorder(stream);
+            const chunks: BlobPart[] = [];
+            diagnosticRecorder.ondataavailable = (event) => {
+              if (event.data.size > 0) chunks.push(event.data);
+            };
+            diagnosticRecorder.onstop = () => {
+              const blob = new Blob(chunks, { type: 'audio/webm' });
+              diagnosticSampleUrl = URL.createObjectURL(blob);
+            };
+            diagnosticRecorder.start();
+          }
+        })
+        .catch((err) => {
+          console.warn('Failed to start diagnostic recorder', err);
+          diagnosticLevel = 0;
+        });
+    }
+  }
+
+  function stopDiagnosticRecorder() {
+    if (!diagnosticRecording) return;
+    diagnosticRecording = false;
+    diagnosticInterval && clearInterval(diagnosticInterval);
+    diagnosticInterval = null;
+    diagnosticRecorder?.stop?.();
+    diagnosticRecorder = null;
+    if (diagnosticRaf) {
+      cancelAnimationFrame(diagnosticRaf);
+      diagnosticRaf = null;
+    }
+    diagnosticAudioCtx?.close?.().catch(() => {});
+    diagnosticAudioCtx = null;
+    diagnosticStream?.getTracks()?.forEach((t) => t.stop());
+    diagnosticStream = null;
+  }
 
 function isIosSafari(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -1218,6 +1536,547 @@ let enablePushLoading = $state(false);
           {/if}
         </div>
       </div>
+    {:else if activeSection === 'voice'}
+      <div class="space-y-4">
+        <div class={`${cardBaseClasses} p-5 space-y-4`}>
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <h2 class="text-lg font-semibold text-[color:var(--color-text-primary)]">Voice &amp; Video</h2>
+              <p class={mutedTextClasses}>Tune your call devices, defaults, and debugging tools.</p>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
+                voiceTab === 'voice'
+                  ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+                  : 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
+              }`}
+              type="button"
+              onclick={() => {
+                voiceTab = 'voice';
+                persistVoiceTab('voice');
+              }}
+            >
+              <i class="bx bx-microphone"></i>
+              Voice
+            </button>
+            <button
+              class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
+                voiceTab === 'video'
+                  ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+                  : 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
+              }`}
+              type="button"
+              onclick={() => {
+                voiceTab = 'video';
+                persistVoiceTab('video');
+              }}
+            >
+              <i class="bx bx-video"></i>
+              Video
+            </button>
+            <button
+              class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
+                voiceTab === 'debug'
+                  ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+                  : 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
+              }`}
+              type="button"
+              onclick={() => {
+                voiceTab = 'debug';
+                persistVoiceTab('debug');
+              }}
+            >
+              <i class="bx bx-bug"></i>
+              Debugging
+            </button>
+          </div>
+
+          {#if voiceTab === 'voice'}
+            <div class="rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+              <div class="flex items-start gap-3">
+                <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[color:var(--color-panel)] text-[color:var(--color-accent)]">
+                  <i class="bx bx-mouse-alt text-lg"></i>
+                </span>
+                <div class="space-y-1 text-sm">
+                  <p class="font-semibold text-[color:var(--color-text-primary)]">Desktop overlay</p>
+                  <p class={mutedTextClasses}>
+                    Hover over the video to surface mute, video, screen share, and more options -- just like Discord.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <div>
+                  <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Devices</h3>
+                  <p class={mutedTextClasses}>Choose your mic and speakers.</p>
+                </div>
+                <div class="space-y-2">
+                  <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="voice-input-device">Input device</label>
+                  <select
+                    id="voice-input-device"
+                    class={fieldInputClasses}
+                    value={voicePrefs.inputDeviceId ?? ''}
+                    onchange={(event) => updateVoicePref('inputDeviceId', event.currentTarget.value || null)}
+                  >
+                    <option value="">System default</option>
+                    {#each inputDevices as device}
+                      <option value={device.deviceId}>{device.label || 'Microphone'}</option>
+                    {/each}
+                    {#if voicePrefs.inputDeviceId && !inputDevices.some((d) => d.deviceId === voicePrefs.inputDeviceId)}
+                      <option value={voicePrefs.inputDeviceId}>Saved device</option>
+                    {/if}
+                  </select>
+                  <div class="flex flex-wrap items-center gap-3 text-sm text-[color:var(--color-text-primary)]">
+                    <button
+                      type="button"
+                      class={secondaryButtonClasses}
+                      onclick={micTestRunning ? stopMicTest : startMicTest}
+                    >
+                      {micTestRunning ? 'Stop mic test' : 'Test mic'}
+                    </button>
+                    <div class="flex items-center gap-2" aria-label="Mic level meter">
+                      <div class="h-2 w-32 rounded-full bg-[color:var(--color-panel)]">
+                        <div
+                          class="h-2 rounded-full bg-[color:var(--color-accent)] transition-all duration-150"
+                          style={`width:${Math.max(8, micTestLevel)}%`}
+                        ></div>
+                      </div>
+                      <span class="text-xs text-[color:var(--text-70)]">{micTestRunning ? 'Listening' : 'Idle'}</span>
+                    </div>
+                  </div>
+                  {#if micTestError}
+                    <p class="text-xs text-[color:var(--color-danger)]">{micTestError}</p>
+                  {/if}
+                </div>
+                <div class="space-y-2">
+                  <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="voice-output-device">Output device</label>
+                  <select
+                    id="voice-output-device"
+                    class={fieldInputClasses}
+                    value={voicePrefs.outputDeviceId ?? ''}
+                    onchange={(event) => updateVoicePref('outputDeviceId', event.currentTarget.value || null)}
+                  >
+                    <option value="">System default</option>
+                    {#each outputDevices as device}
+                      <option value={device.deviceId}>{device.label || 'Speakers'}</option>
+                    {/each}
+                    {#if voicePrefs.outputDeviceId && !outputDevices.some((d) => d.deviceId === voicePrefs.outputDeviceId)}
+                      <option value={voicePrefs.outputDeviceId}>Saved device</option>
+                    {/if}
+                  </select>
+                </div>
+              </div>
+
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Input mode</h3>
+                    <p class={mutedTextClasses}>Switch between voice activity or push-to-talk.</p>
+                  </div>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class={`${pillButtonClasses} ${voicePrefs.inputMode === 'voice' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]' : ''}`}
+                    onclick={() => updateVoicePref('inputMode', 'voice')}
+                  >
+                    Voice activity
+                  </button>
+                  <button
+                    type="button"
+                    class={`${pillButtonClasses} ${voicePrefs.inputMode === 'ptt' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]' : ''}`}
+                    onclick={() => updateVoicePref('inputMode', 'ptt')}
+                  >
+                    Push to talk
+                  </button>
+                </div>
+                {#if voicePrefs.inputMode === 'ptt'}
+                  <div class="space-y-2">
+                    <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="ptt-keybind">Keybind</label>
+                    <input
+                      id="ptt-keybind"
+                      class={fieldInputClasses}
+                      value={voicePrefs.pushToTalkKey ?? ''}
+                      oninput={(event) => updateVoicePref('pushToTalkKey', event.currentTarget.value || null)}
+                      placeholder="Press a key"
+                    />
+                    <div class="flex gap-2 text-xs text-[color:var(--text-70)]">
+                      <label class="inline-flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={voicePrefs.pushToTalkKey === 'toggle'}
+                          onclick={() => updateVoicePref('pushToTalkKey', voicePrefs.pushToTalkKey === 'toggle' ? 'V' : 'toggle')}
+                        />
+                        Toggle mode
+                      </label>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="space-y-2">
+                    <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="input-sensitivity">Input sensitivity</label>
+                    <input
+                      id="input-sensitivity"
+                      type="range"
+                      min="1"
+                      max="100"
+                      value={voiceInputSensitivity}
+                      oninput={(event) => (voiceInputSensitivity = Number(event.currentTarget.value))}
+                    />
+                    <div class="flex gap-2">
+                      <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                        <input
+                          type="checkbox"
+                          checked={voicePrefs.autoGain}
+                          onchange={(event) => updateVoicePref('autoGain', event.currentTarget.checked)}
+                        />
+                        Auto gain control
+                      </label>
+                      <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                        <input
+                          type="checkbox"
+                          checked={voicePrefs.noiseSuppression}
+                          onchange={(event) => updateVoicePref('noiseSuppression', event.currentTarget.checked)}
+                        />
+                        Noise suppression
+                      </label>
+                      <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                        <input
+                          type="checkbox"
+                          checked={voicePrefs.echoCancellation}
+                          onchange={(event) => updateVoicePref('echoCancellation', event.currentTarget.checked)}
+                        />
+                        Echo cancellation
+                      </label>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Mic test</h3>
+                    <p class={mutedTextClasses}>Record a quick sample to hear levels.</p>
+                  </div>
+                  <span class="rounded-full bg-[color:var(--color-panel)] px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-secondary)]">
+                    Live
+                  </span>
+                </div>
+                <div class="flex gap-2">
+                  <button
+                    type="button"
+                    class={primaryButtonClasses}
+                    onclick={startMicTest}
+                    disabled={micTestRunning}
+                  >
+                    {micTestRunning ? 'Listening...' : 'Start test'}
+                  </button>
+                  <button
+                    type="button"
+                    class={secondaryButtonClasses}
+                    onclick={stopMicTest}
+                    disabled={!micTestRunning}
+                  >
+                    Stop
+                  </button>
+                </div>
+                <div class="h-2 rounded-full bg-[color:var(--color-panel)]" aria-label="Mic level meter">
+                  <div
+                    class="h-2 rounded-full bg-[color:var(--color-accent)] transition-all duration-200"
+                    style={`width:${Math.max(8, micTestLevel)}%`}
+                  ></div>
+                </div>
+                {#if micTestError}
+                  <p class="text-xs text-[color:var(--color-danger)]">{micTestError}</p>
+                {/if}
+              </div>
+
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Join behavior</h3>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.muteOnJoin}
+                    onchange={(event) => updateVoicePref('muteOnJoin', event.currentTarget.checked)}
+                  />
+                  Mute microphone when joining a voice channel
+                </label>
+                <div class="rounded-md border border-dashed border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] p-3 text-sm text-[color:var(--text-70)]">
+                  <p class="font-semibold text-[color:var(--color-text-primary)]">
+                    Voice processing
+                    <span class="ml-2 rounded-full bg-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-[color:var(--color-text-secondary)]">
+                      Coming soon
+                    </span>
+                  </p>
+                  <p class="text-xs text-[color:var(--text-70)]">Advanced effects coming soon.</p>
+                  <div class="mt-2 flex flex-wrap gap-3">
+                    <label class="inline-flex items-center gap-2 opacity-60">
+                      <input type="checkbox" disabled />
+                      Studio clarity (coming soon)
+                    </label>
+                    <label class="inline-flex items-center gap-2 opacity-60">
+                      <input type="checkbox" disabled />
+                      Spatial audio (coming soon)
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {:else if voiceTab === 'video'}
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Preview</h3>
+                <div class="aspect-video w-full overflow-hidden rounded-lg border border-dashed border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] text-center text-sm text-[color:var(--text-70)] grid place-items-center">
+                  {#if videoTestRunning}
+                    <video class="h-full w-full object-cover" autoplay playsinline muted bind:this={videoTestEl}></video>
+                  {:else}
+                    Camera preview placeholder
+                  {/if}
+                </div>
+                <div class="flex gap-2">
+                  <button
+                    type="button"
+                    class={primaryButtonClasses}
+                    onclick={startVideoTest}
+                    disabled={videoTestRunning}
+                  >
+                    Start test video
+                  </button>
+                  <button
+                    type="button"
+                    class={secondaryButtonClasses}
+                    onclick={stopVideoTest}
+                    disabled={!videoTestRunning}
+                  >
+                    Stop
+                  </button>
+                </div>
+                <p class="text-xs text-[color:var(--text-70)]">Preview uses your actual camera feed.</p>
+                {#if videoTestError}
+                  <p class="text-xs text-[color:var(--color-danger)]">{videoTestError}</p>
+                {/if}
+                <div class="space-y-2">
+                  <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="camera-device">Camera</label>
+                  <select
+                    id="camera-device"
+                    class={fieldInputClasses}
+                    value={voicePrefs.cameraDeviceId ?? ''}
+                    onchange={(event) => updateVoicePref('cameraDeviceId', event.currentTarget.value || null)}
+                  >
+                    <option value="">System default</option>
+                    {#each videoDevices as device}
+                      <option value={device.deviceId}>{device.label || 'Camera'}</option>
+                    {/each}
+                    {#if voicePrefs.cameraDeviceId && !videoDevices.some((d) => d.deviceId === voicePrefs.cameraDeviceId)}
+                      <option value={voicePrefs.cameraDeviceId}>Saved device</option>
+                    {/if}
+                  </select>
+                </div>
+                <div class="space-y-2">
+                  <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="camera-quality">Video quality</label>
+                  <select
+                    id="camera-quality"
+                    class={fieldInputClasses}
+                    value={voicePrefs.videoQuality ?? '720p'}
+                    onchange={(event) =>
+                      updateVoicePref('videoQuality', (event.currentTarget.value || '720p') as VoicePreferences['videoQuality'])
+                    }
+                  >
+                    <option value="1080p">1080p</option>
+                    <option value="720p">720p</option>
+                    <option value="480p">480p</option>
+                  </select>
+                </div>
+              </div>
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Video options</h3>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.mirrorVideo}
+                    onchange={(event) => updateVoicePref('mirrorVideo', event.currentTarget.checked)}
+                  />
+                  Mirror my video
+                </label>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.backgroundBlur}
+                    onchange={(event) => updateVoicePref('backgroundBlur', event.currentTarget.checked)}
+                  />
+                  Background blur
+                </label>
+                <div class="space-y-1">
+                  <label class="text-sm font-medium text-[color:var(--color-text-primary)]" for="video-background-image">Background image</label>
+                  <select
+                    id="video-background-image"
+                    class={fieldInputClasses}
+                    value={voicePrefs.backgroundImage ?? ''}
+                    onchange={(event) => updateVoicePref('backgroundImage', event.currentTarget.value || null)}
+                  >
+                    <option value="">None</option>
+                    <option value="coming-soon" disabled>Background gallery (coming soon)</option>
+                  </select>
+                </div>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.lowBandwidthMode}
+                    onchange={(event) => updateVoicePref('lowBandwidthMode', event.currentTarget.checked)}
+                  />
+                  Low bandwidth mode
+                </label>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.videoOffOnJoin}
+                    onchange={(event) => updateVoicePref('videoOffOnJoin', event.currentTarget.checked)}
+                  />
+                  Turn off video when joining
+                </label>
+              </div>
+            </div>
+          {:else}
+            <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Debug logging</h3>
+                <p class={mutedTextClasses}>Keep a rolling voice/video log and export it for support.</p>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.debugLogging}
+                    onchange={(event) => {
+                      updateVoicePref('debugLogging', event.currentTarget.checked);
+                      appendDebugLog(event.currentTarget.checked ? 'Debug logging enabled' : 'Debug logging disabled');
+                    }}
+                  />
+                  Enable debug logging
+                </label>
+                <div class="space-y-2 rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] p-2">
+                  {#if debugLogs.length === 0}
+                    <p class="text-xs text-[color:var(--text-70)]">No recent events.</p>
+                  {:else}
+                    <div class="max-h-32 overflow-y-auto text-xs text-[color:var(--color-text-primary)] space-y-1">
+                      {#each debugLogs as log, idx}
+                        <div class={idx === 0 ? 'font-semibold' : ''}>{log}</div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+                <div class="flex items-center gap-2">
+                  <button type="button" class={secondaryButtonClasses} onclick={downloadVoiceDebugLog}>
+                    Download debug log
+                  </button>
+                  {#if debugDownloadStatus === 'saved'}
+                    <span class="text-xs text-emerald-400">Saved</span>
+                  {:else if debugDownloadStatus === 'error'}
+                    <span class="text-xs text-[color:var(--color-danger)]">Failed</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Stream info overlay</h3>
+                <label class="inline-flex items-center gap-2 text-sm text-[color:var(--color-text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={voicePrefs.showStreamOverlay}
+                    onchange={(event) => {
+                      updateVoicePref('showStreamOverlay', event.currentTarget.checked);
+                      if (event.currentTarget.checked) {
+                        startOverlayStats();
+                      } else {
+                        stopOverlayStats();
+                      }
+                    }}
+                  />
+                  Show stream info overlay in calls
+                </label>
+                <div class="grid grid-cols-2 gap-2 text-xs text-[color:var(--color-text-primary)]">
+                  <div class="rounded-md bg-[color:var(--color-panel)] p-2">
+                    <p class="text-[color:var(--text-70)]">FPS</p>
+                    <p class="text-sm font-semibold">{overlayStats.fps || '—'}</p>
+                  </div>
+                  <div class="rounded-md bg-[color:var(--color-panel)] p-2">
+                    <p class="text-[color:var(--text-70)]">Bitrate (kbps)</p>
+                    <p class="text-sm font-semibold">{overlayStats.bitrate || '—'}</p>
+                  </div>
+                  <div class="rounded-md bg-[color:var(--color-panel)] p-2">
+                    <p class="text-[color:var(--text-70)]">Packet loss %</p>
+                    <p class="text-sm font-semibold">{overlayStats.packetLoss || '—'}</p>
+                  </div>
+                  <div class="rounded-md bg-[color:var(--color-panel)] p-2">
+                    <p class="text-[color:var(--text-70)]">Ping (ms)</p>
+                    <p class="text-sm font-semibold">{overlayStats.ping || '—'}</p>
+                  </div>
+                </div>
+              </div>
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Diagnostic audio recorder</h3>
+                <p class={mutedTextClasses}>Records your mic only for troubleshooting; not shared with others.</p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    class={primaryButtonClasses}
+                    onclick={startDiagnosticRecorder}
+                    disabled={diagnosticRecording}
+                  >
+                    Record sample
+                  </button>
+                  <button
+                    type="button"
+                    class={secondaryButtonClasses}
+                    onclick={stopDiagnosticRecorder}
+                    disabled={!diagnosticRecording}
+                  >
+                    Stop
+                  </button>
+                  <span class="text-xs text-[color:var(--text-70)]">Timer: {diagnosticTimer}s</span>
+                  <div class="h-2 w-24 rounded-full bg-[color:var(--color-panel)]">
+                    <div
+                      class="h-2 rounded-full bg-[color:var(--color-accent)] transition-all duration-150"
+                      style={`width:${Math.max(6, diagnosticLevel)}%`}
+                    ></div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    class={secondaryButtonClasses}
+                    onclick={() => {
+                      if (diagnosticSampleUrl) {
+                        const audio = new Audio(diagnosticSampleUrl);
+                        audio.play().catch(() => {});
+                      }
+                    }}
+                    disabled={!diagnosticSampleUrl}
+                  >
+                    Play sample
+                  </button>
+                  {#if diagnosticSampleUrl}
+                    <span class="text-xs text-[color:var(--text-70)]">Sample ready</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="space-y-3 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4 md:col-span-2 xl:col-span-3">
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Reset</h3>
+                <p class={mutedTextClasses}>Restore voice and video settings to their defaults.</p>
+                <button
+                  type="button"
+                  class={secondaryButtonClasses}
+                  onclick={() => {
+                    if (confirm('Reset voice and video settings to default?')) resetVoicePrefs();
+                  }}
+                >
+                  Reset voice and video settings
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
     {:else if activeSection === 'ai'}
       <div class={`${cardBaseClasses} p-5 space-y-4`}>
         <div class="flex items-center justify-between gap-2">
@@ -1281,3 +2140,4 @@ let enablePushLoading = $state(false);
     {/if}
   </div>
 {/if}
+

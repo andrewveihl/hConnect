@@ -4,8 +4,10 @@
     thread?: { id: string; name?: string | null } | null;
     channelsVisible?: boolean;
     membersVisible?: boolean;
+    showMessageShortcut?: boolean;
     onToggleChannels?: (() => void) | null;
     onToggleMembers?: (() => void) | null;
+    onOpenMessages?: (() => void) | null;
     onExitThread?: (() => void) | null;
   }
 
@@ -14,8 +16,10 @@
     thread = null,
     channelsVisible = false,
     membersVisible = false,
+    showMessageShortcut = false,
     onToggleChannels = null,
     onToggleMembers = null,
+    onOpenMessages = null,
     onExitThread = null
   }: Props = $props();
 
@@ -72,14 +76,15 @@
         <span>Back to {channel?.name ?? 'channel'}</span>
       </button>
     {/if}
-    {#if !membersVisible}
+    {#if showMessageShortcut}
       <button
-        class="channel-header__toggle md:hidden"
+        class="channel-header__message"
         type="button"
-        aria-label="Show members"
-        onclick={() => onToggleMembers?.()}
+        aria-label="Open channel messages"
+        title="Open channel messages"
+        onclick={() => onOpenMessages?.()}
       >
-        <i class="bx bx-chevron-right text-xl"></i>
+        <i class="bx bx-message-dots text-xl"></i>
       </button>
     {/if}
   </div>
@@ -132,6 +137,29 @@
   .channel-header__thread-exit:focus-visible {
     background: color-mix(in srgb, var(--color-border-subtle) 20%, transparent);
     outline: none;
+  }
+
+  .channel-header__message {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    color: var(--color-text-primary);
+    display: grid;
+    place-items: center;
+    transition: background 150ms ease, border-color 150ms ease, transform 140ms ease;
+  }
+
+  .channel-header__message:hover,
+  .channel-header__message:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+    outline: none;
+  }
+
+  .channel-header__message:active {
+    transform: translateY(1px);
   }
 
   .channel-header__toggle {
