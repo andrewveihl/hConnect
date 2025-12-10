@@ -14,6 +14,7 @@
     setVoiceDebugSection
   } from '$lib/utils/voiceDebugContext';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { voiceClientState, invokeVoiceClientControl } from '$lib/stores/voiceClient';
 
   interface Props {
     serverId?: string | null;
@@ -37,6 +38,8 @@
   let unsub: Unsubscribe | null = $state(null);
   let copyStatus = $state('');
   let copyTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  const callState = $derived($voiceClientState);
 
   run(() => {
     unsub?.();
@@ -117,6 +120,14 @@
     return name.trim().charAt(0).toUpperCase() || '?';
   }
 
+  function toggleMute() {
+    invokeVoiceClientControl('toggleMute');
+  }
+
+  function toggleDeafen() {
+    invokeVoiceClientControl('toggleDeafen');
+  }
+
   let namesLine = $derived(participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', '));
   let serverLabel = $derived(session?.serverName ?? session?.serverId ?? 'Server');
   let connectedElsewhere = $derived(!!session && !!serverId && session.serverId !== serverId);
@@ -139,267 +150,113 @@
 </script>
 
 {#if session}
-  <div class="voice-mini panel-muted border border-subtle rounded-2xl px-3 py-3 sm:px-4 sm:py-3">
-    <div class="voice-mini__header">
-      <div class="voice-mini__avatar">
-        <i class="bx bx-headphone text-lg"></i>
+  <div class="rounded-2xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/90 p-3 shadow-xl backdrop-blur">
+    <div class="flex flex-wrap items-center gap-3">
+      <div class="relative grid h-12 w-12 place-items-center rounded-2xl bg-[color:var(--color-panel-muted)]">
+        <i class="bx bx-headphone text-lg text-[color:var(--color-text-primary)]"></i>
+        <span class="absolute -right-1 -bottom-1 inline-flex h-3 w-3 items-center justify-center rounded-full bg-[color:var(--color-panel)] shadow-inner">
+          <span class={`h-2 w-2 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+        </span>
       </div>
-      <div class="min-w-0 flex-1">
-        <div class="voice-mini__title">
-          <span class="truncate text-sm font-semibold text-primary sm:text-base">#{session.channelName}</span>
-          <span class="voice-mini__separator">/</span>
-          <span class="text-[11px] uppercase tracking-wide text-soft sm:text-xs">{serverLabel}</span>
+      <div class="min-w-0 flex-1 space-y-0.5">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="truncate text-sm font-semibold text-[color:var(--color-text-primary)]">#{session.channelName}</span>
+          <span class="text-[11px] uppercase tracking-wide text-[color:var(--color-text-tertiary)]">{serverLabel}</span>
           {#if connectedElsewhere}
-            <span class="voice-mini__tag voice-mini__tag--remote">Other server</span>
+            <span class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+              Other server
+            </span>
           {/if}
         </div>
-        {#if namesLine}
-          <div class="voice-mini__subtitle">{namesLine}</div>
-        {/if}
+        <div class="flex flex-wrap items-center gap-2 text-xs text-[color:var(--color-text-secondary)]">
+          <span class="inline-flex items-center gap-1">
+            <span class={`h-2 w-2 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+            <span>{callState.connected ? 'Voice connected' : 'Reconnecting...'}</span>
+          </span>
+          <span class="rounded-full bg-[color:var(--color-panel-muted)] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-secondary)]">
+            {participants.length} in call
+          </span>
+          {#if namesLine}
+            <span class="truncate">• {namesLine}</span>
+          {/if}
+        </div>
       </div>
-      <div class="voice-mini__actions">
-        <button class="voice-mini__button" type="button" title="Open call" aria-label="Open call" onclick={openVoice}>
+      <div class="flex items-center gap-1">
+        <button
+          class={`inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)] ${callState.muted ? 'opacity-90' : ''}`}
+          type="button"
+          title={callState.muted ? 'Unmute' : 'Mute'}
+          aria-pressed={!callState.muted}
+          onclick={toggleMute}
+        >
+          <i class={`bx ${callState.muted ? 'bx-microphone-off' : 'bx-microphone'} text-lg`}></i>
+        </button>
+        <button
+          class={`inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)] ${callState.deafened ? 'opacity-90' : ''}`}
+          type="button"
+          title={callState.deafened ? 'Undeafen' : 'Deafen'}
+          aria-pressed={!callState.deafened}
+          onclick={toggleDeafen}
+        >
+          <i class={`bx ${callState.deafened ? 'bx-volume-mute' : 'bx-volume-full'} text-lg`}></i>
+        </button>
+        <button
+          class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)]"
+          type="button"
+          title="Return to call"
+          aria-label="Return to call"
+          onclick={openVoice}
+        >
           <i class="bx bx-window-open text-lg"></i>
         </button>
-        <button class="voice-mini__button voice-mini__button--danger" type="button" title="Leave call" aria-label="Leave call" onclick={leaveCall}>
+        <button
+          class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-danger,#ef4444)]/60 bg-[color:var(--color-danger,#ef4444)]/15 text-[color:var(--color-danger,#ef4444)] transition hover:bg-[color:var(--color-danger,#ef4444)]/25"
+          type="button"
+          title="Leave call"
+          aria-label="Leave call"
+          onclick={leaveCall}
+        >
           <i class="bx bx-phone-off text-lg"></i>
         </button>
       </div>
     </div>
 
     {#if participants.length}
-      <div class="voice-mini__avatars">
+      <div class="mt-3 flex flex-wrap items-center gap-2">
         {#each participants.slice(0, 6) as p (p.uid)}
-          <div class="voice-mini__avatar-chip">
+          <div class="relative h-9 w-9 overflow-hidden rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]">
             {#if p.photoURL}
               <img src={p.photoURL} alt={p.displayName} class="h-full w-full object-cover" loading="lazy" />
             {:else}
-              <div class="grid h-full w-full place-items-center text-[11px] font-semibold text-primary">
+              <div class="grid h-full w-full place-items-center text-[11px] font-semibold text-[color:var(--color-text-primary)]">
                 {initials(p.displayName)}
               </div>
             {/if}
             {#if p.hasAudio === false}
-              <i class="bx bx-microphone-off voice-mini__badge voice-mini__badge--audio"></i>
-            {/if}
-            {#if p.hasVideo === false}
-              <i class="bx bx-video-off voice-mini__badge voice-mini__badge--video"></i>
+              <i class="bx bx-microphone-off absolute -right-1 -bottom-1 rounded-full bg-[color:var(--color-panel)] px-1 text-[10px] text-rose-200 shadow"></i>
             {/if}
           </div>
         {/each}
         {#if participants.length > 6}
-          <div class="voice-mini__more">+{participants.length - 6}</div>
+          <div class="h-9 px-3 inline-flex items-center justify-center rounded-full border border-dashed border-[color:var(--color-border-subtle)] text-[11px] font-semibold text-[color:var(--color-text-secondary)]">
+            +{participants.length - 6}
+          </div>
         {/if}
       </div>
     {/if}
 
-    <div class="voice-mini__footer">
-      <div class="voice-mini__status">
-        <span class="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-soft">
-          <span class="relative flex h-2 w-2">
-            <span class={`absolute inline-flex h-full w-full rounded-full opacity-75 ${participants.length ? 'bg-emerald-400 animate-ping' : 'bg-white/25'}`}></span>
-            <span class={`relative inline-flex h-2 w-2 rounded-full ${participants.length ? 'bg-emerald-400' : 'bg-white/40'}`}></span>
-          </span>
-          {participants.length} connected
-        </span>
-        <button class="voice-mini__pill" type="button" onclick={openVoice}>
-          Manage
-        </button>
-        <button class="voice-mini__pill" type="button" onclick={copyDebug} aria-label="Copy voice debug info">
-          Copy debug
-        </button>
-        {#if copyStatus}
-          <span class="voice-mini__feedback">{copyStatus}</span>
-        {/if}
-      </div>
+    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-tertiary)]">
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] px-2 py-1 text-[color:var(--color-text-secondary)] transition hover:border-[color:var(--color-accent)]"
+        onclick={copyDebug}
+      >
+        <i class="bx bx-clipboard text-xs"></i>
+        <span>Copy debug</span>
+      </button>
+      {#if copyStatus}
+        <span class="text-[color:var(--color-text-primary)]">{copyStatus}</span>
+      {/if}
     </div>
   </div>
 {/if}
-
-<style>
-  .voice-mini {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    width: 100%;
-    overflow: hidden;
-  }
-
-  .voice-mini__header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .voice-mini__avatar {
-    display: grid;
-    place-items: center;
-    width: 2.5rem;
-    height: 2.5rem;
-    border-radius: var(--radius-lg);
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-text-primary);
-  }
-
-  .voice-mini__title {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .voice-mini__separator {
-    color: var(--text-50);
-  }
-
-  .voice-mini__tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    padding: 0.1rem 0.5rem;
-    border-radius: 999px;
-    font-size: 0.65rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-60);
-  }
-
-  .voice-mini__tag--remote {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text-70);
-  }
-
-  .voice-mini__subtitle {
-    font-size: 0.75rem;
-    color: var(--text-55);
-    margin-top: 0.15rem;
-  }
-
-  .voice-mini__actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .voice-mini__button {
-    display: grid;
-    place-items: center;
-    width: 2.25rem;
-    height: 2.25rem;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-70);
-    transition: background 150ms ease, color 150ms ease;
-  }
-
-  .voice-mini__button:hover {
-    background: rgba(255, 255, 255, 0.14);
-  }
-
-  .voice-mini__button--danger {
-    background: color-mix(in srgb, var(--color-danger) 18%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 80%, white);
-  }
-
-  .voice-mini__button--danger:hover {
-    background: color-mix(in srgb, var(--color-danger) 28%, transparent);
-  }
-
-  .voice-mini__avatars {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .voice-mini__avatar-chip {
-    position: relative;
-    width: 2.25rem;
-    height: 2.25rem;
-    border-radius: 999px;
-    overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .voice-mini__badge {
-    position: absolute;
-    font-size: 0.75rem;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-  }
-
-  .voice-mini__badge--audio {
-    right: -2px;
-    bottom: -2px;
-    color: color-mix(in srgb, var(--color-danger) 80%, white);
-  }
-
-  .voice-mini__badge--video {
-    left: -2px;
-    top: -2px;
-    color: rgba(255, 255, 255, 0.85);
-  }
-
-  .voice-mini__more {
-    height: 2.25rem;
-    display: grid;
-    place-items: center;
-    padding: 0 0.75rem;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-70);
-    font-size: 0.75rem;
-  }
-
-  .voice-mini__footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .voice-mini__status {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .voice-mini__pill {
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 999px;
-    padding: 0.4rem 0.9rem;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-60);
-    background: transparent;
-    transition: background 150ms ease, color 150ms ease;
-  }
-
-  .voice-mini__pill:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-80);
-  }
-
-  .voice-mini__feedback {
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-60);
-    margin-left: 0.35rem;
-  }
-</style>
-
-
-
-
-
-
-
-
-
-
-
-
-

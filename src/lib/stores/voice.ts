@@ -7,6 +7,8 @@ export type VoiceSession = {
   channelName: string;
   serverName?: string | null;
   visible: boolean;
+  joinMuted?: boolean;
+  joinVideoOff?: boolean;
 };
 
 function createVoiceStore() {
@@ -14,13 +16,29 @@ function createVoiceStore() {
 
   return {
     subscribe,
-    join(serverId: string, channelId: string, channelName: string, serverName?: string | null) {
-      set({ serverId, channelId, channelName, serverName, visible: true });
+    join(
+      serverId: string,
+      channelId: string,
+      channelName: string,
+      serverName?: string | null,
+      options: { muted?: boolean; videoOff?: boolean } = {}
+    ) {
+      set({
+        serverId,
+        channelId,
+        channelName,
+        serverName,
+        visible: true,
+        joinMuted: options.muted ?? false,
+        joinVideoOff: options.videoOff ?? false
+      });
       appendVoiceDebugEvent('voice-store', 'join', {
         serverId,
         channelId,
         channelName,
-        serverName: serverName ?? null
+        serverName: serverName ?? null,
+        joinMuted: options.muted ?? false,
+        joinVideoOff: options.videoOff ?? false
       });
     },
     leave() {

@@ -14,6 +14,10 @@
     displayName: string;
     photoURL: string | null;
     status: 'active' | 'left';
+    hasAudio?: boolean;
+    hasVideo?: boolean;
+    screenSharing?: boolean;
+    streamId?: string | null;
   };
 
   interface Props {
@@ -45,18 +49,19 @@
   }: Props = $props();
 
   const dispatch = createEventDispatcher<{
-    joinVoice: void;
-    startStreaming: void;
+    joinVoice: { muted?: boolean; videoOff?: boolean };
+    joinMuted: { muted?: boolean; videoOff?: boolean };
+    startStreaming: { muted?: boolean; videoOff?: boolean };
     returnToSession: void;
+    openChat: void;
   }>();
 
   let participants: ParticipantPreview[] = $state([]);
   let unsub: Unsubscribe | null = $state(null);
-  let copyStatus = '';
+  let copyStatus = $state('');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
-
-
-
+  let muteOnJoin = $state(false);
+  let videoOffOnJoin = $state(false);
 
   onDestroy(() => {
     unsub?.();
@@ -74,7 +79,11 @@
   }
 
   function handleJoin() {
-    dispatch('joinVoice');
+    dispatch('joinVoice', { muted: muteOnJoin, videoOff: videoOffOnJoin });
+  }
+
+  function handleJoinMuted() {
+    dispatch('joinMuted', { muted: true, videoOff: videoOffOnJoin });
   }
 
   function handleReturnToSession() {
@@ -93,11 +102,21 @@
   }
 
   function handleStartStreaming() {
-    dispatch('startStreaming');
+    dispatch('startStreaming', { muted: muteOnJoin, videoOff: false });
   }
-  let connectedElsewhere =
-    $derived(Boolean(connectedChannelId) &&
-    (connectedChannelId !== channelId || (connectedServerId && connectedServerId !== serverId)));
+
+  function handleOpenChat() {
+    dispatch('openChat');
+  }
+
+  function toggleMute() {
+    muteOnJoin = !muteOnJoin;
+  }
+
+  function toggleVideo() {
+    videoOffOnJoin = !videoOffOnJoin;
+  }
+
   run(() => {
     unsub?.();
     participants = [];
@@ -115,354 +134,473 @@
               uid: data.uid ?? entry.id,
               displayName: data.displayName ?? 'Member',
               photoURL: resolveProfilePhotoURL(data),
-              status: (data.status ?? 'active') as 'active' | 'left'
+              status: (data.status ?? 'active') as 'active' | 'left',
+              hasAudio: data.hasAudio ?? true,
+              hasVideo: data.hasVideo ?? false,
+              screenSharing: data.screenSharing ?? false,
+              streamId: data.streamId ?? null
             };
           })
           .filter((participant) => participant.status === 'active');
       });
     }
   });
+
+  const connectedElsewhere = $derived(
+    Boolean(
+      connectedChannelId &&
+        (connectedChannelId !== channelId || (connectedServerId && connectedServerId !== serverId))
+    )
+  );
+
   let participantCount = $derived(participants.length);
+  let videoCount = $derived(participants.filter((p) => p.hasVideo).length);
+  let streamCount = $derived(participants.filter((p) => p.screenSharing).length);
   let displayedParticipants = $derived(participants.slice(0, 5));
   let overflowCount = $derived(Math.max(participantCount - displayedParticipants.length, 0));
-  let previewAvatarUrl = $derived(currentUserAvatar ?? displayedParticipants[0]?.photoURL ?? null);
-  let previewInitial = $derived(initials(currentUserName ?? displayedParticipants[0]?.displayName ?? channelName));
+  let previewImage = $derived(
+    currentUserAvatar || displayedParticipants[0]?.photoURL || participants[0]?.photoURL || null
+  );
+  let callGridCols = $derived(Math.min(3, Math.max(1, participantCount || 1)));
 </script>
 
-<section class="voice-lobby" aria-live="polite">
+<div class="lobby" aria-live="polite">
   {#if connectedElsewhere}
-    <div class="voice-lobby__notice">
-      <div class="voice-lobby__notice-icon">
-        <i class="bx bx-info-circle"></i>
+    <div class="lobby-alert">
+      <div class="lobby-alert__icon"><i class="bx bx-info-circle"></i></div>
+      <div class="lobby-alert__body">
+        <p class="lobby-alert__title">You're already in #{connectedChannelName ?? 'another channel'}.</p>
+        <p class="lobby-alert__desc">Returning will bring that call forward.</p>
       </div>
-      <div class="voice-lobby__notice-body">
-        <p>
-          You're still connected to
-          <strong>#{connectedChannelName ?? 'another channel'}</strong>
-          {#if connectedServerName}
-            in {connectedServerName}
-          {/if}
-          . Joining here will switch you over.
-        </p>
-        <button type="button" class="voice-lobby__pill" onclick={handleReturnToSession}>
-          Return to current call
-        </button>
-      </div>
+      <button type="button" class="lobby-alert__btn" onclick={handleReturnToSession}>Return</button>
     </div>
   {/if}
 
-  <div class="voice-lobby__body">
-    <div class="voice-lobby__preview">
-      <div class="voice-lobby__preview-media">
-        <div class="voice-lobby__preview-outer-glow"></div>
-        <div class="voice-lobby__preview-avatar">
-          {#if previewAvatarUrl}
-            <img src={previewAvatarUrl} alt="" />
-          {:else}
-            <span>{previewInitial}</span>
-          {/if}
-        </div>
-      </div>
-    </div>
-
-    <div class="voice-lobby__participants">
+  <div class="call-grid-wrapper">
+    <div
+      class={`call-grid call-grid--preview ${participantCount === 1 ? 'call-grid--single' : ''}`}
+      style={`--call-grid-cols:${callGridCols}`}
+    >
       {#if participantCount}
-        <div class="voice-lobby__avatar-stack">
-          {#each displayedParticipants as participant (participant.uid)}
-            <div class="voice-lobby__avatar" title={participant.displayName}>
+        {#each displayedParticipants as participant (participant.uid)}
+          <div class="call-tile">
+            <div class="call-tile__media">
               {#if participant.photoURL}
-                <img src={participant.photoURL} alt={participant.displayName} />
-              {:else}
-                <span>{initials(participant.displayName)}</span>
+                <div class="call-tile__bg" style:background-image={`url(${participant.photoURL})`}></div>
               {/if}
+              <div class="call-tile__scrim"></div>
+              <div class="call-avatar call-avatar--center">
+                <div class="call-avatar__image">
+                  {#if participant.photoURL}
+                    <img src={participant.photoURL} alt={participant.displayName} loading="lazy" />
+                  {:else}
+                    <span>{initials(participant.displayName)}</span>
+                  {/if}
+                </div>
+                {#if participant.screenSharing}
+                  <span class="call-tile__footer-pill call-tile__footer-pill--share">Live</span>
+                {/if}
+              </div>
             </div>
-          {/each}
-          {#if overflowCount}
-            <div class="voice-lobby__avatar voice-lobby__avatar--more">
-              +{overflowCount}
+            <div class="call-tile__footer">
+              <div class="call-tile__footer-name">
+                <span>{participant.displayName}</span>
+              </div>
+              <div class="call-tile__footer-icons">
+                <i class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off is-off'}`}></i>
+                <i class={`bx ${participant.hasAudio === false ? 'bx-microphone-off is-off' : 'bx-microphone'}`}></i>
+              </div>
             </div>
-          {/if}
-        </div>
+          </div>
+        {/each}
+        {#if overflowCount}
+          <div class="call-tile call-tile--empty">
+            <div class="call-tile__media">
+              <div class="call-empty-msg">+{overflowCount} more getting ready</div>
+            </div>
+          </div>
+        {/if}
       {:else}
-        <div class="voice-lobby__participants-empty">
-          <i class="bx bx-planet"></i>
-          <span>Waiting for the first person to hop in.</span>
+        <div class="call-tile call-tile--empty call-tile--spacer">
+          <div class="call-tile__media">
+            <div class="call-empty-msg">
+              <i class="bx bx-planet"></i>
+              <p>Waiting for someone to hop in.</p>
+              <span>You're not in the call yet.</span>
+            </div>
+          </div>
         </div>
       {/if}
     </div>
-
-    <div class="voice-lobby__actions">
-      <div class="voice-lobby__primary">
-        <button type="button" class="voice-lobby__btn voice-lobby__btn--accent" onclick={handleStartStreaming}>
-          <i class="bx bx-broadcast"></i>
-          <span>Start streaming</span>
-          <i class="bx bx-chevron-down caret"></i>
+    <div class="preview-actions">
+      <div class="toggle-row toggle-row--actions">
+        <button
+          type="button"
+          class={`icon-toggle ${videoOffOnJoin ? '' : 'is-active'}`}
+          aria-pressed={!videoOffOnJoin}
+          onclick={toggleVideo}
+          title={videoOffOnJoin ? 'Camera off' : 'Camera on'}
+        >
+          <i class={`bx ${videoOffOnJoin ? 'bx-video-off' : 'bx-video'}`}></i>
         </button>
-        <button type="button" class="voice-lobby__btn voice-lobby__btn--outline" onclick={handleJoin}>
-          <i class="bx bx-headphone"></i>
-          <span>Join voice</span>
+        <button
+          type="button"
+          class={`icon-toggle ${muteOnJoin ? '' : 'is-active'}`}
+          aria-pressed={!muteOnJoin}
+          onclick={toggleMute}
+          title={muteOnJoin ? 'Muted' : 'Mic on'}
+        >
+          <i class={`bx ${muteOnJoin ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
+        </button>
+        <button
+          type="button"
+          class="icon-toggle icon-toggle--join"
+          onclick={handleJoin}
+          title="Join call"
+        >
+          <i class="bx bx-phone-call"></i>
+          <span class="sr-only">Join call</span>
         </button>
       </div>
-
     </div>
   </div>
-</section>
+</div>
 
 <style>
-  .voice-lobby {
+  .lobby {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
-    padding: 1.5rem;
-    border-radius: 1.5rem;
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--color-panel-muted) 88%, transparent),
-      color-mix(in srgb, var(--color-panel) 96%, transparent)
-    );
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
-    box-shadow:
-      var(--shadow-elevated),
-      inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
-  }
-
-  .voice-lobby__notice {
-    display: flex;
     gap: 0.75rem;
-    padding: 0.9rem 1.1rem;
-    border-radius: 1rem;
-    border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   }
 
-  .voice-lobby__notice-icon {
-    font-size: 1.4rem;
-    color: color-mix(in srgb, var(--color-accent) 85%, white);
-  }
-
-  .voice-lobby__notice-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    color: var(--text-80);
-    font-size: 0.95rem;
-  }
-
-  .voice-lobby__pill {
-    align-self: flex-start;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: transparent;
-    color: var(--text-80);
-    padding: 0.35rem 1rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 0.65rem;
-  }
-
-  .voice-lobby__body {
-    display: flex;
-    flex-direction: column;
-    gap: 1.35rem;
-    padding: 0.5rem 0 0.25rem;
-  }
-
-  .voice-lobby__preview {
-    display: flex;
-    flex-direction: column;
+  .lobby-alert {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 0.6rem;
     align-items: center;
-    text-align: center;
-    gap: 1rem;
-    width: 100%;
+    padding: 0.65rem 0.8rem;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 60%, var(--color-border-subtle));
+    background: color-mix(in srgb, var(--color-accent-soft, #1e293b) 60%, transparent);
   }
 
-  .voice-lobby__preview-media {
-    position: relative;
-    width: min(380px, 100%);
-    min-height: 220px;
-    aspect-ratio: 16 / 10;
-    border-radius: clamp(1.2rem, 3vw, 2.2rem);
-    background: linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--color-card) 90%, transparent),
-      color-mix(in srgb, var(--color-panel) 95%, transparent)
-    );
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-    margin: 0 auto;
+  .lobby-alert__icon {
+    color: var(--color-accent);
+    font-size: 1.2rem;
   }
 
-  .voice-lobby__preview-outer-glow {
-    position: absolute;
-    inset: -30%;
-    background: radial-gradient(
-      circle,
-      color-mix(in srgb, var(--color-text-primary) 15%, transparent),
-      transparent 65%
-    );
-    opacity: 0.4;
-  }
-
-  .voice-lobby__preview-avatar {
-    position: relative;
-    width: clamp(120px, 20vw, 160px);
-    height: clamp(120px, 20vw, 160px);
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-  }
-
-  .voice-lobby__preview-avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .voice-lobby__preview-avatar span {
-    font-size: 2rem;
-    color: var(--text-90);
-    font-weight: 600;
-  }
-
-  .voice-lobby__participants {
-    border-radius: 1rem;
-    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    padding: 1.1rem;
-    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
-  }
-
-  .voice-lobby__avatar-stack {
+  .lobby-alert__body {
     display: flex;
-    gap: 0.75rem;
-    align-items: center;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 0.1rem;
   }
 
-  .voice-lobby__avatar {
-    width: 46px;
-    height: 46px;
-    border-radius: 999px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
-    display: grid;
-    place-items: center;
-    font-weight: 600;
-    color: var(--text-80);
+  .lobby-alert__title {
+    margin: 0;
+    font-weight: 700;
+    color: var(--color-text-primary);
   }
 
-  .voice-lobby__avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .voice-lobby__avatar--more {
+  .lobby-alert__desc {
+    margin: 0;
+    color: var(--color-text-secondary);
     font-size: 0.9rem;
   }
 
-  .voice-lobby__participants-empty {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    font-size: 0.95rem;
-    color: var(--text-60);
+  .lobby-alert__btn {
+    border: 1px solid color-mix(in srgb, var(--color-accent) 60%, var(--color-border-subtle));
+    background: color-mix(in srgb, var(--color-panel) 60%, transparent);
+    color: var(--color-text-primary);
+    border-radius: 0.6rem;
+    padding: 0.4rem 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
   }
 
-  .voice-lobby__participants-empty i {
-    font-size: 1.2rem;
+  .call-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
+    gap: 0.65rem;
+    align-items: stretch;
+    align-content: center;
+    justify-items: stretch;
+    width: 100%;
+    max-width: calc(var(--call-grid-cols, 1) * 780px);
+    margin: 0 auto;
   }
 
-  .voice-lobby__actions {
+.call-grid--single {
+  grid-template-columns: minmax(0, 640px);
+  max-width: 640px;
+  justify-content: center;
+}
+
+.call-grid-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: clamp(420px, 70vh, 820px);
+}
+
+@media (min-width: 1200px) {
+  .call-grid--preview {
+    grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
+    max-width: calc(var(--call-grid-cols, 1) * 820px);
+  }
+    .call-grid--single {
+      grid-template-columns: minmax(0, 720px);
+      max-width: 720px;
+    }
+  }
+
+  .call-tile {
+    position: relative;
+    border-radius: 0.65rem;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    align-items: center;
-    text-align: center;
+    transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 120ms ease;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+    --call-tile-aspect: 16 / 9;
+    min-height: clamp(200px, 28vw, 360px);
+    aspect-ratio: var(--call-tile-aspect, 16 / 9);
   }
 
-  .voice-lobby__primary {
+  .call-tile:hover {
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    border-color: color-mix(in srgb, #ffffff 10%, rgba(54, 57, 63, 0.7));
+  }
+
+  .call-tile--self {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 32%, transparent);
+  }
+
+  .call-tile__media {
+    position: relative;
+    flex: 1;
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--color-panel-muted) 72%, rgba(0, 0, 0, 0.4));
+    overflow: hidden;
+  }
+
+  .call-tile__bg {
+    position: absolute;
+    inset: 0;
+    background-position: center;
+    background-size: cover;
+    filter: blur(18px);
+    transform: scale(1.05);
+    opacity: 0.85;
+  }
+
+  .call-tile__scrim {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0.4));
+  }
+
+  .call-avatar {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem;
+    color: var(--text-70);
+    transform: none;
+  }
+
+  .call-avatar--center {
+    margin: auto;
+  }
+
+  .call-avatar__image {
+    width: clamp(56px, 10vw, 96px);
+    height: clamp(56px, 10vw, 96px);
+    border-radius: 999px;
+    overflow: hidden;
+    border: 2px solid rgba(255, 255, 255, 0.08);
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--text-80);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.03);
+    text-transform: uppercase;
+  }
+
+  .call-avatar__image img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .call-avatar__hint {
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    color: var(--text-50);
+  }
+
+  .call-tile__footer {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.55rem 0.75rem;
+    background: color-mix(in srgb, var(--color-panel) 80%, rgba(0, 0, 0, 0.55));
+    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  }
+
+  .call-tile__footer-name {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-weight: 700;
+    color: #ffffff;
+    font-size: 0.95rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .call-tile__footer-icons {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #b9bbbe;
+    font-size: 1.05rem;
+  }
+
+  .call-tile__footer-icons .is-off {
+    color: #b9bbbe;
+  }
+
+  .call-tile__footer-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .call-tile__footer-pill--share {
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    color: var(--color-text-inverse);
+  }
+
+  .call-tile--empty {
+    border-style: dashed;
+  }
+
+  .call-tile--spacer {
+    grid-column: 1 / -1;
+  }
+
+  .call-empty-msg {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 0.35rem;
+    place-items: center;
+    text-align: center;
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }
+
+  .call-empty-msg i {
+    font-size: 2rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .preview-actions {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 1rem;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .toggle-row {
+    display: inline-flex;
+    gap: 0.5rem;
+  }
+
+  .toggle-row--actions {
+    pointer-events: auto;
+    padding: 0.45rem 0.6rem;
+    border-radius: 0.85rem;
+    background: color-mix(in srgb, var(--color-panel) 82%, rgba(0, 0, 0, 0.28));
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    box-shadow: 0 10px 28px rgba(7, 10, 22, 0.35);
+  }
+
+  .icon-toggle {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    color: var(--color-text-secondary);
+    display: grid;
+    place-items: center;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, background 120ms ease, transform 120ms ease;
+  }
+
+  .icon-toggle.is-active {
+    color: var(--color-text-primary);
+    border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border-subtle));
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel));
+  }
+
+  .icon-toggle:active {
+    transform: translateY(1px);
+  }
+
+  .toggle-row--actions {
+    gap: 0.65rem;
     justify-content: center;
   }
 
-  .voice-lobby__btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    border-radius: 0.8rem;
-    border: 1px solid transparent;
-    font-size: 0.95rem;
-    font-weight: 600;
-    padding: 0.85rem 1.4rem;
-    transition: transform 120ms ease, background 150ms ease, border-color 150ms ease;
+  .icon-toggle--join {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 90%, #7dd3fc 10%), var(--color-accent));
+    color: var(--color-text-inverse);
+    border-color: color-mix(in srgb, var(--color-accent) 60%, var(--color-border-subtle));
+    box-shadow: 0 10px 20px -12px rgba(0, 0, 0, 0.35);
+    --icon-color: var(--color-text-inverse);
   }
 
-  .voice-lobby__btn--accent {
-    background: radial-gradient(circle at top, color-mix(in srgb, var(--color-accent) 75%, transparent), color-mix(in srgb, var(--color-accent) 40%, transparent));
-    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
-    color: color-mix(in srgb, var(--color-accent) 95%, white);
-    box-shadow:
-      0 12px 28px color-mix(in srgb, var(--color-panel-muted) 45%, transparent),
-      inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 18%, transparent);
-  }
-
-  .voice-lobby__btn--accent:hover {
+  .icon-toggle--join:hover {
     transform: translateY(-1px);
+    box-shadow: 0 12px 22px -14px rgba(0, 0, 0, 0.45);
   }
 
-  .voice-lobby__btn--outline {
-    border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    color: var(--text-90);
-    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
-  }
-
-  .voice-lobby__btn--outline:hover {
-    border-color: color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-  }
-
-  .voice-lobby__btn .caret {
-    font-size: 1.2rem;
-  }
-
-  @media (max-width: 768px) {
-    .voice-lobby {
-      padding: 1.1rem;
-      border-radius: 1.1rem;
+  @media (max-width: 640px) {
+    .call-tile {
+      min-height: 200px;
     }
 
-    .voice-lobby__body {
-      padding: 0.25rem 0 0;
+    .call-avatar__image {
+      width: 64px;
+      height: 64px;
     }
-
-    .voice-lobby__preview {
-      align-items: center;
-    }
-
-    .voice-lobby__preview-media {
-      margin-left: auto;
-      margin-right: auto;
-    }
-
-    .voice-lobby__preview-avatar {
-      margin-left: auto;
-      margin-right: auto;
-    }
-
-    .voice-lobby__btn {
-      width: 100%;
-      justify-content: center;
-    }
-
-    .voice-lobby__primary {
-      flex-direction: column;
-    }
-
   }
 </style>
+

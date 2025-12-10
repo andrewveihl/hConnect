@@ -1,10 +1,11 @@
-export type SettingsSectionId = 'account' | 'notifications' | 'appearance' | 'ai' | 'invites';
+export type SettingsSectionId = 'account' | 'notifications' | 'voice' | 'appearance' | 'ai' | 'invites';
 
 export type SettingsSection = {
   id: SettingsSectionId;
   group: string;
   label: string;
   keywords?: string[];
+  path?: string;
 };
 
 export const settingsSections: SettingsSection[] = [
@@ -19,6 +20,13 @@ export const settingsSections: SettingsSection[] = [
     group: 'User Settings',
     label: 'Notifications',
     keywords: ['push', 'desktop', 'alerts', 'test']
+  },
+  {
+    id: 'voice',
+    group: 'User Settings',
+    label: 'Voice & Video',
+    keywords: ['voice', 'video', 'call', 'mic', 'camera'],
+    path: '/settings/voice-video'
   },
   {
     id: 'appearance',

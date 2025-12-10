@@ -15,19 +15,19 @@
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
-import { notifications, channelIndicators } from '$lib/stores/notifications';
-
-import {
-  collection,
-  onSnapshot,
-  orderBy,
-  query,
-  where,
-  doc,
-  type Unsubscribe,
-  setDoc,
-  writeBatch
-} from 'firebase/firestore';
+  import { notifications, channelIndicators } from '$lib/stores/notifications';
+  import {
+    collection,
+    doc,
+    getDoc,
+    onSnapshot,
+    orderBy,
+    query,
+    where,
+    type Unsubscribe,
+    setDoc,
+    writeBatch
+  } from 'firebase/firestore';
 
   import type { ChannelThread } from '$lib/firestore/threads';
 
@@ -112,6 +112,8 @@ import {
   let voicePresence: Record<string, VoiceParticipant[]> = $state({});
   const voiceUnsubs = new Map<string, Unsubscribe>();
   let activeVoice: VoiceSession | null = $state(null);
+  const voiceProfileCache = new Map<string, { displayName?: string | null; photoURL?: string | null }>();
+  const pendingVoiceProfiles = new Set<string>();
   const unsubscribeVoiceSession = voiceSession.subscribe((value) => {
     activeVoice = value;
   });
@@ -195,6 +197,61 @@ import {
     return summary;
   }
 
+  function applyVoiceProfile(participant: VoiceParticipant): VoiceParticipant {
+    const cached = voiceProfileCache.get(participant.uid);
+    if (!cached) return participant;
+    const cachedPhoto = typeof cached.photoURL === 'string' && cached.photoURL.trim().length ? cached.photoURL : null;
+    const cachedName =
+      typeof cached.displayName === 'string' && cached.displayName.trim().length ? cached.displayName : null;
+    return {
+      ...participant,
+      displayName: cachedName ?? participant.displayName,
+      photoURL: cachedPhoto ?? participant.photoURL ?? null
+    };
+  }
+
+  function refreshVoicePresenceChannel(channelId: string) {
+    const list = voicePresence[channelId];
+    if (!Array.isArray(list) || !list.length) return;
+    voicePresence = {
+      ...voicePresence,
+      [channelId]: list.map((entry) => applyVoiceProfile(entry))
+    };
+  }
+
+  async function hydrateVoiceProfiles(list: VoiceParticipant[], channelId: string) {
+    const db = getDb();
+    for (const participant of list) {
+      const cached = voiceProfileCache.get(participant.uid);
+      const missingDisplay =
+        !participant.displayName || participant.displayName === 'Member' || participant.displayName === '?';
+      const missingPhoto =
+        !participant.photoURL || participant.photoURL.endsWith('default-avatar.svg') || participant.photoURL === '?';
+      // Fetch if we don't have a cache yet or if the participant looks incomplete.
+      if (cached && cached.photoURL && !missingDisplay && !missingPhoto) continue;
+      if (pendingVoiceProfiles.has(participant.uid)) continue;
+      pendingVoiceProfiles.add(participant.uid);
+      try {
+        const snap = await getDoc(doc(db, 'profiles', participant.uid));
+        pendingVoiceProfiles.delete(participant.uid);
+        if (!snap.exists()) continue;
+        const data = (snap.data() as any) ?? {};
+        const displayNameCandidate =
+          (typeof data.displayName === 'string' && data.displayName.trim()) ||
+          (typeof data.name === 'string' && data.name.trim()) ||
+          null;
+        const photoURL = resolveProfilePhotoURL(data, participant.photoURL);
+        voiceProfileCache.set(participant.uid, {
+          displayName: displayNameCandidate,
+          photoURL
+        });
+        refreshVoicePresenceChannel(channelId);
+      } catch {
+        pendingVoiceProfiles.delete(participant.uid);
+      }
+    }
+  }
+
   function syncVoicePresenceWatchers(list: Chan[]) {
     if (!computedServerId) {
       resetVoiceWatchers();
@@ -244,20 +301,40 @@ import {
         (snap) => {
           const participants = snap.docs
             .map((d) => {
-              const data = d.data() as any;
-              const status = (data.status ?? 'active') as 'active' | 'left';
-              return {
-                uid: data.uid ?? d.id,
-                displayName: data.displayName ?? 'Member',
-                photoURL: resolveProfilePhotoURL(data),
-                hasAudio: data.hasAudio ?? false,
-                hasVideo: data.hasVideo ?? false,
-                status
-              } as VoiceParticipant;
-            })
-            .filter((p) => p.status !== 'left');
+          const data = d.data() as any;
+          const status = (data.status ?? 'active') as 'active' | 'left';
+          const normalize = (val: unknown) => (typeof val === 'string' ? val.trim() : '');
+          const providedPhoto =
+            normalize(data.photoURL) ||
+            normalize(data.photoUrl) ||
+            normalize((data.profile as any)?.photoURL) ||
+            normalize((data.profile as any)?.photoUrl) ||
+            normalize(data.customPhotoURL) ||
+            normalize(data.authPhotoURL) ||
+            normalize(data.avatar) ||
+            normalize(data.avatarUrl) ||
+            normalize(data.avatarURL) ||
+            normalize(data.photo) ||
+            null;
+          // Resolve avatar using participant photo first, then profile fields, then default, and apply any cached profile overrides.
+          const basePhoto = resolveProfilePhotoURL({ ...data, photoURL: providedPhoto }, providedPhoto);
+          const participant: VoiceParticipant = {
+            uid: data.uid ?? d.id,
+            displayName: data.displayName ?? 'Member',
+            photoURL: basePhoto,
+            hasAudio: data.hasAudio ?? false,
+            hasVideo: data.hasVideo ?? false,
+            status
+          };
+          const withProfile = applyVoiceProfile(participant);
+          const finalPhoto = resolveProfilePhotoURL(withProfile, withProfile.photoURL ?? null);
+          return { ...withProfile, photoURL: finalPhoto };
+        })
+        .filter((p) => p.status !== 'left');
 
-          voicePresence = { ...voicePresence, [chan.id]: participants };
+          const enriched = participants.map((entry) => applyVoiceProfile(entry));
+          voicePresence = { ...voicePresence, [chan.id]: enriched };
+          hydrateVoiceProfiles(participants, chan.id);
           if (browser) {
             appendVoiceDebugEvent('sidebar', 'voicePresenceUpdate', {
               serverId: computedServerId ?? null,
@@ -793,44 +870,6 @@ import {
           channelName: chan.name ?? null
         });
       }
-
-      const me = get(user);
-      if (me?.uid) {
-        const nameCandidates = [
-          (me as any)?.nickname,
-          (me as any)?.displayName,
-          (me as any)?.name,
-          (me as any)?.profile?.displayName,
-          (me as any)?.profile?.name,
-          (me as any)?.email
-        ];
-        let displayName = 'You';
-        for (const candidate of nameCandidates) {
-          if (typeof candidate === 'string') {
-            const trimmed = candidate.trim();
-            if (trimmed.length) {
-              displayName = trimmed;
-              break;
-            }
-          }
-        }
-
-        const photoURL =
-          resolveProfilePhotoURL(me, (me as any)?.photoURL ?? (me as any)?.authPhotoURL ?? null) ?? null;
-        const existing = voicePresence[id] ?? [];
-        const base: VoiceParticipant = {
-          uid: me.uid,
-          displayName,
-          photoURL,
-          hasAudio: true,
-          hasVideo: false,
-          status: 'active'
-        };
-        const index = existing.findIndex((p) => p.uid === me.uid);
-        const nextPresence =
-          index === -1 ? [...existing, base] : existing.map((p, idx) => (idx === index ? { ...p, ...base } : p));
-        voicePresence = { ...voicePresence, [id]: nextPresence };
-      }
     }
     onPickChannel(id);
     dispatch('pick', id);
@@ -1092,7 +1131,7 @@ run(() => {
   class="server-sidebar h-dvh w-80 shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
   aria-label="Channels"
 >
-  <div class="server-sidebar__header h-12 px-3 flex items-center justify-between border-b border-subtle">
+  <div class="server-sidebar__header h-11 px-2.5 flex items-center justify-between border-b border-subtle">
     <button
       type="button"
       class="server-header__button"
@@ -1124,14 +1163,14 @@ run(() => {
     <div class="px-3 pt-2 text-xs text-red-300">{orderError}</div>
   {/if}
 
-  <div class="p-3 space-y-4 overflow-y-auto overflow-x-hidden">
+  <div class="p-3 space-y-3 overflow-y-auto overflow-x-hidden">
     {#if activeVoice}
       <div class="hidden md:block">
         <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
       </div>
     {/if}
     <div class="channel-heading">Channels</div>
-    <div class="channel-list space-y-1">
+    <div class="channel-list space-y-0.5">
       {#each visibleChannels as c (c.id)}
         <div
           class={`channel-row ${(activeChannelId === c.id || isVoiceChannelActive(c.id)) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
@@ -1271,9 +1310,9 @@ run(() => {
 
 <style>
   .server-sidebar__header {
-    min-height: 3rem;
-    height: 3rem;
-    padding: 0.5rem 0.75rem;
+    min-height: 2.75rem;
+    height: 2.75rem;
+    padding: 0.35rem 0.6rem;
     display: flex;
     align-items: center;
   }
@@ -1281,10 +1320,10 @@ run(() => {
   .server-header__button {
     display: flex;
     align-items: center;
-    gap: 0.65rem;
+    gap: 0.5rem;
     width: 100%;
-    padding: 0.4rem 0.55rem;
-    border-radius: 0.9rem;
+    padding: 0.3rem 0.45rem;
+    border-radius: 0.75rem;
     border: 1px solid transparent;
     background: transparent;
     text-align: left;
@@ -1297,8 +1336,8 @@ run(() => {
   }
 
   .server-avatar {
-    width: 2.25rem;
-    height: 2.25rem;
+    width: 2rem;
+    height: 2rem;
     border-radius: 999px;
     overflow: hidden;
     background: color-mix(in srgb, var(--color-accent) 20%, transparent);
@@ -1328,13 +1367,13 @@ run(() => {
 
   .server-name {
     font-weight: 700;
-    font-size: 1.05rem;
+    font-size: 1rem;
   }
 
   .channel-heading {
     font-weight: 800;
-    font-size: 0.95rem;
-    padding-left: 0.25rem;
+    font-size: 0.9rem;
+    padding-left: 0.15rem;
   }
 
   .channel-list {
@@ -1384,7 +1423,7 @@ run(() => {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.4rem 0.55rem;
+    padding: 0.35rem 0.5rem;
     text-align: left;
     user-select: none;
     background: transparent;
@@ -1402,7 +1441,7 @@ run(() => {
 
   .channel-row--active .channel-row__button {
     background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-    border-radius: 0.75rem;
+    border-radius: 0.65rem;
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
     color: inherit;
   }
@@ -1417,16 +1456,16 @@ run(() => {
   }
 
   .channel-name {
-    font-size: 1.05rem;
+    font-size: 0.98rem;
   }
 
   .channel-voice-count {
-    min-width: 1.4rem;
-    padding: 0.05rem 0.4rem;
+    min-width: 1.25rem;
+    padding: 0.05rem 0.35rem;
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
     color: var(--color-accent);
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 700;
     text-align: center;
   }
@@ -1435,15 +1474,15 @@ run(() => {
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
-    margin-top: 0.25rem;
+    margin-top: 0.15rem;
     width: 100%;
     padding-left: 2.1rem;
   }
 
   .channel-voice-avatar {
     position: relative;
-    width: 1.85rem;
-    height: 1.85rem;
+    width: 1.7rem;
+    height: 1.7rem;
     border-radius: 999px;
     overflow: hidden;
     background: color-mix(in srgb, var(--color-accent) 16%, transparent);
