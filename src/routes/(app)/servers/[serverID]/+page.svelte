@@ -23,7 +23,7 @@ import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte'
   import type { VoiceSession } from '$lib/stores/voice';
 
   import { db } from '$lib/firestore';
-import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, type Unsubscribe } from 'firebase/firestore';
+import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, setDoc, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
   import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
@@ -74,6 +74,7 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
     isPrivate?: boolean;
     allowedRoleIds?: string[];
   };
+  type ChannelEventDetail = { serverId: string | null; channels: Channel[] };
   type MentionSendRecord = {
     uid: string;
     handle: string | null;
@@ -95,7 +96,10 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
 let channels: Channel[] = $state([]);
 let activeChannel: Channel | null = $state(null);
 let requestedChannelId: string | null = $state(null);
+let channelListServerId: string | null = $state(null);
 let messages: any[] = $state([]);
+let messagesLoadError: string | null = $state(null);
+let lastSidebarChannels: ChannelEventDetail | null = $state(null);
 let channelThreads: ChannelThread[] = $state([]);
 let threadsByChannel: Record<string, ChannelThread[]> = $state({});
 let serverThreadsUnsub: Unsubscribe | null = null;
@@ -224,10 +228,11 @@ let serverDisplayName = $state('Server');
   let mentionOptions: MentionDirectoryEntry[] = $state([]);
   let memberMentionOptions: MentionDirectoryEntry[] = $state([]);
   let roleMentionOptions: MentionDirectoryEntry[] = $state([]);
-  let mentionDirectoryStop: Unsubscribe | null = $state(null);
-  let mentionRolesStop: Unsubscribe | null = $state(null);
-  let lastMentionServer: string | null = null;
-  let isCurrentServerMember = false;
+let mentionDirectoryStop: Unsubscribe | null = $state(null);
+let mentionRolesStop: Unsubscribe | null = $state(null);
+let lastMentionServer: string | null = null;
+let isCurrentServerMember = false;
+let memberEnsurePromise: Promise<void> | null = null;
 
   const canonicalHandle = (value: string) =>
     (value ?? '')
@@ -911,11 +916,18 @@ let serverDisplayName = $state('Server');
   let isViewingActiveVoiceChannel = $state(false);
   let showVoiceLobby = $state(false);
   let voiceInviteUrl: string | null = $state(null);
-  let currentUserDisplayName = $state('');
-  let currentUserPhotoURL: string | null = $state(null);
-  const unsubscribeVoice = voiceSession.subscribe((value) => {
-    voiceState = value;
-  });
+let currentUserDisplayName = $state('');
+let currentUserPhotoURL: string | null = $state(null);
+const unsubscribeVoice = voiceSession.subscribe((value) => {
+  voiceState = value;
+});
+const blockedChannels = new Set<string>();
+
+  function clearRequestedChannel(targetId?: string) {
+    if (!requestedChannelId) return;
+    if (targetId && requestedChannelId !== targetId) return;
+    requestedChannelId = null;
+  }
 
   run(() => {
     const visible = !!voiceState?.visible;
@@ -938,10 +950,7 @@ let serverDisplayName = $state('Server');
 
 
   // listeners
-  let channelsUnsub: (() => void) | null = $state(null);
   let messagesUnsub: (() => void) | null = null;
-
-  function clearChannelsUnsub() { channelsUnsub?.(); channelsUnsub = null; }
   function clearMessagesUnsub() { messagesUnsub?.(); messagesUnsub = null; }
   function clearThreadsUnsub() { threadsUnsub?.(); threadsUnsub = null; }
   function clearThreadMessagesUnsub() { threadMessagesUnsub?.(); threadMessagesUnsub = null; }
@@ -976,6 +985,26 @@ let serverDisplayName = $state('Server');
     serverThreadsUnsub = null;
     threadsByChannel = {};
     serverThreadsScope = null;
+  }
+
+  function resetChannelState() {
+    clearMessagesUnsub();
+    clearPopoutMessagesUnsub();
+    cleanupPopoutProfileSubscriptions();
+    resetThreadState({ resetCache: true });
+    messagesLoadError = null;
+    channels = [];
+    activeChannel = null;
+    messages = [];
+    profiles = {};
+    channelMessagesPopout = false;
+    channelMessagesPopoutChannelId = null;
+    channelMessagesPopoutChannelName = '';
+    popoutMessages = [];
+    popoutProfiles = {};
+    popoutReplyTarget = null;
+    popoutPendingUploads = [];
+    popoutEarliestLoaded = null;
   }
 
   function normalizeThreadSnapshot(data: any, id: string): ChannelThread {
@@ -1095,7 +1124,18 @@ let serverDisplayName = $state('Server');
     }
   }
 
-  function subscribeMessages(currServerId: string, channelId: string) {
+  async function subscribeMessages(currServerId: string, channelId: string) {
+    if (blockedChannels.has(channelId)) {
+      messagesLoadError = 'You do not have permission to view messages in this channel.';
+      return;
+    }
+    if (memberEnsurePromise) {
+      try {
+        await memberEnsurePromise;
+      } catch {
+        // Ignore membership bootstrap failures; Firestore will surface permissions if still unauthorized.
+      }
+    }
     const database = db();
     const q = query(
       collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
@@ -1104,6 +1144,7 @@ let serverDisplayName = $state('Server');
       limitToLast(PAGE_SIZE)
     );
     clearMessagesUnsub();
+    messagesLoadError = null;
     cleanupProfileSubscriptions();
     profiles = {};
     if ($user?.uid) {
@@ -1112,42 +1153,65 @@ let serverDisplayName = $state('Server');
         email: pickString($user.email) ?? undefined
       });
     }
-    messagesUnsub = onSnapshot(q, (snap) => {
-      const nextMessages: any[] = [];
-      const seen = new Set<string>();
+    messagesUnsub = onSnapshot(
+      q,
+      (snap) => {
+        const nextMessages: any[] = [];
+        const seen = new Set<string>();
 
-      for (const docSnap of snap.docs) {
-        const raw: any = docSnap.data();
-        const msg = toChatMessage(docSnap.id, raw);
-        nextMessages.push(msg);
+        for (const docSnap of snap.docs) {
+          const raw: any = docSnap.data();
+          const msg = toChatMessage(docSnap.id, raw);
+          nextMessages.push(msg);
 
-        if (msg?.uid && msg.uid !== 'unknown') {
-          seen.add(msg.uid);
-          if (pickString(msg.displayName)) {
-            updateProfileCache(msg.uid, {
-              displayName: msg.displayName
-            });
+          if (msg?.uid && msg.uid !== 'unknown') {
+            seen.add(msg.uid);
+            if (pickString(msg.displayName)) {
+              updateProfileCache(msg.uid, {
+                displayName: msg.displayName
+              });
+            }
+          }
+        }
+
+        messages = nextMessages;
+        triggerScrollToBottom();
+        if (messages.length) {
+          earliestLoaded = messages[0]?.createdAt ?? null;
+        }
+        seen.forEach((uid) => ensureProfileSubscription(database, uid));
+        messagesLoadError = null;
+
+        // Mark as read when viewing this channel
+        try {
+          if ($user?.uid && activeChannel?.id === channelId) {
+            const last = nextMessages[nextMessages.length - 1];
+            const at = last?.createdAt ?? null;
+            const lastId = last?.id ?? null;
+            void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
+          }
+        } catch {}
+      },
+      (error) => {
+        console.error('Failed to load channel messages', error);
+        messagesLoadError =
+          (error as any)?.code === 'permission-denied'
+            ? 'You do not have permission to view messages in this channel.'
+            : 'Failed to load messages. Please try again.';
+        messages = [];
+        // Stop listening after a permission error to avoid retry loops / Firestore internal assertions.
+        clearMessagesUnsub();
+        if ((error as any)?.code === 'permission-denied') {
+          blockedChannels.add(channelId);
+          clearRequestedChannel(channelId);
+          if (activeChannel?.id === channelId) {
+            activeChannel = null;
+            showChannels = true;
+            showMembers = false;
           }
         }
       }
-
-      messages = nextMessages;
-      triggerScrollToBottom();
-      if (messages.length) {
-        earliestLoaded = messages[0]?.createdAt ?? null;
-      }
-      seen.forEach((uid) => ensureProfileSubscription(database, uid));
-
-      // Mark as read when viewing this channel
-      try {
-        if ($user?.uid && activeChannel?.id === channelId) {
-          const last = nextMessages[nextMessages.length - 1];
-          const at = last?.createdAt ?? null;
-          const lastId = last?.id ?? null;
-          void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
-        }
-      } catch {}
-    });
+    );
   }
 
   function clearPopoutMessagesUnsub() {
@@ -1171,32 +1235,42 @@ let serverDisplayName = $state('Server');
         email: pickString($user.email) ?? undefined
       });
     }
-    popoutMessagesUnsub = onSnapshot(q, (snap) => {
-      const nextMessages: any[] = [];
-      const seen = new Set<string>();
+    popoutMessagesUnsub = onSnapshot(
+      q,
+      (snap) => {
+        const nextMessages: any[] = [];
+        const seen = new Set<string>();
 
-      for (const docSnap of snap.docs) {
-        const raw: any = docSnap.data();
-        const msg = toChatMessage(docSnap.id, raw);
-        nextMessages.push(msg);
+        for (const docSnap of snap.docs) {
+          const raw: any = docSnap.data();
+          const msg = toChatMessage(docSnap.id, raw);
+          nextMessages.push(msg);
 
-        if (msg?.uid && msg.uid !== 'unknown') {
-          seen.add(msg.uid);
-          if (pickString(msg.displayName)) {
-            updatePopoutProfileCache(msg.uid, {
-              displayName: msg.displayName
-            });
+          if (msg?.uid && msg.uid !== 'unknown') {
+            seen.add(msg.uid);
+            if (pickString(msg.displayName)) {
+              updatePopoutProfileCache(msg.uid, {
+                displayName: msg.displayName
+              });
+            }
           }
         }
-      }
 
-      popoutMessages = nextMessages;
-      popoutScrollToBottomSignal = Date.now();
-      if (popoutMessages.length) {
-        popoutEarliestLoaded = popoutMessages[0]?.createdAt ?? null;
+        popoutMessages = nextMessages;
+        popoutScrollToBottomSignal = Date.now();
+        if (popoutMessages.length) {
+          popoutEarliestLoaded = popoutMessages[0]?.createdAt ?? null;
+        }
+        seen.forEach((uid) => ensurePopoutProfileSubscription(database, uid));
+      },
+      (error) => {
+        console.error('Failed to load popout messages', error);
+        clearPopoutMessagesUnsub();
+        if ((error as any)?.code === 'permission-denied') {
+          handleChannelDenied(channelId);
+        }
       }
-      seen.forEach((uid) => ensurePopoutProfileSubscription(database, uid));
-    });
+    );
   }
 
   function watchThreadRead(threadId: string) {
@@ -1254,48 +1328,82 @@ let serverDisplayName = $state('Server');
     }
   }
 
-  function subscribeThreads(currServerId: string, channelId: string) {
+  function handleChannelDenied(channelId: string) {
+    blockedChannels.add(channelId);
+    clearRequestedChannel(channelId);
+    clearMessagesUnsub();
     clearThreadsUnsub();
+    messages = [];
     channelThreads = [];
-    const stop = streamChannelThreads(currServerId, channelId, (list) => {
-      channelThreads = list;
-      const present = new Set(list.map((thread) => thread.id));
-      present.forEach((threadId) => watchThreadRead(threadId));
-      for (const [threadId, stopRead] of threadReadStops) {
-        if (!present.has(threadId)) {
-          stopRead();
-          threadReadStops.delete(threadId);
-          delete threadReadCursors[threadId];
-        }
+    if (activeChannel?.id === channelId) {
+      activeChannel = null;
+      showChannels = true;
+      showMembers = false;
+    }
+  }
+
+  async function subscribeThreads(currServerId: string, channelId: string) {
+    clearThreadsUnsub();
+    if (blockedChannels.has(channelId)) return;
+    if (memberEnsurePromise) {
+      try {
+        await memberEnsurePromise;
+      } catch {
+        // Membership bootstrap may fail for guests; Firestore will enforce permissions.
       }
-      if (pendingThreadId) {
-        const pending = list.find((thread) => thread.id === pendingThreadId);
-        if (pending) {
-          const root =
-            pendingThreadRoot ??
-            messages.find((msg) => msg.id === pending.createdFromMessageId) ??
-            activeThreadRoot ??
-            null;
-          if (root) {
-            activateThreadView(pending, root);
-          } else {
-            activeThread = pending;
-            prefetchThreadMemberProfiles(pending);
+    }
+    channelThreads = [];
+    const stop = streamChannelThreads(
+      currServerId,
+      channelId,
+      (list) => {
+        channelThreads = list;
+        const present = new Set(list.map((thread) => thread.id));
+        present.forEach((threadId) => watchThreadRead(threadId));
+        for (const [threadId, stopRead] of threadReadStops) {
+          if (!present.has(threadId)) {
+            stopRead();
+            threadReadStops.delete(threadId);
+            delete threadReadCursors[threadId];
           }
-          pendingThreadId = null;
-          pendingThreadRoot = null;
         }
-      } else if (activeThread) {
-        const current = list.find((thread) => thread.id === activeThread?.id);
-        if (current) {
-          activeThread = current;
-          prefetchThreadMemberProfiles(current);
-        } else {
-          closeThreadView();
+        if (pendingThreadId) {
+          const pending = list.find((thread) => thread.id === pendingThreadId);
+          if (pending) {
+            const root =
+              pendingThreadRoot ??
+              messages.find((msg) => msg.id === pending.createdFromMessageId) ??
+              activeThreadRoot ??
+              null;
+            if (root) {
+              activateThreadView(pending, root);
+            } else {
+              activeThread = pending;
+              prefetchThreadMemberProfiles(pending);
+            }
+            pendingThreadId = null;
+            pendingThreadRoot = null;
+          }
+        } else if (activeThread) {
+          const current = list.find((thread) => thread.id === activeThread?.id);
+          if (current) {
+            activeThread = current;
+            prefetchThreadMemberProfiles(current);
+          } else {
+            closeThreadView();
+          }
+        }
+        recomputeThreadStats();
+      },
+      {
+        onError: (err) => {
+          console.error('Failed to load threads', err);
+          if ((err as any)?.code === 'permission-denied') {
+            handleChannelDenied(channelId);
+          }
         }
       }
-      recomputeThreadStats();
-    });
+    );
     threadsUnsub = stop;
   }
 
@@ -1340,7 +1448,7 @@ function sidebarThreadList() {
     );
   }
 
-  function attachThreadStream(thread: ChannelThread | null) {
+  async function attachThreadStream(thread: ChannelThread | null) {
     if (!thread || !serverId || !activeChannel?.id) {
       clearThreadMessagesUnsub();
       threadMessages = [];
@@ -1357,10 +1465,30 @@ function sidebarThreadList() {
     clearThreadMessagesUnsub();
     lastThreadStreamChannel = activeChannel.id;
     lastThreadStreamId = thread.id;
-    threadMessagesUnsub = streamThreadMessages(serverId, activeChannel.id, thread.id, (list) => {
-      threadMessages = list;
-      scheduleThreadRead();
-    });
+    if (memberEnsurePromise) {
+      try {
+        await memberEnsurePromise;
+      } catch {
+        // proceed; Firestore will enforce permissions
+      }
+    }
+    threadMessagesUnsub = streamThreadMessages(
+      serverId,
+      activeChannel.id,
+      thread.id,
+      (list) => {
+        threadMessages = list;
+        scheduleThreadRead();
+      },
+      {
+        onError: (err) => {
+          console.error('Failed to load thread messages', err);
+          if ((err as any)?.code === 'permission-denied') {
+            handleChannelDenied(activeChannel.id);
+          }
+        }
+      }
+    );
   }
 
   function clearThreadReadTimer() {
@@ -1404,22 +1532,32 @@ function sidebarThreadList() {
 
   function pickChannel(id: string) {
     if (!serverId) return;
+    const allowedChannel = channels.find((c) => c.id === id);
+    if (!allowedChannel) {
+      messagesLoadError = 'You do not have permission to view messages in this channel.';
+      activeChannel = null;
+      showChannels = true;
+      showMembers = false;
+      clearRequestedChannel(id);
+      return;
+    }
+    if (blockedChannels.has(id)) {
+      messagesLoadError = 'You do not have permission to view messages in this channel.';
+      activeChannel = null;
+      showChannels = true;
+      showMembers = false;
+      clearRequestedChannel(id);
+      return;
+    }
     const next = selectChannelObject(id);
     activeChannel = next;
     messages = [];
+    messagesLoadError = null;
     clearMessagesUnsub();
     resetThreadState();
 
     if (next.type === 'voice') {
-      subscribeMessages(serverId, id);
-      subscribeThreads(serverId, id);
-      if ($user?.uid) {
-        const last = messages[messages.length - 1];
-        const at = last?.createdAt ?? null;
-        const lastId = last?.id ?? null;
-        void markChannelRead($user.uid, serverId, id, { at, lastMessageId: lastId });
-      }
-      // Hide member pane while showing voice preview to reduce clutter.
+      // Voice channels do not stream messages; just toggle voice UI visibility.
       showMembers = false;
       desktopMembersVisible = false;
       if (voiceState && voiceState.serverId === serverId && voiceState.channelId === next.id) {
@@ -1457,6 +1595,117 @@ function sidebarThreadList() {
         }
       } catch {}
     }
+  }
+
+  function syncVisibleChannels(payload: ChannelEventDetail | null) {
+    if (payload) {
+      lastSidebarChannels = payload;
+    }
+    if (!serverId || !$user?.uid) {
+      return;
+    }
+    const source = payload ?? lastSidebarChannels;
+    if (!source) return;
+    const payloadServer = source.serverId ?? serverId;
+    if (!payloadServer || payloadServer !== serverId) return;
+
+    channelListServerId = payloadServer;
+    const nextChannels = Array.isArray(source.channels) ? source.channels : [];
+    const currentActive = untrack(() => activeChannel);
+    const currentShowMembers = untrack(() => showMembers);
+    const currentShowChannels = untrack(() => showChannels);
+    const requestedId = requestedChannelId;
+    const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
+
+    channels = nextChannels;
+
+    if (!nextChannels.length) {
+      resetChannelState();
+      showChannels = currentShowChannels && false;
+      showMembers = currentShowMembers && false;
+      return;
+    }
+
+    if (!currentActive) {
+      if (requestedId) {
+        const target = nextChannels.find((c) => c.id === requestedId);
+        if (target) {
+          pickChannel(target.id);
+          return;
+        }
+      }
+      if (isDesktop) {
+        pickChannel(nextChannels[0].id);
+      } else {
+        activeChannel = null;
+        showMembers = false;
+        showChannels = true;
+      }
+      return;
+    }
+
+    const updated = nextChannels.find((c) => c.id === currentActive.id);
+    if (updated) {
+      activeChannel = updated;
+      return;
+    }
+
+    if (requestedId) {
+      const target = nextChannels.find((c) => c.id === requestedId);
+      if (target) {
+        pickChannel(target.id);
+        return;
+      }
+    }
+
+    if (isDesktop) {
+      pickChannel(nextChannels[0].id);
+    } else {
+      clearMessagesUnsub();
+      resetThreadState({ resetCache: true });
+      activeChannel = null;
+      showMembers = false;
+      showChannels = true;
+      messages = [];
+    }
+  }
+
+  function handleSidebarChannels(event: CustomEvent<ChannelEventDetail>) {
+    syncVisibleChannels(event?.detail ?? null);
+  }
+
+  async function ensureServerMembership(currServerId: string, uid: string) {
+    if (!currServerId || !uid || memberEnsurePromise) return memberEnsurePromise ?? Promise.resolve();
+    memberEnsurePromise = (async () => {
+      try {
+        const database = db();
+        const memberRef = doc(database, 'servers', currServerId, 'members', uid);
+        const snap = await getDoc(memberRef);
+        if (!snap.exists()) {
+          let defaultRole: string | null = null;
+          try {
+            const serverSnap = await getDoc(doc(database, 'servers', currServerId));
+            if (serverSnap.exists()) {
+              const data: any = serverSnap.data();
+              defaultRole = pickString(data?.defaultRoleId) ?? pickString(data?.everyoneRoleId) ?? null;
+            }
+          } catch {
+            defaultRole = null;
+          }
+          const payload: Record<string, unknown> = {
+            role: 'member',
+            roleIds: Array.isArray(defaultRole) ? defaultRole : defaultRole ? [defaultRole] : [],
+            joinedAt: new Date()
+          };
+          await setDoc(memberRef, payload, { merge: true });
+        }
+      } catch (err) {
+        console.error('ensureServerMembership failed', err);
+      } finally {
+        memberEnsurePromise = null;
+      }
+    })();
+    return memberEnsurePromise;
   }
 
   function joinSelectedVoiceChannel(options: { muted?: boolean; videoOff?: boolean } = {}) {
@@ -2339,7 +2588,6 @@ function sidebarThreadList() {
 
 
   onDestroy(() => {
-    clearChannelsUnsub();
     clearMessagesUnsub();
     clearPopoutMessagesUnsub();
     resetThreadState();
@@ -2865,6 +3113,14 @@ function sidebarThreadList() {
             at,
             lastMessageId: lastId
           });
+        }
+      },
+      {
+        onError: (err) => {
+          console.error('Failed to load floating thread messages', err);
+          if ((err as any)?.code === 'permission-denied') {
+            handleChannelDenied(info.channelId);
+          }
         }
       }
     );
@@ -3456,97 +3712,26 @@ function sidebarThreadList() {
   run(() => {
     requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
   });
-  // subscribe to channels
+  run(() => {
+    const currentServer = serverId ?? null;
+    if (!currentServer || !$user?.uid) {
+      channelListServerId = currentServer;
+      resetChannelState();
+      return;
+    }
+    if (currentServer !== channelListServerId) {
+      channelListServerId = currentServer;
+      resetChannelState();
+    }
+  });
   run(() => {
     if (serverId && $user?.uid) {
-      const currentActive = untrack(() => activeChannel);
-      const currentShowMembers = untrack(() => showMembers);
-      const currentShowChannels = untrack(() => showChannels);
-      const database = db();
-      const q = query(collection(database, 'servers', serverId, 'channels'), orderBy('position'));
-      clearChannelsUnsub();
-      channelsUnsub = onSnapshot(q, (snap) => {
-        const nextChannels = snap.docs.map((d) => {
-          const x: any = d.data();
-          const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'channel';
-          const type = x.type === 'voice' ? 'voice' : 'text';
-          return { id: d.id, ...x, name, type: type as 'text' | 'voice' } as Channel;
-        });
-
-        const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
-        const requestedId = requestedChannelId;
-
-        if (!currentActive && nextChannels.length) {
-          if (requestedId) {
-            const target = nextChannels.find((c) => c.id === requestedId);
-            if (target) {
-              pickChannel(target.id);
-            } else if (isDesktop) {
-              pickChannel(nextChannels[0].id);
-            } else {
-              activeChannel = null;
-              showMembers = false;
-              showChannels = true;
-            }
-          } else if (isDesktop) {
-            // desktop: auto-pick first channel
-            pickChannel(nextChannels[0].id);
-          } else {
-            // mobile: show channel list first
-            activeChannel = null;
-            showMembers = false;
-            showChannels = true;
-          }
-        } else if (currentActive) {
-          const updated = nextChannels.find((c) => c.id === currentActive!.id);
-          if (updated) {
-            activeChannel = updated;
-          } else if (nextChannels.length) {
-            if (requestedId) {
-              const target = nextChannels.find((c) => c.id === requestedId);
-              if (target) {
-                pickChannel(target.id);
-              } else if (isDesktop) {
-                pickChannel(nextChannels[0].id);
-              } else {
-                activeChannel = null;
-                showMembers = false;
-                showChannels = true;
-              }
-            } else if (isDesktop) {
-              pickChannel(nextChannels[0].id);
-            } else {
-              activeChannel = null;
-              showMembers = false;
-              showChannels = true;
-            }
-          } else {
-            activeChannel = null;
-            clearMessagesUnsub();
-            messages = [];
-            showChannels = currentShowChannels && false;
-            showMembers = currentShowMembers && false;
-          }
-        }
-        channels = nextChannels;
-      });
-    } else {
-      clearChannelsUnsub();
-      clearMessagesUnsub();
-      clearPopoutMessagesUnsub();
-      cleanupPopoutProfileSubscriptions();
-      channels = [];
-      activeChannel = null;
-      messages = [];
-      profiles = {};
-      channelMessagesPopout = false;
-      channelMessagesPopoutChannelId = null;
-      channelMessagesPopoutChannelName = '';
-      popoutMessages = [];
-      popoutProfiles = {};
-      popoutReplyTarget = null;
-      popoutPendingUploads = [];
-      popoutEarliestLoaded = null;
+      void ensureServerMembership(serverId, $user.uid);
+    }
+  });
+  run(() => {
+    if (serverId && $user?.uid && lastSidebarChannels) {
+      syncVisibleChannels(lastSidebarChannels);
     }
   });
   run(() => {
@@ -3833,8 +4018,12 @@ function sidebarThreadList() {
     }
   });
   run(() => {
+    if (!requestedChannelId) return;
+    if (blockedChannels.has(requestedChannelId)) {
+      clearRequestedChannel(requestedChannelId);
+      return;
+    }
     if (
-      requestedChannelId &&
       requestedChannelId !== activeChannel?.id &&
       channels.some((c) => c.id === requestedChannelId)
     ) {
@@ -3881,6 +4070,7 @@ function sidebarThreadList() {
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
           onPickChannel={(id: string) => pickChannel(id)}
+          on:channels={handleSidebarChannels}
           threads={sidebarThreadList()}
           activeThreadId={activeThread?.id ?? null}
           onPickThread={(thread) => void openThreadFromSidebar(thread)}
@@ -3947,43 +4137,52 @@ function sidebarThreadList() {
             </div>
 
             <div class={`mobile-chat-card ${mobileVoicePane === 'chat' ? '' : 'hidden'}`}>
-              <ChannelMessagePane
-                hasChannel={Boolean(serverId && activeChannel)}
-                channelName={activeChannel?.name ?? ''}
-                {messages}
-                {profiles}
-                currentUserId={$user?.uid ?? null}
-                {mentionOptions}
-                {replyTarget}
-                threadStats={threadStats}
-                defaultSuggestionSource={latestInboundMessage}
-                conversationContext={aiConversationContext}
-                aiAssistEnabled={aiAssistEnabled}
-                threadLabel={activeChannel?.name ?? ''}
-                {pendingUploads}
-                {scrollToBottomSignal}
-                scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
-                listClass="message-scroll-region flex-1 overflow-y-auto p-3"
-                inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
-                inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
-                emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-                onVote={handleVote}
-                onSubmitForm={handleFormSubmit}
-                onReact={handleReaction}
-                onLoadMore={() => {
-                  if (serverId && activeChannel?.id) {
-                    loadOlderMessages(serverId, activeChannel.id);
-                  }
-                }}
-                onSend={handleSend}
-                onSendGif={handleSendGif}
-                onCreatePoll={handleCreatePoll}
-                onCreateForm={handleCreateForm}
-                onUploadFiles={handleUploadFiles}
-                on:reply={handleReplyRequest}
-                on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
-                on:cancelReply={() => (replyTarget = null)}
-              />
+              {#if messagesLoadError}
+                <div class="flex-1 grid place-items-center text-soft text-center px-4">
+                  <div>
+                    <div class="font-semibold mb-1">Messages unavailable</div>
+                    <div class="text-sm">{messagesLoadError}</div>
+                  </div>
+                </div>
+              {:else}
+                <ChannelMessagePane
+                  hasChannel={Boolean(serverId && activeChannel)}
+                  channelName={activeChannel?.name ?? ''}
+                  {messages}
+                  {profiles}
+                  currentUserId={$user?.uid ?? null}
+                  {mentionOptions}
+                  {replyTarget}
+                  threadStats={threadStats}
+                  defaultSuggestionSource={latestInboundMessage}
+                  conversationContext={aiConversationContext}
+                  aiAssistEnabled={aiAssistEnabled}
+                  threadLabel={activeChannel?.name ?? ''}
+                  {pendingUploads}
+                  {scrollToBottomSignal}
+                  scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+                  listClass="message-scroll-region flex-1 overflow-y-auto p-3"
+                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
+                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                  emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+                  onVote={handleVote}
+                  onSubmitForm={handleFormSubmit}
+                  onReact={handleReaction}
+                  onLoadMore={() => {
+                    if (serverId && activeChannel?.id) {
+                      loadOlderMessages(serverId, activeChannel.id);
+                    }
+                  }}
+                  onSend={handleSend}
+                  onSendGif={handleSendGif}
+                  onCreatePoll={handleCreatePoll}
+                  onCreateForm={handleCreateForm}
+                  onUploadFiles={handleUploadFiles}
+                  on:reply={handleReplyRequest}
+                  on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+                  on:cancelReply={() => (replyTarget = null)}
+                />
+              {/if}
             </div>
           </div>
       {:else}
@@ -4168,40 +4367,49 @@ function sidebarThreadList() {
 
 
         {#if !voiceDesktopLayout && !showVoiceLobby}
-          <ChannelMessagePane
-            hasChannel={Boolean(serverId && activeChannel)}
-            channelName={activeChannel?.name ?? ''}
-            {messages}
-            {profiles}
-            currentUserId={$user?.uid ?? null}
-            {mentionOptions}
-            {replyTarget}
-            threadStats={threadStats}
-            defaultSuggestionSource={latestInboundMessage}
-            conversationContext={aiConversationContext}
-            aiAssistEnabled={aiAssistEnabled}
-            threadLabel={activeChannel?.name ?? ''}
-            {pendingUploads}
-            {scrollToBottomSignal}
-            scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
-            emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
-            onVote={handleVote}
-            onSubmitForm={handleFormSubmit}
-            onReact={handleReaction}
-            onLoadMore={() => {
-              if (serverId && activeChannel?.id) {
-                loadOlderMessages(serverId, activeChannel.id);
-              }
-            }}
-            onSend={handleSend}
-            onSendGif={handleSendGif}
-            onCreatePoll={handleCreatePoll}
-            onCreateForm={handleCreateForm}
-            onUploadFiles={handleUploadFiles}
-            on:reply={handleReplyRequest}
-            on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
-            on:cancelReply={() => (replyTarget = null)}
-          />
+          {#if messagesLoadError}
+            <div class="flex-1 grid place-items-center text-soft text-center px-4">
+              <div>
+                <div class="font-semibold mb-1">Messages unavailable</div>
+                <div class="text-sm">{messagesLoadError}</div>
+              </div>
+            </div>
+          {:else}
+            <ChannelMessagePane
+              hasChannel={Boolean(serverId && activeChannel)}
+              channelName={activeChannel?.name ?? ''}
+              {messages}
+              {profiles}
+              currentUserId={$user?.uid ?? null}
+              {mentionOptions}
+              {replyTarget}
+              threadStats={threadStats}
+              defaultSuggestionSource={latestInboundMessage}
+              conversationContext={aiConversationContext}
+              aiAssistEnabled={aiAssistEnabled}
+              threadLabel={activeChannel?.name ?? ''}
+              {pendingUploads}
+              {scrollToBottomSignal}
+              scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
+              emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
+              onVote={handleVote}
+              onSubmitForm={handleFormSubmit}
+              onReact={handleReaction}
+              onLoadMore={() => {
+                if (serverId && activeChannel?.id) {
+                  loadOlderMessages(serverId, activeChannel.id);
+                }
+              }}
+              onSend={handleSend}
+              onSendGif={handleSendGif}
+              onCreatePoll={handleCreatePoll}
+              onCreateForm={handleCreateForm}
+              onUploadFiles={handleUploadFiles}
+              on:reply={handleReplyRequest}
+              on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
+              on:cancelReply={() => (replyTarget = null)}
+            />
+          {/if}
         {/if}
       {/if}
           </div>
@@ -4307,6 +4515,7 @@ function sidebarThreadList() {
           serverId={serverId}
           activeChannelId={activeChannel?.id ?? null}
           onPickChannel={(id: string) => pickChannel(id)}
+          on:channels={handleSidebarChannels}
           threads={sidebarThreadList()}
           activeThreadId={activeThread?.id ?? null}
           onPickThread={(thread) => {

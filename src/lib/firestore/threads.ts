@@ -562,7 +562,7 @@ export function streamChannelThreads(
   serverId: string,
   channelId: string,
   cb: (threads: ChannelThread[]) => void,
-  { limitTo }: { limitTo?: number } = {}
+  { limitTo, onError }: { limitTo?: number; onError?: (err: unknown) => void } = {}
 ): ThreadSubscription {
   const db = getDb();
   const q = query(
@@ -570,25 +570,38 @@ export function streamChannelThreads(
     orderBy('lastMessageAt', 'desc'),
     ...(limitTo ? [limit(limitTo)] : [])
   );
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(toThread));
-  });
+  return onSnapshot(
+    q,
+    (snap) => {
+      cb(snap.docs.map(toThread));
+    },
+    (err) => {
+      if (onError) onError(err);
+    }
+  );
 }
 
 export function streamThreadMessages(
   serverId: string,
   channelId: string,
   threadId: string,
-  cb: (messages: ThreadMessage[]) => void
+  cb: (messages: ThreadMessage[]) => void,
+  { onError }: { onError?: (err: unknown) => void } = {}
 ): ThreadSubscription {
   const db = getDb();
   const q = query(
     threadMessagesCollection(db, serverId, channelId, threadId),
     orderBy('createdAt', 'asc')
   );
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(toThreadMessage));
-  });
+  return onSnapshot(
+    q,
+    (snap) => {
+      cb(snap.docs.map(toThreadMessage));
+    },
+    (err) => {
+      if (onError) onError(err);
+    }
+  );
 }
 
 export async function markThreadRead(

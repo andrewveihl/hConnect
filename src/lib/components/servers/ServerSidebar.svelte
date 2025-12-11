@@ -50,7 +50,8 @@
     onPickThread = () => {},
     threadUnreadByChannel = {}
   }: Props = $props();
-  const dispatch = createEventDispatcher<{ pick: string }>();
+  type ChannelEventDetail = { serverId: string | null; channels: Chan[] };
+  const dispatch = createEventDispatcher<{ pick: string; channels: ChannelEventDetail }>();
 
 
   type Chan = {
@@ -123,14 +124,18 @@
 
   let unsubChannels: Unsubscribe | null = null;
   let unsubPublicChannels: Unsubscribe | null = null;
-  let unsubPrivateChannels: Unsubscribe | null = null;
+  let unsubAllowedChannels: Unsubscribe | null = null;
   let unsubServerMeta: Unsubscribe | null = null;
   let unsubMyMember: Unsubscribe | null = null;
+  let unsubProfileMembership: Unsubscribe | null = null;
   let unsubPersonalOrder: Unsubscribe | null = null;
+  const blockedChannelServers = new Map<string, string>(); // serverId -> roleKey when permission denied
 
   let ownerId: string | null = null;
   let myRole: 'owner' | 'admin' | 'member' | null = $state(null);
   let myPerms = $state<PermissionFlags | null>(null);
+  let isMemberDoc = $state(false);
+  let profileMembership = $state(false);
   let myRoleIds: string[] = [];
   let lastServerId: string | null = $state(null);
   let mentionHighlights: Set<string> = $state(new Set());
@@ -643,6 +648,7 @@
     unsubMyMember?.();
     myRole = computeIsOwner() ? 'owner' : null;
     myPerms = null;
+    isMemberDoc = false;
     myRoleIds = [];
     channelFetchDenied = false;
     channelVisibilityHint = null;
@@ -655,30 +661,47 @@
       ref,
       (snap) => {
         const data = snap.exists() ? (snap.data() as any) : null;
+        isMemberDoc = snap.exists();
         const maybeRole = data?.role ?? null;
         myRole = computeIsOwner() ? 'owner' : (maybeRole as any);
         myPerms = data?.perms ?? null;
         myRoleIds = Array.isArray(data?.roleIds) ? data.roleIds : [];
+        blockedChannelServers.delete(server);
         maybeRefreshChannels(server);
       },
       () => {
         myRole = computeIsOwner() ? 'owner' : null;
         myPerms = null;
+        isMemberDoc = false;
         myRoleIds = [];
       }
     );
   }
 
-  function channelRoleSet(): string[] {
-    return Array.from(
-      new Set(
-        [
-          ...(Array.isArray(myRoleIds) ? myRoleIds : []),
-          defaultRoleId,
-          everyoneRoleId
-        ].filter((id): id is string => typeof id === 'string' && id.length > 0)
-      )
+  function watchProfileMembership(server: string) {
+    profileMembership = false;
+    if (!$user?.uid) return;
+    const db = getDb();
+    const ref = doc(db, 'profiles', $user.uid, 'servers', server);
+    // Firestore rules also treat this profile doc as membership for isMember; we only use its existence.
+    unsubProfileMembership = onSnapshot(
+      ref,
+      (snap) => {
+        profileMembership = snap.exists();
+        maybeRefreshChannels(server);
+      },
+      () => {
+        profileMembership = false;
+      }
     );
+  }
+
+  function channelRoleSet(): string[] {
+    const roles: string[] = [];
+    if (Array.isArray(myRoleIds)) roles.push(...myRoleIds);
+    if (typeof defaultRoleId === 'string' && defaultRoleId.length) roles.push(defaultRoleId);
+    if (typeof everyoneRoleId === 'string' && everyoneRoleId.length) roles.push(everyoneRoleId);
+    return Array.from(new Set(roles.filter((id) => id && typeof id === 'string')));
   }
 
   function roleKeyFromSet(set: string[]): string {
@@ -729,92 +752,139 @@
   }
 
   function watchChannels(server: string) {
-    unsubChannels?.();
-    unsubPublicChannels?.();
-    unsubPrivateChannels?.();
+    const roleKey = roleKeyFromSet(channelRoleSet());
+    const roleSet = channelRoleSet();
+    const blockedKey = blockedChannelServers.get(server);
+    // Admins and members can read the full collection (rules allow member channel metadata); guests use filtered queries.
+    const allowFullChannelQuery = isAdminLike || isMember;
+
+    const stopChannelUnsubs = () => {
+      unsubChannels?.();
+      unsubChannels = null;
+      unsubPublicChannels?.();
+      unsubPublicChannels = null;
+      unsubAllowedChannels?.();
+      unsubAllowedChannels = null;
+    };
+
+    if (allowFullChannelQuery && blockedKey && blockedKey === roleKey) {
+      channelFetchDenied = true;
+      channelVisibilityHint =
+        'You do not have permission to view channels. Ask an admin to allow @everyone/default role to view channels or add you to the server.';
+      channels = [];
+      syncVoicePresenceWatchers(channels);
+      return;
+    }
+
+    stopChannelUnsubs();
     channels = [];
     channelFetchDenied = false;
+    let channelWatchBlocked = false;
     channelVisibilityHint = null;
     currentChannelServer = server;
 
     const db = getDb();
     const baseCol = collection(db, 'servers', server, 'channels');
 
-    const handleChannelError = (error: unknown) => {
+    const mergeAndSortChannels = (lists: Chan[][]) => {
+      const map = new Map<string, Chan>();
+      lists.forEach((list) => list.forEach((c) => map.set(c.id, c)));
+      channels = Array.from(map.values()).sort((a, b) => {
+        const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+        const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+        return ap - bp || a.id.localeCompare(b.id);
+      });
+      channelFetchDenied = false;
+      channelVisibilityHint = null;
+      lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
+      syncVoicePresenceWatchers(channels);
+    };
+
+    const handleChannelError = (error: unknown, blockOnDeny = true) => {
       console.warn('[ServerSidebar] channel list error', error);
-      channelFetchDenied = (error as any)?.code === 'permission-denied';
+      const denied = (error as any)?.code === 'permission-denied';
+      if (denied && !blockOnDeny) {
+        channelVisibilityHint =
+          channelVisibilityHint ??
+          'Some channels may be hidden due to your current role permissions.';
+        return;
+      }
+      channelFetchDenied = denied && blockOnDeny;
       channelVisibilityHint = channelFetchDenied
         ? 'You do not have permission to view channels. Ask an admin to grant view access to the default role (@everyone) or add you to the server.'
         : 'Channel list is unavailable. Try reloading.';
+      if (denied && blockOnDeny) {
+        blockedChannelServers.set(server, roleKey);
+        channelWatchBlocked = true;
+        stopChannelUnsubs();
+        channels = [];
+        syncVoicePresenceWatchers(channels);
+      }
     };
 
-    if (isAdminLike) {
-      const qRef = query(baseCol, orderBy('position'));
-      unsubChannels = onSnapshot(
-        qRef,
+    // Filtered mode: public channels + private channels the member can see (role overlap)
+    const startFilteredChannelQueries = () => {
+      let publicChannels: Chan[] = [];
+      const refresh = () => mergeAndSortChannels([publicChannels]);
+
+      const qPublic = query(baseCol, where('isPrivate', '==', false), orderBy('position'));
+      unsubPublicChannels = onSnapshot(
+        qPublic,
         (snap) => {
-          channels = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
-          channelFetchDenied = false;
-          channelVisibilityHint = null;
-          syncVoicePresenceWatchers(channels);
+          if (channelWatchBlocked) return;
+          publicChannels = snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
+          refresh();
         },
-        handleChannelError
+        (err) => handleChannelError(err, false)
       );
+    };
+
+    if (!allowFullChannelQuery) {
+      startFilteredChannelQueries();
       return;
     }
 
-    // Non-admins: fetch public and allowed private channels separately.
-    const pubRef = query(baseCol, where('isPrivate', '==', false), orderBy('position'));
-    unsubPublicChannels = onSnapshot(
-      pubRef,
+    const qRef = query(baseCol, orderBy('position'));
+    unsubChannels = onSnapshot(
+      qRef,
       (snap) => {
-        mergeChannelSnapshots(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[]);
+        if (channelWatchBlocked) return;
+        channels = snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
         channelFetchDenied = false;
         channelVisibilityHint = null;
+        lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
+        syncVoicePresenceWatchers(channels);
       },
-      handleChannelError
-    );
-
-    const roleSet = channelRoleSet();
-    lastChannelRoleKey = roleKeyFromSet(roleSet);
-
-    if (roleSet.length) {
-      const privRef = query(
-        baseCol,
-        where('isPrivate', '==', true),
-        where('allowedRoleIds', 'array-contains-any', roleSet),
-        orderBy('position')
-      );
-      unsubPrivateChannels = onSnapshot(
-        privRef,
-        (snap) => {
-          mergeChannelSnapshots(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Chan[]);
+      (err) => {
+        const denied = (err as any)?.code === 'permission-denied';
+        handleChannelError(err, !denied);
+        if (denied) {
+          // Fall back to filtered queries instead of blanking the channel list.
+          channelWatchBlocked = false;
           channelFetchDenied = false;
           channelVisibilityHint = null;
-        },
-        handleChannelError
-      );
-    }
+          startFilteredChannelQueries();
+        }
+      }
+    );
   }
 
   function canSeeChannel(chan: Chan): boolean {
     if (isAdminLike) return true;
 
     const isPrivate = chan?.isPrivate === true;
-    if (!isPrivate) return true;
+    const isPublic = !isPrivate;
+
+    // Public channels: mirror canViewChannel rule for public access (signed-in).
+    if (isPublic) return !!$user?.uid;
+
+    // Private channels: require membership and role overlap.
+    if (!isMember) return false;
 
     const allowed = Array.isArray((chan as any)?.allowedRoleIds) ? (chan as any).allowedRoleIds : [];
     if (!allowed.length) return false;
 
-    const roles = Array.from(
-      new Set(
-        [
-          ...(Array.isArray(myRoleIds) ? myRoleIds : []),
-          defaultRoleId,
-          everyoneRoleId
-        ].filter((id): id is string => typeof id === 'string' && id.length > 0)
-      )
-    );
+    const roles = channelRoleSet();
     if (!roles.length) return false;
 
     return allowed.some((roleId: string) => roles.includes(roleId));
@@ -832,6 +902,7 @@
     resetVoiceWatchers();
     watchServerMeta(server);
     watchMyMember(server);
+    watchProfileMembership(server);
     watchChannels(server);
     watchChannelOrder(server);
     reorderMode = 'none';
@@ -846,9 +917,10 @@
   onDestroy(() => {
     unsubChannels?.();
     unsubPublicChannels?.();
-    unsubPrivateChannels?.();
+    unsubAllowedChannels?.();
     unsubServerMeta?.();
     unsubMyMember?.();
+    unsubProfileMembership?.();
     unsubPersonalOrder?.();
     resetVoiceWatchers();
     unsubscribeVoiceSession();
@@ -1029,7 +1101,14 @@
     !!myPerms?.manageChannels ||
     !!myPerms?.manageServer);
   let canReorderPersonal = $derived(!!myPerms?.reorderChannels);
-  const isMember = $derived(Boolean(myRole || (Array.isArray(myRoleIds) && myRoleIds.length > 0)));
+  const isMember = $derived(
+    Boolean(
+      isMemberDoc ||
+        profileMembership ||
+        myRole ||
+        (Array.isArray(myRoleIds) && myRoleIds.length > 0)
+    )
+  );
   const noChannelsReason = $derived.by(() => {
     if (!$user?.uid) return 'Sign in to view channels.';
     if (channelFetchDenied) {
@@ -1077,6 +1156,12 @@ run(() => {
   });
   run(() => {
     visibleChannels = orderedChannels.filter(canSeeChannel);
+  });
+  run(() => {
+    dispatch('channels', {
+      serverId: computedServerId ?? null,
+      channels: visibleChannels
+    });
   });
   run(() => {
     if (computedServerId && $user?.uid && computedServerId !== lastServerId) {
