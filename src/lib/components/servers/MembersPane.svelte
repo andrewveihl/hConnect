@@ -9,6 +9,7 @@
   import { getOrCreateDMThread } from '$lib/firestore/dms';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { user } from '$lib/stores/user';
+  import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
   import InvitePanel from '$lib/components/app/InvitePanel.svelte';
   import MemberProfileCard from './MemberProfileCard.svelte';
 
@@ -45,8 +46,6 @@ type RoleDoc = {
   position?: number;
   showInMemberList?: boolean;
 };
-
-  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
   type MemberRow = {
     uid: string;
@@ -135,12 +134,7 @@ type RoleDoc = {
   const presenceUnsubs: Record<string, Unsubscribe> = {};
   let currentServer: string | null = $state(null);
   const statusOrder: PresenceState[] = ['online', 'busy', 'idle', 'offline'];
-  const statusLabels: Record<PresenceState, string> = {
-    online: 'Online',
-    busy: 'Busy',
-    idle: 'Idle',
-    offline: 'Offline'
-  };
+  const statusLabels: Record<PresenceState, string> = presenceLabels;
   const MAX_VISIBLE_MEMBER_ROLES = 2;
   // derived above
 
@@ -192,160 +186,8 @@ type RoleDoc = {
     return resolveProfilePhotoURL(profile, fallback);
   };
 
-  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
-  const IDLE_WINDOW_MS = 60 * 60 * 1000;
-
-  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
-    if (!value) return false;
-    try {
-      if (typeof value === 'number') {
-        return Date.now() - value <= ms;
-      }
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) && Date.now() - parsed <= ms;
-      }
-      if (typeof value === 'object' && value !== null) {
-        const maybeTs = value as { toMillis?: () => number };
-        if (typeof maybeTs.toMillis === 'function') {
-          const ts = maybeTs.toMillis();
-          return Number.isFinite(ts) && Date.now() - ts <= ms;
-        }
-      }
-    } catch {
-      return false;
-    }
-    return false;
-  };
-
-  const toMillis = (value: unknown): number | null => {
-    try {
-      if (!value) return null;
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) ? parsed : null;
-      }
-      if (value instanceof Date) return value.getTime();
-      if (typeof value === 'object' && value !== null) {
-        const maybeTs = value as { toMillis?: () => number };
-        if (typeof maybeTs.toMillis === 'function') {
-          const ts = maybeTs.toMillis();
-          return Number.isFinite(ts) ? ts : null;
-        }
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
-
-  const normalizePresence = (raw?: string | null): PresenceState | null => {
-    if (!raw) return null;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) return null;
-    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
-    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
-    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
-    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
-    return null;
-  };
-
-  const manualPresenceFrom = (...sources: any[]): PresenceState | null => {
-    for (const source of sources) {
-      if (!source) continue;
-      const raw =
-        pickString(source.manualState) ??
-        pickString((source.manual as any)?.state);
-      if (!raw) continue;
-      const normalized = normalizePresence(raw);
-      if (!normalized) continue;
-      const expiresAt =
-        toMillis(source.manualExpiresAt) ??
-        toMillis((source.manual as any)?.expiresAt);
-      if (expiresAt && Date.now() > expiresAt) continue;
-      return normalized;
-    }
-    return null;
-  };
-
   function presenceState(uid: string): PresenceState {
-    const member = members[uid] as any;
-    const profile = profiles[uid] as any;
-    const presence = presenceDocs[uid] as any;
-
-    const manual = manualPresenceFrom(presence, profile, member);
-    if (manual) return manual;
-
-    const booleanCandidates = [
-      member?.online,
-      member?.isOnline,
-      member?.active,
-      profile?.online,
-      profile?.isOnline,
-      profile?.active,
-      presence?.online,
-      presence?.isOnline,
-      presence?.active
-    ];
-
-    let sawBoolean = false;
-
-    for (const candidate of booleanCandidates) {
-      if (typeof candidate !== 'boolean') continue;
-      sawBoolean = true;
-      if (candidate) {
-        return 'online';
-      }
-    }
-
-    const rawStatus =
-      pickString(member?.status) ??
-      pickString((member?.status as any)?.state) ??
-      pickString(member?.presence) ??
-      pickString((member?.presence as any)?.state) ??
-      pickString(profile?.status) ??
-      pickString((profile?.status as any)?.state) ??
-      pickString(profile?.presence?.state) ??
-      pickString(profile?.presenceState) ??
-      pickString(profile?.availability) ??
-      pickString(presence?.state) ??
-      pickString(presence?.status);
-
-    if (rawStatus) {
-      const normalized = normalizePresence(rawStatus);
-      if (normalized === 'busy') return 'busy';
-      if (normalized === 'online') return 'online';
-      if (normalized === 'idle') return 'idle';
-      if (normalized === 'offline') return 'offline';
-    }
-
-    if (sawBoolean) {
-      return 'offline';
-    }
-
-    const lastActive =
-      member?.lastActive ??
-      member?.lastSeen ??
-      member?.updatedAt ??
-      profile?.lastActive ??
-      profile?.lastSeen ??
-      profile?.updatedAt ??
-      presence?.lastActive ??
-      presence?.lastSeen ??
-      presence?.updatedAt ??
-      (presence?.timestamp as any);
-
-    if (lastActive) {
-      const seenOnline = isRecent(lastActive, ONLINE_WINDOW_MS);
-      const seenIdle = isRecent(lastActive, IDLE_WINDOW_MS);
-
-      if (seenOnline) return 'online';
-      if (seenIdle) return 'idle';
-      return 'offline';
-    }
-
-    return 'offline';
+    return presenceFromSources([presenceDocs[uid], profiles[uid], members[uid]]);
   }
 
   const statusClass = (state: PresenceState) => {

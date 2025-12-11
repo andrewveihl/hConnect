@@ -3,8 +3,7 @@ import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
 import { user as userStore } from '$lib/stores/user';
-
-type PresenceState = 'online' | 'idle' | 'offline';
+import type { PresenceState } from '$lib/presence/state';
 
 let currentUid: string | null = null;
 let lastState: PresenceState | null = null;

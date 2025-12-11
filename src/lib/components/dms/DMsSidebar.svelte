@@ -11,6 +11,7 @@
     streamUnreadCount, streamProfiles, getProfile, deleteThreadForUser,
     streamThreadMeta
   } from '$lib/firestore/dms';
+  import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 
   const dispatch = createEventDispatcher();
   let me: any = $state(null);
@@ -20,8 +21,6 @@ interface Props {
   showPersonalSection?: boolean;
   navigateOnSelect?: boolean;
 }
-
-  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
   type PresenceDoc = {
     state?: string | null;
@@ -33,13 +32,6 @@ interface Props {
     lastSeen?: any;
     updatedAt?: any;
     timestamp?: any;
-  };
-
-  const presenceLabels: Record<PresenceState, string> = {
-    online: 'Online',
-    busy: 'Busy',
-    idle: 'Idle',
-    offline: 'Offline'
   };
 
   const presenceClassMap: Record<PresenceState, string> = {
@@ -182,85 +174,6 @@ let {
     }
     return null;
   }
-
-  function pickString(value: unknown): string | undefined {
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (trimmed.length) return trimmed;
-    }
-    return undefined;
-  }
-
-  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
-  const IDLE_WINDOW_MS = 60 * 60 * 1000;
-
-  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
-    if (!value) return false;
-    try {
-      if (typeof value === 'number') {
-        return Date.now() - value <= ms;
-      }
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) && Date.now() - parsed <= ms;
-      }
-      if (value instanceof Date) {
-        return Date.now() - value.getTime() <= ms;
-      }
-      if (typeof (value as any)?.toMillis === 'function') {
-        const ts = (value as any).toMillis();
-        return Number.isFinite(ts) && Date.now() - ts <= ms;
-      }
-    } catch {
-      return false;
-    }
-    return false;
-  };
-
-  const toMillis = (value: unknown): number | null => {
-    try {
-      if (!value) return null;
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) ? parsed : null;
-      }
-      if (value instanceof Date) return value.getTime();
-      if (typeof (value as any)?.toMillis === 'function') {
-        const ts = (value as any).toMillis();
-        return Number.isFinite(ts) ? ts : null;
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
-
-  const normalizePresence = (raw?: string | null): PresenceState | null => {
-    if (!raw) return null;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) return null;
-    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
-    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
-    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
-    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
-    return null;
-  };
-
-  const manualStateFrom = (source: any): PresenceState | null => {
-    if (!source || typeof source !== 'object') return null;
-    const raw =
-      pickString(source.manualState) ??
-      pickString((source.manual as any)?.state);
-    if (!raw) return null;
-    const expiresAt =
-      toMillis(source.manualExpiresAt) ??
-      toMillis((source.manual as any)?.expiresAt);
-    if (expiresAt && Date.now() > expiresAt) return null;
-    return normalizePresence(raw);
-  };
-
-
 
   function resolveOtherUid(t: any) {
     return t.otherUid || (t.participants || []).find((p: string) => p !== me?.uid) || null;
@@ -458,67 +371,15 @@ let {
     });
   }
 
-  function booleanPresenceFrom(source: any): boolean | null {
-    if (!source || typeof source !== 'object') return null;
-    if (typeof source.online === 'boolean') return source.online;
-    if (typeof source.isOnline === 'boolean') return source.isOnline;
-    if (typeof source.active === 'boolean') return source.active;
-    return null;
-  }
-
-  function statusFromSource(source: any): string | undefined {
-    if (!source || typeof source !== 'object') return undefined;
-    return (
-      pickString(source.status) ??
-      pickString(source.state) ??
-      pickString(source.presenceState) ??
-      pickString((source.presence as any)?.state)
-    );
-  }
-
-  function recentActivityFrom(source: any) {
-    if (!source || typeof source !== 'object') return null;
-    return source.lastActive ?? source.lastSeen ?? source.updatedAt ?? source.timestamp ?? null;
-  }
-
   function presenceStateFor(uid: string | null, thread?: any): PresenceState {
     if (!uid) return 'offline';
-    const sources = [
+    return presenceFromSources([
       thread?.presence ?? null,
       thread?.profile ?? null,
       thread ?? null,
       peopleMap[uid] ?? null,
       presenceDocs[uid] ?? null
-    ];
-
-    for (const source of sources) {
-      const manual = manualStateFrom(source);
-      if (manual) return manual;
-    }
-
-    for (const source of sources) {
-      const bool = booleanPresenceFrom(source);
-      if (bool !== null) {
-        return bool ? 'online' : 'offline';
-      }
-    }
-
-    for (const source of sources) {
-      const raw = statusFromSource(source);
-      if (!raw) continue;
-      const normalized = normalizePresence(raw);
-      if (normalized) return normalized;
-    }
-
-    for (const source of sources) {
-      const recent = recentActivityFrom(source);
-      if (!recent) continue;
-      if (isRecent(recent, ONLINE_WINDOW_MS)) return 'online';
-      if (isRecent(recent, IDLE_WINDOW_MS)) return 'idle';
-      return 'offline';
-    }
-
-    return 'offline';
+    ]);
   }
 
   const presenceClassFromState = (state: PresenceState) =>

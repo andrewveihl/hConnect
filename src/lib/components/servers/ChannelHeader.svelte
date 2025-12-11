@@ -76,7 +76,7 @@
         <span>Back to {channel?.name ?? 'channel'}</span>
       </button>
     {/if}
-    {#if showMessageShortcut}
+    {#if showMessageShortcut && channel?.type === 'voice'}
       <button
         class="channel-header__message"
         type="button"

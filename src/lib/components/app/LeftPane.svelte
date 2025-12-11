@@ -10,6 +10,12 @@
   import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
   import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
   import { db } from '$lib/firestore';
+  import {
+    presenceFromSources,
+    presenceLabels,
+    resolveManualPresenceFromSources,
+    type PresenceState
+  } from '$lib/presence/state';
 import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } from 'firebase/firestore';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
   import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
@@ -29,7 +35,6 @@ import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settin
     showBottomActions?: boolean;
   }
 
-  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
   type StatusSelection = 'auto' | PresenceState;
   type DmAlert = {
     id: string;
@@ -176,23 +181,14 @@ const isSuperAdmin = $derived(
       ? currentPath.slice(5).split('/')[0] || null
       : null);
 
-  const presenceLabels: Record<PresenceState, string> = {
-    online: 'Online',
-    busy: 'Busy',
-    idle: 'Idle',
-    offline: 'Offline'
-  };
-
   const statusOptions: Array<{ id: StatusSelection; label: string; description: string; state: PresenceState | null }> = [
     { id: 'auto', label: 'Auto', description: 'Follow activity', state: null },
-    { id: 'online', label: 'Online', description: 'Available to chat', state: 'online' },
-    { id: 'busy', label: 'Busy', description: 'Do not disturb', state: 'busy' },
-    { id: 'idle', label: 'Idle', description: 'Away for a bit', state: 'idle' },
+    { id: 'online', label: presenceLabels.online, description: 'Available to chat', state: 'online' },
+    { id: 'busy', label: presenceLabels.busy, description: 'Do not disturb', state: 'busy' },
+    { id: 'idle', label: presenceLabels.idle, description: 'Away for a bit', state: 'idle' },
     { id: 'offline', label: 'Invisible', description: 'Appear offline', state: 'offline' }
   ];
 
-  const ONLINE_WINDOW_MS = 10 * 60 * 1000;
-  const IDLE_WINDOW_MS = 60 * 60 * 1000;
   const DEFAULT_OVERRIDE_MS = 24 * 60 * 60 * 1000;
 
 const dmAlerts = $derived.by(() => {
@@ -265,11 +261,11 @@ const dmAlerts = $derived.by(() => {
       ref,
       (snap) => {
         const data = snap.data() ?? {};
-        const manual = manualStateFromDoc(data);
+        const manual = resolveManualPresenceFromSources(data);
         myOverrideActive = !!manual;
         myOverrideState = manual?.state ?? null;
         myOverrideExpiresAt = manual?.expiresAt ?? null;
-        myPresenceState = manual?.state ?? computePresenceFromDoc(data);
+        myPresenceState = presenceFromSources([data]);
       },
       () => {
         myPresenceState = 'offline';
@@ -281,98 +277,6 @@ const dmAlerts = $derived.by(() => {
   });
 
   onDestroy(() => presenceUnsub?.());
-
-  const pickString = (value: unknown): string | undefined => {
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (trimmed.length) return trimmed;
-    }
-    return undefined;
-  };
-
-  const toMillis = (value: unknown): number | null => {
-    try {
-      if (!value) return null;
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) ? parsed : null;
-      }
-      if (value instanceof Date) return value.getTime();
-      if (typeof (value as any)?.toMillis === 'function') {
-        const ts = (value as any).toMillis();
-        return Number.isFinite(ts) ? ts : null;
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
-
-  const isRecent = (value: unknown, ms = ONLINE_WINDOW_MS) => {
-    const time = toMillis(value);
-    if (time === null) return false;
-    return Date.now() - time <= ms;
-  };
-
-  const normalizePresence = (raw?: string | null): PresenceState | null => {
-    if (!raw) return null;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) return null;
-    if (['online', 'active', 'available', 'connected', 'here'].includes(normalized)) return 'online';
-    if (['busy', 'dnd', 'do not disturb', 'occupied', 'focus'].includes(normalized)) return 'busy';
-    if (['idle', 'away', 'brb', 'soon'].includes(normalized)) return 'idle';
-    if (['offline', 'invisible', 'off'].includes(normalized)) return 'offline';
-    return null;
-  };
-
-  const manualStateFromDoc = (source: any): { state: PresenceState; expiresAt: number | null } | null => {
-    if (!source || typeof source !== 'object') return null;
-    const raw =
-      pickString(source.manualState) ??
-      pickString((source.manual as any)?.state);
-    if (!raw) return null;
-    const normalized = normalizePresence(raw);
-    if (!normalized) return null;
-    const expiresAt =
-      toMillis(source.manualExpiresAt) ??
-      toMillis((source.manual as any)?.expiresAt) ??
-      null;
-    if (expiresAt && Date.now() > expiresAt) return null;
-    return { state: normalized, expiresAt };
-  };
-
-  const booleanPresenceFrom = (source: any): boolean | null => {
-    if (!source || typeof source !== 'object') return null;
-    if (typeof source.online === 'boolean') return source.online;
-    if (typeof source.isOnline === 'boolean') return source.isOnline;
-    if (typeof source.active === 'boolean') return source.active;
-    return null;
-  };
-
-  const recentActivityFrom = (source: any): unknown => {
-    if (!source || typeof source !== 'object') return null;
-    return source.lastActive ?? source.lastSeen ?? source.updatedAt ?? source.timestamp ?? null;
-  };
-
-  const computePresenceFromDoc = (source: any): PresenceState => {
-    const manual = manualStateFromDoc(source);
-    if (manual) return manual.state;
-    const bool = booleanPresenceFrom(source);
-    if (bool !== null) return bool ? 'online' : 'offline';
-    const raw =
-      pickString(source?.state) ??
-      pickString(source?.status) ??
-      pickString(source?.presenceState);
-    const normalized = normalizePresence(raw ?? null);
-    if (normalized) return normalized;
-    const recent = recentActivityFrom(source);
-    if (recent) {
-      if (isRecent(recent, ONLINE_WINDOW_MS)) return 'online';
-      if (isRecent(recent, IDLE_WINDOW_MS)) return 'idle';
-    }
-    return 'offline';
-  };
 
   const statusDotClass = (state: PresenceState) => {
     switch (state) {

@@ -1484,7 +1484,10 @@ function sidebarThreadList() {
         onError: (err) => {
           console.error('Failed to load thread messages', err);
           if ((err as any)?.code === 'permission-denied') {
-            handleChannelDenied(activeChannel.id);
+            const deniedChannelId = activeChannel?.id ?? thread.channelId ?? thread.parentChannelId ?? null;
+            if (deniedChannelId) {
+              handleChannelDenied(deniedChannelId);
+            }
           }
         }
       }
