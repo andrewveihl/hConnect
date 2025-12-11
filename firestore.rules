@@ -77,6 +77,14 @@ service cloud.firestore {
           : null;
     }
 
+    // Legacy compatibility: expose explicit everyoneRoleId even when defaultRoleId is present.
+    function serverEveryoneRoleId(serverId) {
+      let serverPath = /databases/$(database)/documents/servers/$(serverId);
+      let hasServer = exists(serverPath);
+      let data = hasServer ? get(serverPath).data : {};
+      return (hasServer && data.everyoneRoleId is string) ? data.everyoneRoleId : null;
+    }
+
     function roleAllowsPerm(serverId, roleId, permKey) {
       return roleDocExists(serverId, roleId)
         && (
@@ -114,8 +122,11 @@ service cloud.firestore {
       let key = permKeyName(perm);
       let modern = mem.permissions is map && mem.permissions[key] == true;
 
-      // Use the configured default role (or fallback) so baseline permissions are honored even if member docs lag.
-      let rolesAllow = roleAllowsPerm(serverId, serverDefaultRoleId(serverId), key);
+      // Use the configured default role (and legacy everyone role) so baseline permissions are honored even if member docs lag.
+      let defaultRole = serverDefaultRoleId(serverId);
+      let everyoneRole = serverEveryoneRoleId(serverId);
+      let rolesAllow = roleAllowsPerm(serverId, defaultRole, key)
+        || (everyoneRole != defaultRole && roleAllowsPerm(serverId, everyoneRole, key));
 
       // Baseline allowances for members.
       let defaultAllow = (
@@ -132,6 +143,7 @@ service cloud.firestore {
       let guestAllow = (
         perm == "viewChannels" ||
         perm == "viewPublicChannels" ||
+        perm == "sendMessages" ||
         perm == "readMessageHistory" ||
         perm == "viewMemberList" ||
         perm == "viewServerHome"
@@ -177,8 +189,13 @@ service cloud.firestore {
               || (
                 channelDoc(serverId, channelId).data.allowedRoleIds is list
                 && channelDoc(serverId, channelId).data.allowedRoleIds.hasAny(
-                  (memberRoleIds(serverId) is list ? memberRoleIds(serverId) : [])
+                  (
+                    memberRoleIds(serverId) is list
+                      ? memberRoleIds(serverId)
+                      : []
+                  )
                     .concat(defaultRoleId(serverId) != null ? [defaultRoleId(serverId)] : [])
+                    .concat(serverEveryoneRoleId(serverId) != null ? [serverEveryoneRoleId(serverId)] : [])
                 )
               )
             )
@@ -217,19 +234,15 @@ service cloud.firestore {
     }
 
     function canViewChannel(serverId, channelId) {
-      return isServerAdmin(serverId)
-        // Public channel: any signed-in user can see if the channel is public.
-        || (
-          channelId != null
-            && channelIsPublic(serverId, channelId)
-            && isSignedIn()
-        )
-        // Member-based visibility (includes private channel gating).
-        || (
-          channelId != null
-            ? (channelAllowsMember(serverId, channelId) && isMember(serverId))
-            : isMember(serverId)
-        );
+      return (
+        (channelId != null && channelIsPublic(serverId, channelId))
+          ? true
+          : (
+            channelId != null
+              ? (channelAllowsMember(serverId, channelId) && isMember(serverId))
+              : (isMember(serverId) || isServerAdmin(serverId))
+          )
+      );
     }
     function canSendInChannel(serverId, channelId) {
       return isServerAdmin(serverId)
@@ -494,22 +507,35 @@ service cloud.firestore {
       }
 
       match /presence/{uid} {
-        allow read: if isSignedIn() && (uid == request.auth.uid || isMember(serverId));
-        allow create, update: if isSignedIn() && request.auth.uid == uid && isMember(serverId);
+        allow read: if isSignedIn()
+          && (
+            uid == request.auth.uid
+            || isMember(serverId)
+            || serverIsPublic(serverId)
+          );
+        allow create, update: if isSignedIn()
+          && request.auth.uid == uid
+          && (isMember(serverId) || serverIsPublic(serverId));
         allow delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
       }
 
       match /channels/{channelId} {
-        // Members can always load channel metadata; signed-in users can load public channels.
-        allow read: if (resource != null && resource.data.isPrivate != true && isSignedIn())
+        // Members/admins always; anyone signed-in can read public channels.
+        allow read: if (isSignedIn() && channelIsPublic(serverId, channelId))
                     || isMember(serverId)
-                    || canViewChannel(serverId, channelId);
+                    || isServerAdmin(serverId);
       allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
 
         match /messages/{messageId} {
-          allow read: if canViewChannel(serverId, channelId);
-          allow create: if canSendInChannel(serverId, channelId)
-            && isSignedIn()
+          allow read: if (isSignedIn() && channelIsPublic(serverId, channelId))
+            || canViewChannel(serverId, channelId);
+          allow create: if isSignedIn()
+            && (
+              // Allow signed-in users to send in public channels.
+              channelIsPublic(serverId, channelId)
+              // Also allow via member/admin permission path.
+              || canSendInChannel(serverId, channelId)
+            )
             && (
               request.resource.data.uid == request.auth.uid
               || request.resource.data.authorId == request.auth.uid

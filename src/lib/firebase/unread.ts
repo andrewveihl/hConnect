@@ -123,6 +123,9 @@ async function computeChannelSnapshot(options: {
     const agg = await getCountFromServer(query(base, ...timeConstraint));
     total = agg.data().count ?? 0;
   } catch (err) {
+    if ((err as any)?.code === 'permission-denied') {
+      throw err;
+    }
     console.warn('[unread] total count failed', { serverId, channelId }, err);
     return { total: 0, high: 0, low: 0, latestHigh: null };
   }
@@ -145,6 +148,9 @@ async function computeChannelSnapshot(options: {
       highEvents.set(docSnap.id, event);
     });
   } catch (err) {
+    if ((err as any)?.code === 'permission-denied') {
+      throw err;
+    }
     console.warn('[unread] mention query failed', { serverId, channelId }, err);
   }
 
@@ -158,6 +164,9 @@ async function computeChannelSnapshot(options: {
         highEvents.set(docSnap.id, event);
       });
     } catch (err) {
+      if ((err as any)?.code === 'permission-denied') {
+        throw err;
+      }
       console.warn(`[unread] ${field} query failed`, { serverId, channelId }, err);
     }
   };
@@ -177,6 +186,9 @@ async function computeChannelSnapshot(options: {
       highEvents.set(docSnap.id, event);
     });
   } catch (err) {
+    if ((err as any)?.code === 'permission-denied') {
+      throw err;
+    }
     console.warn('[unread] reply query failed', { serverId, channelId }, err);
   }
 
@@ -205,13 +217,84 @@ export function subscribeUnreadForServer(
 ): Unsubscribe {
   const db = getDb();
   const channelStates = new Map<string, ChannelState>();
+  const deniedChannels = new Set<string>();
+  const channelDocs = new Map<string, any>();
   const counts: UnreadMap = {};
+  let stopChannels: Unsubscribe | null = null;
+  let stopPublicChannels: Unsubscribe | null = null;
+  let memberRoleIds: string[] = [];
+  let memberPerms: any = null;
+  let isMember = false;
+  let profileMembership = false;
+  let defaultRoleId: string | null = null;
+  let everyoneRoleId: string | null = null;
+  let serverOwnerId: string | null = null;
+  let serverIsPublic = false;
+  let stopMember: Unsubscribe | null = null;
+  let stopProfileMembership: Unsubscribe | null = null;
+  let stopServerMeta: Unsubscribe | null = null;
 
   const emit = () => {
     onUpdate({ ...counts });
   };
 
+  const handlePermissionDenied = (channelId: string, err: unknown): boolean => {
+    if ((err as any)?.code === 'permission-denied') {
+      deniedChannels.add(channelId);
+      detachChannel(channelId);
+      return true;
+    }
+    return false;
+  };
+
+  const roleSet = () => {
+    const roles: string[] = [];
+    if (Array.isArray(memberRoleIds)) roles.push(...memberRoleIds);
+    if (typeof defaultRoleId === 'string' && defaultRoleId.length) roles.push(defaultRoleId);
+    if (typeof everyoneRoleId === 'string' && everyoneRoleId.length) roles.push(everyoneRoleId);
+    return Array.from(new Set(roles.filter((id) => typeof id === 'string' && id.length)));
+  };
+
+  const isAdminLike = () => {
+    const perms = (memberPerms as any) ?? {};
+    const legacyManage =
+      (perms.manageServer === true || perms.manageRoles === true);
+    const modern = perms.permissions ?? {};
+    const modernManage =
+      modern.MANAGE_SERVER === true ||
+      modern.MANAGE_ROLES === true ||
+      perms.MANAGE_SERVER === true ||
+      perms.MANAGE_ROLES === true;
+    const owner = typeof serverOwnerId === 'string' && uid === serverOwnerId;
+    return owner || legacyManage || modernManage;
+  };
+
+  const hasServerAccess = () => {
+    return isAdminLike() || serverIsPublic || isMember || profileMembership;
+  };
+
+  const canWatchChannel = (data: any): boolean => {
+    if (!uid) return false;
+    if (isAdminLike()) return true;
+    if (!hasServerAccess()) return false;
+    if ((data?.type ?? 'text') === 'voice') return false;
+    const isPrivate = data?.isPrivate === true;
+    if (!isPrivate) return true; // Public channels follow canViewChannel's public branch.
+    // Private: must be a member and have role overlap.
+    if (!isMember && !profileMembership) return false;
+    const allowed = Array.isArray(data?.allowedRoleIds)
+      ? (data.allowedRoleIds as unknown[]).filter((id) => typeof id === 'string')
+      : [];
+    if (!allowed.length) return false;
+    const roles = roleSet();
+    if (!roles.length) return false;
+    return allowed.some((id) => roles.includes(id as string));
+  };
+
   const scheduleRecompute = (channelId: string) => {
+    if (!hasServerAccess()) return;
+    // If we have already observed a permission issue for this channel, do not retry until roles change.
+    if (deniedChannels.has(channelId)) return;
     const state = channelStates.get(channelId);
     if (!state) return;
     if (state.recomputeRunning) {
@@ -232,6 +315,7 @@ export function subscribeUnreadForServer(
         emit();
       })
       .catch((err) => {
+        if (handlePermissionDenied(channelId, err)) return;
         console.warn('[unread] failed to compute snapshot', { serverId, channelId }, err);
       })
       .finally(() => {
@@ -254,7 +338,10 @@ export function subscribeUnreadForServer(
   };
 
   const attachChannel = (channelId: string) => {
+    if (!hasServerAccess()) return;
     if (channelStates.has(channelId)) return;
+    const data = channelDocs.get(channelId);
+    if ((data?.type ?? 'text') === 'voice') return;
     const state: ChannelState = {
       id: channelId,
       lastReadAt: null,
@@ -270,7 +357,10 @@ export function subscribeUnreadForServer(
         limit(1)
       ),
       () => scheduleRecompute(channelId),
-      () => scheduleRecompute(channelId)
+      (err) => {
+        if (handlePermissionDenied(channelId, err)) return;
+        scheduleRecompute(channelId);
+      }
     );
 
     state.stopRead = onSnapshot(
@@ -280,7 +370,8 @@ export function subscribeUnreadForServer(
         state.lastReadAt = data?.lastReadAt ?? null;
         scheduleRecompute(channelId);
       },
-      () => {
+      (err) => {
+        if (handlePermissionDenied(channelId, err)) return;
         state.lastReadAt = null;
         scheduleRecompute(channelId);
       }
@@ -289,32 +380,170 @@ export function subscribeUnreadForServer(
     scheduleRecompute(channelId);
   };
 
-  const stopChannels = onSnapshot(
-    query(collection(db, 'servers', serverId, 'channels'), orderBy('position')),
-    (snap) => {
-      const present = new Set<string>();
-      snap.forEach((docSnap) => {
-        const channelId = docSnap.id;
-        present.add(channelId);
-        attachChannel(channelId);
-      });
-      for (const channelId of Array.from(channelStates.keys())) {
-        if (!present.has(channelId)) {
-          detachChannel(channelId);
-        }
-      }
-    },
-    () => {
+  const handleChannelSnapshot = (snap: any) => {
+    if (!hasServerAccess()) {
       for (const channelId of Array.from(channelStates.keys())) {
         detachChannel(channelId);
+        deniedChannels.delete(channelId);
+        channelDocs.delete(channelId);
       }
+      return;
+    }
+    const present = new Set<string>();
+    snap.forEach((docSnap: any) => {
+      const channelId = docSnap.id;
+      const data = docSnap.data();
+      present.add(channelId);
+      channelDocs.set(channelId, data);
+      if (deniedChannels.has(channelId)) return;
+      if (canWatchChannel(data)) {
+        attachChannel(channelId);
+      } else {
+        detachChannel(channelId);
+      }
+    });
+    for (const channelId of Array.from(channelStates.keys())) {
+      if (!present.has(channelId)) {
+        detachChannel(channelId);
+        deniedChannels.delete(channelId);
+        channelDocs.delete(channelId);
+      }
+    }
+  };
+
+  const startPublicChannels = () => {
+    if (stopPublicChannels) return;
+    const qPublic = query(
+      collection(db, 'servers', serverId, 'channels'),
+      where('isPrivate', '==', false),
+      orderBy('position')
+    );
+    stopPublicChannels = onSnapshot(
+      qPublic,
+      (snap) => handleChannelSnapshot(snap),
+      () => {
+        for (const channelId of Array.from(channelStates.keys())) {
+          detachChannel(channelId);
+        }
+        stopPublicChannels?.();
+        stopPublicChannels = null;
+      }
+    );
+  };
+
+  const startAllChannels = () => {
+    stopChannels?.();
+    if (!hasServerAccess()) return;
+    const qAll = query(collection(db, 'servers', serverId, 'channels'), orderBy('position'));
+    stopChannels = onSnapshot(
+      qAll,
+      (snap) => handleChannelSnapshot(snap),
+      (err) => {
+        if ((err as any)?.code === 'permission-denied') {
+          // Fallback to public channels if full collection is not readable.
+          stopChannels?.();
+          stopChannels = null;
+          startPublicChannels();
+        } else {
+          for (const channelId of Array.from(channelStates.keys())) {
+            detachChannel(channelId);
+          }
+        }
+      }
+    );
+  };
+
+  startAllChannels();
+
+  const reevaluateChannels = () => {
+    if (!hasServerAccess()) {
+      for (const channelId of Array.from(channelStates.keys())) {
+        detachChannel(channelId);
+        deniedChannels.delete(channelId);
+        channelDocs.delete(channelId);
+      }
+      return;
+    }
+    for (const [channelId, data] of channelDocs.entries()) {
+      if (deniedChannels.has(channelId) && canWatchChannel(data)) {
+        deniedChannels.delete(channelId);
+      }
+      if (deniedChannels.has(channelId)) continue;
+      if (canWatchChannel(data)) {
+        attachChannel(channelId);
+      } else {
+        detachChannel(channelId);
+      }
+    }
+  };
+
+  stopMember = onSnapshot(
+    doc(db, 'servers', serverId, 'members', uid),
+    (snap) => {
+      const data: any = snap.data() ?? {};
+      isMember = snap.exists();
+      memberRoleIds = Array.isArray(data?.roleIds) ? data.roleIds : [];
+      memberPerms = data?.perms ?? data?.permissions ?? null;
+      reevaluateChannels();
+    },
+    () => {
+      isMember = false;
+      memberRoleIds = [];
+      memberPerms = null;
+      reevaluateChannels();
+    }
+  );
+
+  stopProfileMembership = onSnapshot(
+    doc(db, 'profiles', uid, 'servers', serverId),
+    (snap) => {
+      profileMembership = snap.exists();
+      if (profileMembership && !hasServerAccess()) {
+        // membership gained, restart all channels
+        startAllChannels();
+      }
+      reevaluateChannels();
+    },
+    () => {
+      profileMembership = false;
+      reevaluateChannels();
+    }
+  );
+
+  stopServerMeta = onSnapshot(
+    doc(db, 'servers', serverId),
+    (snap) => {
+      const data: any = snap.data() ?? {};
+      serverOwnerId =
+        typeof data?.ownerId === 'string'
+          ? data.ownerId
+          : typeof data?.owner === 'string'
+            ? data.owner
+            : null;
+      defaultRoleId = typeof data?.defaultRoleId === 'string' ? data.defaultRoleId : null;
+      everyoneRoleId = typeof data?.everyoneRoleId === 'string' ? data.everyoneRoleId : null;
+      serverIsPublic = data?.isPublic === true;
+      reevaluateChannels();
+    },
+    () => {
+      serverOwnerId = null;
+      defaultRoleId = null;
+      everyoneRoleId = null;
+      serverIsPublic = false;
+      reevaluateChannels();
     }
   );
 
   return () => {
     stopChannels?.();
+    stopPublicChannels?.();
+    stopMember?.();
+    stopProfileMembership?.();
+    stopServerMeta?.();
     for (const channelId of Array.from(channelStates.keys())) {
       detachChannel(channelId);
     }
+    deniedChannels.clear();
+    channelDocs.clear();
   };
 }
