@@ -115,6 +115,8 @@
   let activeVoice: VoiceSession | null = $state(null);
   const voiceProfileCache = new Map<string, { displayName?: string | null; photoURL?: string | null }>();
   const pendingVoiceProfiles = new Set<string>();
+  let brokenVoiceAvatars = $state(new Set<string>());
+  const lastVoiceAvatarUrl = new Map<string, string | null>();
   const unsubscribeVoiceSession = voiceSession.subscribe((value) => {
     activeVoice = value;
   });
@@ -167,6 +169,33 @@
   function voiceInitial(name?: string): string {
     if (!name) return '?';
     return name.trim().charAt(0).toUpperCase() || '?';
+  }
+
+  function voiceAvatarURL(participant: VoiceParticipant): string | null {
+    const cached = voiceProfileCache.get(participant.uid);
+    const current = get(user);
+    const merged = {
+      ...participant,
+      ...(cached ?? {}),
+      photoURL: cached?.photoURL ?? participant.photoURL ?? null
+    };
+    if (current?.uid && current.uid === participant.uid) {
+      merged.photoURL = merged.photoURL ?? current.photoURL ?? null;
+      (merged as any).authPhotoURL = (merged as any).authPhotoURL ?? current.photoURL ?? null;
+    }
+    return resolveProfilePhotoURL(merged, merged.photoURL ?? null);
+  }
+
+  function resolveVoiceAvatar(member: VoiceParticipant): string | null {
+    const url = voiceAvatarURL(member);
+    const previous = lastVoiceAvatarUrl.get(member.uid);
+    if (url !== previous && brokenVoiceAvatars.has(member.uid)) {
+      const next = new Set(brokenVoiceAvatars);
+      next.delete(member.uid);
+      brokenVoiceAvatars = next;
+    }
+    lastVoiceAvatarUrl.set(member.uid, url);
+    return url;
   }
 
   function isVoiceChannelActive(id: string): boolean {
@@ -309,6 +338,11 @@
           const data = d.data() as any;
           const status = (data.status ?? 'active') as 'active' | 'left';
           const normalize = (val: unknown) => (typeof val === 'string' ? val.trim() : '');
+          const providedName =
+            normalize(data.displayName) ||
+            normalize((data.profile as any)?.displayName) ||
+            normalize((data.profile as any)?.name) ||
+            null;
           const providedPhoto =
             normalize(data.photoURL) ||
             normalize(data.photoUrl) ||
@@ -325,7 +359,7 @@
           const basePhoto = resolveProfilePhotoURL({ ...data, photoURL: providedPhoto }, providedPhoto);
           const participant: VoiceParticipant = {
             uid: data.uid ?? d.id,
-            displayName: data.displayName ?? 'Member',
+            displayName: providedName ?? 'Member',
             photoURL: basePhoto,
             hasAudio: data.hasAudio ?? false,
             hasVideo: data.hasVideo ?? false,
@@ -1310,30 +1344,30 @@ run(() => {
           </button>
 
           {#if c.type === 'voice'}
-            {#if (voicePresence[c.id]?.length ?? 0) > 0}
-              <div class="channel-voice-presence">
-                {#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
-                  <div class="channel-voice-avatar">
-                    {#if member.photoURL}
-                      <img
-                        src={member.photoURL}
-                        alt={member.displayName}
-                        class="h-full w-full object-cover"
-                        loading="lazy"
-                      />
-                    {:else}
-                      <div class="grid h-full w-full place-items-center text-[10px] font-semibold text-primary">
-                        {voiceInitial(member.displayName)}
-                      </div>
-                    {/if}
-                    {#if member.hasVideo === false}
-                      <i class="bx bx-video-off channel-voice-indicator channel-voice-indicator--video"></i>
-                    {/if}
-                    {#if member.hasAudio === false}
-                      <i class="bx bx-microphone-off channel-voice-indicator channel-voice-indicator--audio"></i>
-                    {/if}
-                  </div>
-                {/each}
+          {#if (voicePresence[c.id]?.length ?? 0) > 0}
+            <div class="channel-voice-presence">
+              {#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
+                {@const avatarUrl = resolveVoiceAvatar(member)}
+                <div class="channel-voice-avatar">
+                  {#if avatarUrl && !brokenVoiceAvatars.has(member.uid)}
+                    <img
+                      src={avatarUrl}
+                      alt={member.displayName}
+                      class="h-full w-full object-cover"
+                      loading="lazy"
+                      onerror={() => {
+                        const next = new Set(brokenVoiceAvatars);
+                        next.add(member.uid);
+                        brokenVoiceAvatars = next;
+                      }}
+                    />
+                  {:else}
+                    <div class="grid h-full w-full place-items-center text-[10px] font-semibold text-primary">
+                      {voiceInitial(member.displayName)}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
                 {#if (voicePresence[c.id]?.length ?? 0) > 6}
                   <div class="channel-voice-more">
                     +{voicePresence[c.id].length - 6}
@@ -1469,7 +1503,15 @@ run(() => {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 0.1rem;
+    gap: 0.05rem;
+    padding: 0.08rem 0.3rem;
+    border-radius: var(--radius-md);
+    background: transparent;
+  }
+
+  .channel-row:hover,
+  .channel-row--active {
+    background: transparent;
   }
 
   .channel-row--dragging {
@@ -1507,37 +1549,42 @@ run(() => {
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0.5rem;
+    gap: 0.45rem;
+    padding: 0.3rem 0.55rem;
     text-align: left;
     user-select: none;
     background: transparent;
     border: 1px solid transparent;
+    border-radius: 0.55rem;
     box-shadow: none;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
   }
 
   .channel-row__button:hover,
-  .channel-row__button:focus,
+  .channel-row__button:focus-visible,
   .channel-row__button:active {
-    background: transparent;
-    border-color: transparent;
+    background: color-mix(in srgb, var(--color-sidebar) 68%, transparent);
+    border-color: color-mix(in srgb, var(--color-sidebar) 72%, transparent);
     box-shadow: none;
+    outline: none;
   }
 
   .channel-row--active .channel-row__button {
-    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-    border-radius: 0.65rem;
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    border-radius: 0.55rem;
+    box-shadow: none;
     color: inherit;
+    font-weight: 600;
   }
 
   .channel-row--active .channel-row__button:hover,
-  .channel-row--active .channel-row__button:focus,
+  .channel-row--active .channel-row__button:focus-visible,
   .channel-row--active .channel-row__button:active {
-    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+    box-shadow: none;
     color: inherit;
-    border-color: transparent;
   }
 
   .channel-name {
@@ -1558,48 +1605,31 @@ run(() => {
   .channel-voice-presence {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem;
+    gap: clamp(0.35rem, 1vw, 0.6rem);
     margin-top: 0.15rem;
     width: 100%;
-    padding-left: 2.1rem;
+    padding-left: clamp(2rem, 2vw + 1.3rem, 3rem);
   }
 
   .channel-voice-avatar {
     position: relative;
-    width: 1.7rem;
-    height: 1.7rem;
+    width: clamp(1.8rem, 2vw + 1.1rem, 2.2rem);
+    height: clamp(1.8rem, 2vw + 1.1rem, 2.2rem);
     border-radius: 999px;
     overflow: hidden;
     background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   }
 
-  .channel-voice-indicator {
-    position: absolute;
-    right: -4px;
-    bottom: -4px;
-    font-size: 0.8rem;
-    background: var(--color-panel);
-    border-radius: 999px;
-    padding: 1px;
-  }
-
-  .channel-voice-indicator--video {
-    color: #f97316;
-  }
-
-  .channel-voice-indicator--audio {
-    color: #ef4444;
-  }
 
   .channel-voice-more {
-    width: 1.85rem;
-    height: 1.85rem;
+    width: clamp(1.8rem, 2vw + 1.1rem, 2.2rem);
+    height: clamp(1.8rem, 2vw + 1.1rem, 2.2rem);
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-accent) 16%, transparent);
     color: var(--color-accent);
     display: grid;
     place-items: center;
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     font-weight: 700;
   }
 

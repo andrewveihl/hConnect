@@ -1,13 +1,12 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { presenceLabels, type PresenceState } from '$lib/presence/state';
 
   type RoleDoc = {
     id: string;
     name: string;
     color?: string | null;
   };
-
-  type PresenceState = 'online' | 'busy' | 'idle' | 'offline';
 
   type MemberRow = {
     uid: string;
@@ -24,13 +23,6 @@
     email?: string | null;
     bio?: string | null;
     about?: string | null;
-  };
-
-  const presenceLabels: Record<PresenceState, string> = {
-    online: 'Online',
-    busy: 'Busy',
-    idle: 'Idle',
-    offline: 'Offline'
   };
 
   interface Props {
