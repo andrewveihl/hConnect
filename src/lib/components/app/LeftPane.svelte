@@ -1,32 +1,33 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
-
   import { onDestroy, onMount, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import { goto } from '$app/navigation';
   import { browser } from '$app/environment';
   import { page } from '$app/stores';
-  import { user } from '$lib/stores/user';
+  import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } from 'firebase/firestore';
+
   import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
+  import logoMarkUrl from '$lib/assets/Logo_transparent.png';
+  import { db } from '$lib/firestore/client';
+  import { streamMyDMs } from '$lib/firestore/dms';
   import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
-  import { db } from '$lib/firestore';
+  import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
+  import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
+  import { superAdminEmailsStore } from '$lib/admin/superAdmin';
+  import { featureFlags } from '$lib/stores/featureFlags';
+  import { dmUnreadCount, notifications } from '$lib/stores/notifications';
+  import type { NotificationItem } from '$lib/stores/notifications';
+  import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
+  import { defaultSettingsSection } from '$lib/settings/sections';
   import {
     presenceFromSources,
     presenceLabels,
     resolveManualPresenceFromSources,
     type PresenceState
   } from '$lib/presence/state';
-import { doc, onSnapshot, setDoc, deleteField, Timestamp, type Unsubscribe } from 'firebase/firestore';
-  import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
-  import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
-  import logoMarkUrl from '$lib/assets/Logo_transparent.png';
-import { dmUnreadCount, notifications } from '$lib/stores/notifications';
-import type { NotificationItem } from '$lib/stores/notifications';
-import { streamMyDMs } from '$lib/firestore/dms';
-  import { superAdminEmailsStore } from '$lib/admin/superAdmin';
-  import { featureFlags } from '$lib/stores/featureFlags';
-import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
-  import { defaultSettingsSection } from '$lib/settings/sections';
+  import { user } from '$lib/stores/user';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   interface Props {
     activeServerId?: string | null;
@@ -668,16 +669,17 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
               title={dm.title}
               aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
             >
-              {#if dm.photoURL}
-                <img
-                  src={dm.photoURL}
-                  alt={dm.title}
-                  class="rail-button__image"
-                  draggable="false"
-                />
-              {:else}
-                <i class="bx bx-user text-xl leading-none"></i>
-              {/if}
+              <img
+                src={resolveProfilePhotoURL(dm)}
+                alt={dm.title}
+                class="rail-button__image"
+                draggable="false"
+                onerror={(event) => {
+                  const img = event.currentTarget as HTMLImageElement;
+                  img.onerror = null;
+                  img.src = '/default-avatar.svg';
+                }}
+              />
               <span class="rail-badge">{formatBadge(dm.unread)}</span>
             </a>
           {/each}

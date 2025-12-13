@@ -1,7 +1,7 @@
 import { browser } from '$app/environment';
 import { user } from '$lib/stores/user';
 import { ensureFirebaseReady } from '$lib/firebase';
-import { db } from '$lib/firestore';
+import { db } from '$lib/firestore/client';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 

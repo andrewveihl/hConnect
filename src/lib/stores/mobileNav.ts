@@ -86,7 +86,8 @@ export function openOverlay(id: MobileOverlayId) {
   const entryId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : fallbackId(id);
   entryDirectory.set(entryId, id);
   const nextState = { ...(window.history.state ?? {}), [STATE_KEY]: entryId };
-  pushState(window.location.href, { state: nextState });
+  // Use native history.pushState to avoid router-init timing issues on first paint.
+  window.history.pushState(nextState, '', window.location.href);
   stackStore.update((stack) => [...stack, { id, entryId }]);
 }
 
@@ -117,3 +118,14 @@ export function clearAllOverlays({ notify = true }: { notify?: boolean } = {}) {
 export const mobileOverlayStack = {
   subscribe: stackStore.subscribe
 };
+
+// Track overlay state on document for CSS targeting
+if (browser) {
+  stackStore.subscribe((stack) => {
+    if (stack.length > 0) {
+      document.documentElement.classList.add('mobile-overlay-active');
+    } else {
+      document.documentElement.classList.remove('mobile-overlay-active');
+    }
+  });
+}

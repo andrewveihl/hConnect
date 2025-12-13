@@ -1706,6 +1706,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   let statusMessage = $state('');
   let errorMessage = $state('');
+  let copyErrorInFlight = $state(false);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let callStartedAt: number | null = null;
   let callDuration = $state('00:00');
@@ -4400,12 +4401,14 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 
   } catch (err) {
-    console.error('Failed to join voice call', err);
-    voiceDebug('Failed to join voice call', err);
+    const code = (err as any)?.code ?? 'unknown';
+    const path = serverId && channelId ? `servers/${serverId}/channels/${channelId}/calls/${CALL_DOC_ID}` : 'unknown';
+    console.error('Failed to join voice call', { err, code, path });
+    voiceDebug('Failed to join voice call', { err, code, path });
     errorMessage =
       err instanceof Error
-        ? err.message
-        : 'Unable to join the call. Please check your devices and try again.';
+        ? `${err.message} (code: ${code}, path: ${path})`
+        : `Unable to join the call. (code: ${code}, path: ${path})`;
     await hangUp({ cleanupDoc: false, resetError: false });
   } finally {
     isConnecting = false;
@@ -4926,6 +4929,18 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   function toggleSideMembersPanel() {
     dispatch('toggleSideMembers');
     showControlsBar();
+  }
+
+  async function copyErrorMessage() {
+    if (!errorMessage || copyErrorInFlight) return;
+    copyErrorInFlight = true;
+    try {
+      await navigator.clipboard?.writeText(errorMessage);
+    } catch (err) {
+      console.warn('Failed to copy error message', err);
+    } finally {
+      copyErrorInFlight = false;
+    }
   }
 
   function togglePopout() {
@@ -6556,7 +6571,16 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   {#if errorMessage}
     <div class="call-error">
-      {errorMessage}
+      <div class="call-error__text">{errorMessage}</div>
+      <button
+        type="button"
+        class="call-error__copy"
+        onclick={copyErrorMessage}
+        disabled={copyErrorInFlight}
+      >
+        <i class={`bx ${copyErrorInFlight ? 'bx-loader bx-spin' : 'bx-copy'}`}></i>
+        <span>{copyErrorInFlight ? 'Copying…' : 'Copy error'}</span>
+      </button>
     </div>
   {/if}
 
@@ -6620,7 +6644,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 }
 
 .voice-root--compact {
-  padding-bottom: calc(var(--voice-root-padding) + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--voice-root-padding) + var(--mobile-dock-height, 0px));
 }
 
   .voice-root--compact .call-shell {
@@ -8851,6 +8875,34 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     padding: 0.9rem 1.1rem;
     color: color-mix(in srgb, var(--color-danger) 85%, white);
     font-size: 0.9rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .call-error__text {
+    flex: 1 1 auto;
+    user-select: text;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .call-error__copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.45rem 0.65rem;
+    border-radius: var(--radius-md);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 45%, transparent);
+    color: var(--text-90);
+    font-size: 0.8rem;
+  }
+
+  .call-error__copy:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   .voice-root--compact .call-controls__group--main,
@@ -8939,11 +8991,5 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
   }
 </style>
-
-
-
-
-
-
 
 

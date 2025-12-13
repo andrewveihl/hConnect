@@ -1,5 +1,5 @@
 import { ensureFirebaseReady } from '$lib/firebase';
-import { db } from '$lib/firestore';
+import { db } from '$lib/firestore/client';
 import {
   addDoc,
   collection,

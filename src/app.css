@@ -3,6 +3,127 @@
 @tailwind utilities;
 
 /* -------------------------------------------------------------------------- */
+/* Safe Area & iOS-specific CSS variables                                     */
+/* -------------------------------------------------------------------------- */
+:root {
+  --safe-area-top: max(0px, env(safe-area-inset-top));
+  --safe-area-right: max(0px, env(safe-area-inset-right));
+  --safe-area-bottom: max(0px, env(safe-area-inset-bottom));
+  --safe-area-left: max(0px, env(safe-area-inset-left));
+  
+  /* Mobile dock height - Discord-style compact nav (includes safe area) */
+  --mobile-dock-height: calc(3rem + env(safe-area-inset-bottom, 0px));
+  
+  /* Mobile header height - extends into safe area on iPhone 15+ */
+  --mobile-header-height: 3rem;
+  --mobile-header-total: calc(var(--mobile-header-height) + var(--safe-area-top));
+
+  /* Device-aware viewport height */
+  --app-height: 100vh;
+  
+  /* Viewport height (excluding safe areas) */
+  --viewport-height: var(--app-height);
+  
+  /* Total usable height on mobile (viewport - dock) */
+  --usable-height: calc(var(--app-height) - var(--mobile-dock-height));
+  
+  /* Enable hardware acceleration for smooth scrolling */
+  --scroll-behavior: smooth;
+}
+
+/* iOS Safari: force use of the largest available height */
+@supports (-webkit-touch-callout: none) {
+  :root {
+    --app-height: 100lvh;
+  }
+  html,
+  body,
+  #app {
+    height: -webkit-fill-available;
+    min-height: -webkit-fill-available;
+  }
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --app-height: 100dvh;
+  }
+}
+
+@supports (height: 100lvh) {
+  :root {
+    --app-height: 100lvh;
+  }
+}
+
+
+
+/* iOS-specific fixes */
+@supports (padding: max(0px)) {
+  body {
+    padding-left: max(0px, env(safe-area-inset-left));
+    padding-right: max(0px, env(safe-area-inset-right));
+    
+    /* Prevent zoom on iOS input focus */
+    font-size: 16px;
+  }
+}
+
+/* Prevent bounce scrolling and ensure full viewport coverage on iOS */
+html {
+  width: 100%;
+  min-height: var(--app-height);
+  min-height: 100vh;
+  min-height: 100lvh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  height: var(--app-height);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #1e1f22; /* Match mobile nav bar for seamless safe area */
+  overscroll-behavior: none;
+}
+
+body {
+  width: 100%;
+  min-height: var(--app-height);
+  min-height: 100vh;
+  min-height: 100lvh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  height: var(--app-height);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #1e1f22; /* Match mobile nav bar for seamless safe area */
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: none;
+  display: flex;
+  flex-direction: column;
+  overscroll-behavior: none;
+}
+
+/* App container - must fill entire viewport including safe areas */
+#app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  min-height: var(--app-height);
+  height: var(--app-height);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #1e1f22; /* Match mobile nav bar */
+  padding: 0;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Theme tokens (dark defaults)                                               */
 /* -------------------------------------------------------------------------- */
 :root {
@@ -860,7 +981,7 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--surface-root);
+  background: #1e1f22; /* Match mobile nav bar */
   color: var(--color-text-primary);
 }
 
@@ -874,18 +995,12 @@ body {
 /* Wraps the entire UI so the background and safe-area padding stay consistent on iOS. */
 .app-root {
   min-height: 100vh;
-  background: var(--surface-root);
+  min-height: 100dvh;
+  background: #1e1f22; /* Match mobile nav bar */
   color: var(--color-text-primary);
   display: flex;
   flex-direction: column;
-  padding-top: constant(safe-area-inset-top);
-  padding-top: env(safe-area-inset-top);
-  padding-right: constant(safe-area-inset-right);
-  padding-right: env(safe-area-inset-right);
-  padding-bottom: constant(safe-area-inset-bottom);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: constant(safe-area-inset-left);
-  padding-left: env(safe-area-inset-left);
+  padding: 0;
 }
 
 /* Full-screen splash overlay shown while the client finishes bootstrapping. */
@@ -896,11 +1011,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-top: constant(safe-area-inset-top);
-  padding-top: env(safe-area-inset-top);
+  padding-top: 0;
   padding-right: constant(safe-area-inset-right);
   padding-right: env(safe-area-inset-right);
-  padding-bottom: constant(safe-area-inset-bottom);
   padding-bottom: env(safe-area-inset-bottom);
   padding-left: constant(safe-area-inset-left);
   padding-left: env(safe-area-inset-left);
@@ -1023,16 +1136,16 @@ body {
 /* Utility surfaces                                                           */
 /* -------------------------------------------------------------------------- */
 .app-bg {
-  background: var(--surface-root);
+  background: #1e1f22; /* Match mobile nav bar */
   color: var(--color-text-primary);
 }
 
 .app-shell {
-  min-height: 100dvh;
+  min-height: var(--app-height);
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--surface-root);
+  background: #1e1f22; /* Match mobile nav bar */
 }
 
 .app-shell__body {
@@ -1042,23 +1155,128 @@ body {
 
 .has-mobile-dock {
   --mobile-dock-height: 0px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .has-mobile-dock--suppressed {
   --mobile-dock-height: 0px;
 }
 
+.has-mobile-dock--suppressed .mobile-dock {
+  display: none !important;
+}
+
 @media (max-width: 767px) {
+  /* iPhone / Mobile breakpoint - Maximize screen real estate */
+  html, body {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    background: var(--surface-root, #1e1f22); /* Match app background */
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    /* Fill entire screen including safe areas - critical for iOS, with slight extra to allow scroll to collapse URL bar */
+    min-height: calc(var(--app-height, 100vh) + 2px);
+    min-height: calc(100lvh + 2px);
+    min-height: calc(100dvh + 2px);
+    min-height: -webkit-fill-available;
+    position: static;
+  }
+
+  /* Remove any blocking overlay - headers will extend into safe area themselves */
+
+  .app-root {
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-right: 0;
+    padding-left: 0;
+    background: var(--surface-root, #1e1f22);
+    overflow: hidden;
+    overscroll-behavior: none;
+    width: 100vw;
+    height: 100%;
+    min-height: var(--app-height, 100vh);
+    min-height: 100lvh;
+    min-height: 100dvh;
+    min-height: -webkit-fill-available;
+  }
+
+  .splash-screen {
+    padding-top: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .has-mobile-dock {
+    /* Discord-style compact bottom nav height - just the visible dock, not including safe area */
+    --mobile-dock-height: 3rem;
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: calc(var(--app-height, 100vh) + 2px);
+    min-height: calc(100lvh + 2px);
+    min-height: calc(100dvh + 2px);
+    min-height: -webkit-fill-available;
+    width: 100%;
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-right: 0;
+    padding-left: 0;
+    background: var(--surface-root, #1e1f22); /* Match app background for safe area */
+    overflow: hidden;
+    overscroll-behavior: none;
+    position: relative;
+  }
+
+  /* Allow slight scroll so Safari can collapse its URL bar */
+  #app {
+    position: relative;
+    height: auto;
+    min-height: calc(var(--app-height, 100vh) + 2px);
+    min-height: calc(100lvh + 2px);
+    min-height: calc(100dvh + 2px);
+    min-height: -webkit-fill-available;
+  }
+
   .has-mobile-dock:not(.has-mobile-dock--suppressed) {
-    --mobile-dock-height: 4.75rem;
+    --mobile-dock-height: 3rem;
   }
 
   .has-mobile-dock:not(.has-mobile-dock--suppressed) .app-shell__body {
-    padding-bottom: calc(var(--mobile-dock-height) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: 0;
+    overflow: hidden;
+    flex: 1;
+    min-height: 0;
   }
 
   .has-mobile-dock.has-mobile-dock--suppressed .app-shell__body {
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: 0;
+  }
+
+  .app-shell__stage {
+    border-radius: 0;
+    overflow: hidden;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    flex: 1;
+    padding-bottom: 0;
+  }
+
+  /* Ensure nav bar is visible and accessible */
+  .mobile-dock {
+    display: block !important;
+    visibility: visible !important;
+  }
+
+  .mobile-dock.md\:hidden {
+    display: block;
   }
 }
 
@@ -1328,7 +1546,7 @@ body {
   color: var(--color-text-primary);
   box-shadow: none;
   border-radius: 0;
-  padding-bottom: calc(var(--mobile-dock-height, 0px) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)));
+  padding-bottom: 0;
 }
 
 .mobile-panel--dragging {
@@ -1336,12 +1554,17 @@ body {
 }
 
 .chat-input-region {
-  position: sticky;
-  bottom: var(--chat-keyboard-offset, 0px);
-  left: 0;
-  right: 0;
+  position: relative;
+  bottom: auto;
+  left: auto;
+  right: auto;
   z-index: 30;
-  background: inherit;
+  width: 100%;
+  background: var(--surface-root);
+  max-height: 50vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: var(--mobile-dock-height, 0px);
 }
 
 .message-scroll-region {
@@ -1350,41 +1573,80 @@ body {
 
 .message-scroll-region .chat-scroll {
   --chat-scroll-padding: calc(
-    max(
-      var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
-      0px
-    ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) + 0.3rem
+    var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
+    var(--chat-keyboard-offset, 0px) +
+    1.25rem
   );
+}
+
+@media (min-width: 768px) {
+  .chat-input-region {
+    position: sticky;
+    bottom: 0;
+    margin-left: auto;
+    margin-right: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.6rem 0.75rem;
+    box-sizing: border-box;
+  }
+
+  .chat-input-region > * {
+    width: 100%;
+  }
 }
 
 @media (max-width: 767px) {
   .chat-input-region {
-    bottom: calc(
-      var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) + var(--chat-keyboard-offset, 0px) +
-      max(var(--mobile-dock-height, 0px) - 0.35rem, 0px)
-    );
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Position at bottom - nav bar is hidden by default now */
+    bottom: 0;
+    /* Minimal padding - just safe area for home indicator */
+    padding: 0.375rem 0.5rem env(safe-area-inset-bottom, 0px) 0.5rem !important;
     box-shadow: 0 -12px 28px rgba(5, 9, 16, 0.45);
+    transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
   }
 
-    .message-scroll-region .chat-scroll {
-      --chat-scroll-padding: calc(
-        max(
-          var(--chat-input-height, 0px) - var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)),
-          0px
-        ) + var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
-        max(calc(var(--mobile-dock-height, 0px) - 1.2rem), 0px) +
-        var(--chat-keyboard-offset, 0px) + 0.15rem
-      );
-    }
+  /* Hide chat input when mobile overlay (channel list, etc.) is open */
+  html.mobile-overlay-active .chat-input-region {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(100%) !important;
+    visibility: hidden !important;
   }
+
+  .message-scroll-region .chat-scroll {
+    /* Ensure messages don't hide behind chat input + safe area */
+    --chat-scroll-padding: calc(
+      var(--chat-input-height, 4rem) + 
+      env(safe-area-inset-bottom, 0px) +
+      var(--chat-keyboard-offset, 0px) + 0.5rem
+    );
+  }
+}
 
 .mobile-panel__header {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  height: 3.25rem;
+  min-height: 3.25rem;
   padding: 0 1rem;
   border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-panel);
+}
+
+/* Mobile panel header extends into safe area on iPhone 15+ */
+@media (max-width: 767px) {
+  .mobile-panel__header {
+    min-height: calc(3.25rem + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  }
 }
 
 .mobile-panel__title {
@@ -2429,4 +2691,529 @@ body {
 
 
 
+/* -------------------------------------------------------------------------- */
+/* Discord-inspired refresh                                                   */
+/* -------------------------------------------------------------------------- */
+:global(body) {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--surface-root, #404549);
+  background-image:
+    radial-gradient(circle at 20% 20%, rgba(88, 101, 242, 0.25), transparent 45%),
+    radial-gradient(circle at 80% 0%, rgba(51, 200, 191, 0.18), transparent 45%);
+  font-family: 'Inter', 'Segoe UI', 'SF Pro Display', system-ui, sans-serif;
+  color: var(--text-100);
+}
 
+:global(#app) {
+  min-height: 100vh;
+}
+
+.app-shell__stage {
+  border-radius: 1.4rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+  backdrop-filter: blur(28px);
+  box-shadow: 0 35px 80px rgba(0, 0, 0, 0.75);
+  background: color-mix(in srgb, var(--surface-root) 92%, rgba(3, 4, 6, 0.8));
+}
+
+/* Mobile: remove layered backgrounds to prevent two-tone gray */
+@media (max-width: 767px) {
+  .app-shell__stage {
+    border-radius: 0;
+    border: none;
+    backdrop-filter: none;
+    box-shadow: none;
+    background: transparent;
+  }
+}
+
+/* Activity surface - mobile uses transparent background, desktop gets styled */
+.activity-surface {
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.activity-header {
+  background: transparent;
+  box-shadow: none;
+}
+
+.activity-main {
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+/* Desktop styling for activity surface */
+@media (min-width: 768px) {
+  .activity-surface {
+    border-radius: 1.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-root) 96%, rgba(5, 6, 11, 0.9));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 30%, transparent),
+      0 25px 60px rgba(0, 0, 0, 0.6);
+  }
+
+  .activity-header {
+    background: color-mix(in srgb, var(--color-panel) 82%, rgba(9, 11, 15, 0.92));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+  }
+
+  .activity-main {
+    border-radius: 1.2rem;
+    background: color-mix(in srgb, var(--color-panel) 80%, rgba(4, 5, 8, 0.88));
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  }
+}
+
+/* Activity item base styling - clean and minimal on mobile */
+.activity-item {
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  background: color-mix(in srgb, var(--color-panel) 60%, transparent);
+  box-shadow: none;
+  transition: transform 140ms ease, border-color 140ms ease;
+}
+
+.activity-item:hover,
+.activity-item:focus-visible {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+}
+
+/* Desktop styling for activity items */
+@media (min-width: 768px) {
+  .activity-item {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 78%, rgba(5, 6, 10, 0.95));
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.55);
+  }
+
+  .activity-item:hover,
+  .activity-item:focus-visible {
+    background: color-mix(in srgb, var(--color-panel) 85%, rgba(16, 18, 22, 0.95));
+  }
+}
+
+.activity-item__icon {
+  border-radius: 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  box-shadow: none;
+  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+}
+
+@media (min-width: 768px) {
+  .activity-item__icon {
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 90%, rgba(255, 255, 255, 0.05));
+  }
+}
+
+.activity-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  color: var(--text-60);
+}
+
+.activity-item__meta span {
+  font-size: 0.8rem;
+  border-radius: 999px;
+  padding: 0.2rem 0.75rem;
+  background: color-mix(in srgb, var(--color-panel) 35%, transparent);
+  border: none;
+}
+
+@media (min-width: 768px) {
+  .activity-item__meta span {
+    background: color-mix(in srgb, var(--color-panel) 50%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  }
+}
+
+.activity-empty,
+.activity-placeholder {
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--color-panel-muted) 50%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 35%, transparent);
+  box-shadow: none;
+}
+
+@media (min-width: 768px) {
+  .activity-empty,
+  .activity-placeholder {
+    background: color-mix(in srgb, var(--color-panel-muted) 75%, rgba(5, 6, 10, 0.85));
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 35%, transparent);
+  }
+}
+
+.activity-empty__actions .btn {
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+}
+
+.activity-feed {
+  gap: 1.1rem;
+}
+
+.bulk-clear .clear-feed-btn {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+}
+
+.mobile-panel {
+  background: color-mix(in srgb, var(--color-panel) 90%, rgba(4, 5, 8, 0.92));
+  border-radius: 1.3rem 1.3rem 0 0;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  box-shadow: 0 -30px 65px rgba(0, 0, 0, 0.75);
+}
+
+.mobile-panel__body {
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--color-panel) 85%, rgba(7, 8, 12, 0.95));
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+}
+
+.mobile-dock {
+  background: #1e1f22; /* Server rail background - solid color */
+  border-top: none;
+  border-radius: 0;
+  overflow: visible;
+  -webkit-user-select: none;
+  user-select: none;
+  padding-bottom: 0;
+}
+
+.mobile-dock__item {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0.15rem 0;
+  box-shadow: none;
+  color: #80848e;
+}
+
+.mobile-dock__item:hover {
+  border-color: transparent;
+  color: #80848e; /* No hover change */
+}
+
+.mobile-dock__item.is-active {
+  background: transparent;
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.mobile-dock__item.is-active .mobile-dock__icon {
+  color: #ffffff;
+}
+
+.mobile-dock__badge {
+  border: 2px solid #1e1f22;
+  box-shadow: none;
+}
+
+.mobile-dock__avatar,
+.mobile-dock__server-icon {
+  border: none;
+  box-shadow: none;
+}
+
+.channel-header {
+  border-radius: 0.95rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  background: color-mix(in srgb, var(--color-panel) 70%, rgba(7, 9, 13, 0.9));
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+}
+
+.channel-header__badge {
+  border-radius: 0.5rem;
+  padding: 0.45rem;
+  background: color-mix(in srgb, var(--color-accent) 40%, rgba(88, 101, 242, 0.08));
+  color: var(--color-accent);
+}
+
+.chat-input-region {
+  border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  background: var(--surface-root);
+  box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.3);
+  border-radius: 0;
+}
+
+@media (max-width: 640px) {
+  .app-shell__stage {
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    border: none;
+  }
+
+  .mobile-dock {
+    border-radius: 0;
+  }
+}
+
+/* ================================================================ */
+/* Dog Animation Styles */
+/* ================================================================ */
+:root {
+  --dog-head-color: #d4915d;
+  --dog-eye-color: #2c2c2c;
+  --dog-nose-color: #1a1a1a;
+  --dog-ear-color: #b8774a;
+  --dog-tongue-color: #ff6b9d;
+}
+
+@keyframes dogWalk {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(20px);
+  }
+  50% {
+    transform: translateX(40px);
+  }
+  75% {
+    transform: translateX(20px);
+  }
+}
+
+@keyframes dogBounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes dogTailWag {
+  0%, 100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(15deg);
+  }
+  75% {
+    transform: rotate(-15deg);
+  }
+}
+
+@keyframes dogEarFlop {
+  0%, 100% {
+    transform: rotate(-10deg);
+  }
+  50% {
+    transform: rotate(10deg);
+  }
+}
+
+@keyframes dogHeadNod {
+  0%, 100% {
+    transform: rotateX(0deg);
+  }
+  50% {
+    transform: rotateX(10deg);
+  }
+}
+
+@keyframes tongueWiggle {
+  0%, 100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.8);
+  }
+}
+
+@keyframes eyeBlink {
+  0%, 100% {
+    height: 100%;
+  }
+  50% {
+    height: 10%;
+  }
+}
+
+.dog-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  perspective: 1000px;
+}
+
+.dog {
+  position: relative;
+  width: 200px;
+  height: 150px;
+  animation: dogBounce 2s ease-in-out infinite;
+}
+
+.dog-body {
+  position: absolute;
+  width: 120px;
+  height: 80px;
+  background: var(--dog-head-color);
+  border-radius: 60px 60px 40px 40px;
+  left: 40px;
+  top: 40px;
+  box-shadow: inset -5px -5px 10px rgba(0, 0, 0, 0.2);
+}
+
+.dog-head {
+  position: absolute;
+  width: 90px;
+  height: 90px;
+  background: var(--dog-head-color);
+  border-radius: 50%;
+  left: 55px;
+  top: 10px;
+  animation: dogHeadNod 3s ease-in-out infinite;
+  box-shadow: inset -3px -3px 8px rgba(0, 0, 0, 0.1);
+}
+
+.dog-ear {
+  position: absolute;
+  width: 35px;
+  height: 50px;
+  background: var(--dog-ear-color);
+  border-radius: 50% 50% 50% 30%;
+  top: -5px;
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.15);
+}
+
+.dog-ear:nth-child(1) {
+  left: 15px;
+  animation: dogEarFlop 2.5s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+
+.dog-ear:nth-child(2) {
+  right: 15px;
+  animation: dogEarFlop 2.5s ease-in-out infinite 0.3s;
+  transform-origin: bottom center;
+}
+
+.dog-eye {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--dog-eye-color);
+  border-radius: 50%;
+  top: 25px;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.dog-eye::after {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  background: white;
+  border-radius: 50%;
+  animation: eyeBlink 4s ease-in-out infinite;
+}
+
+.dog-eye:nth-child(3) {
+  left: 25px;
+}
+
+.dog-eye:nth-child(4) {
+  right: 25px;
+}
+
+.dog-nose {
+  position: absolute;
+  width: 14px;
+  height: 10px;
+  background: var(--dog-nose-color);
+  border-radius: 50%;
+  left: 50%;
+  top: 48px;
+  transform: translateX(-50%);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  z-index: 5;
+}
+
+.dog-tongue {
+  position: absolute;
+  width: 12px;
+  height: 14px;
+  background: var(--dog-tongue-color);
+  border-radius: 0 0 50% 50%;
+  left: 50%;
+  top: 58px;
+  transform: translateX(-50%);
+  animation: tongueWiggle 1.5s ease-in-out infinite;
+  z-index: 4;
+}
+
+.dog-tail {
+  position: absolute;
+  width: 50px;
+  height: 15px;
+  background: var(--dog-head-color);
+  border-radius: 0 20px 20px 0;
+  right: -40px;
+  bottom: 30px;
+  animation: dogTailWag 1s ease-in-out infinite;
+  transform-origin: left center;
+  box-shadow: inset 2px -2px 5px rgba(0, 0, 0, 0.15);
+}
+
+.dog-leg {
+  position: absolute;
+  width: 20px;
+  height: 50px;
+  background: var(--dog-head-color);
+  border-radius: 10px;
+  bottom: -10px;
+  box-shadow: inset -2px 0 4px rgba(0, 0, 0, 0.1);
+}
+
+.dog-leg:nth-child(5) {
+  left: 60px;
+}
+
+.dog-leg:nth-child(6) {
+  left: 100px;
+}
+
+.dog-leg:nth-child(7) {
+  right: 100px;
+}
+
+.dog-leg:nth-child(8) {
+  right: 60px;
+}
+
+.animation-text {
+  position: absolute;
+  bottom: -50px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  color: #888;
+  font-size: 12px;
+  animation: fadeInOut 3s ease-in-out infinite;
+}
+
+@keyframes fadeInOut {
+  0%, 100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}

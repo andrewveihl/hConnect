@@ -4,7 +4,7 @@
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
-  import { db } from '$lib/firestore';
+  import { db } from '$lib/firestore/client';
   import { user } from '$lib/stores/user';
   import {
     searchUsersByName, getOrCreateDMThread, streamMyDMs,
@@ -442,10 +442,17 @@ let {
 
     /* ---------------- Long-press delete (mobile) ---------------- */
   const DM_LONG_PRESS_MS = 600;
+  const SWIPE_DELETE_THRESHOLD = 80;
 
   let dmLongPressTimer: ReturnType<typeof setTimeout> | null = null;
   let dmLongPressThreadId: string | null = null;
   let dmLongPressFiredFor: string | null = null;
+  
+  // Swipe-to-delete state
+  let swipeThreadId: string | null = $state(null);
+  let swipeStartX = 0;
+  let swipeDelta = $state(0);
+  let swipeTracking = $state(false);
 
   function clearDmLongPressTimer() {
     if (dmLongPressTimer) {
@@ -480,9 +487,57 @@ let {
     clearDmLongPressTimer();
   }
 
+  // Swipe-to-delete handlers
+  function handleSwipeStart(event: TouchEvent, threadId: string) {
+    if (event.touches.length !== 1) return;
+    swipeThreadId = threadId;
+    swipeStartX = event.touches[0].clientX;
+    swipeDelta = 0;
+    swipeTracking = true;
+  }
+
+  function handleSwipeMove(event: TouchEvent) {
+    if (!swipeTracking || event.touches.length !== 1) return;
+    const delta = swipeStartX - event.touches[0].clientX;
+    // Only allow swiping left (positive delta)
+    swipeDelta = Math.max(0, Math.min(delta, SWIPE_DELETE_THRESHOLD + 40));
+  }
+
+  function handleSwipeEnd() {
+    if (!swipeTracking) return;
+    swipeTracking = false;
+    
+    if (swipeDelta >= SWIPE_DELETE_THRESHOLD && swipeThreadId) {
+      // Keep revealed until user taps delete or elsewhere
+      swipeDelta = SWIPE_DELETE_THRESHOLD;
+    } else {
+      // Snap back
+      swipeDelta = 0;
+      swipeThreadId = null;
+    }
+  }
+
+  function handleSwipeDeleteConfirm(threadId: string) {
+    swipeDelta = 0;
+    swipeThreadId = null;
+    deleteThread(threadId);
+  }
+
+  function resetSwipeState() {
+    swipeDelta = 0;
+    swipeThreadId = null;
+    swipeTracking = false;
+  }
+
   function handleThreadClick(event: MouseEvent | PointerEvent, threadId: string) {
     // prevent the click from bubbling to the row / delete button wrappers
     event.stopPropagation();
+
+    // If swiped open, close it instead of navigating
+    if (swipeThreadId && swipeDelta > 0) {
+      resetSwipeState();
+      return;
+    }
 
     // If a long-press just fired, don't also open the DM
     if (dmLongPressFiredFor === threadId) {
@@ -699,8 +754,8 @@ let {
 </script>
 
 <aside class="relative w-full md:w-80 shrink-0 sidebar-surface h-[100dvh] flex flex-col text-primary">
-  <!-- Header -->
-  <div class="px-4 py-3 flex items-center justify-between gap-2">
+  <!-- Header with safe area support for iPhone 15+ -->
+  <div class="dms-sidebar-header px-4 py-3 flex items-center justify-between gap-2">
     <div class="text-base font-semibold">Direct Messages</div>
     <div class="flex items-center gap-2">
       <button
@@ -764,15 +819,33 @@ let {
             {@const otherUid = resolveOtherUid(t)}
             {@const presenceState = presenceStateFor(otherUid, t)}
             {@const timestampLabel = formatThreadTimestamp(t.updatedAt)}
-            <li>
-              <div class={`dm-thread__row group ${isActive ? 'dm-thread__row--active' : ''}`}>
+            {@const isSwipingThis = swipeThreadId === t.id}
+            {@const swipeOffset = isSwipingThis ? swipeDelta : 0}
+            <li class="dm-thread__item">
+              <!-- Delete action revealed by swipe -->
+              <div class="dm-thread__delete-action" class:dm-thread__delete-action--visible={swipeOffset > 20}>
                 <button
-                  class="dm-thread__button flex items-center gap-3 text-left focus:outline-none min-w-0"
+                  class="dm-thread__delete-action-btn"
+                  aria-label="Delete conversation"
+                  onclick={() => handleSwipeDeleteConfirm(t.id)}
+                >
+                  <i class="bx bx-trash"></i>
+                  <span>Delete</span>
+                </button>
+              </div>
+              
+              <div 
+                class={`dm-thread__row group ${isActive ? 'dm-thread__row--active' : ''}`}
+                style:transform={swipeOffset > 0 ? `translateX(-${swipeOffset}px)` : undefined}
+                style:transition={swipeTracking ? 'none' : 'transform 200ms ease-out'}
+                ontouchstart={(e) => handleSwipeStart(e, t.id)}
+                ontouchmove={handleSwipeMove}
+                ontouchend={handleSwipeEnd}
+                ontouchcancel={handleSwipeEnd}
+              >
+                <button
+                  class="dm-thread__button"
                   onclick={(event) => handleThreadClick(event, t.id)}
-                  onpointerdown={(event) => handleThreadPointerDown(event, t.id)}
-                  onpointerup={handleThreadPointerUp}
-                  onpointerleave={handleThreadPointerCancel}
-                  onpointercancel={handleThreadPointerCancel}
                 >
                   <div class="dm-thread__avatar">
                     <div class="dm-thread__avatar-img">
@@ -790,23 +863,22 @@ let {
                       ></span>
                     {/if}
                   </div>
-                  <div class="flex-1 min-w-0">
+                  <div class="dm-thread__content">
                     <div class="dm-thread__header-line">
-                      <div class="text-sm font-medium leading-5 truncate">{otherOf(t)}</div>
+                      <span class="dm-thread__name">{otherOf(t)}</span>
                       {#if timestampLabel}
                         <span class="dm-thread__timestamp">{timestampLabel}</span>
                       {/if}
                     </div>
-                  <div class="text-xs text-white/50 truncate">{previewTextFor(t)}</div>
-                </div>
-                {#if (unreadMap[t.id] ?? 0) > 0}
-                  <span class="ml-2 min-w-6 h-6 px-2 text-xs grid place-items-center rounded-full bg-red-600">
-                    {unreadMap[t.id]}
-                  </span>
-                {/if}
-              </button>
-              <button
-                class="dm-thread__delete-btn"
+                    <div class="dm-thread__preview">{previewTextFor(t)}</div>
+                  </div>
+                  {#if (unreadMap[t.id] ?? 0) > 0}
+                    <span class="dm-thread__unread">{unreadMap[t.id]}</span>
+                  {/if}
+                </button>
+                <!-- Desktop-only delete button -->
+                <button
+                  class="dm-thread__delete-btn"
                   aria-label="Delete conversation"
                   onclick={stopPropagation(() => deleteThread(t.id))}
                 >
@@ -948,19 +1020,123 @@ let {
 
 
 <style>
+  /* DMs sidebar header with safe area support for iPhone 15+ */
+  .dms-sidebar-header {
+    background: var(--color-sidebar);
+  }
+
+  @media (max-width: 767px) {
+    .dms-sidebar-header {
+      padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
+      padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+      padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+    }
+  }
+
+  /* Thread item container for swipe-to-delete */
+  .dm-thread__item {
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.75rem;
+    margin-bottom: 0.25rem;
+  }
+
+  /* Delete action revealed by swipe (mobile) */
+  .dm-thread__delete-action {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #dc2626;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+
+  .dm-thread__delete-action--visible {
+    opacity: 1;
+  }
+
+  .dm-thread__delete-action-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.5rem;
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 500;
+    background: none;
+    border: none;
+  }
+
+  .dm-thread__delete-action-btn i {
+    font-size: 1.25rem;
+  }
+
+  /* Hide swipe delete action on desktop */
+  @media (min-width: 641px) {
+    .dm-thread__delete-action {
+      display: none;
+    }
+  }
+
   .dm-thread__header-line {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
+    align-items: baseline;
     gap: 0.5rem;
     min-width: 0;
-    align-items: baseline;
+  }
+
+  .dm-thread__name {
+    flex: 1;
+    font-size: 0.9rem;
+    font-weight: 500;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .dm-thread__timestamp {
+    flex-shrink: 0;
     font-size: 0.7rem;
-    color: var(--color-text-tertiary, rgba(255, 255, 255, 0.6));
+    color: var(--color-text-tertiary, rgba(255, 255, 255, 0.5));
     line-height: 1;
-    justify-self: end;
+  }
+
+  .dm-thread__preview {
+    font-size: 0.8rem;
+    color: var(--color-text-secondary, rgba(255, 255, 255, 0.6));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+
+  .dm-thread__content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .dm-thread__unread {
+    flex-shrink: 0;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.35rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: grid;
+    place-items: center;
+    border-radius: 9999px;
+    background: #dc2626;
+    color: white;
   }
 
   .dm-thread__row {
@@ -968,17 +1144,32 @@ let {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.15rem 0.35rem;
-    border-radius: var(--radius-md);
-    transition: background 160ms ease;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.75rem;
+    background: var(--color-panel);
+    will-change: transform;
   }
 
-  .dm-thread__row:hover {
-    background: color-mix(in srgb, white 8%, transparent);
+  .dm-thread__row:active {
+    background: color-mix(in srgb, var(--color-panel) 90%, rgba(255, 255, 255, 0.05));
+  }
+
+  @media (min-width: 641px) {
+    .dm-thread__row {
+      transition: background 150ms ease;
+    }
+    
+    .dm-thread__row:hover {
+      background: color-mix(in srgb, var(--color-panel) 90%, rgba(255, 255, 255, 0.06));
+    }
   }
 
   .dm-thread__row--active {
-    background: color-mix(in srgb, white 12%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 25%, var(--color-panel));
+  }
+
+  .dm-thread__row--active .dm-thread__name {
+    color: var(--color-accent-text, #fff);
   }
 
   .dm-thread__button {
@@ -986,15 +1177,17 @@ let {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    padding: 0.3rem 0.4rem;
-    padding-right: 2.5rem;
+    padding: 0;
     border: none;
     background: transparent;
     color: inherit;
+    text-align: left;
+    min-width: 0;
   }
 
   .dm-thread__button:focus-visible {
     outline: 2px solid color-mix(in srgb, white 35%, transparent);
+    outline-offset: 2px;
     border-radius: var(--radius-md);
   }
 
@@ -1003,16 +1196,13 @@ let {
     top: 50%;
     right: 0.5rem;
     transform: translateY(-50%);
-    padding: 0.35rem;
+    padding: 0.4rem;
     border-radius: var(--radius-md);
     border: none;
     background: transparent;
-    color: var(--color-text-secondary);
+    color: var(--color-text-tertiary);
     opacity: 0;
-    transition:
-      opacity 140ms ease,
-      background 140ms ease,
-      color 140ms ease;
+    transition: opacity 140ms ease, background 140ms ease, color 140ms ease;
   }
 
   .dm-thread__row:hover .dm-thread__delete-btn,
@@ -1022,33 +1212,22 @@ let {
 
   .dm-thread__delete-btn:hover,
   .dm-thread__delete-btn:focus-visible {
-    background: color-mix(in srgb, white 10%, transparent);
-    color: var(--color-text-primary);
+    background: rgba(220, 38, 38, 0.15);
+    color: #f87171;
   }
 
+  /* Hide desktop delete button on mobile */
   @media (max-width: 640px) {
-    .dm-thread__button {
-      padding-right: 1rem;
-    }
     .dm-thread__delete-btn {
       display: none !important;
-      opacity: 0 !important;
-      visibility: hidden !important;
-      pointer-events: none !important;
-    }
-
-    .dm-thread__delete-btn i {
-      font-size: 0.85rem;
     }
   }
 
   .dm-thread__avatar {
     position: relative;
-    width: 2.25rem;
-    height: 2.25rem;
+    width: 2.5rem;
+    height: 2.5rem;
     flex-shrink: 0;
-    display: grid;
-    place-items: center;
   }
 
   .dm-thread__avatar-img {
@@ -1058,27 +1237,24 @@ let {
     overflow: hidden;
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--color-sidebar, #0f172a) 70%, rgba(255, 255, 255, 0.08));
+    background: color-mix(in srgb, var(--color-panel) 70%, rgba(255, 255, 255, 0.08));
   }
 
   .dm-thread__avatar-img img {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    border-radius: inherit;
   }
 
   .dm-thread__avatar .presence-dot {
     pointer-events: none;
     z-index: 1;
     transform: translate(15%, 15%);
-    border-color: color-mix(in srgb, var(--color-sidebar, #0f172a) 70%, rgba(0, 0, 0, 0.6));
   }
 
   .people-picker {
-    background: color-mix(in srgb, var(--color-sidebar) 92%, var(--color-app-overlay) 45%);
-    backdrop-filter: blur(14px);
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 95%, rgba(0, 0, 0, 0.5));
+    backdrop-filter: blur(16px);
     color: var(--color-text-primary);
   }
 
@@ -1117,8 +1293,9 @@ let {
   }
 
   .people-picker__body {
-    background: color-mix(in srgb, var(--color-panel-muted) 90%, transparent);
-    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 95%, rgba(0, 0, 0, 0.3));
+    border-top: 1px solid var(--color-border-subtle);
+    padding: 1rem;
   }
 
   .people-picker__section-label {
@@ -1126,7 +1303,7 @@ let {
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--color-text-tertiary);
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.5rem;
   }
 
   .people-picker__option {
@@ -1134,21 +1311,22 @@ let {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-md);
+    padding: 0.625rem 0.75rem;
+    border-radius: 0.625rem;
     text-align: left;
-    transition: background 120ms ease, box-shadow 120ms ease;
-    background: transparent;
+    background: var(--color-panel);
+    border: none;
+    transition: background 150ms ease;
   }
 
   .people-picker__option:hover,
   .people-picker__option:focus-visible {
-    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 90%, rgba(255, 255, 255, 0.06));
   }
 
   .people-picker__option:focus-visible {
-    outline: none;
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
   }
 
   .people-picker__muted,
@@ -1158,7 +1336,7 @@ let {
   }
 
   .people-picker__empty {
-    padding: 0.25rem 0;
+    padding: 0.5rem 0;
   }
 
   .people-picker__sentinel {

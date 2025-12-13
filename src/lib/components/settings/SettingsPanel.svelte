@@ -5,7 +5,7 @@ import { onMount, onDestroy } from 'svelte';
 import { get } from 'svelte/store';
 import { user } from '$lib/stores/user';
 import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme';
-import { db } from '$lib/firestore';
+import { db } from '$lib/firestore/client';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { uploadProfileAvatar } from '$lib/firebase/storage';
 import {

@@ -217,10 +217,35 @@ async function afterLoginEnsureDoc() {
   await ensureFirebaseReady();
   const current = auth?.currentUser;
   if (!current) return;
+
+  // Check if user already has a custom or cached photo in Firestore
+  const ref = profileRef(current.uid);
+  const snap = await getDoc(ref);
+  const existing: Record<string, any> | null = snap.exists() ? (snap.data() as any) : null;
+  const hasCustom = !!existing?.customPhotoURL;
+  const hasCached = !!existing?.photoURL && existing.photoURL !== existing?.authPhotoURL;
+
+  let cachedPhotoURL = existing?.photoURL;
+  // If no custom/cached photo, cache Google photoURL in Storage
+  if (!hasCustom && !hasCached && current.photoURL) {
+    try {
+      // Fetch Google photo as blob
+      const response = await fetch(current.photoURL);
+      const blob = await response.blob();
+      const file = new File([blob], 'google-avatar.jpg', { type: blob.type || 'image/jpeg' });
+      // Upload to Storage
+      const { uploadProfileAvatar } = await import('./storage');
+      const uploaded = await uploadProfileAvatar({ file, uid: current.uid });
+      cachedPhotoURL = uploaded.url;
+    } catch (e) {
+      console.warn('Failed to cache Google photoURL:', e);
+    }
+  }
+
   await ensureUserDoc(current.uid, {
     email: current.email,
     name: current.displayName ?? (current.email ? current.email.split('@')[0] : current.uid),
-    photoURL: current.photoURL
+    photoURL: cachedPhotoURL || current.photoURL
   });
 }
 

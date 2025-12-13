@@ -2538,14 +2538,24 @@
   .chat-input__textarea-wrapper textarea {
     position: relative;
     z-index: 1;
-    padding-top: 0.45rem;
-    padding-bottom: 0.45rem;
-    min-height: 2.65rem;
+    width: 100%;
+    padding: 0.55rem 1rem;
+    min-height: 2.8rem;
     line-height: 1.4;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, rgba(56, 59, 64, 0.9), rgba(12, 16, 20, 0.8)),
+      color-mix(in srgb, var(--color-panel) 75%, rgba(5, 5, 7, 0.95))
+    );
+    color: var(--text-100);
+    box-shadow: inset 0 1px 8px rgba(0, 0, 0, 0.35), 0 12px 30px rgba(0, 0, 0, 0.45);
   }
 
   .chat-input__textarea-wrapper textarea::placeholder {
     line-height: 1.4;
+    color: var(--text-50);
   }
 
   .chat-input__prediction {
