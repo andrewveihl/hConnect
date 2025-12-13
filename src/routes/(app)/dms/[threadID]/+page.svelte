@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
+import { run } from 'svelte/legacy';
 
-  import { onMount } from 'svelte';
+import { onMount, onDestroy } from 'svelte';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
   import { getDb } from '$lib/firebase';
   import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+  import { mobileDockSuppressed } from '$lib/stores/ui';
 
 import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
-import { openOverlay, closeOverlay, registerOverlayHandler, type MobileOverlayId } from '$lib/stores/mobileNav';
+import { openOverlay, closeOverlay, registerOverlayHandler, clearAllOverlays, type MobileOverlayId } from '$lib/stores/mobileNav';
 
 import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
 import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -137,6 +138,9 @@ let composerEl: HTMLDivElement | null = $state(null);
 let composerHeight = $state(0);
 let composerObserver: ResizeObserver | null = null;
 let lastComposerEl: HTMLDivElement | null = null;
+let dockClaimed = false;
+
+const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
 
 function observeComposer(target: HTMLDivElement | null) {
   if (!browser || typeof ResizeObserver === 'undefined') {
@@ -157,11 +161,32 @@ function observeComposer(target: HTMLDivElement | null) {
 }
 
 onMount(() => {
+  clearAllOverlays();
   observeComposer(composerEl);
   return () => {
     composerObserver?.disconnect();
     composerObserver = null;
   };
+});
+
+$effect(() => {
+  if (!browser) return;
+  if (useMobileShell()) {
+    if (!dockClaimed) {
+      mobileDockSuppressed.claim();
+      dockClaimed = true;
+    }
+  } else if (dockClaimed) {
+    mobileDockSuppressed.release();
+    dockClaimed = false;
+  }
+});
+
+onDestroy(() => {
+  if (dockClaimed) {
+    mobileDockSuppressed.release();
+    dockClaimed = false;
+  }
 });
 
 $effect(() => {
@@ -171,8 +196,6 @@ $effect(() => {
 });
 
 const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
-
-const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
 
 // Keep overlays and browser history synchronized so native edge swipes pop the same stack as our buttons.
 let routeSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1284,7 +1307,7 @@ run(() => {
     (otherProfile || otherMessageUser ? otherUid ?? 'Member' : 'Direct Message'));
 </script>
 
-<div class="flex flex-1 overflow-hidden panel-muted gesture-pad-x" bind:this={swipeSurface}>
+<div class="flex flex-1 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
   <div class="hidden md:flex md:w-80 flex-col border-r border-subtle panel-muted">
     <DMsSidebar
       bind:this={sidebarRef}
@@ -1300,7 +1323,7 @@ run(() => {
   </div>
 
   <div class="flex flex-1 flex-col panel overflow-hidden">
-    <header class="h-14 px-3 sm:px-4 flex items-center justify-between border-b border-subtle panel-muted">
+    <header class="dm-header px-3 sm:px-4 flex items-center justify-between border-b border-subtle panel-muted">
       <div class="flex items-center gap-3 min-w-0">
         <button
           class="md:hidden p-2  hover:bg-white/10 active:bg-white/15 transition"
@@ -1366,9 +1389,8 @@ run(() => {
     </main>
 
     <div
-      class="chat-input-region border-t border-subtle panel p-3"
+      class="chat-input-region border-t border-subtle panel"
       bind:this={composerEl}
-      style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + 0.5rem)"
     >
       <ChatInput
         placeholder={`Message`}
@@ -1533,6 +1555,35 @@ run(() => {
 {/if}
 
 <style>
+  /* DM header - background extends into safe area, content stays below */
+  .dm-header {
+    height: 3.5rem;
+    background: var(--color-panel);
+  }
+
+  @media (max-width: 767px) {
+    .dm-header {
+      /* Fixed position to extend background into safe area */
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      /* Total height includes safe area */
+      height: calc(3.5rem + env(safe-area-inset-top, 0px));
+      /* Padding keeps content below the notch */
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-left: calc(0.75rem + env(safe-area-inset-left, 0px));
+      padding-right: calc(0.75rem + env(safe-area-inset-right, 0px));
+      background: var(--color-panel);
+    }
+
+    /* Spacer for fixed header */
+    .dm-header + main {
+      margin-top: calc(3.5rem + env(safe-area-inset-top, 0px));
+    }
+  }
+
   :global(.mobile-panel__body) {
     flex: 1;
     display: flex;
@@ -1547,8 +1598,24 @@ run(() => {
     display: flex;
     flex-direction: column;
   }
+
+  @media (max-width: 767px) {
+    .dm-page .chat-input-region {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 60;
+      padding: 0.375rem 0.5rem env(safe-area-inset-bottom, 0px) 0.5rem;
+    }
+
+    .dm-page .message-scroll-region {
+      padding-bottom: calc(
+        var(--chat-input-height, 4.5rem) +
+          env(safe-area-inset-bottom, 0px) +
+          var(--chat-keyboard-offset, 0px) +
+          0.5rem
+      );
+    }
+  }
 </style>
-
-
-
-

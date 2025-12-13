@@ -1247,7 +1247,7 @@ run(() => {
 </script>
 
 <aside
-  class="server-sidebar h-dvh w-80 shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
+  class="server-sidebar h-full w-full shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
   aria-label="Channels"
 >
   <div class="server-sidebar__header h-11 px-2.5 flex items-center justify-between border-b border-subtle">
@@ -1256,7 +1256,6 @@ run(() => {
       class="server-header__button"
       onclick={openServerSettingsOverlay}
       aria-label="Open server settings"
-      disabled={!isAdminLike}
     >
       <span class="server-avatar">
         {#if serverIcon}
@@ -1264,8 +1263,14 @@ run(() => {
         {:else}
           <span class="server-avatar__initial">{voiceInitial(serverName)}</span>
         {/if}
+        <!-- Teal lock icon - visible on mobile only when admin -->
+        {#if isAdminLike}
+          <span class="server-avatar__lock md:hidden">
+            <i class="bx bxs-lock-alt"></i>
+          </span>
+        {/if}
       </span>
-      <span class="server-header__label">
+      <span class="server-header__label hidden md:flex">
         <span class="server-label-row">
           <span class="server-name truncate" title={serverName}>{serverName}</span>
           {#if isOwner}
@@ -1282,13 +1287,23 @@ run(() => {
     <div class="px-3 pt-2 text-xs text-red-300">{orderError}</div>
   {/if}
 
-  <div class="p-3 space-y-3 overflow-y-auto overflow-x-hidden">
+  <div class="channel-scroll-area flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3 -webkit-overflow-scrolling-touch">
     {#if activeVoice}
       <div class="hidden md:block">
         <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
       </div>
     {/if}
-    <div class="channel-heading">Channels</div>
+    <!-- Channels heading - clickable on mobile for admins to access server settings -->
+    {#if isAdminLike}
+      <button
+        type="button"
+        class="channel-heading channel-heading--clickable md:cursor-default"
+        onclick={openServerSettingsOverlay}
+        aria-label="Open server settings"
+      >Channels</button>
+    {:else}
+      <div class="channel-heading">Channels</div>
+    {/if}
     <div class="channel-list space-y-0.5">
       {#each visibleChannels as c (c.id)}
         <div
@@ -1428,12 +1443,75 @@ run(() => {
 </aside>
 
 <style>
+  /* Mobile-first Discord-like styling */
+  aside.server-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    background: #2b2d31; /* Discord's channel sidebar background */
+    border: none;
+  }
+
+  .channel-scroll-area {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  @media (max-width: 767px) {
+    aside.server-sidebar {
+      width: 100% !important;
+      max-width: 100%;
+      border-right: none !important;
+    }
+  }
+
   .server-sidebar__header {
-    min-height: 2.75rem;
-    height: 2.75rem;
-    padding: 0.35rem 0.6rem;
+    position: relative;
+    min-height: 3rem;
+    height: 3rem;
+    padding: 0.35rem 0.75rem;
     display: flex;
     align-items: center;
+    background: #2b2d31;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    flex-shrink: 0;
+  }
+
+  /* On mobile, compact header with logo in safe area */
+  @media (max-width: 767px) {
+    .server-sidebar__header {
+      height: auto;
+      min-height: 2.5rem;
+      /* Position logo up in the safe area, near the time */
+      padding-top: calc(0.25rem + env(safe-area-inset-top, 0px) * 0.15);
+      padding-bottom: 0.35rem;
+      padding-left: 2.5rem; /* Moved further right */
+      border-bottom: none;
+      background: transparent;
+      overflow: visible;
+    }
+
+    /* Dark bar behind icon - same color as server rail */
+    .server-sidebar__header::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: #1e1f22;
+      z-index: 0;
+    }
+
+    .server-sidebar__header > * {
+      position: relative;
+      z-index: 1;
+    }
   }
 
   .server-header__button {
@@ -1449,6 +1527,16 @@ run(() => {
     user-select: none;
   }
 
+  @media (max-width: 767px) {
+    .server-header__button {
+      width: auto;
+      /* Reasonable tap area for the server header only */
+      padding: 0.5rem 1rem 0.5rem 0.45rem;
+      margin: 0;
+      border-radius: 0.5rem;
+    }
+  }
+
   .server-header__button:disabled {
     opacity: 1;
     cursor: default;
@@ -1458,11 +1546,24 @@ run(() => {
     width: 2rem;
     height: 2rem;
     border-radius: 999px;
-    overflow: hidden;
+    overflow: visible; /* Allow lock icon to overflow */
     background: color-mix(in srgb, var(--color-accent) 20%, transparent);
     display: grid;
     place-items: center;
     flex-shrink: 0;
+    position: relative;
+  }
+
+  .server-avatar img {
+    border-radius: 999px;
+  }
+
+  /* Smaller avatar on mobile - compact fit */
+  @media (max-width: 767px) {
+    .server-avatar {
+      width: 1.5rem;
+      height: 1.5rem;
+    }
   }
 
   .server-avatar__initial {
@@ -1470,11 +1571,41 @@ run(() => {
     font-size: 1rem;
   }
 
+  @media (max-width: 767px) {
+    .server-avatar__initial {
+      font-size: 0.75rem;
+    }
+  }
+
+  /* Teal lock icon positioned at bottom-right of avatar */
+  .server-avatar__lock {
+    position: absolute;
+    bottom: -1px;
+    right: -1px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-accent, #33c8bf); /* App teal color */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 6px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+
   .server-header__label {
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
     min-width: 0;
+  }
+
+  /* Hide server name/badge on mobile */
+  @media (max-width: 767px) {
+    .server-header__label {
+      display: none !important;
+    }
   }
 
   .server-label-row {
@@ -1493,6 +1624,19 @@ run(() => {
     font-weight: 800;
     font-size: 0.9rem;
     padding-left: 0.15rem;
+  }
+
+  /* Clickable channel heading for mobile admin access */
+  .channel-heading--clickable {
+    background: none;
+    border: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    display: inline-block;
+    width: auto;
+    padding: 0.5rem 1rem 0.5rem 0.15rem;
+    margin: -0.5rem 0 -0.5rem 0;
   }
 
   .channel-list {

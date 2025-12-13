@@ -33,7 +33,7 @@
 
 <svelte:head><title>Sign in</title></svelte:head>
 
-<div class="auth-surface flex min-h-dvh items-center justify-center px-4">
+<div class="auth-surface flex flex-1 items-center justify-center px-4">
   <div class="auth-panel flex w-full max-w-md flex-col items-center space-y-8 rounded-3xl px-6 py-10 text-center shadow-2xl backdrop-blur">
     <div class="flex flex-col items-center">
       <img class="logo-mark" alt="Healthspaces logo" src={logoMarkUrl} />
@@ -69,8 +69,10 @@
 
 <style>
   .auth-surface {
-    background: radial-gradient(circle at top, rgba(51, 200, 191, 0.25), transparent 55%),
-      var(--surface-root);
+    background: transparent;
+    flex: 1 1 0%;
+    height: 100%;
+    min-height: 0;
   }
 
   .auth-panel {

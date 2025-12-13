@@ -385,7 +385,7 @@
   }
 </script>
 
-<div class="flex h-dvh app-bg text-primary overflow-hidden mobile-full-bleed">
+<div class="flex h-dvh text-primary overflow-hidden mobile-full-bleed">
   <div class="hidden md:flex md:shrink-0">
     <LeftPane activeServerId={null} />
   </div>
@@ -543,7 +543,7 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    background: var(--surface-root);
+    background: transparent;
     color: var(--text-100);
     overflow: hidden;
   }
@@ -555,7 +555,16 @@
     flex-wrap: wrap;
     gap: clamp(1rem, 3vw, 2.5rem);
     align-items: flex-start;
-    background: color-mix(in srgb, var(--surface-root) 85%, transparent);
+    background: var(--color-panel);
+  }
+
+  /* Mobile: Activity header extends into safe area on iPhone 15+ */
+  @media (max-width: 767px) {
+    .activity-header {
+      padding-top: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-top, 0px));
+      padding-left: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-left, 0px));
+      padding-right: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-right, 0px));
+    }
   }
 
   .activity-header__text h1 {
@@ -589,8 +598,8 @@
   .activity-header__stats span {
     padding: 0.25rem 0.9rem;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
+    border: none;
   }
 
   .activity-header__actions {
@@ -647,9 +656,11 @@
     flex: 1;
     overflow-y: auto;
     padding: clamp(1.2rem, 4vw, 2.4rem);
+    padding-bottom: calc(clamp(1.2rem, 4vw, 2.4rem) + var(--mobile-dock-height, 0px));
     display: flex;
     flex-direction: column;
     gap: clamp(1rem, 3vw, 1.6rem);
+    background: transparent;
   }
 
   .activity-placeholder,
@@ -691,8 +702,8 @@
   .activity-item {
     width: 100%;
     border-radius: 1rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--surface-root) 92%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
     padding: 0.95rem 1.1rem;
     display: grid;
     grid-template-columns: auto 1fr;
@@ -706,7 +717,7 @@
   .activity-item:hover {
     transform: translateY(-1px);
     border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    background: color-mix(in srgb, var(--surface-panel) 84%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
   }
 
   .activity-item:focus-visible {
@@ -718,7 +729,7 @@
     width: 2.8rem;
     height: 2.8rem;
     border-radius: 0.9rem;
-    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 60%, transparent);
     display: grid;
     place-items: center;
     font-weight: 600;
@@ -728,17 +739,17 @@
   }
 
   .activity-item--dm .activity-item__icon {
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 15%, transparent);
     color: var(--color-accent);
   }
 
   .activity-item--thread .activity-item__icon {
-    background: color-mix(in srgb, var(--color-highlight, #7cf) 25%, transparent);
+    background: color-mix(in srgb, var(--color-highlight, #7cf) 20%, transparent);
     color: color-mix(in srgb, var(--color-highlight, #7cf) 60%, var(--text-100));
   }
 
   .activity-item--channel .activity-item__icon {
-    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
     color: var(--text-80);
   }
 
@@ -769,7 +780,7 @@
     letter-spacing: 0.16em;
     padding: 0.2rem 0.6rem;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
     color: var(--text-70);
   }
 

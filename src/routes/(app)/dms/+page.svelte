@@ -238,6 +238,43 @@
 {/if}
 
 <style>
+  .channel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    height: 3rem;
+    padding: 0 1.25rem;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-panel);
+  }
+
+  /* Mobile: Extend header into safe area (iPhone 15 Dynamic Island) */
+  @media (max-width: 767px) {
+    .channel-header {
+      height: calc(3rem + env(safe-area-inset-top, 0px));
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-left: calc(0.75rem + env(safe-area-inset-left, 0px));
+      padding-right: calc(0.75rem + env(safe-area-inset-right, 0px));
+    }
+  }
+
+  .channel-header__left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .channel-header__title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .channel-header__badge {
+    color: var(--text-60);
+  }
+
   :global(.mobile-full-bleed) {
     width: 100%;
   }

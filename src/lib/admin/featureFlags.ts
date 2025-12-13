@@ -1,5 +1,5 @@
 import { ensureFirebaseReady } from '$lib/firebase';
-import { db } from '$lib/firestore';
+import { db } from '$lib/firestore/client';
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import type { Readable } from 'svelte/store';
 import { readable } from 'svelte/store';

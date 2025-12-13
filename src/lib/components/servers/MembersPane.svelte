@@ -5,7 +5,7 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
-  import { db } from '$lib/firestore';
+  import { db } from '$lib/firestore/client';
   import { getOrCreateDMThread } from '$lib/firestore/dms';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { user } from '$lib/stores/user';

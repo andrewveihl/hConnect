@@ -24,7 +24,7 @@
     setServerSettingsSection
   } from '$lib/stores/serverSettingsUI';
   import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
-  import MobileDock from '$lib/components/app/MobileDock.svelte';
+  import MobileNavBar from '$lib/components/app/MobileNavBar.svelte';
   import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
   import SettingsMobileShell from '$lib/components/settings/SettingsMobileShell.svelte';
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
@@ -37,6 +37,7 @@
   import { requestDomainAutoInvites } from '$lib/servers/domainAutoInvite';
   import type { SettingsSectionId } from '$lib/settings/sections';
   import type { VoiceSession } from '$lib/stores/voice';
+  import { setupSwipeGestures } from '$lib/utils/swipeGestures';
   interface Props {
     children?: import('svelte').Snippet;
   }
@@ -344,6 +345,7 @@
     const stopAuth = startAuthListener();
     const stopPresence = startPresenceService();
     let detachGestureGuards: (() => void) | null = null;
+    let detachSwipeGestures: (() => void) | null = null;
 
     stopDeepLinkListener = startDeepLinkListener((payload) => {
       skipResumeRestore = true;
@@ -356,6 +358,31 @@
       document.title = APP_TITLE;
       // Best-effort register SW for push/notifications (no permission prompt here)
       registerFirebaseMessagingSW().catch(() => {});
+      
+      // Setup swipe gestures for mobile navigation
+      if (mobileViewport && typeof window !== 'undefined') {
+        detachSwipeGestures = setupSwipeGestures(
+          window,
+          {
+            onSwipeRight: () => {
+              // Swipe right opens server/channel list
+              const openedOverlay = document.querySelector('[data-overlay="server-rail"], [data-overlay="channel-list"]');
+              if (openedOverlay) {
+                openedOverlay.classList.remove('open');
+              }
+            },
+            onSwipeLeft: () => {
+              // Swipe left closes overlays
+              const openedOverlay = document.querySelector('[data-overlay].open');
+              if (openedOverlay) {
+                openedOverlay.classList.remove('open');
+              }
+            }
+          },
+          { minDistance: 40, maxDuration: 600 }
+        );
+      }
+      
       const preventGesture = (event: Event) => {
         event.preventDefault();
       };
@@ -401,6 +428,7 @@
       stopPresence?.();
       stopAuth?.();
       detachGestureGuards?.();
+      detachSwipeGestures?.();
       stopDeepLinkListener?.();
     };
   });
@@ -426,7 +454,7 @@
     {@render children?.()}
   </div>
 
-  <MobileDock />
+  <MobileNavBar />
 
   {#if settingsState.open}
     {#if mobileViewport}
@@ -473,7 +501,7 @@
   {#if activeVoice && !activeVoice.visible}
     <div
       class="voice-mini-fab pointer-events-none fixed left-0 right-0 z-40 flex justify-center px-4"
-      style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem + env(safe-area-inset-bottom, 0px))"
+      style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem)"
     >
       <div class="pointer-events-auto w-full max-w-lg">
         <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} />

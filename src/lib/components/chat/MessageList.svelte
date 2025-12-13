@@ -1077,6 +1077,14 @@ onMount(() => {
     align-self: flex-start;
     width: fit-content;
     max-width: min(48rem, 100%);
+    overflow: hidden;
+  }
+
+  /* Mobile: Ensure message content doesn't overflow */
+  @media (max-width: 767px) {
+    .message-content {
+      max-width: calc(100% - 0.5rem);
+    }
   }
 
   .message-content--mine {
@@ -1554,19 +1562,22 @@ onMount(() => {
       display: none;
     }
 
-    /* Mobile: Show avatar for other users */
+    /* Mobile: Show avatar for other users - modern compact size */
     .message-layout:not(.message-layout--mine) .message-avatar {
       width: 2rem;
       height: 2rem;
       min-width: 2rem;
+      border-radius: 50%;
+      overflow: hidden;
     }
 
-    /* Mobile: User messages styled with teal background */
+    /* Mobile: User messages styled with modern gradient teal */
     .message-bubble--mine {
-      background: #33c8bf !important;
+      background: linear-gradient(135deg, #33c8bf 0%, #2ba8a0 100%) !important;
       color: #ffffff !important;
-      border-radius: 1.25rem;
-      padding: 0.7rem 0.95rem !important;
+      border-radius: 1.125rem 1.125rem 0.35rem 1.125rem;
+      padding: 0.6rem 0.85rem !important;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
     }
 
     .message-bubble--mine .chat-mention {
@@ -1576,38 +1587,63 @@ onMount(() => {
       text-shadow: none !important;
     }
 
-    /* Mobile: Other users' messages with subtle background */
+    /* Mobile: Other users' messages with modern glass effect */
     .message-bubble--other {
-      background: rgba(255, 255, 255, 0.08) !important;
+      background: rgba(255, 255, 255, 0.07) !important;
       color: var(--color-text-primary) !important;
-      border-radius: 1.25rem;
-      padding: 0.7rem 0.95rem !important;
+      border-radius: 1.125rem 1.125rem 1.125rem 0.35rem;
+      padding: 0.6rem 0.85rem !important;
+      border: 1px solid rgba(255, 255, 255, 0.05);
     }
 
-    /* Mobile: User message content takes full width without avatar */
+    /* Mobile: User message content - right aligned */
     .message-layout--mine .message-content {
-      width: 100%;
-      max-width: 85%;
+      width: auto;
+      max-width: 78%;
       margin-left: auto;
+      align-items: flex-end;
     }
 
     /* Mobile: Other users' content aligns left with avatar */
     .message-layout:not(.message-layout--mine) .message-content {
-      max-width: calc(100% - 2.5rem);
+      max-width: calc(100% - 2.75rem);
+      align-items: flex-start;
+    }
+
+    /* Mobile: Compact message header */
+    .message-header {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      margin-bottom: 0.15rem;
+      font-size: 0.8rem;
     }
 
     /* Adjust author name color for user messages on mobile */
     .message-author--mine {
-      color: rgba(255, 255, 255, 0.95) !important;
+      color: rgba(255, 255, 255, 0.9) !important;
+      font-weight: 600;
+      font-size: 0.75rem;
+    }
+
+    .message-author {
+      font-size: 0.8rem;
+      font-weight: 600;
     }
 
     /* Adjust timestamp color for user messages on mobile */
     .message-bubble--mine .message-timestamp-inline {
-      color: rgba(255, 255, 255, 0.7) !important;
+      color: rgba(255, 255, 255, 0.65) !important;
+      font-size: 0.7rem;
+    }
+
+    .message-timestamp-inline {
+      font-size: 0.7rem;
+      color: var(--text-50);
     }
 
     .message-bubble--mine .message-header__dot {
-      color: rgba(255, 255, 255, 0.6) !important;
+      color: rgba(255, 255, 255, 0.5) !important;
     }
 
     /* Adjust action bar positioning for mobile */
@@ -1673,10 +1709,19 @@ onMount(() => {
   .chat-gif {
     display: block;
     width: 100%;
-    max-width: min(2000px, 100%);
+    max-width: min(400px, 100%);
     border-radius: calc(var(--radius-lg) + 0.2rem);
     border: 1px solid var(--chat-bubble-other-border);
     overflow: hidden;
+    object-fit: contain;
+  }
+
+  /* Mobile: Constrain GIF and image sizes */
+  @media (max-width: 767px) {
+    .chat-gif {
+      max-width: min(280px, calc(100vw - 5rem));
+      border-radius: 1rem;
+    }
   }
 
   .chat-gif.mine {
@@ -1684,7 +1729,14 @@ onMount(() => {
   }
 
   .chat-file {
-    max-width: min(1400px, 100%);
+    max-width: min(400px, 100%);
+  }
+
+  /* Mobile: Constrain file cards */
+  @media (max-width: 767px) {
+    .chat-file {
+      max-width: min(280px, calc(100vw - 5rem));
+    }
   }
 
   .chat-file__card {

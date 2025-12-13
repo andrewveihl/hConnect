@@ -99,6 +99,22 @@
     height: 3rem;
     padding: 0 1.25rem;
     border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-panel);
+  }
+
+  /* Mobile: Header extends into safe area but stays in document flow */
+  @media (max-width: 767px) {
+    .channel-header {
+      /* Total height includes safe area, but content area stays 3rem */
+      height: calc(3rem + env(safe-area-inset-top, 0px));
+      /* Padding pushes content below the notch/Dynamic Island */
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-left: calc(0.75rem + env(safe-area-inset-left, 0px));
+      padding-right: calc(0.75rem + env(safe-area-inset-right, 0px));
+      /* Ensure background fills the entire area including behind notch */
+      background: var(--color-panel);
+      flex-shrink: 0;
+    }
   }
 
   .channel-header__left,

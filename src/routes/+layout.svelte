@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
   import SplashScreen from '$lib/components/app/SplashScreen.svelte';
   import { initMobileNavigation } from '$lib/stores/mobileNav';
   import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
@@ -15,8 +16,70 @@
   let shouldShowMobileSplash = $state(false);
   let splashTimer: ReturnType<typeof setTimeout> | null = null;
   let hardFailSafeTimer: ReturnType<typeof setTimeout> | null = null;
+  let detachViewportListeners: (() => void) | null = null;
+  const currentPath = $derived($page?.url?.pathname ?? '/');
+  const hideFloatingDock = $derived(currentPath.startsWith('/splash'));
+
+  // Prefer the largest available viewport metric so iOS URL bars don't shrink the app.
+  const setAppHeight = () => {
+    if (typeof window === 'undefined') return;
+    const vv = window.visualViewport;
+    const candidates = [
+      window.innerHeight,
+      document.documentElement.clientHeight,
+      window.outerHeight,
+      vv?.height ?? 0,
+      window.screen?.height ?? 0,
+      window.screen?.availHeight ?? 0
+    ].filter((n) => typeof n === 'number' && n > 0);
+
+    const maxHeight = candidates.length ? Math.max(...candidates) : window.innerHeight;
+    const next = `${maxHeight}px`;
+    document.documentElement.style.setProperty('--app-height', next);
+    document.documentElement.style.height = next;
+    document.documentElement.style.minHeight = next;
+    document.body.style.height = next;
+    document.body.style.minHeight = next;
+    const app = document.getElementById('app');
+    if (app) {
+      app.style.height = next;
+      app.style.minHeight = next;
+    }
+  };
+
+  // Small scroll nudge to encourage Safari to collapse the URL bar.
+  const nudgeSafariBar = () => {
+    if (typeof window === 'undefined') return;
+    requestAnimationFrame(() => {
+      if (window.scrollY < 2) {
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          if (window.scrollY < 2) window.scrollTo(0, 1);
+        }, 180);
+      }
+    });
+  };
+
+  const attachViewportListeners = () => {
+    const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+    setAppHeight();
+    // Re-apply shortly after mount to catch late Safari viewport adjustments.
+    setTimeout(setAppHeight, 100);
+    setTimeout(setAppHeight, 350);
+    setTimeout(nudgeSafariBar, 200);
+    window.addEventListener('resize', setAppHeight);
+    window.addEventListener('orientationchange', setAppHeight);
+    vv?.addEventListener('resize', setAppHeight);
+
+    return () => {
+      window.removeEventListener('resize', setAppHeight);
+      window.removeEventListener('orientationchange', setAppHeight);
+      vv?.removeEventListener('resize', setAppHeight);
+    };
+  };
 
   onMount(() => {
+    detachViewportListeners = attachViewportListeners();
     const teardownNavigation = initMobileNavigation();
     initClientErrorReporting();
     const isMobile = shouldUseMobileSplash();
@@ -24,7 +87,11 @@
     if (!isMobile) {
       isAppReady = true;
       shouldShowMobileSplash = false;
-      return () => {};
+      return () => {
+        teardownNavigation?.();
+        teardownClientErrorReporting();
+        detachViewportListeners?.();
+      };
     }
 
     shouldShowMobileSplash = true;
@@ -42,6 +109,7 @@
     return () => {
       teardownNavigation?.();
       teardownClientErrorReporting();
+      detachViewportListeners?.();
       if (splashTimer) clearTimeout(splashTimer);
       if (hardFailSafeTimer) clearTimeout(hardFailSafeTimer);
     };
@@ -63,9 +131,15 @@
 </script>
 
 <svelte:head>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta
+    name="viewport"
+    content="width=device-width, height=device-height, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content"
+  />
   <meta name="theme-color" content="#404549" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="hConnect" />
+  <meta name="format-detection" content="telephone=no" />
 </svelte:head>
 
 <div class="app-root">
@@ -77,29 +151,63 @@
       {@render children?.()}
     </div>
   </div>
-  <FloatingActionDock />
+  {#if !hideFloatingDock}
+    <FloatingActionDock />
+  {/if}
 </div>
 
 <style>
-  .app-shell {
-    min-height: 100vh;
-    width: 100%;
+  .app-root {
+    flex: 1 1 0%;
+    height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--surface-root);
+    min-height: 0;
+    width: 100%;
+  }
+
+  .app-shell {
+    flex: 1 1 0%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    width: 100%;
+    background: radial-gradient(circle at 20% -10%, rgba(88, 101, 242, 0.25), transparent 40%),
+      radial-gradient(circle at 75% 10%, rgba(51, 200, 191, 0.22), transparent 45%),
+      var(--surface-root);
+    background-attachment: fixed;
+    box-shadow: inset 0 0 35px rgba(0, 0, 0, 0.45);
     color: var(--color-text-primary);
-    padding-top: constant(safe-area-inset-top);
-    padding-top: env(safe-area-inset-top);
+    padding-top: 0;
     padding-right: constant(safe-area-inset-right);
     padding-right: env(safe-area-inset-right);
-    padding-bottom: constant(safe-area-inset-bottom);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: 0;
     padding-left: constant(safe-area-inset-left);
     padding-left: env(safe-area-inset-left);
   }
 
+  /* Mobile: use single flat background to prevent two-tone gray */
+  @media (max-width: 932px) {
+    .app-shell {
+      background: #1e1f22; /* Match mobile nav bar */
+      background-attachment: scroll;
+      box-shadow: none;
+    }
+  }
+
+  @media (min-width: 933px) {
+    .app-shell {
+      padding-top: constant(safe-area-inset-top);
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: constant(safe-area-inset-bottom);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+  }
+
   .app-shell__stage {
-    flex: 1;
+    flex: 1 1 0%;
+    height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;

@@ -22,7 +22,7 @@ import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte'
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
 
-  import { db } from '$lib/firestore';
+  import { db } from '$lib/firestore/client';
 import { collection, collectionGroup, doc, onSnapshot, orderBy, query, getDocs, getDoc, endBefore, limitToLast, where, limit, setDoc, type Unsubscribe } from 'firebase/firestore';
   import { sendChannelMessage, submitChannelForm, toggleChannelReaction, voteOnChannelPoll } from '$lib/firestore/messages';
   import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -44,6 +44,7 @@ import { uploadChannelFile } from '$lib/firebase/storage';
 import { looksLikeImage } from '$lib/utils/fileType';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { openOverlay, closeOverlay } from '$lib/stores/mobileNav';
 
   
   interface Props {
@@ -1750,7 +1751,7 @@ function sidebarThreadList() {
   let lastShowThreadPanel = false;
   let channelHeaderEl: { focusHeader?: () => void } | null = null;
   const pendingChannelRedirect = $derived.by(() => Boolean(requestedChannelId && !activeChannel));
-  const channelPanelInteractive = $derived.by(() => showChannels && !pendingChannelRedirect);
+  const channelPanelInteractive = $derived.by(() => showChannels);
   const activeServerCall = $derived.by(
     () =>
       Boolean(
@@ -1763,6 +1764,24 @@ function sidebarThreadList() {
       )
   );
   const voiceDesktopLayout = $derived.by(() => !isMobile && isVoiceChannelView && activeServerCall);
+
+  // Sync showChannels/showMembers with global overlay stack so mobile nav can hide/show properly
+  $effect(() => {
+    if (!isMobile) return;
+    if (showChannels) {
+      openOverlay('channel-list');
+    } else {
+      closeOverlay('channel-list');
+    }
+  });
+  $effect(() => {
+    if (!isMobile) return;
+    if (showMembers) {
+      openOverlay('members-pane');
+    } else {
+      closeOverlay('members-pane');
+    }
+  });
 
   const LEFT_RAIL = 72;
   const EDGE_ZONE = 120;
@@ -4165,8 +4184,7 @@ function sidebarThreadList() {
                   {scrollToBottomSignal}
                   scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
-                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
-                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted"
                   emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
                   onVote={handleVote}
                   onSubmitForm={handleFormSubmit}
@@ -4189,7 +4207,7 @@ function sidebarThreadList() {
             </div>
           </div>
       {:else}
-        {#if showVoiceLobby}
+        {#if showVoiceLobby && !(isMobile && showChannels)}
           <div class="px-3 pt-1 md:px-5 md:pt-0 mb-3">
             <VoiceLobby
               serverId={serverId}
@@ -4343,8 +4361,7 @@ function sidebarThreadList() {
                   scrollToBottomSignal={popoutScrollToBottomSignal}
                   scrollContextKey={`popout:${serverId ?? 'server'}:${channelMessagesPopoutChannelId ?? 'none'}`}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
-                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted p-3"
-                  inputPaddingBottom="calc(env(safe-area-inset-bottom, 0px) + 0.85rem)"
+                  inputWrapperClass="chat-input-region border-t border-subtle panel-muted"
                   emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
                   onVote={handlePopoutVote}
                   onSubmitForm={handlePopoutFormSubmit}
@@ -4498,7 +4515,6 @@ function sidebarThreadList() {
   style:transform={channelsTransform}
   style:pointer-events={channelPanelInteractive ? 'auto' : 'none'}
   aria-label="Servers and channels"
-  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >
 
   <div class="mobile-panel__body md:hidden">
@@ -4542,7 +4558,6 @@ function sidebarThreadList() {
   style:transform={membersTransform}
   style:pointer-events={showMembers ? 'auto' : 'none'}
   aria-label="Members"
-  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >
   <div class="mobile-panel__header md:hidden">
     <button
@@ -4575,7 +4590,6 @@ function sidebarThreadList() {
   style:transform={threadTransform}
   style:pointer-events={activeThread && showThreadPanel ? 'auto' : 'none'}
   aria-label="Thread view"
-  style:bottom="calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))"
 >
   <div class="flex-1 panel-muted flex flex-col min-h-0">
     {#if activeThread}
@@ -4699,23 +4713,30 @@ function sidebarThreadList() {
   .mobile-panel__body {
     flex: 1;
     display: flex;
-    background: var(--color-panel);
-    border-top: 1px solid var(--color-border-subtle);
+    background: #2b2d31; /* Discord's sidebar background */
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
     min-height: 0;
+    height: 100%;
+    overflow: hidden;
   }
 
   .mobile-panel {
     padding-bottom: 0;
+    top: 0;
+    bottom: 0 !important;
+    background: #2b2d31; /* Discord's background */
   }
 
   .mobile-panel__servers {
-    width: 84px;
-    flex: 0 0 84px;
+    width: 72px;
+    flex: 0 0 72px;
     display: flex;
     justify-content: center;
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    border-right: 1px solid var(--color-border-subtle);
+    background: #1e1f22; /* Discord's server list background */
+    border-right: none;
     overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
   }
 
   .mobile-panel__servers :global(.app-rail) {
@@ -4726,16 +4747,34 @@ function sidebarThreadList() {
     min-height: 0;
     border-radius: 0;
     box-shadow: none;
-    padding-top: 0.5rem;
+    /* Server icons positioned below safe area with some breathing room */
+    padding-top: calc(0.35rem + env(safe-area-inset-top, 0px) * 0.5);
+    background: #1e1f22;
   }
 
   .mobile-panel__channels {
     flex: 1;
     min-width: 0;
-    background: color-mix(in srgb, var(--color-panel-muted) 96%, transparent);
+    background: #2b2d31; /* Discord's channel list background */
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    height: 100%;
+  }
+
+  .mobile-panel__channels :global(.server-sidebar) {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: #2b2d31;
+  }
+
+  .mobile-panel__channels :global(.server-sidebar > div:last-child) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .thread-pane-desktop {
