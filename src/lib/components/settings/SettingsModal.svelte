@@ -2,7 +2,6 @@
   import { createEventDispatcher } from 'svelte';
 
   import SettingsPanel from '$lib/components/settings/SettingsPanel.svelte';
-  import { goto } from '$app/navigation';
   import { settingsSections, type SettingsSection, type SettingsSectionId } from '$lib/settings/sections';
 
   interface Props {
@@ -64,9 +63,6 @@
   function pickSection(section: SettingsSection) {
     activeSection = section.id;
     dispatch('section', section.id);
-    if (section.path) {
-      goto(section.path, { replaceState: true, keepFocus: true, noScroll: true });
-    }
   }
 </script>
 
@@ -78,10 +74,10 @@
     tabindex="-1"
     aria-hidden="true"
     onclick={handleOverlayClick}
-    onkeydown={handleOverlayKeydown}
+      onkeydown={handleOverlayKeydown}
   >
     <div
-      class="relative flex h-[calc(100vh-4rem)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-[color:var(--color-panel)] text-[color:var(--color-text-primary)] shadow-2xl"
+      class="relative my-8 flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-[color:var(--color-panel)] text-[color:var(--color-text-primary)] shadow-2xl max-h-[calc(100vh-4rem)] min-h-[60vh] h-[80vh]"
       role="dialog"
       aria-modal="true"
       aria-label="User settings"

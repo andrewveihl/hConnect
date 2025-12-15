@@ -2,15 +2,18 @@
   import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { dmUnreadCount } from '$lib/stores/notifications';
   import { activityUnreadCount } from '$lib/stores/activityFeed';
-  import { user } from '$lib/stores/user';
+  import { user, userProfile } from '$lib/stores/user';
   import { subscribeUserServers } from '$lib/firestore/servers';
   import { featureFlags } from '$lib/stores/featureFlags';
   import { closeSettings, openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
   import { defaultSettingsSection } from '$lib/settings/sections';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { setupSwipeGestures } from '$lib/utils/swipeGestures';
+  import { isMobileViewport } from '$lib/stores/viewport';
+  import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 
   type LinkKey = 'activity' | 'dms';
 
@@ -28,8 +31,6 @@
     icon?: string | null;
   };
 
-  const LAST_SERVER_KEY = 'hconnect:last-server';
-  const LAST_SERVER_CHANNEL_KEY = 'hconnect:last-server-channel';
   type ChannelMemory = Record<string, string>;
 
   const navLinks: Link[] = [
@@ -75,6 +76,10 @@
   const isSettingsOpen = $derived($settingsUI.open);
   const settingsActive = $derived(isSettingsOpen || (currentPath?.startsWith('/settings') ?? false));
   const dockSuppressed = $derived(settingsActive);
+  const mobileViewportStore = isMobileViewport;
+  const mobileViewport = $derived($mobileViewportStore);
+  let navElement: HTMLElement | null = null;
+  let detachSwipeGestures: (() => void) | null = null;
 
   onMount(() => {
     loadStoredLastServer();
@@ -196,8 +201,7 @@
     return value.toString();
   };
 
-  function handleNav(event: MouseEvent, link: Link) {
-    event.preventDefault();
+  function navigateToLink(link: Link) {
     closeSettings();
     if (typeof window !== 'undefined' && link.href === '/dms') {
       try {
@@ -207,6 +211,11 @@
       }
     }
     goto(link.href);
+  }
+
+  function handleNav(event: MouseEvent, link: Link) {
+    event.preventDefault();
+    navigateToLink(link);
   }
 
   function openMobileSettings(event: MouseEvent) {
@@ -225,7 +234,7 @@
   function loadStoredChannelMemory() {
     if (!browser) return;
     try {
-      const raw = localStorage.getItem(LAST_SERVER_CHANNEL_KEY);
+      const raw = localStorage.getItem(SERVER_CHANNEL_MEMORY_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object') return;
@@ -246,9 +255,9 @@
     try {
       const keys = Object.keys(map);
       if (!keys.length) {
-        localStorage.removeItem(LAST_SERVER_CHANNEL_KEY);
+        localStorage.removeItem(SERVER_CHANNEL_MEMORY_KEY);
       } else {
-        localStorage.setItem(LAST_SERVER_CHANNEL_KEY, JSON.stringify(map));
+        localStorage.setItem(SERVER_CHANNEL_MEMORY_KEY, JSON.stringify(map));
       }
     } catch {
       // ignore storage errors
@@ -269,11 +278,52 @@
     serverChannelMemory = {};
     persistChannelMemory({});
   }
+
+  function getVisibleNavLinks() {
+    return navLinks.filter((link) => link.key !== 'dms' || enableDMs);
+  }
+
+  function handleSwipe(direction: 'left' | 'right') {
+    if (!mobileViewport || dockSuppressed) return;
+    const links = getVisibleNavLinks();
+    if (links.length < 2) return;
+
+    const activeIndex = links.findIndex((link) => link.isActive(currentPath));
+    if (activeIndex < 0) return;
+
+    const targetIndex = direction === 'left' ? activeIndex + 1 : activeIndex - 1;
+    const target = links[targetIndex];
+    if (!target) return;
+
+    navigateToLink(target);
+  }
+
+  $effect(() => {
+    detachSwipeGestures?.();
+    detachSwipeGestures = null;
+    if (!browser || !mobileViewport || dockSuppressed || !navElement) return;
+    const links = getVisibleNavLinks();
+    if (links.length < 2) return;
+
+    detachSwipeGestures = setupSwipeGestures(
+      navElement,
+      {
+        onSwipeLeft: () => handleSwipe('left'),
+        onSwipeRight: () => handleSwipe('right')
+      },
+      { minDistance: 32, maxDuration: 480, verticalThreshold: 72 }
+    );
+  });
+
+  onDestroy(() => {
+    detachSwipeGestures?.();
+  });
 </script>
 
 <nav
   class="mobile-dock md:hidden"
   aria-label="Primary"
+  bind:this={navElement}
 >
   <div class="mobile-dock__inner">
     <a
@@ -347,12 +397,15 @@
       title="Profile"
     >
       <span class="mobile-dock__icon-wrapper mobile-dock__icon-wrapper--profile">
-        <img
-          src={resolveProfilePhotoURL($user)}
-          alt="Me"
-          class="mobile-dock__avatar"
-          onerror={handleAvatarError}
-        />
+        <div style="width:1.5rem;height:1.5rem;overflow:hidden;border-radius:50%;aspect-ratio:1/1;background:#23272a;border:2px solid #1e1f22;display:flex;align-items:center;justify-content:center;">
+          <img
+            src={resolveProfilePhotoURL($userProfile ?? $user)}
+            alt="Me"
+            class="mobile-dock__avatar"
+            onerror={handleAvatarError}
+            style="width:100%;height:100%;object-fit:cover;"
+          />
+        </div>
       </span>
     </a>
   </div>
@@ -369,7 +422,7 @@
     box-sizing: border-box;
     background: #40444e !important; /* Match provided image color */
     border-top: none;
-    padding: 0 0.5rem;
+    padding: 0;
     padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.65rem); /* Nudge nav content further upward */
     height: var(--mobile-dock-height, calc(3rem + env(safe-area-inset-bottom, 0px)));
     /* Ensure no transparency */
@@ -398,8 +451,8 @@
       var(--mobile-dock-height, calc(3rem + env(safe-area-inset-bottom, 0px))) - env(safe-area-inset-bottom, 0px)
     - 0.65rem);
     width: 100%;
-    max-width: 500px;
-    margin: 0 auto;
+    max-width: none;
+    margin: 0;
     gap: 0;
   }
 

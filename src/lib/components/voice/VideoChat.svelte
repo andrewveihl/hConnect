@@ -1,11 +1,11 @@
 <script lang="ts">
   import { run, stopPropagation } from 'svelte/legacy';
 
-  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount, untrack } from 'svelte';
   import { browser } from '$app/environment';
   import { get } from 'svelte/store';
 import { getDb } from '$lib/firebase';
-import { user } from '$lib/stores/user';
+import { user, userProfile } from '$lib/stores/user';
 import {
     appendVoiceDebugEvent,
     removeVoiceDebugSection,
@@ -13,6 +13,7 @@ import {
     formatVoiceDebugContext
   } from '$lib/utils/voiceDebugContext';
   import { copyTextToClipboard } from '$lib/utils/clipboard';
+  import { playSound } from '$lib/utils/sounds';
 import { resolveProfilePhotoURL } from '$lib/utils/profile';
 import { voiceSession } from '$lib/stores/voice';
 import type { VoiceSession } from '$lib/stores/voice';
@@ -165,6 +166,9 @@ import {
   let participantModeration = $state(
     new Map<string, { serverMuted: boolean; serverDeafened: boolean }>()
   );
+  // Non-reactive mirror so we can read/clean up without creating self-dependencies.
+  let participantModerationCache: Map<string, { serverMuted: boolean; serverDeafened: boolean }> =
+    participantModeration;
   let speakingLevels = $state(new Map<string, number>());
   let chatMessages = $state<{ id: string; text: string; ts: number; author: string }[]>([
     { id: 'seed-1', text: 'Welcome to call chat. Say hi!', ts: Date.now(), author: 'System' }
@@ -248,8 +252,13 @@ import {
   let isScreenSharePending = $state(false);
 let shouldRestoreCameraOnShareEnd = false;
 let audioNeedsUnlock = $state(false);
-let isPlaybackMuted = $state(false);
+  let isPlaybackMuted = $state(false);
   let inactivityTimer: number | null = null;
+  let inactivityHeartbeat: ReturnType<typeof setInterval> | null = null;
+  let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
+  const THUMBNAIL_INTERVAL_MS = 2000; // Capture thumbnail every 2 seconds
+  const THUMBNAIL_QUALITY = 0.6; // JPEG quality
+  const THUMBNAIL_MAX_SIZE = 160; // Max width/height in pixels
   let voiceActivityUnsub: (() => void) | null = null;
   let visibilityUnsub: (() => void) | null = null;
   interface Props {
@@ -364,6 +373,13 @@ let isPlaybackMuted = $state(false);
   let voiceErrorCount = $state(0);
   let voiceWarnCount = $state(0);
   const remoteCandidateKeys = new Set<string>();
+  type QueuedRemoteCandidate = {
+    candidate: RTCIceCandidateInit & { candidate?: string | null };
+    role: 'offerer' | 'answerer';
+    fallback?: boolean;
+  };
+  const pendingRemoteCandidateKeys = new Set<string>();
+  let pendingRemoteIceCandidates: QueuedRemoteCandidate[] = [];
   const DEBUG_STORAGE_KEY = 'hconnect:voice:debug';
   const DEBUG_PANEL_STORAGE_KEY = 'hconnect:voice:debug-panel-open';
   const QUICK_STATS_STORAGE_KEY = 'hconnect:voice:debug.quickstats';
@@ -1292,6 +1308,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     publishedCandidateCount = 0;
     appliedCandidateCount = 0;
     remoteCandidateKeys.clear();
+    clearPendingRemoteCandidates();
     peerDiagnostics = {
       transceivers: [],
       senders: [],
@@ -1350,6 +1367,21 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
+  function stopInactivityHeartbeat() {
+    if (inactivityHeartbeat) {
+      voiceDebug('Stopping inactivity heartbeat');
+      clearInterval(inactivityHeartbeat);
+      inactivityHeartbeat = null;
+    }
+  }
+
+  function startInactivityHeartbeat() {
+    stopInactivityHeartbeat();
+    if (!isJoined || !serverId || !channelId) return;
+    voiceDebug('Starting inactivity heartbeat', { serverId, channelId });
+    inactivityHeartbeat = setInterval(() => emitVoiceActivity('heartbeat'), 60_000);
+  }
+
   function scheduleInactivityTimeout(reason: string) {
     if (!isJoined || !serverId || !channelId) return;
     clearInactivityTimer();
@@ -1358,12 +1390,26 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       statusMessage = 'Disconnected after 5 minutes without activity.';
       voiceSession.leave();
     }, INACTIVITY_TIMEOUT_MS);
+    // Heartbeat is now managed by the reactive run() block, don't start it here
   }
 
   function emitVoiceActivity(reason: string) {
     if (!serverId || !channelId) return;
     voiceActivity.ping(serverId, channelId, reason);
-    scheduleInactivityTimeout(reason);
+    // Only reschedule the timeout, not the heartbeat (heartbeat is managed by reactive block)
+    clearInactivityTimer();
+    if (isJoined) {
+      inactivityTimer = window.setTimeout(() => {
+        voiceDebug('voice inactivity timeout', { reason, limit: INACTIVITY_TIMEOUT_MS });
+        statusMessage = 'Disconnected after 5 minutes without activity.';
+        voiceSession.leave();
+      }, INACTIVITY_TIMEOUT_MS);
+    }
+  }
+
+  function trackUserActivity(reason: string) {
+    if (!isJoined) return;
+    emitVoiceActivity(reason);
   }
 
   function setParticipantSpeaking(uid: string, speaking: boolean) {
@@ -1718,6 +1764,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   let debugParticipants: ParticipantState[] = $state([]);
 
   voiceUnsubscribe = voiceSession.subscribe((next) => {
+    // Skip the initial subscription callback if we haven't mounted yet
+    // The onMount will handle initial state
     sessionQueue = sessionQueue.then(() => handleSessionChange(next));
   });
 
@@ -1826,13 +1874,20 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 
 
-  let lastPresenceSignature: string | null = $state(null);
+  // Only used as an internal cache to skip redundant presence writes; keep it non-reactive.
+  let lastPresenceSignature: string | null = null;
 
   onMount(() => {
     const onUnload = () => {
-      hangUp({ cleanupDoc: false }).catch(() => {});
+      voiceSession.leave();
+      hangUp({ cleanupDoc: true }).catch(() => {});
+    };
+    const onPageHide = () => {
+      voiceSession.leave();
+      hangUp({ cleanupDoc: true }).catch(() => {});
     };
     const onPointerDown = (event: PointerEvent) => {
+      trackUserActivity('pointer');
       if (!(event.target instanceof HTMLElement)) {
         menuOpenFor = null;
         moreMenuOpen = false;
@@ -1844,6 +1899,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      trackUserActivity('key');
       if (event.key === 'Escape') {
         menuOpenFor = null;
         moreMenuOpen = false;
@@ -1911,6 +1967,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       voiceDebug('Voice component mounted');
       isTouchDevice = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
       window.addEventListener('beforeunload', onUnload);
+      window.addEventListener('pagehide', onPageHide);
+      window.addEventListener('unload', onPageHide);
       window.addEventListener('pointerdown', onPointerDown);
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('resize', onResize);
@@ -1935,6 +1993,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     return () => {
       if (browser && typeof window !== 'undefined') {
         window.removeEventListener('beforeunload', onUnload);
+        window.removeEventListener('pagehide', onPageHide);
+        window.removeEventListener('unload', onPageHide);
         window.removeEventListener('pointerdown', onPointerDown);
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('resize', onResize);
@@ -2103,10 +2163,17 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     return participantModeration.get(uid) ?? { serverMuted: false, serverDeafened: false };
   }
 
+  function setParticipantModerationMap(
+    next: Map<string, { serverMuted: boolean; serverDeafened: boolean }>
+  ) {
+    participantModeration = next;
+    participantModerationCache = next;
+  }
+
   function toggleServerMute(uid: string) {
     const current = moderationState(uid);
     const next = { ...current, serverMuted: !current.serverMuted };
-    participantModeration = new Map(participantModeration).set(uid, next);
+    setParticipantModerationMap(new Map(participantModeration).set(uid, next));
     applyParticipantControls(uid);
   }
 
@@ -2117,7 +2184,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       serverMuted: true,
       serverDeafened: !current.serverDeafened
     };
-    participantModeration = new Map(participantModeration).set(uid, next);
+    setParticipantModerationMap(new Map(participantModeration).set(uid, next));
     applyParticipantControls(uid);
   }
 
@@ -2492,10 +2559,23 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         ? {
             serverId: next.serverId,
             channelId: next.channelId,
-            visible: next.visible
+            visible: next.visible,
+            activeSessionKey
           }
-        : { session: null }
+        : { session: null, activeSessionKey }
     );
+    console.log('[VoiceDebug] handleSessionChange called', {
+      next: next ? { serverId: next.serverId, channelId: next.channelId, visible: next.visible } : null,
+      activeSessionKey,
+      isJoined,
+      isConnecting
+    });
+    voiceDebug('handleSessionChange called', {
+      next: next ? { serverId: next.serverId, channelId: next.channelId, visible: next.visible } : null,
+      activeSessionKey,
+      isJoined,
+      isConnecting
+    });
     if (!next) {
       session = null;
       sessionVisible = false;
@@ -2521,32 +2601,73 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       return;
     }
 
-    session = next;
-    sessionVisible = next.visible;
-    sessionChannelName = next.channelName;
-    sessionServerName = next.serverName ?? '';
-
     const nextKey = `${next.serverId}:${next.channelId}`;
     const sameSession = activeSessionKey === nextKey;
 
-    serverId = next.serverId;
-    channelId = next.channelId;
+    console.log('[VoiceDebug] handleSessionChange session check', {
+      activeSessionKey,
+      nextKey,
+      sameSession,
+      isJoined,
+      isConnecting
+    });
+    voiceDebug('handleSessionChange session check', {
+      activeSessionKey,
+      nextKey,
+      sameSession,
+      isJoined,
+      isConnecting
+    });
 
-    if (!sameSession) {
-      isMicMuted = next.joinMuted ?? currentPrefs.muteOnJoin;
-      isCameraOff = next.joinVideoOff ?? currentPrefs.videoOffOnJoin;
-    }
+    // Only update state if values actually changed to avoid triggering unnecessary reactivity
+    if (session !== next) session = next;
+    if (sessionVisible !== next.visible) sessionVisible = next.visible;
+    if (sessionChannelName !== next.channelName) sessionChannelName = next.channelName;
+    const nextServerName = next.serverName ?? '';
+    if (sessionServerName !== nextServerName) sessionServerName = nextServerName;
+    if (serverId !== next.serverId) serverId = next.serverId;
+    if (channelId !== next.channelId) channelId = next.channelId;
 
     if (sameSession) {
+      // Same session, just visibility or metadata changed - no need to rejoin
+      console.log('[VoiceDebug] sameSession=true, isJoined=', isJoined, 'isConnecting=', isConnecting);
       if (!isJoined && !isConnecting) {
+        console.log('[VoiceDebug] sameSession but NOT joined, calling joinChannel');
         await joinChannel();
       }
       return;
     }
 
-    if (isJoined || isConnecting) {
-      await hangUp();
+    // When switching to a different channel, preserve current media state if already in a call
+    // Otherwise use the join preferences from the new session
+    const wasInCall = isJoined || isConnecting;
+    const preservedMicMuted = wasInCall ? isMicMuted : (next.joinMuted ?? currentPrefs.muteOnJoin);
+    const preservedCameraOff = wasInCall ? isCameraOff : (next.joinVideoOff ?? currentPrefs.videoOffOnJoin);
+    const preservedScreenSharing = wasInCall ? isScreenSharing : false;
+    
+    console.log('[VoiceDebug] CHANNEL SWITCH DETECTED', {
+      wasInCall,
+      previousKey: activeSessionKey,
+      nextKey
+    });
+    voiceDebug('handleSessionChange channel switch', {
+      wasInCall,
+      preservedMicMuted,
+      preservedCameraOff,
+      preservedScreenSharing,
+      previousKey: activeSessionKey,
+      nextKey
+    });
+
+    if (wasInCall) {
+      // Use preserveMediaState option to prevent hangUp from resetting mic/camera state
+      await hangUp({ preserveMediaState: true });
     }
+
+    // Apply the preserved or new media state
+    isMicMuted = preservedMicMuted;
+    isCameraOff = preservedCameraOff;
+    // Note: Screen sharing is not preserved across channel switches as it requires new stream
 
     activeSessionKey = nextKey;
     await joinChannel();
@@ -2801,6 +2922,78 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     answerCandidatesUnsub = null;
   }
 
+  function clearPendingRemoteCandidates() {
+    pendingRemoteIceCandidates = [];
+    pendingRemoteCandidateKeys.clear();
+  }
+
+  function applyRemoteIceCandidate(
+    connection: RTCPeerConnection | null,
+    candidateData: RTCIceCandidateInit & { candidate?: string | null },
+    role: 'offerer' | 'answerer',
+    options: { fallback?: boolean; fromQueue?: boolean } = {}
+  ) {
+    const { fallback = false, fromQueue = false } = options;
+    if (!connection || connection.signalingState === 'closed') return;
+    const key = remoteCandidateKey(candidateData);
+    if (remoteCandidateKeys.has(key)) {
+      voiceDebug('Skipping duplicate remote ICE candidate', { role, key, source: fallback ? 'fallback' : 'primary' });
+      return;
+    }
+    if (!fromQueue && pendingRemoteCandidateKeys.has(key)) {
+      return;
+    }
+    const info = describeIceCandidate(candidateData.candidate);
+    if (!fromQueue) {
+      logRemoteCandidate(role, info, { fallback });
+    }
+    if (!connection.remoteDescription) {
+      pendingRemoteCandidateKeys.add(key);
+      pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+      voiceDebug('Queued remote ICE candidate (awaiting remote description)', {
+        role,
+        ...info,
+        fallback
+      });
+      return;
+    }
+    pendingRemoteCandidateKeys.delete(key);
+    remoteCandidateKeys.add(key);
+    const candidate = new RTCIceCandidate(candidateData);
+    connection
+      .addIceCandidate(candidate)
+      .then(() => {
+        appliedCandidateCount += 1;
+      })
+      .catch((err) => {
+        console.warn('Failed to add remote ICE candidate', err);
+        voiceDebug('Failed to add remote ICE candidate', {
+          role,
+          error: err instanceof Error ? err.message : String(err),
+          ...info
+        });
+        if (err instanceof DOMException && err.name === 'InvalidStateError' && !connection.remoteDescription) {
+          if (!pendingRemoteCandidateKeys.has(key)) {
+            pendingRemoteCandidateKeys.add(key);
+            pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+          }
+        }
+      });
+  }
+
+  function flushPendingRemoteIceCandidates(connection: RTCPeerConnection | null = pc) {
+    if (!connection || !connection.remoteDescription) return;
+    if (!pendingRemoteIceCandidates.length) return;
+    const queued = pendingRemoteIceCandidates;
+    pendingRemoteIceCandidates = [];
+    queued.forEach((entry) =>
+      applyRemoteIceCandidate(connection, entry.candidate, entry.role, {
+        fallback: entry.fallback,
+        fromQueue: true
+      })
+    );
+  }
+
   function attachOffererIceHandlers(connection: RTCPeerConnection) {
     if (!offerCandidatesRef) {
       voiceDebug('attachOffererIceHandlers skipped (missing offerCandidatesRef)');
@@ -2838,24 +3031,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
               return;
             }
             consumedAnswerCandidateIds.add(docId);
-            const candidateData = change.doc.data();
-            const key = remoteCandidateKey(candidateData);
-            if (remoteCandidateKeys.has(key)) {
-              voiceDebug('Skipping duplicate remote ICE candidate', { role: 'offerer', key });
-              return;
-            }
-            remoteCandidateKeys.add(key);
-            const info = describeIceCandidate(candidateData.candidate);
-            logRemoteCandidate('offerer', info);
-            const candidate = new RTCIceCandidate(candidateData);
-            connection
-              .addIceCandidate(candidate)
-              .then(() => {
-                appliedCandidateCount += 1;
-              })
-              .catch((err) => {
-                console.warn('Failed to add remote ICE candidate', err);
-              });
+            const candidateData = change.doc.data() as RTCIceCandidateInit & { candidate?: string | null };
+            applyRemoteIceCandidate(connection, candidateData, 'offerer');
           }
         });
       });
@@ -2870,24 +3047,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
             return;
           }
           consumedAnswerCandidateIds.add(docId);
-          const candidateData = change.doc.data();
-          const key = remoteCandidateKey(candidateData);
-          if (remoteCandidateKeys.has(key)) {
-            voiceDebug('Skipping duplicate remote ICE candidate', { role: 'offerer', key, fallback: true });
-            return;
-          }
-          remoteCandidateKeys.add(key);
-          const info = describeIceCandidate(candidateData.candidate);
-          logRemoteCandidate('offerer', info, { fallback: true });
-          const candidate = new RTCIceCandidate(candidateData);
-          connection
-            .addIceCandidate(candidate)
-            .then(() => {
-              appliedCandidateCount += 1;
-            })
-            .catch((err) => {
-              console.warn('Failed to add remote ICE candidate', err);
-            });
+          const candidateData = change.doc.data() as RTCIceCandidateInit & { candidate?: string | null };
+          applyRemoteIceCandidate(connection, candidateData, 'offerer', { fallback: true });
         }
       });
     });
@@ -2930,24 +3091,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
               return;
             }
             consumedOfferCandidateIds.add(docId);
-            const candidateData = change.doc.data();
-            const key = remoteCandidateKey(candidateData);
-            if (remoteCandidateKeys.has(key)) {
-              voiceDebug('Skipping duplicate remote ICE candidate', { role: 'answerer', key });
-              return;
-            }
-            remoteCandidateKeys.add(key);
-            const info = describeIceCandidate(candidateData.candidate);
-            logRemoteCandidate('answerer', info);
-            const candidate = new RTCIceCandidate(candidateData);
-            connection
-              .addIceCandidate(candidate)
-              .then(() => {
-                appliedCandidateCount += 1;
-              })
-              .catch((err) => {
-                console.warn('Failed to add remote ICE candidate', err);
-              });
+            const candidateData = change.doc.data() as RTCIceCandidateInit & { candidate?: string | null };
+            applyRemoteIceCandidate(connection, candidateData, 'answerer');
           }
         });
       });
@@ -3268,6 +3413,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const config = buildRtcConfiguration();
     const connection = new RTCPeerConnection(config);
     pc = connection;
+    clearPendingRemoteCandidates();
     resetPeerDiagnostics();
     updatePeerConnectionStateSnapshot(connection);
     const maskedServers = (config.iceServers ?? []).map((server) => ({
@@ -3299,6 +3445,9 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         iceConnectionState: pc?.iceConnectionState ?? null,
         iceGatheringState: pc?.iceGatheringState ?? null
       });
+      if (pc?.remoteDescription) {
+        flushPendingRemoteIceCandidates(pc);
+      }
       if (state === 'stable' && renegotiationAwaitingStable) {
         renegotiationAwaitingStable = false;
         const requireOfferer = renegotiationNeedsPromotion && !isOfferer;
@@ -3622,10 +3771,28 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       if (offerDescription.sdp) {
         offerPayload.sdp = offerDescription.sdp;
       }
-      await updateDoc(callRef, {
-        offer: offerPayload,
-        answer: deleteField()
-      });
+      try {
+        await updateDoc(callRef, {
+          offer: offerPayload,
+          answer: deleteField()
+        });
+      } catch (err: any) {
+        const code = err?.code ?? err?.message ?? 'unknown';
+        if (code === 'not-found' || code === 'not-found: Document does not exist') {
+          voiceDebug('Call doc missing during renegotiation; recreating before publish', { revision });
+          await setDoc(
+            callRef,
+            {
+              offer: offerPayload,
+              createdAt: serverTimestamp(),
+              createdBy: currentUser?.uid ?? null
+            },
+            { merge: true }
+          );
+        } else {
+          throw err;
+        }
+      }
       if (answerDescriptionRef) {
         await deleteDoc(answerDescriptionRef).catch(() => {});
         latestAnswerDescription = null;
@@ -3869,6 +4036,22 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
+  async function hasActiveParticipants(targetRef: DocumentReference): Promise<boolean> {
+    try {
+      const snapshot = await getDocs(collection(targetRef, 'participants'));
+      for (const snap of snapshot.docs) {
+        const data = snap.data() as any;
+        const status = (data?.status ?? 'active') as string;
+        if (status !== 'left' && status !== 'removed') {
+          return true;
+        }
+      }
+    } catch (err) {
+      voiceDebug('hasActiveParticipants failed', err);
+    }
+    return false;
+  }
+
   async function startAsOfferer(
     connection: RTCPeerConnection,
     docRef: DocumentReference,
@@ -3881,7 +4064,12 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     lastOfferRevision = existingData?.offer?.revision ?? 0;
     lastAnswerRevision = existingData?.answer?.revision ?? 0;
     voiceDebug('Joining voice channel as offerer', { lastOfferRevision, lastAnswerRevision });
-    await purgeCallArtifacts();
+    const activeParticipants = await hasActiveParticipants(docRef);
+    if (activeParticipants) {
+      voiceDebug('Skipping purgeCallArtifacts (active participants present)');
+    } else {
+      await purgeCallArtifacts();
+    }
     attachOffererIceHandlers(connection);
 
     const offerDescription = await connection.createOffer();
@@ -4069,6 +4257,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
             promoteToOfferer = true;
           } else {
             await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
+            flushPendingRemoteIceCandidates(connection);
             voiceDebug('Applied existing offer', {
               revision: lastOfferRevision,
               length: offerDescription.sdp?.length ?? 0
@@ -4117,11 +4306,28 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
             if (answerDescription.sdp) {
               answerData.sdp = answerDescription.sdp;
             }
-            await updateDoc(docRef, {
-              answer: answerData,
-              answeredAt: serverTimestamp(),
-              answeredBy: current.uid
-            });
+            try {
+              await updateDoc(docRef, {
+                answer: answerData,
+                answeredAt: serverTimestamp(),
+                answeredBy: current.uid
+              });
+            } catch (err: any) {
+              const code = err?.code ?? err?.message ?? 'unknown';
+              if (code === 'not-found') {
+                await setDoc(
+                  docRef,
+                  {
+                    answer: answerData,
+                    answeredAt: serverTimestamp(),
+                    answeredBy: current.uid
+                  },
+                  { merge: true }
+                );
+              } else {
+                throw err;
+              }
+            }
             voiceDebug('Published initial answer', { answerRevision });
             joinRole = 'answerer';
           }
@@ -4141,7 +4347,46 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       isJoined = true;
       startCallTimer();
       emitVoiceActivity('joined');
+      playSound('call-join');
+      startInactivityHeartbeat();
       voiceDebug('joinChannel ready', { joinRole, isOfferer });
+
+      // Acquire initial media tracks based on join preferences
+      // This ensures buttons reflect actual track state immediately
+      const shouldAcquireAudio = !isMicMuted;
+      const shouldAcquireVideo = !isCameraOff;
+      voiceDebug('joinChannel acquiring initial tracks', { shouldAcquireAudio, shouldAcquireVideo, isMicMuted, isCameraOff });
+      
+      if (shouldAcquireAudio) {
+        const audioOk = await acquireTrack('audio');
+        if (!audioOk) {
+          // If audio acquisition fails, update state to reflect reality
+          isMicMuted = true;
+          voiceDebug('Initial audio acquisition failed, setting muted');
+        }
+      }
+      
+      if (shouldAcquireVideo) {
+        const videoOk = await acquireTrack('video');
+        if (!videoOk) {
+          // If video acquisition fails, update state to reflect reality
+          isCameraOff = true;
+          voiceDebug('Initial video acquisition failed, setting camera off');
+        }
+      }
+      
+      // Update presence after acquiring tracks
+      if (shouldAcquireAudio || shouldAcquireVideo) {
+        await updateParticipantPresence();
+        if (!isMicMuted || !isCameraOff) {
+          scheduleRenegotiation('initial-media-acquired', { requireOfferer: true });
+        }
+      }
+      
+      // Start thumbnail publishing if camera is on
+      if (!isCameraOff) {
+        startThumbnailPublishing();
+      }
     callUnsub = onSnapshot(docRef, (snapshot) => {
 
       sessionQueue = sessionQueue
@@ -4213,6 +4458,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                   try {
 
                     await pc.setRemoteDescription(new RTCSessionDescription(description));
+                    flushPendingRemoteIceCandidates(pc);
 
                     voiceDebug('Remote offer applied (offerer fallback)', { revision });
 
@@ -4302,15 +4548,28 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
                     }
 
-                    await updateDoc(callRef!, {
-
-                      answer: answerUpdate,
-
-                      answeredAt: serverTimestamp(),
-
-                      answeredBy: currentUidValue
-
-                    });
+                    try {
+                      await updateDoc(callRef!, {
+                        answer: answerUpdate,
+                        answeredAt: serverTimestamp(),
+                        answeredBy: currentUidValue
+                      });
+                    } catch (err: any) {
+                      const code = err?.code ?? err?.message ?? 'unknown';
+                      if (code === 'not-found') {
+                        await setDoc(
+                          callRef!,
+                          {
+                            answer: answerUpdate,
+                            answeredAt: serverTimestamp(),
+                            answeredBy: currentUidValue
+                          },
+                          { merge: true }
+                        );
+                      } else {
+                        throw err;
+                      }
+                    }
 
                     voiceDebug('Published fallback answer', { revision: nextRevision });
 
@@ -4366,13 +4625,33 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
               voiceDebug('Applying remote answer', { revision, length: description.sdp?.length ?? 0 });
 
-              lastAnswerRevision = revision;
+              if (connection.signalingState !== 'have-local-offer') {
+
+                voiceDebug('Skipping remote answer (unexpected signaling state)', {
+
+                  revision,
+
+                  signalingState: connection.signalingState
+
+                });
+
+                return;
+
+              }
 
               connection
 
                 .setRemoteDescription(new RTCSessionDescription(description))
 
-                .then(() => voiceDebug('Remote answer applied', { revision }))
+                .then(() => {
+
+                  lastAnswerRevision = revision;
+
+                  voiceDebug('Remote answer applied', { revision });
+
+                  flushPendingRemoteIceCandidates(connection);
+
+                })
 
                 .catch((err) => {
 
@@ -4417,15 +4696,23 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 
 
-  async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean } = {}) {
+  async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean; preserveMediaState?: boolean } = {}) {
+    console.log('[VoiceDebug] hangUp called', options, new Error().stack);
     voiceDebug('hangUp start', options);
     reconnectAttemptCount = 0;
     connectionFailureCount = 0;
-    const { cleanupDoc = true, resetError = true } = options;
+    const { cleanupDoc = true, resetError = true, preserveMediaState = false } = options;
+    const wasJoined = isJoined;
+
+    if (wasJoined) {
+      playSound('call-leave');
+    }
 
     clearReconnectTimer();
     clearInactivityTimer();
+    stopInactivityHeartbeat();
     stopCallTimer();
+    stopThumbnailPublishing();
     lastPresencePayload = null;
     lastParticipantsSnapshot = null;
     if (presenceDebounce) {
@@ -4443,6 +4730,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     participantsUnsub?.();
     offerDescriptionUnsub?.();
     answerDescriptionUnsub?.();
+    clearPendingRemoteCandidates();
 
     callUnsub = null;
     participantsUnsub = null;
@@ -4614,8 +4902,11 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     statusMessage = '';
     isJoined = false;
     isConnecting = false;
-    isMicMuted = true;
-    isCameraOff = true;
+    // Only reset media state if not preserving it (e.g., during channel switch)
+    if (!preserveMediaState) {
+      isMicMuted = true;
+      isCameraOff = true;
+    }
     callSnapshotDebug = '';
   }
 
@@ -4683,6 +4974,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
       applyTrackStates();
       statusMessage = 'Camera on.';
+      // Start publishing thumbnails when camera turns on
+      startThumbnailPublishing();
     } else {
       removeLocalTrack('video');
       isCameraOff = true;
@@ -4690,6 +4983,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       shouldRestoreCameraOnShareEnd = false;
       applyTrackStates();
       statusMessage = 'Camera off.';
+      // Stop publishing thumbnails when camera turns off
+      stopThumbnailPublishing();
     }
 
     await updateParticipantPresence();
@@ -5293,6 +5588,91 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     callDuration = '00:00';
   }
 
+  // Thumbnail capture and publishing for lobby preview
+  async function captureThumbnail(): Promise<string | null> {
+    const videoElement = localVideoEl;
+    if (!videoElement || isCameraOff) return null;
+    
+    const videoWidth = videoElement.videoWidth;
+    const videoHeight = videoElement.videoHeight;
+    if (!videoWidth || !videoHeight) return null;
+    
+    // Calculate scaled dimensions
+    const scale = Math.min(THUMBNAIL_MAX_SIZE / videoWidth, THUMBNAIL_MAX_SIZE / videoHeight);
+    const width = Math.floor(videoWidth * scale);
+    const height = Math.floor(videoHeight * scale);
+    
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      
+      ctx.drawImage(videoElement, 0, 0, width, height);
+      return canvas.toDataURL('image/jpeg', THUMBNAIL_QUALITY);
+    } catch (err) {
+      console.warn('[VideoChat] Failed to capture thumbnail:', err);
+      return null;
+    }
+  }
+
+  async function publishThumbnail() {
+    if (!isJoined || !callRef || isCameraOff) {
+      // Clear thumbnail if camera is off
+      if (callRef && isCameraOff) {
+        try {
+          const database = getDb();
+          const thumbnailRef = doc(database, callRef.path, 'thumbnails', get(user)?.uid ?? 'unknown');
+          await deleteDoc(thumbnailRef);
+        } catch (err) {
+          // Ignore - thumbnail may not exist
+        }
+      }
+      return;
+    }
+    
+    const thumbnail = await captureThumbnail();
+    if (!thumbnail) return;
+    
+    try {
+      const database = getDb();
+      const currentUser = get(user);
+      if (!currentUser?.uid || !callRef) return;
+      
+      const thumbnailRef = doc(database, callRef.path, 'thumbnails', currentUser.uid);
+      await setDoc(thumbnailRef, {
+        imageData: thumbnail,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (err) {
+      console.warn('[VideoChat] Failed to publish thumbnail:', err);
+    }
+  }
+
+  function startThumbnailPublishing() {
+    stopThumbnailPublishing();
+    // Publish immediately, then on interval
+    publishThumbnail();
+    thumbnailInterval = setInterval(publishThumbnail, THUMBNAIL_INTERVAL_MS);
+  }
+
+  function stopThumbnailPublishing() {
+    if (thumbnailInterval) {
+      clearInterval(thumbnailInterval);
+      thumbnailInterval = null;
+    }
+    // Clean up thumbnail document when stopping
+    if (callRef) {
+      const currentUser = get(user);
+      if (currentUser?.uid) {
+        const database = getDb();
+        const thumbnailRef = doc(database, callRef.path, 'thumbnails', currentUser.uid);
+        deleteDoc(thumbnailRef).catch(() => {/* ignore */});
+      }
+    }
+  }
+
   function handleFullscreenChange() {
     if (typeof document === 'undefined') return;
     if (!document.fullscreenElement) {
@@ -5371,7 +5751,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   });
   let participantCount = $derived(participants.length);
   run(() => {
-    updateVoiceClientState({
+    const snapshot = {
       connected: isJoined,
       muted: isMicMuted,
       deafened: isPlaybackMuted,
@@ -5380,7 +5760,9 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       channelName: sessionChannelName || null,
       serverName: sessionServerName || null,
       participantCount
-    });
+    };
+    // Avoid reading voiceClientState while writing to it (prevents recursive reactive warnings)
+    untrack(() => updateVoiceClientState(snapshot));
   });
   let quickStatsItems = $derived((() => {
     const callDocPath = callRef?.path ?? 'none';
@@ -5629,15 +6011,20 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   });
   run(() => {
     const activeUids = new Set(participantMedia.map((tile) => tile.uid));
+    const previousModeration = participantModerationCache;
     let changed = false;
-    participantModeration.forEach((_, uid) => {
+    let nextModeration = previousModeration;
+    previousModeration.forEach((_, uid) => {
       if (!activeUids.has(uid)) {
-        participantModeration.delete(uid);
+        if (nextModeration === previousModeration) {
+          nextModeration = new Map(previousModeration);
+        }
+        nextModeration.delete(uid);
         changed = true;
       }
     });
     if (changed) {
-      participantModeration = new Map(participantModeration);
+      setParticipantModerationMap(nextModeration);
     }
   });
   run(() => {
@@ -5698,6 +6085,21 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       }
     }
   });
+  // Track previous heartbeat state to avoid repeatedly starting/stopping
+  let lastHeartbeatActive = false;
+  run(() => {
+    // Keep heartbeat/timers aligned with join state changes.
+    const shouldBeActive = !!(isJoined && serverId && channelId);
+    if (shouldBeActive === lastHeartbeatActive) return;
+    lastHeartbeatActive = shouldBeActive;
+    if (shouldBeActive) {
+      scheduleInactivityTimeout('state-change');
+      // Note: startInactivityHeartbeat is called by scheduleInactivityTimeout
+    } else {
+      clearInactivityTimer();
+      stopInactivityHeartbeat();
+    }
+  });
   run(() => {
     canKickMembers =
       !!currentUserId &&
@@ -5719,7 +6121,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         identity.authPhotoURL ?? '',
         isScreenSharing ? '1' : '0'
       ].join('|');
-      if (signature !== lastPresenceSignature) {
+      const prevSignature = untrack(() => lastPresenceSignature);
+      if (signature !== prevSignature) {
         lastPresenceSignature = signature;
         updateParticipantPresence({}, identity).catch((err) => console.warn('Failed to sync presence', err));
       }
@@ -5889,36 +6292,34 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
           onToggleSelf={toggleShowSelf}
           onOpenSettings={() => openVoiceSettingsPanel()}
           controlsVisibleOverride={isEmbedded ? true : controlsVisible}
+          hideControls={true}
         >
           <div
             slot="video"
-            class={`call-grid ${gridMode === 'focus' && focusedTile ? 'call-grid--focus' : ''} ${gridTiles.length === 1 ? 'call-grid--single' : ''} grid w-full`}
-            style={`--call-grid-cols:${gridColumns};grid-template-columns:repeat(${Math.min(gridColumns, 4)},minmax(0,1fr));`}
+            class={`call-grid ${gridMode === 'focus' && focusedTile ? 'call-grid--focus' : ''} ${gridTiles.length === 1 ? 'call-grid--single' : ''}`}
           >
             {#each gridTiles as tile (tile.uid)}
               <article
-                class={`call-tile relative isolate overflow-hidden rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/80 shadow-sm ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking ring-2 ring-[color:var(--color-accent)] ring-offset-1 ring-offset-[color:var(--color-panel)]' : ''} ${gridMode === 'focus' && focusedTile && tile.uid === focusedTile.uid ? 'call-tile--focus-main' : ''}`}
+                class={`call-tile ${tile.isSelf ? 'call-tile--self' : ''} ${tile.screenSharing ? 'call-tile--sharing' : ''} ${tile.isSpeaking ? 'call-tile--speaking' : ''} ${gridMode === 'focus' && focusedTile && tile.uid === focusedTile.uid ? 'call-tile--focus-main' : ''}`}
                 data-voice-menu
                 ontouchstart={() => handleLongPressStart(tile.uid)}
               ontouchend={() => handleLongPressEnd(tile.uid)}
               ontouchcancel={() => handleLongPressEnd(tile.uid)}
               oncontextmenu={(event) => openVolumeMenu(event, tile.uid)}
             >
-                <div class="call-tile__media relative flex h-full w-full flex-col items-center justify-center bg-[color:var(--color-panel-muted)]/70">
+                <div class="call-tile__media">
                   <video
                     use:videoSink={tile.uid}
                     autoplay
                     playsinline
                     muted={tile.isSelf}
-                    class="absolute inset-0 h-full w-full object-cover opacity-0 transition-opacity duration-150"
                     class:call-tile__video-visible={streamHasLiveVideo(tile.stream)}
-                    class:opacity-100={streamHasLiveVideo(tile.stream)}
                   ></video>
                   {#if !streamHasLiveVideo(tile.stream)}
-                    <div class="flex h-full w-full items-center justify-center bg-[color:var(--color-panel-muted)]/70">
-                      <div class="grid h-20 w-20 place-items-center overflow-hidden rounded-2xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] text-lg font-bold text-[color:var(--color-text-primary)] shadow-inner">
+                    <div class="call-avatar">
+                      <div class="call-avatar__image">
                         {#if tile.photoURL}
-                          <img src={tile.photoURL} alt={tile.displayName} loading="lazy" class="h-full w-full object-cover" />
+                          <img src={tile.photoURL} alt={tile.displayName} loading="lazy" />
                         {:else}
                           <span>{avatarInitial(tile.displayName)}</span>
                         {/if}
@@ -5928,37 +6329,33 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
                   {#if !tile.isSelf}
                     <audio use:audioSink={tile.uid} autoplay playsinline class="hidden"></audio>
                   {/if}
-                  <div class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-[color:var(--color-panel)]/85 px-3 py-2 text-xs text-[color:var(--color-text-primary)] backdrop-blur">
-                    <div class="flex min-w-0 items-center gap-2">
-                      <span class="truncate text-sm font-semibold leading-tight" title={tile.displayName}>
-                        {tile.isSelf ? 'You' : tile.displayName}
-                      </span>
-                      {#if tile.isSelf}
-                        <span class="rounded-sm bg-[color:var(--color-border-subtle)]/80 px-1.5 py-0.5 text-[10px] font-semibold tracking-tight text-[color:var(--color-text-secondary)]">
-                          YOU
-                        </span>
-                      {/if}
-                    </div>
-                    <div class="flex items-center gap-2 text-[color:var(--color-text-secondary)]">
-                      {#if tile.screenSharing}
-                        <span class="rounded-sm bg-[color:var(--color-accent)]/90 px-2 py-0.5 text-[10px] font-bold uppercase text-[color:var(--color-text-inverse)]">
-                          Live
-                        </span>
-                      {/if}
-                      <i class={`bx ${tile.hasAudio ? 'bx-microphone' : 'bx-microphone-off text-[color:var(--color-danger,#ef4444)]'}`}></i>
-                      <i class={`bx ${tile.hasVideo ? 'bx-video' : 'bx-video-off text-[color:var(--color-danger,#ef4444)]'}`}></i>
-                    </div>
+                </div>
+                <div class="call-tile__footer">
+                  <div class="call-tile__footer-name">
+                    <span class="call-tile__footer-text" title={tile.displayName}>
+                      {tile.isSelf ? 'You' : tile.displayName}
+                    </span>
+                    {#if tile.isSelf}
+                      <span class="call-tile__footer-pill">YOU</span>
+                    {/if}
+                    {#if tile.screenSharing}
+                      <span class="call-tile__footer-pill call-tile__footer-pill--share">LIVE</span>
+                    {/if}
                   </div>
-                  <button
-                    type="button"
-                    class={`call-tile__menu-button absolute right-3 bottom-3 inline-flex h-9 w-9 items-center justify-center rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/80 text-[color:var(--color-text-primary)] shadow-sm backdrop-blur transition hover:border-[color:var(--color-accent)] ${tile.isSelf ? 'call-tile__menu-button--self' : ''}`}
+                  <div class="call-tile__footer-icons">
+                    <i class={`bx ${tile.hasAudio ? 'bx-microphone' : 'bx-microphone-off is-off'}`}></i>
+                    <i class={`bx ${tile.hasVideo ? 'bx-video' : 'bx-video-off is-off'}`}></i>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                    class={`call-tile__menu-button ${tile.isSelf ? 'call-tile__menu-button--self' : ''}`}
                     onclick={stopPropagation(() => openMenu(tile.uid))}
                     data-voice-menu
                     aria-label={`Voice options for ${tile.isSelf ? 'you' : tile.displayName}`}
                   >
                     <i class="bx bx-dots-vertical-rounded"></i>
                   </button>
-                </div>
 
                 {#if menuOpenFor === tile.uid}
                   <div class="call-tile__menu-panel" data-voice-menu>
@@ -6116,8 +6513,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         <div class="call-empty" aria-label="Call preview">
           <div class="call-empty__tile">
             <div class="call-empty__avatar">
-              {#if $user?.photoURL}
-                <img src={resolveProfilePhotoURL($user.photoURL)} alt="Your avatar" />
+              {#if $user?.photoURL || $userProfile}
+                <img src={resolveProfilePhotoURL($userProfile ?? $user)} alt="Your avatar" />
               {:else}
                 <i class="bx bx-user"></i>
               {/if}
@@ -6235,25 +6632,16 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
               {#if moreMenuOpen}
                 <div class="call-more-menu" data-voice-menu>
                   <button type="button" onclick={toggleGridMode}>
-                    <div>
-                      <span>Grid view</span>
-                      <small>{gridMode === 'focus' ? 'Focus screen share/active speaker' : 'Equal tiles'}</small>
-                    </div>
-                    <i class={`bx ${gridMode === 'focus' ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                    <i class={`bx ${gridMode === 'focus' ? 'bx-grid-alt' : 'bx-grid-horizontal'}`}></i>
+                    <span>{gridMode === 'focus' ? 'Grid view' : 'Focus view'}</span>
                   </button>
                   <button type="button" onclick={toggleShowSelf}>
-                    <div>
-                      <span>Show my own camera</span>
-                      <small>{showSelfInGrid ? 'Visible in grid' : 'Hidden with mini preview'}</small>
-                    </div>
-                    <i class={`bx ${showSelfInGrid ? 'bx-toggle-right' : 'bx-toggle-left'}`}></i>
+                    <i class={`bx ${showSelfInGrid ? 'bx-hide' : 'bx-show'}`}></i>
+                    <span>{showSelfInGrid ? 'Hide self' : 'Show self'}</span>
                   </button>
                   <button type="button" onclick={() => openVoiceSettingsPanel()}>
-                    <div>
-                      <span>Voice and video settings</span>
-                      <small>Open user settings</small>
-                    </div>
                     <i class="bx bx-cog"></i>
+                    <span>Settings</span>
                   </button>
                 </div>
               {/if}
@@ -6681,8 +7069,9 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 }
 
   .voice-root--compact .call-tile {
-    min-height: clamp(200px, 55vh, 360px);
-    width: min(420px, 100%);
+    width: 360px;
+    height: 202px;
+    min-height: auto;
   }
 
   .voice-root--compact .call-controls {
@@ -7103,70 +7492,83 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   display: flex;
   position: relative;
   overflow: hidden;
-  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
-  border-radius: 0.65rem;
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-  padding: clamp(0.5rem, 1vw, 0.75rem);
-  padding-bottom: clamp(0.85rem, 2.4vh, 1.5rem);
+  background: #1e1f22;
+  border-radius: 8px;
+  padding: 8px;
+  padding-bottom: 16px;
   justify-content: center;
   align-items: center;
 }
 
 .call-shell:not(.call-shell--embedded) .call-stage {
-  min-height: clamp(240px, 40vh, 520px);
-  padding-bottom: clamp(0.4rem, 0.9vw, 0.75rem);
+  min-height: clamp(280px, 50vh, 600px);
+  padding-bottom: 16px;
 }
 
 .call-stage--embedded {
   flex: none;
-  min-height: clamp(200px, 38vh, 420px);
-  max-height: clamp(260px, 48vh, 520px);
-  border-radius: 0.65rem;
-  padding: clamp(0.45rem, 1vw, 0.7rem);
-  background: color-mix(in srgb, var(--color-panel-muted) 76%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 52%, transparent);
+  min-height: clamp(220px, 42vh, 480px);
+  max-height: clamp(280px, 52vh, 560px);
+  border-radius: 8px;
+  padding: 8px;
+  background: #1e1f22;
 }
 
-  .call-shell--minimal .call-stage {
-    background: #202225;
-    border: none;
-    padding: clamp(1.25rem, 3vw, 2rem);
-    min-height: calc(100vh - 2rem);
-    width: 100%;
-    align-items: center;
-    justify-content: center;
-    background-image: radial-gradient(circle at 10% 20%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px),
-      radial-gradient(circle at 80% 30%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px),
-      radial-gradient(circle at 50% 80%, rgba(255, 255, 255, 0.01) 0, rgba(255, 255, 255, 0.01) 2px, transparent 2px);
-    background-size: 120px 120px;
-  }
+.call-shell--minimal .call-stage {
+  background: #1e1f22;
+  border: none;
+  padding: 16px;
+  min-height: calc(100vh - 2rem);
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+
+/* ========================================================================== */
+/* Discord-style Video Grid                                                    */
+/* ========================================================================== */
 
 .call-grid {
-  display: grid;
-  grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
-  gap: 0.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   width: 100%;
-  max-width: calc(var(--call-grid-cols, 1) * 780px);
+  max-width: 100%;
   margin: 0 auto;
+  padding: 8px;
+  align-items: center;
+  justify-content: center;
   align-content: center;
-  align-items: stretch;
-  justify-items: stretch;
 }
 
 .call-grid--single {
-  grid-template-columns: minmax(0, 560px);
-  max-width: 640px;
+  max-width: 800px;
   justify-content: center;
 }
 
+/* Responsive grid gaps */
+@media (min-width: 640px) {
+  .call-grid {
+    gap: 8px;
+    padding: 8px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .call-grid {
+    gap: 8px;
+    padding: 12px;
+  }
+}
+
 .call-shell--minimal .call-grid {
-  grid-template-columns: repeat(var(--call-grid-cols, 1), minmax(0, 1fr));
-  justify-content: stretch;
-  justify-items: stretch;
-  gap: 0.4rem;
+  justify-content: center;
+  gap: 8px;
   width: 100%;
-  max-width: calc(var(--call-grid-cols, 1) * 780px);
+  max-width: 100%;
   margin: 0 auto;
+  padding: 8px;
 }
 
   .call-stage__overlay {
@@ -7229,94 +7631,99 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   .call-popout-placeholder {
-    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
-    border-radius: 0.9rem;
-    padding: 0.85rem 1rem;
-    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-    color: var(--text-70);
+    border: 2px dashed #3f4147;
+    border-radius: 8px;
+    padding: 16px;
+    background: #2b2d31;
+    color: #b5bac1;
   }
 
   .call-popout-placeholder__body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
+    gap: 16px;
     flex-wrap: wrap;
   }
 
   .call-popout-placeholder__title {
-    font-weight: 700;
-    color: var(--text-90);
-    margin: 0 0 0.25rem;
+    font-weight: 600;
+    color: #f2f3f5;
+    margin: 0 0 4px;
   }
 
   .call-popout-placeholder__subtitle {
     margin: 0;
-    font-size: 0.9rem;
+    font-size: 13px;
   }
 
   .call-popout-placeholder__action {
-    border-radius: 0.65rem;
-    padding: 0.6rem 1.1rem;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-accent) 65%, transparent);
-    color: var(--text-95);
-    font-weight: 600;
+    border-radius: 4px;
+    padding: 10px 16px;
+    background: #5865f2;
+    border: none;
+    color: white;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 150ms ease;
+  }
+
+  .call-popout-placeholder__action:hover {
+    background: #4752c4;
   }
 
   .self-preview {
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    border-radius: 0.9rem;
-    padding: 0.6rem;
-    background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
+    border-radius: 8px;
+    padding: 8px;
+    background: #2b2d31;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 6px;
   }
 
   .self-preview__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
-    font-size: 0.9rem;
-    color: var(--text-80);
+    gap: 8px;
+    font-size: 13px;
+    color: #b5bac1;
   }
 
   .self-preview__pill {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.25rem 0.5rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    font-size: 0.75rem;
-    color: var(--text-70);
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #1e1f22;
+    font-size: 11px;
+    color: #6d6f78;
   }
 
   .self-preview video {
     width: 100%;
-    border-radius: 0.7rem;
-    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    background: #1e1f22;
   }
 
 .call-grid--focus {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  grid-auto-rows: auto;
-  align-items: start;
-  gap: 0.5rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .call-tile--focus-main {
-  grid-column: 1 / -1;
+  width: 100%;
+  max-width: 100%;
   min-height: clamp(260px, 56vh, 640px);
-  --call-tile-aspect: 16 / 9;
+  flex: none;
 }
 
 .call-grid--focus .call-tile:not(.call-tile--focus-main) {
-  grid-row: 2;
-  --call-tile-target-height: clamp(120px, 18vh, 180px);
-  max-height: 190px;
+  width: 180px;
+  height: 180px;
+  flex: none;
 }
   .call-debug-banner {
     display: flex;
@@ -8113,32 +8520,33 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 @media (min-width: 1200px) {
   .call-grid {
-      --call-tile-min-width: clamp(300px, 24vw, 420px);
-    }
+    gap: 8px;
   }
+}
 
-  @media (min-width: 1600px) {
-    .call-grid {
-      --call-tile-min-width: clamp(320px, 22vw, 460px);
-    }
+@media (min-width: 1600px) {
+  .call-grid {
+    gap: 10px;
   }
+}
+
+/* ========================================================================== */
+/* Discord-style Video Tile                                                    */
+/* ========================================================================== */
 
 .call-tile {
   position: relative;
-  border-radius: 0.65rem;
+  width: 360px;
+  height: 202px;
+  border-radius: 8px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--color-panel) 75%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  background: #2b2d31;
   display: flex;
   flex-direction: column;
-  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 120ms ease;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
-  --call-tile-aspect: 16 / 9;
-  min-height: clamp(200px, 28vw, 360px);
-  width: 100%;
-  min-width: 0;
+  transition: box-shadow 200ms ease;
+  box-shadow: none;
   outline: none;
-  aspect-ratio: var(--call-tile-aspect, 16 / 9);
+  flex-shrink: 0;
 }
 
   @supports (aspect-ratio: 16 / 9) {
@@ -8148,48 +8556,48 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
 .call-tile--self {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 32%, transparent);
+  box-shadow: 0 0 0 2px var(--color-accent);
 }
 
 .call-tile--sharing {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-strong) 50%, transparent);
-  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  box-shadow: 0 0 0 2px #23a559;
 }
 
-  .call-shell--minimal .call-tile {
-    max-width: none;
-    min-width: 0;
-    min-height: clamp(180px, 24vw, 320px);
-  }
+.call-shell--minimal .call-tile {
+  width: 360px;
+  height: 202px;
+  border-radius: 8px;
+}
 
+/* Double size when alone in call - desktop */
+.call-grid--single .call-tile {
+  width: 720px;
+  height: 404px;
+}
+
+/* Discord green speaking glow */
 .call-tile--speaking {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 80%, #5865f2 10%), 0 4px 10px rgba(0, 0, 0, 0.2);
-  border-color: color-mix(in srgb, var(--color-accent) 72%, #5865f2 12%);
-  transition: transform 140ms ease, box-shadow 160ms ease, border-color 160ms ease;
+  box-shadow: 
+    0 0 0 2px #23a559,
+    0 0 16px rgba(35, 165, 89, 0.4);
 }
 
 .call-tile:focus-visible {
-  border-color: #4ea4ff;
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.call-tile--speaking:focus-visible {
   box-shadow:
-      0 0 0 3px #4ea4ff,
-      0 10px 28px rgba(0, 0, 0, 0.28);
-  }
+    0 0 0 2px #23a559,
+    0 0 16px rgba(35, 165, 89, 0.4);
+}
 
-  .call-tile--speaking:focus-visible {
-    box-shadow:
-      0 0 0 3px #4ea4ff,
-      0 0 0 6px rgba(88, 101, 242, 0.5),
-      0 14px 42px rgba(0, 0, 0, 0.4);
-    border-color: #4ea4ff;
-  }
-
-  .call-tile:focus-visible .call-tile__menu-button {
-    opacity: 1;
-  }
+.call-tile:focus-visible .call-tile__menu-button {
+  opacity: 1;
+}
 
 .call-tile:hover {
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-  border-color: color-mix(in srgb, #ffffff 10%, rgba(54, 57, 63, 0.7));
+  background: #32353b;
 }
 
 .call-tile__media {
@@ -8198,7 +8606,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--color-panel-muted) 72%, rgba(0, 0, 0, 0.4));
+  background: #2b2d31;
   overflow: hidden;
   min-height: 0;
 }
@@ -8209,76 +8617,74 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: rgba(0, 0, 0, 0.6);
+  background: #1e1f22;
   opacity: 0;
-  transition: opacity 160ms ease;
+  transition: opacity 200ms ease;
 }
 
-  .call-tile__media video.call-tile__video-visible {
-    opacity: 1;
-  }
+.call-tile__media video.call-tile__video-visible {
+  opacity: 1;
+}
 
-  .call-avatar,
-  .call-voice-row {
-    position: relative;
-    z-index: 1;
-  }
+.call-avatar,
+.call-voice-row {
+  position: relative;
+  z-index: 1;
+}
 
+/* Discord-style centered avatar for voice-only */
 .call-avatar {
   margin: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.35rem;
-  color: var(--text-70);
-  transform: none;
-  transition: opacity 140ms ease, transform 140ms ease, scale 140ms ease;
-  padding: 0.25rem;
+  gap: 8px;
+  color: #b5bac1;
+  padding: 8px;
 }
 
 .call-avatar--video {
   position: absolute;
-  top: 0.55rem;
-  left: 0.55rem;
-  transform: none;
-  gap: 0.25rem;
-  opacity: 0.9;
-  scale: 0.9;
+  top: 8px;
+  left: 8px;
+  gap: 4px;
+  opacity: 0.95;
+  scale: 0.75;
   z-index: 2;
 }
 
-  .call-avatar__image {
-    width: clamp(44px, 7vw, 56px);
-    height: clamp(44px, 7vw, 56px);
-    border-radius: 999px;
-    overflow: hidden;
-    border: 2px solid rgba(255, 255, 255, 0.08);
-    display: grid;
-    place-items: center;
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: var(--text-80);
-    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.03);
-  }
-
-  .call-avatar__image img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .call-avatar__hint {
-    text-transform: uppercase;
-    font-size: 0.7rem;
-    letter-spacing: 0.14em;
-    color: var(--text-50);
-  }
-
-  .call-voice-row {
-    display: flex;
+/* Discord-style avatar circle */
+.call-avatar__image {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
   align-items: center;
-  gap: 0.65rem;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-strong) 100%);
+  font-size: 2rem;
+  font-weight: 600;
+  color: white;
+}
+
+.call-avatar__image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.call-avatar__hint {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #6d6f78;
+}
+
+.call-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   padding: 0;
   justify-content: center;
@@ -8286,190 +8692,217 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 .call-voice-row .call-avatar {
   margin: 0;
-  transform: none;
-    padding: 0;
-  }
+  padding: 0;
+}
 
 .call-voice-meta {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 2px;
   min-width: 0;
   align-items: center;
 }
 
 .call-voice-name {
-  font-weight: 700;
-  color: #ffffff;
+  font-weight: 500;
+  color: #f2f3f5;
   max-width: 18ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
 }
 
-  .call-voice-icons {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    color: #b9bbbe;
-    font-size: 0.95rem;
-  }
+.call-voice-icons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #b5bac1;
+  font-size: 14px;
+}
 
 .call-voice-icons .is-off {
-  color: #b9bbbe;
+  color: #f23f43;
 }
 
 .call-tile__icons {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.45rem;
-    color: #b9bbbe;
-    font-size: 1.05rem;
-  }
+  gap: 4px;
+  color: #b5bac1;
+  font-size: 14px;
+}
 
-  .call-tile__icons .is-off {
-    color: #b9bbbe;
-  }
+.call-tile__icons .is-off {
+  color: #f23f43;
+}
 
+/* Discord-style tile footer with username */
 .call-tile__footer {
-  position: relative;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
   z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: color-mix(in srgb, var(--color-panel) 80%, rgba(0, 0, 0, 0.55));
-  border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+  gap: 8px;
+  padding: 8px 12px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.4) 60%, transparent 100%);
+  transition: background 150ms ease;
 }
 
 .call-tile__footer-name {
   min-width: 0;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
-  font-weight: 600;
-  color: #ffffff;
-  font-size: 0.9rem;
+  gap: 6px;
+  font-weight: 500;
+  color: #f2f3f5;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding-right: 0.25rem;
 }
 
 .call-tile__footer-text {
-  font-weight: 600;
-  color: #ffffff;
+  font-weight: 500;
+  color: #f2f3f5;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* "You" badge */
 .call-tile__footer-pill {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.12rem 0.4rem;
-  font-size: 0.65rem;
-  letter-spacing: 0.08em;
-  border-radius: 0.4rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  color: #dfe2e6;
-  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 4px;
+  color: #f2f3f5;
+  background: rgba(255, 255, 255, 0.1);
+  text-transform: uppercase;
 }
 
+/* Screen share badge - Discord green */
 .call-tile__footer-pill--share {
-  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
-  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
-  color: color-mix(in srgb, var(--color-accent) 92%, white);
+  background: #23a559;
+  color: white;
 }
 
+/* Status icons in footer */
 .call-tile__footer-icons {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
-  color: #e5e7eb;
-  font-size: 0.95rem;
-  transition: color 140ms ease;
+  gap: 6px;
+  color: #b5bac1;
+  font-size: 14px;
 }
 
 .call-tile__footer-icons .is-off {
-  color: #9ca3af;
+  color: #f23f43;
 }
 
 .call-tile:hover .call-tile__footer {
-  background: rgba(0, 0, 0, 0.72);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.5) 60%, transparent 100%);
 }
 
-  .call-tile:hover .call-tile__footer-icons {
-    color: #ffffff;
-  }
+.call-tile:hover .call-tile__footer-icons {
+  color: #f2f3f5;
+}
 
-  .call-tile__menu-button {
-    opacity: 0;
-    transform: translateY(6px);
-    pointer-events: none;
-    transition: opacity 120ms ease, transform 120ms ease;
-  }
+/* Menu button on tile */
+.call-tile__menu-button {
+  position: absolute;
+  right: 8px;
+  bottom: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #b5bac1;
+  font-size: 18px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity 100ms ease, transform 100ms ease, background 100ms ease, color 100ms ease;
+}
 
-  .call-tile:hover .call-tile__menu-button,
-  .call-tile__menu-button:focus-visible {
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
-  }
+.call-tile:hover .call-tile__menu-button,
+.call-tile__menu-button:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
 
-  .call-tile__menu-button:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
-  }
+.call-tile__menu-button:hover {
+  background: rgba(0, 0, 0, 0.8);
+  color: #f2f3f5;
+}
 
+.call-tile__menu-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+  /* Discord-style participant menu */
   .call-tile__menu-panel {
     position: absolute;
-    right: 0.85rem;
-    bottom: 4.25rem;
-    transform: none;
-    width: min(260px, 92%);
-    border-radius: 1rem;
-    padding: 1rem;
-    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: var(--shadow-elevated);
+    right: 8px;
+    bottom: 56px;
+    width: min(280px, 90%);
+    border-radius: 8px;
+    padding: 12px;
+    background: #111214;
+    border: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     z-index: 30;
-    color: var(--text-90);
+    color: #f2f3f5;
   }
 
   .call-menu__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    text-transform: none;
-    font-size: 0.9rem;
+    font-size: 14px;
     font-weight: 600;
-    color: var(--text-100);
+    color: #f2f3f5;
+    margin-bottom: 8px;
   }
 
   .call-menu__header button {
-    display: grid;
-    place-items: center;
-    width: 2rem;
-    height: 2rem;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--text-70);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    background: transparent;
+    color: #b5bac1;
+    border: none;
+    cursor: pointer;
   }
 
   .call-menu__header button:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text-90);
+    background: #2b2d31;
+    color: #f2f3f5;
   }
 
   .call-menu__section {
-    margin-top: 0.9rem;
+    margin-top: 8px;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 6px;
   }
 
   .volume-menu-backdrop {
@@ -8483,100 +8916,104 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     z-index: 81;
     transform: translate(-50%, -50%);
     width: 220px;
-    padding: 0.9rem;
-    border-radius: 0.75rem;
-    background: color-mix(in srgb, var(--color-panel) 82%, black 15%);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
-    color: var(--text-90);
+    padding: 12px;
+    border-radius: 8px;
+    background: #111214;
+    border: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    color: #f2f3f5;
   }
 
   .volume-menu__row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 0.9rem;
-    margin-bottom: 0.4rem;
+    font-size: 13px;
+    margin-bottom: 6px;
   }
 
   .volume-menu input[type='range'] {
     width: 100%;
+    accent-color: #5865f2;
   }
 
   .call-menu__note {
-    margin-top: 0.75rem;
-    padding-top: 0.6rem;
-    border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #2b2d31;
     display: flex;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: 8px;
     align-items: center;
   }
 
   .call-menu__label {
     display: flex;
     justify-content: space-between;
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
+    font-size: 10px;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--text-50);
+    color: #6d6f78;
   }
 
   .call-menu__slider {
     width: 100%;
-    accent-color: color-mix(in srgb, var(--color-accent) 85%, white);
+    accent-color: #5865f2;
   }
 
+  /* Discord-style action buttons in menu */
   .call-menu__action {
-    margin-top: 0.75rem;
+    margin-top: 4px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    border-radius: 0.9rem;
-    padding: 0.65rem 0.85rem;
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--text-80);
-    font-size: 0.85rem;
-    transition: background 150ms ease, color 150ms ease;
+    border-radius: 4px;
+    padding: 8px 10px;
+    background: transparent;
+    color: #b5bac1;
+    font-size: 13px;
+    border: none;
+    cursor: pointer;
+    transition: background 100ms ease, color 100ms ease;
   }
 
   .call-menu__action i {
-    font-size: 1rem;
+    font-size: 16px;
   }
 
   .call-menu__action:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text-100);
+    background: #4752c4;
+    color: #ffffff;
   }
 
   .call-menu__roles {
-    color: var(--text-70);
+    color: #6d6f78;
     font-weight: 500;
+    font-size: 12px;
   }
 
   .call-menu__action--danger {
-    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 90%, white);
+    color: #f23f43;
   }
 
   .call-menu__action--danger:hover {
-    background: color-mix(in srgb, var(--color-danger) 32%, transparent);
+    background: #f23f43;
+    color: #ffffff;
   }
 
   .call-more-menu {
     position: absolute;
-    bottom: calc(100% + 0.5rem);
+    bottom: calc(100% + 8px);
     right: 0;
-    min-width: 240px;
+    min-width: 180px;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.5rem;
-    border-radius: 0.9rem;
-    background: color-mix(in srgb, var(--color-panel) 78%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
-    box-shadow: var(--shadow-elevated);
+    padding: 6px;
+    border-radius: 4px;
+    background: #111214;
+    border: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     z-index: 24;
   }
 
@@ -8584,64 +9021,71 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     width: 100%;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.55rem 0.7rem;
-    border-radius: 0.75rem;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 3px;
     background: transparent;
     border: none;
-    color: var(--text-85);
+    color: #b5bac1;
+    font-size: 14px;
     text-align: left;
+    cursor: pointer;
+    transition: background 100ms ease, color 100ms ease;
+  }
+
+  .call-more-menu button i {
+    font-size: 16px;
+    opacity: 0.8;
   }
 
   .call-more-menu button:hover,
   .call-more-menu button:focus-visible {
-    background: color-mix(in srgb, var(--color-panel-muted) 35%, transparent);
-    color: var(--text-100);
+    background: #4752c4;
+    color: #ffffff;
   }
 
-  .call-more-menu small {
-    display: block;
-    color: var(--text-60);
-    font-size: 0.75rem;
+  .call-more-menu button:hover i,
+  .call-more-menu button:focus-visible i {
+    opacity: 1;
   }
+
+/* ========================================================================== */
+/* Discord-style Empty State / Join Preview                                    */
+/* ========================================================================== */
 
 .call-empty {
   margin: auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: clamp(1rem, 2vw, 1.5rem);
+  padding: 16px;
   width: 100%;
   text-align: center;
 }
 
 .call-empty__tile {
-  width: min(520px, 96%);
+  width: min(400px, 90%);
   aspect-ratio: 16 / 9;
-  border-radius: 0.75rem;
-  background: color-mix(in srgb, var(--color-panel) 75%, rgba(0, 0, 0, 0.2));
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  background: #2b2d31;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.6rem;
+  gap: 12px;
   text-align: center;
-  padding: 1rem;
+  padding: 24px;
 }
 
 .call-empty__avatar {
-  width: 82px;
-  height: 82px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-panel-muted) 70%, rgba(0, 0, 0, 0.3));
-  border: 2px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-  display: grid;
-  place-items: center;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-strong) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
 .call-empty__avatar img {
@@ -8651,45 +9095,43 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 }
 
 .call-empty__avatar i {
-  font-size: 1.8rem;
-  color: var(--text-70);
+  font-size: 2rem;
+  color: white;
 }
 
 .call-empty__label {
-  color: var(--text-95);
-  font-weight: 700;
-  font-size: 1rem;
+  color: #f2f3f5;
+  font-weight: 600;
+  font-size: 16px;
 }
 
 .call-empty__hint {
-  color: var(--text-60);
-  font-size: 0.9rem;
+  color: #6d6f78;
+  font-size: 13px;
 }
+
+/* ========================================================================== */
+/* Discord-style Control Bar                                                   */
+/* ========================================================================== */
 
 .call-controls {
   position: absolute;
   left: 50%;
-  bottom: clamp(3rem, 8vh, 5rem);
+  bottom: 20px;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 8px;
   width: auto;
-  max-width: calc(100% - 1.5rem);
-  border-radius: 0.9rem;
-  border: none;
-  background: none;
-  padding: 0.2rem 0.35rem;
+  max-width: calc(100% - 24px);
+  border-radius: 8px;
+  background: #1e1f22;
+  padding: 8px;
   opacity: 0;
   transform: translate(-50%, 12px);
   pointer-events: none;
-  transition:
-    opacity 160ms ease,
-    transform 160ms ease,
-    background 180ms ease,
-    border-color 180ms ease;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: opacity 150ms ease, transform 150ms ease;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 6;
-  backdrop-filter: blur(8px);
 }
 
 .call-controls--visible {
@@ -8707,12 +9149,10 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   transform: none;
   opacity: 1;
   pointer-events: auto;
-  border-radius: 0.55rem;
-  background: color-mix(in srgb, var(--color-panel) 92%, transparent);
-  border-color: color-mix(in srgb, var(--color-border-subtle) 58%, transparent);
+  border-radius: 8px;
+  background: #1e1f22;
   box-shadow: none;
-  backdrop-filter: none;
-  margin-top: 0.35rem;
+  margin-top: 8px;
 }
 
 .call-controls__row {
@@ -8720,63 +9160,69 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.3rem;
+  gap: 4px;
 }
 
-  .call-controls__row--join {
-    justify-content: center;
-    text-align: center;
-  }
+.call-controls__row--join {
+  justify-content: center;
+  text-align: center;
+}
 
-  .call-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.65rem 1.1rem;
-    border-radius: var(--radius-pill);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-90);
-    font-size: 0.9rem;
-    font-weight: 600;
-  }
+/* Join button */
+.call-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 4px;
+  border: none;
+  background: #23a559;
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
 
-  .call-button--primary {
-    background: var(--button-primary-bg);
-    color: var(--button-primary-text);
-    border-color: color-mix(in srgb, var(--button-primary-bg) 80%, transparent);
-  }
+.call-button:hover {
+  background: #1a7d41;
+}
 
-  .call-button--primary:hover {
-    background: var(--button-primary-hover);
-  }
+.call-button--primary {
+  background: #23a559;
+  color: white;
+}
 
-  .call-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
+.call-button--primary:hover {
+  background: #1a7d41;
+}
 
-  .call-status-message {
-    font-size: 0.8rem;
-    color: var(--text-60);
-  }
+.call-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.call-status-message {
+  font-size: 12px;
+  color: #6d6f78;
+}
 
 .call-controls__status {
   display: none;
 }
 
-  .call-audio-unlock {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
+.call-audio-unlock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 
 .call-controls__group {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 4px;
   flex-wrap: wrap;
 }
 
@@ -8785,12 +9231,12 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   display: flex;
   flex-wrap: nowrap;
   justify-content: center;
-  gap: 0.15rem;
+  gap: 4px;
   align-items: center;
 }
 
 .call-controls__group--exit {
-  gap: 0.15rem;
+  gap: 4px;
   align-items: center;
   padding-left: 0;
   margin-left: 0;
@@ -8801,83 +9247,85 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 0.2rem;
-  font-size: 0.72rem;
-  text-transform: none;
-  letter-spacing: 0.02em;
-  color: var(--text-70);
+  gap: 4px;
+  font-size: 11px;
+  color: #6d6f78;
 }
 
 .call-controls__item span {
   display: none;
 }
 
-  .call-controls__item--more {
-    position: relative;
-  }
-
-  .call-controls__item--leave span {
-    color: color-mix(in srgb, var(--color-danger) 85%, white);
-  }
-
-  .voice-root--compact .call-controls__item--leave-inline {
-    flex: 0 0 auto;
-  }
-
-.call-control-button {
-  display: grid;
-  place-items: center;
-  width: 3.4rem;
-  height: 3.4rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-  background: color-mix(in srgb, #1f1f1f 85%, rgba(0, 0, 0, 0.35));
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 1.25rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  transition: transform 120ms ease, background 150ms ease, color 150ms ease, border-color 150ms ease;
+.call-controls__item--more {
+  position: relative;
 }
 
-  .call-control-button:hover {
-    background: color-mix(in srgb, var(--color-panel) 90%, rgba(0, 0, 0, 0.2));
-    color: var(--text-100);
-    border-color: color-mix(in srgb, var(--color-border-strong) 70%, transparent);
-  }
+.call-controls__item--leave span {
+  color: #f23f43;
+}
 
-  .call-control-button--active {
-    background: color-mix(in srgb, var(--color-accent) 60%, rgba(0, 0, 0, 0.35));
-    color: color-mix(in srgb, var(--color-accent) 96%, white);
-    border-color: color-mix(in srgb, var(--color-accent) 75%, transparent);
-  }
+.voice-root--compact .call-controls__item--leave-inline {
+  flex: 0 0 auto;
+}
 
-  .call-control-button--danger {
-    background: color-mix(in srgb, var(--color-danger) 60%, rgba(0, 0, 0, 0.25));
-    color: color-mix(in srgb, var(--color-danger) 96%, white);
-    border-color: color-mix(in srgb, var(--color-danger) 70%, transparent);
-  }
+/* Discord-style circular control buttons */
+.call-control-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: #2b2d31;
+  color: #b5bac1;
+  font-size: 20px;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
 
-  .call-control-button--danger:hover {
-    background: color-mix(in srgb, var(--color-danger) 35%, transparent);
-  }
+.call-control-button:hover {
+  background: #404249;
+  color: #f2f3f5;
+}
 
-  .call-control-button--disabled,
-  .call-control-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-40);
-  }
+/* Active state (e.g., mic on) */
+.call-control-button--active {
+  background: #23a559;
+  color: white;
+}
+
+.call-control-button--active:hover {
+  background: #1a7d41;
+}
+
+/* Danger state (leave call) */
+.call-control-button--danger {
+  background: #f23f43;
+  color: white;
+}
+
+.call-control-button--danger:hover {
+  background: #d12d30;
+}
+
+.call-control-button--disabled,
+.call-control-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #2b2d31;
+  color: #6d6f78;
+}
 
   .call-error {
-    border-radius: var(--radius-lg);
-    border: 1px solid color-mix(in srgb, var(--color-danger) 45%, transparent);
-    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
-    padding: 0.9rem 1.1rem;
-    color: color-mix(in srgb, var(--color-danger) 85%, white);
-    font-size: 0.9rem;
+    border-radius: 8px;
+    background: rgba(242, 63, 67, 0.15);
+    padding: 12px 16px;
+    color: #f23f43;
+    font-size: 13px;
     display: flex;
     align-items: flex-start;
-    gap: 0.6rem;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
@@ -8889,19 +9337,25 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   .call-error__copy {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.45rem 0.65rem;
-    border-radius: var(--radius-md);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 45%, transparent);
-    color: var(--text-90);
-    font-size: 0.8rem;
+    gap: 4px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: none;
+    background: #2b2d31;
+    color: #b5bac1;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .call-error__copy:hover {
+    background: #404249;
+    color: #f2f3f5;
   }
 
   .call-error__copy:disabled {
-    opacity: 0.65;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
@@ -8909,7 +9363,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   .voice-root--compact .call-controls__group--exit {
     width: 100%;
     justify-content: space-between;
-    gap: 0.65rem;
+    gap: 8px;
     flex-wrap: nowrap;
   }
 
@@ -8919,8 +9373,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   .voice-root--compact .call-control-button {
-    width: clamp(3.2rem, 18vw, 4rem);
-    height: clamp(3.2rem, 18vw, 4rem);
+    width: clamp(42px, 16vw, 52px);
+    height: clamp(42px, 16vw, 52px);
   }
 
   .call-controls__item--messages {
@@ -8933,29 +9387,49 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     }
   }
 
+  /* ========================================================================== */
+  /* Mobile Responsive Styles                                                    */
+  /* ========================================================================== */
+
   @media (max-width: 768px) {
     .voice-root {
-      padding: 0.75rem;
+      padding: 4px;
     }
 
     .call-shell {
-      padding: 1rem;
+      padding: 8px;
     }
 
     .call-stage {
-      padding: 0.75rem;
+      padding: 4px;
+    }
+
+    .call-grid {
+      gap: 6px;
+    }
+
+    .call-tile {
+      width: 320px;
+      height: 180px;
+      border-radius: 6px;
+    }
+
+    /* Double size when alone - tablet */
+    .call-grid--single .call-tile {
+      width: 560px;
+      height: 315px;
     }
 
     .call-controls__row--connected {
       flex-direction: column;
-      gap: 0.75rem;
+      gap: 8px;
     }
 
     .call-controls__group--main,
     .call-controls__group--exit {
       order: 2;
       justify-content: space-between;
-      gap: 0.6rem;
+      gap: 6px;
     }
 
     .call-controls__group--main .call-controls__item,
@@ -8967,29 +9441,79 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       order: 1;
       text-align: center;
     }
+
+    .call-controls {
+      bottom: 12px;
+      padding: 6px;
+      gap: 6px;
+    }
+
+    .call-avatar__image {
+      width: 56px;
+      height: 56px;
+      font-size: 1.25rem;
+    }
+
+    .call-control-button {
+      width: 42px;
+      height: 42px;
+      font-size: 18px;
+    }
   }
 
   @media (max-width: 480px) {
     .call-grid {
-      --call-tile-min-width: 170px;
-      grid-template-columns: repeat(auto-fit, minmax(var(--call-tile-min-width), 1fr));
-      max-width: 100%;
+      gap: 4px;
+    }
+
+    .call-tile {
+      width: 280px;
+      height: 158px;
+      border-radius: 6px;
+    }
+
+    /* Double size when alone - mobile */
+    .call-grid--single .call-tile {
+      width: 100%;
+      max-width: 480px;
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+
+    .call-tile__footer {
+      padding: 6px 8px;
+    }
+
+    .call-tile__footer-name {
+      font-size: 11px;
     }
 
     .call-controls__group--main {
-      gap: 0.58rem;
+      gap: 4px;
     }
 
     .call-controls__item {
-      gap: 0.18rem;
+      gap: 2px;
     }
 
     .call-controls__item span {
-      font-size: 0.6rem;
-      letter-spacing: 0.04em;
+      font-size: 9px;
     }
 
+    .call-avatar__image {
+      width: 48px;
+      height: 48px;
+      font-size: 1rem;
+    }
+
+    .call-empty__tile {
+      aspect-ratio: 1;
+    }
+
+    .call-control-button {
+      width: 38px;
+      height: 38px;
+      font-size: 16px;
+    }
   }
 </style>
-
-

@@ -22,6 +22,10 @@ export function resolveProfilePhotoURL(record: any, fallback?: string | null): s
   const custom = cleanUrl(record?.customPhotoURL);
   if (custom) return custom;
 
+  // Prefer cached Firebase Storage URL over external provider URLs
+  const cached = cleanUrl(record?.cachedPhotoURL);
+  if (cached) return cached;
+
   const provider = cleanUrl(record?.authPhotoURL) ?? cleanUrl(record?.photo) ?? cleanUrl(record?.picture);
   if (provider) return provider;
 

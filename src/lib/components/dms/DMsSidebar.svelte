@@ -1,7 +1,9 @@
+
 <script lang="ts">
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { run, stopPropagation } from 'svelte/legacy';
 
-  import { createEventDispatcher, onDestroy } from 'svelte';
+import { createEventDispatcher, onDestroy, untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
   import { db } from '$lib/firestore/client';
@@ -137,7 +139,7 @@ let {
   /* ---------------- Threads ---------------- */
   let threads: any[] = $state([]);
   let threadsLoading = $state(true);
-  let unsubThreads: (() => void) | null = $state(null);
+  let unsubThreads: (() => void) | null = null;
   let threadMeta: Record<string, { lastMessage: string | null; lastSender: string | null; updatedAt: any | null }> = $state({});
   let metaUnsubs: Record<string, () => void> = {};
   let decoratedThreads: any[] = $state([]);
@@ -202,17 +204,8 @@ let {
     const other = resolveOtherUid(t);
     if (!other) return null;
     const fromPeople = peopleMap[other];
-    if (fromPeople) {
-      if (fromPeople.photoURL) return fromPeople.photoURL;
-      if (fromPeople.authPhotoURL) return fromPeople.authPhotoURL;
-    }
-    return (
-      t.otherPhotoURL ??
-      t.photoURL ??
-      t.profile?.photoURL ??
-      t.profile?.authPhotoURL ??
-      null
-    );
+    if (fromPeople) return resolveProfilePhotoURL(fromPeople);
+    return resolveProfilePhotoURL(t.profile) || t.otherPhotoURL || t.photoURL || null;
   }
 
   function timestampValue(value: any): number {
@@ -388,7 +381,7 @@ let {
 
   /* ---------------- Unread badges ---------------- */
   let unreadMap: Record<string, number> = $state({});
-  let unsubsUnread: Array<() => void> = $state([]);
+  let unsubsUnread: Array<() => void> = [];
 
   onDestroy(() => unsubsUnread.forEach((u) => u()));
 
@@ -396,7 +389,7 @@ let {
   let people: any[] = $state([]);
   let peopleLoading = $state(true);
   let peopleMap: Record<string, any> = $state({});
-  let unsubPeople: (() => void) | null = $state(null);
+  let unsubPeople: (() => void) | null = null;
 
   onDestroy(() => unsubPeople?.());
 
@@ -618,7 +611,8 @@ let {
     me = $user;
   });
   run(() => {
-    unsubThreads?.();
+    const prevUnsub = untrack(() => unsubThreads);
+    prevUnsub?.();
     if (me?.uid) {
       threadsLoading = true;
       unsubThreads = streamMyDMs(me.uid, (t) => {
@@ -632,8 +626,9 @@ let {
   });
   run(() => {
     if (threads?.length) {
+      const cache = untrack(() => nameCache);
       let updated = false;
-      const nextCache = { ...nameCache };
+      const nextCache = { ...cache };
       for (const t of threads) {
         const other = resolveOtherUid(t);
         if (!other) continue;
@@ -651,9 +646,10 @@ let {
   run(() => {
     (async () => {
       if (!threads?.length) return;
+      const cache = untrack(() => nameCache);
       for (const t of threads) {
         const other = resolveOtherUid(t);
-        if (other && !nameCache[other]) {
+        if (other && !cache[other]) {
           try {
             const prof = await getProfile(other);
             const resolved =
@@ -662,7 +658,8 @@ let {
               prof?.email ??
               null;
             if (resolved) {
-              nameCache = { ...nameCache, [other]: resolved };
+              nameCache = { ...cache, [other]: resolved };
+              cache[other] = resolved;
             }
           } catch {}
         }
@@ -700,12 +697,14 @@ let {
       });
   });
   run(() => {
-    unsubsUnread.forEach((u) => u());
+    const prevStops = untrack(() => unsubsUnread);
+    prevStops.forEach((u) => u());
     unsubsUnread = [];
     if (me?.uid) {
       for (const t of threads) {
         const stop = streamUnreadCount(t.id, me.uid, (n) => {
-          unreadMap = { ...unreadMap, [t.id]: n };
+          const prev = untrack(() => unreadMap);
+          unreadMap = { ...prev, [t.id]: n };
         });
         unsubsUnread.push(stop);
       }
@@ -713,7 +712,8 @@ let {
   });
   run(() => {
     peopleLoading = true;
-    unsubPeople?.();
+    const prevUnsub = untrack(() => unsubPeople);
+    prevUnsub?.();
     unsubPeople = streamProfiles((list) => {
       const filtered = (me?.uid) ? list.filter((p) => p.uid !== me.uid) : list;
       people = filtered;
@@ -722,7 +722,8 @@ let {
       peopleMap = map;
 
       if (filtered.length) {
-        const next = { ...nameCache };
+        const baseCache = untrack(() => nameCache);
+        const next = { ...baseCache };
         let updated = false;
         for (const person of filtered) {
           const uid = person?.uid;
@@ -849,11 +850,17 @@ let {
                 >
                   <div class="dm-thread__avatar">
                     <div class="dm-thread__avatar-img">
-                      {#if otherPhoto}
-                        <img class="w-full h-full object-cover" src={otherPhoto} alt="" />
-                      {:else}
-                        <i class="bx bx-user text-lg text-white/80"></i>
-                      {/if}
+                      <img
+                        class="w-full h-full object-cover"
+                        src={otherPhoto}
+                        alt=""
+                        onerror={(e) => {
+                          const img = e.currentTarget as HTMLImageElement | null;
+                          if (!img) return;
+                          img.onerror = null;
+                          img.src = '/default-avatar.svg';
+                        }}
+                      />
                     </div>
                     {#if otherUid}
                       <span

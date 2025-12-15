@@ -35,12 +35,16 @@
     '/admin/logs': 'Inspect system logs with filters.',
     '/admin/archive': 'Restore or purge archived content.',
     '/admin/super-admins': 'Manage Super Admin allow list.',
-    '/admin/settings': 'Tune retention and safety preferences.'
+    '/admin/settings': 'Tune retention and safety preferences.',
+    '/admin/health': 'Monitor system health and performance.',
+    '/admin/announcements': 'Create and manage system alerts.'
   };
 
   const manualTitles: Record<string, string> = {
     '/admin/settings': 'Settings',
-    '/admin/super-admins': 'Super Admins'
+    '/admin/super-admins': 'Super Admins',
+    '/admin/health': 'System Health',
+    '/admin/announcements': 'Announcements'
   };
 
   const fallbackDescription = $derived(descriptions[currentPath] ?? 'Super Admin area.');

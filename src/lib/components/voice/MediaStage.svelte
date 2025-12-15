@@ -34,6 +34,7 @@
     onToggleSelf?: (() => void) | null;
     onOpenSettings?: (() => void) | null;
     controlsVisibleOverride?: boolean | null;
+    hideControls?: boolean;
   };
 
   export type Props = MediaStageProps;
@@ -57,7 +58,8 @@
     onToggleGrid = null,
     onToggleSelf = null,
     onOpenSettings = null,
-    controlsVisibleOverride = null
+    controlsVisibleOverride = null,
+    hideControls = false
   }: MediaStageProps = $props();
 
   let hoverEnabled = true;
@@ -201,6 +203,7 @@
       {/each}
     </div>
   {/if}
+  {#if !hideControls}
   <div
     class={`stage-controls ${controlVisible ? 'is-visible' : ''}`}
     onpointerenter={handlePointerEnterArea}
@@ -247,9 +250,14 @@
       {/if}
     </div>
   </div>
+  {/if}
 </div>
 
 <style>
+  /* ========================================================================== */
+  /* Discord-style Voice Channel UI                                              */
+  /* ========================================================================== */
+  
   .media-stage {
     position: relative;
     display: flex;
@@ -261,224 +269,368 @@
   .media-stage--voice {
     align-items: center;
     justify-content: center;
-    padding: clamp(1rem, 2vw, 1.5rem);
-    padding-bottom: clamp(2.25rem, 4vw, 3rem);
+    padding: 1rem;
+    background: #1e1f22;
   }
 
   .media-stage--voice-solo {
-    padding-inline: clamp(1.5rem, 4vw, 3rem);
+    padding: 1.5rem;
   }
 
+  /* Discord-style grid - wraps users in compact tiles */
   .voice-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
-    gap: clamp(1rem, 2.6vw, 1.5rem);
-    width: min(100%, 1680px);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+    max-width: 1200px;
     justify-content: center;
-    justify-items: stretch;
+    align-items: center;
+    align-content: center;
     margin: 0 auto;
-    align-content: start;
+    padding: 8px;
   }
 
   .voice-grid--solo {
-    grid-template-columns: minmax(680px, 1fr);
-    width: min(100%, 1680px);
+    max-width: 400px;
   }
 
+  /* Discord-style voice card - 16:9 rectangular */
   .voice-card {
-    border-radius: 1rem;
-    padding: 0.95rem 1rem;
-    background: color-mix(in srgb, var(--color-panel) 75%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    position: relative;
+    width: 360px;
+    height: 202px;
+    border-radius: 8px;
+    background: #2b2d31;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
     align-items: center;
     justify-content: center;
-    position: relative;
+    gap: 8px;
     overflow: hidden;
-    width: 100%;
-    max-width: 820px;
-    min-width: 360px;
-    min-height: 260px;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
-    transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
-    aspect-ratio: 16 / 9;
-    text-align: center;
+    transition: background 150ms ease, box-shadow 200ms ease;
+    cursor: pointer;
   }
 
   .voice-grid--solo .voice-card {
-    max-width: none;
-    width: 100%;
-    min-height: clamp(520px, 70vh, 860px);
-    background: #2a2421;
-    border-color: #332b27;
-    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.32);
-    gap: 1.25rem;
+    width: 280px;
+    height: 280px;
+    border-radius: 12px;
   }
 
-  .voice-card:hover,
-  .voice-card:focus-visible {
-    transform: translateY(-2px);
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.26);
-    border-color: color-mix(in srgb, #ffffff 12%, var(--color-border-subtle) 88%);
-    outline: none;
+  .voice-card:hover {
+    background: #32353b;
   }
 
+  /* Speaking state - Discord green glow ring */
   .voice-card.is-speaking {
-    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    box-shadow: 
+      0 0 0 2px #23a559,
+      0 0 12px rgba(35, 165, 89, 0.4);
   }
 
+  /* Avatar container with speaking ring */
   .voice-card__avatar {
     position: relative;
-    width: 3.65rem;
-    height: 3.65rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-    display: grid;
-    place-items: center;
-    overflow: hidden;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-strong) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: visible;
+    flex-shrink: 0;
   }
 
   .voice-grid--solo .voice-card__avatar {
-    width: 6.2rem;
-    height: 6.2rem;
-    background: rgba(255, 255, 255, 0.05);
+    width: 120px;
+    height: 120px;
   }
 
   .voice-card__avatar img {
     width: 100%;
     height: 100%;
+    border-radius: 50%;
     object-fit: cover;
   }
 
   .voice-card__avatar span {
-    font-weight: 700;
-    color: var(--text-80);
+    font-weight: 600;
+    color: white;
+    font-size: 2rem;
+    text-transform: uppercase;
   }
 
+  .voice-grid--solo .voice-card__avatar span {
+    font-size: 3rem;
+  }
+
+  /* Speaking halo ring animation */
   .voice-card__halo {
     position: absolute;
-    inset: -2px;
-    border: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
-    border-radius: inherit;
+    inset: -4px;
+    border: 3px solid #23a559;
+    border-radius: 50%;
     opacity: 0;
-    transition: opacity 160ms ease;
-  }
-
-  .voice-grid--solo .voice-card__halo {
-    inset: -3px;
+    transition: opacity 150ms ease;
+    animation: none;
   }
 
   .voice-card.is-speaking .voice-card__halo {
     opacity: 1;
+    animation: voice-pulse 1.5s ease-in-out infinite;
   }
 
+  @keyframes voice-pulse {
+    0%, 100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(1.05);
+      opacity: 0.7;
+    }
+  }
+
+  /* User info below avatar */
   .voice-card__body {
-    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
     align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: calc(100% - 16px);
   }
 
   .voice-card__name {
-    font-weight: 700;
-    color: var(--text-90);
-    display: inline-flex;
+    font-weight: 500;
+    color: #f2f3f5;
+    font-size: 13px;
+    display: flex;
     align-items: center;
-    gap: 0.4rem;
-    justify-content: center;
+    gap: 6px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .voice-grid--solo .voice-card__name {
-    font-size: 1.05rem;
+    font-size: 15px;
   }
 
+  /* "You" pill badge */
   .voice-card__pill {
-    font-size: 11px;
+    font-size: 10px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
-    color: var(--text-70);
+    letter-spacing: 0.02em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    flex-shrink: 0;
   }
 
-.stage-controls {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0.35rem;
-  transform: none;
-  display: inline-flex;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
-  border-radius: 0.65rem;
-  background: rgba(12, 14, 20, 0.82);
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.4);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 160ms ease, transform 160ms ease;
-  backdrop-filter: blur(8px);
-  z-index: 5;
-  display: none;
-}
+  /* Status icons row (mic/video indicators) */
+  .voice-card__icons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #b5bac1;
+    font-size: 14px;
+  }
 
-.stage-controls.is-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
+  .voice-card__icons .is-muted {
+    color: #f23f43;
+  }
 
-.stage-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.42rem 0.65rem;
-  border-radius: 0.55rem;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-80);
-  font-size: 0.85rem;
-  font-weight: 600;
-  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
-}
+  /* ========================================================================== */
+  /* Stage Controls Bar - Discord style                                          */
+  /* ========================================================================== */
+
+  .stage-controls {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background: #1e1f22;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+    z-index: 5;
+  }
+
+  .stage-controls.is-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Control button - Discord circular style */
+  .stage-control {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: none;
+    background: #2b2d31;
+    color: #b5bac1;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 150ms ease, color 150ms ease;
+  }
+
+  .stage-control:hover {
+    background: #404249;
+    color: #f2f3f5;
+  }
 
   .stage-control.is-active {
-    color: color-mix(in srgb, var(--color-accent) 95%, white);
-    border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    background: #23a559;
+    color: white;
+  }
+
+  .stage-control.is-active:hover {
+    background: #1a7d41;
   }
 
   .stage-control.is-disabled {
-    opacity: 0.55;
-  }
-
-  .stage-control:hover:not(.is-disabled),
-  .stage-control:focus-visible:not(.is-disabled) {
-    color: var(--text-100);
-    border-color: color-mix(in srgb, var(--color-border-strong) 55%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 55%, transparent);
-    outline: none;
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .stage-control i {
-    font-size: 1.15rem;
+    font-size: 20px;
   }
 
+  .stage-control span {
+    display: none;
+  }
+
+  .stage-control--more {
+    position: relative;
+  }
+
+  /* Dropdown menu */
+  .stage-more-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 180px;
+    padding: 6px;
+    border-radius: 4px;
+    background: #111214;
+    border: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stage-more-menu button {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 3px;
+    border: none;
+    background: transparent;
+    color: #b5bac1;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 100ms ease, color 100ms ease;
+  }
+
+  .stage-more-menu button:hover {
+    background: #4752c4;
+    color: #ffffff;
+  }
+
+  /* ========================================================================== */
+  /* Responsive Breakpoints                                                      */
+  /* ========================================================================== */
 
   @media (max-width: 768px) {
-    .stage-controls {
-      width: calc(100% - 1.4rem);
-      justify-content: space-between;
-      gap: 0.25rem;
+    .voice-grid {
+      gap: 6px;
+      padding: 6px;
     }
 
-    .stage-control span {
-      display: none;
+    .voice-card {
+      width: 160px;
+      height: 160px;
+    }
+
+    .voice-card__avatar {
+      width: 60px;
+      height: 60px;
+    }
+
+    .voice-card__avatar span {
+      font-size: 1.5rem;
+    }
+
+    .voice-card__name {
+      font-size: 12px;
+    }
+
+    .stage-controls {
+      gap: 6px;
+      padding: 6px;
+    }
+
+    .stage-control {
+      width: 42px;
+      height: 42px;
+    }
+
+    .stage-control i {
+      font-size: 18px;
+    }
+
+    .voice-grid--solo .voice-card {
+      width: 220px;
+      height: 220px;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .voice-card {
+      width: 220px;
+      height: 124px;
+    }
+
+    .voice-card__avatar {
+      width: 48px;
+      height: 48px;
+    }
+
+    .voice-card__avatar span {
+      font-size: 1.25rem;
+    }
+
+    .voice-card__name {
+      font-size: 11px;
+    }
+
+    .stage-control {
+      width: 38px;
+      height: 38px;
+    }
+
+    .stage-control i {
+      font-size: 16px;
     }
   }
 </style>

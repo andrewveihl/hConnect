@@ -11,6 +11,7 @@
 import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 import LeftPane from '$lib/components/app/LeftPane.svelte';
 import TicketAIModal from '$lib/components/servers/TicketAIModal.svelte';
+import { subscribeTicketAiSettings } from '$lib/firestore/ticketAi';
 import { bitsAsNumber, PERMISSION_KEYS, toPermissionBits } from '$lib/permissions/permissions';
 
 import {
@@ -24,6 +25,7 @@ import {
 const ICON_MAX_BYTES = 8 * 1024 * 1024;
 const FIRESTORE_IMAGE_LIMIT = 900 * 1024;
 const ICON_MAX_DIMENSION = 512;
+const ICON_CROP_FRAME = 260;
 const DEFAULT_ACCENT = '#33c8bf';
 const DEFAULT_SIDEBAR = '#13171d';
 const DEFAULT_MENTION = '#f97316';
@@ -50,6 +52,17 @@ const DEFAULT_MENTION = '#f97316';
   let serverIcon = $state('');
   let serverIconInput: HTMLInputElement | null = $state(null);
   let serverIconError: string | null = $state(null);
+  let serverIconCropOpen = $state(false);
+  let serverIconCropSrc: string | null = $state(null);
+  let serverIconCropImage: HTMLImageElement | null = $state(null);
+  let serverIconCropScale = $state(1);
+  let serverIconCropMinScale = $state(1);
+  let serverIconCropMaxScale = $state(3);
+  let serverIconCropOffset = $state({ x: 0, y: 0 });
+  let serverIconCropDragging = $state(false);
+  let serverIconCropDragStart = $state({ x: 0, y: 0 });
+  let serverIconCropDragOrigin = $state({ x: 0, y: 0 });
+  let serverIconCropDimensions = $state({ width: 0, height: 0 });
   type ChatDensity = 'cozy' | 'compact';
   type BubbleShape = 'rounded' | 'pill' | 'minimal';
   let accentColor = $state(DEFAULT_ACCENT);
@@ -63,6 +76,7 @@ const DEFAULT_MENTION = '#f97316';
   let chatShowJoinMessages = $state(true);
   let chatSlowModeSeconds = $state(0);
   let inviteAutomationEnabled = $state(false);
+  let ticketAiEnabled = $state(false);
   let inviteDomains: string[] = $state([]);
   let inviteDomainInput = $state('');
   let inviteDefaultRoleId: string | null = $state(null);
@@ -121,6 +135,7 @@ let overviewSaveTimer: ReturnType<typeof setTimeout> | null = null;
   ];
 
   const navGroups = $derived(Array.from(new Set(navItems.map((item) => item.group))));
+  const iconCropPreviewScale = $derived(Math.min(1, 140 / ICON_CROP_FRAME));
 
   let tab: Tab = $state('profile');
   $effect(() => {
@@ -397,6 +412,7 @@ let roleMemberSearch = $state('');
   let touchStartAt = 0;
   let touchStartTarget: EventTarget | null = null;
   let offMyMember: Unsubscribe | null = null;
+  let offTicketAi: Unsubscribe | null = null;
 
   function ownerFrom(data: any) {
     return data?.owner ?? data?.ownerId ?? data?.createdBy ?? null;
@@ -1046,6 +1062,9 @@ let roleMemberSearch = $state('');
       offProfiles = watchProfiles();
       offRoles = watchRoles();
       offMyMember = watchMyMembership();
+      offTicketAi = subscribeTicketAiSettings(serverId!, (settings) => {
+        ticketAiEnabled = settings.enabled;
+      });
       offDirectory = subscribeServerDirectory(serverId!, (entries) => {
         const next: Record<string, MentionDirectoryEntry> = {};
         for (const entry of entries) {
@@ -1064,6 +1083,7 @@ let roleMemberSearch = $state('');
       offProfiles?.();
       offRoles?.();
       offMyMember?.();
+      offTicketAi?.();
       offDirectory?.();
       offInvites?.();
       inviteProfileStops.forEach((stop) => stop());
@@ -1278,36 +1298,178 @@ let roleMemberSearch = $state('');
     return Math.ceil((base64.length * 3) / 4);
   }
 
-  async function compressServerImage(file: File): Promise<string> {
-    const objectUrl = URL.createObjectURL(file);
+  function exportCanvasToDataUrl(canvas: HTMLCanvasElement): string {
+    let quality = 0.92;
+    let result = canvas.toDataURL('image/webp', quality);
+    while (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT && quality > 0.4) {
+      quality = Math.max(0.4, quality - 0.08);
+      result = canvas.toDataURL('image/webp', quality);
+    }
+    if (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT) {
+      throw new Error('Image is still too large after compression.');
+    }
+    return result;
+  }
+
+  function clampCropOffset(
+    offset: { x: number; y: number },
+    scale = serverIconCropScale,
+    dims = serverIconCropDimensions
+  ) {
+    if (!dims.width || !dims.height) return { x: 0, y: 0 };
+    const frame = ICON_CROP_FRAME;
+    const displayWidth = dims.width * scale;
+    const displayHeight = dims.height * scale;
+    const maxX = Math.max(0, (displayWidth - frame) / 2);
+    const maxY = Math.max(0, (displayHeight - frame) / 2);
+    return {
+      x: Math.min(Math.max(offset.x, -maxX), maxX),
+      y: Math.min(Math.max(offset.y, -maxY), maxY)
+    };
+  }
+
+  function adjustIconCropScale(value: number) {
+    const clamped = Math.min(Math.max(value, serverIconCropMinScale), serverIconCropMaxScale);
+    serverIconCropScale = clamped;
+    serverIconCropOffset = clampCropOffset(serverIconCropOffset, clamped);
+  }
+
+  function onIconCropWheel(event: WheelEvent) {
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.08 : 0.08;
+    adjustIconCropScale(serverIconCropScale + delta);
+  }
+
+  const handleIconCropDrag = (event: PointerEvent) => {
+    if (!serverIconCropDragging) return;
+    const deltaX = event.clientX - serverIconCropDragStart.x;
+    const deltaY = event.clientY - serverIconCropDragStart.y;
+    serverIconCropOffset = clampCropOffset(
+      { x: serverIconCropDragOrigin.x + deltaX, y: serverIconCropDragOrigin.y + deltaY },
+      serverIconCropScale
+    );
+  };
+
+  function endIconCropDrag() {
+    serverIconCropDragging = false;
+    window.removeEventListener('pointermove', handleIconCropDrag);
+    window.removeEventListener('pointerup', endIconCropDrag);
+  }
+
+  function startIconCropDrag(event: PointerEvent) {
+    if (!serverIconCropOpen) return;
+    event.preventDefault();
+    serverIconCropDragging = true;
+    serverIconCropDragStart = { x: event.clientX, y: event.clientY };
+    serverIconCropDragOrigin = { ...serverIconCropOffset };
+    window.addEventListener('pointermove', handleIconCropDrag);
+    window.addEventListener('pointerup', endIconCropDrag);
+  }
+
+  async function readFileAsDataUrl(file: File): Promise<string> {
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string) ?? '');
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function loadImageFromSource(src: string): Promise<HTMLImageElement> {
+    return await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Could not open that image.'));
+      image.src = src;
+    });
+  }
+
+  async function openServerIconCropperFromSource(source: string) {
+    const img = await loadImageFromSource(source);
+    const minScale = Math.max(ICON_CROP_FRAME / img.width, ICON_CROP_FRAME / img.height);
+    const maxScale = Math.max(minScale * 3, minScale + 1);
+    serverIconCropImage = img;
+    serverIconCropSrc = source;
+    serverIconCropDimensions = { width: img.width, height: img.height };
+    serverIconCropMinScale = minScale;
+    serverIconCropMaxScale = maxScale;
+    serverIconCropScale = minScale;
+    serverIconCropOffset = clampCropOffset({ x: 0, y: 0 }, minScale, { width: img.width, height: img.height });
+    serverIconCropOpen = true;
+    serverIconError = null;
+  }
+
+  function closeServerIconCropper() {
+    endIconCropDrag();
+    serverIconCropOpen = false;
+    serverIconCropSrc = null;
+    serverIconCropImage = null;
+    serverIconCropDragging = false;
+    serverIconCropOffset = { x: 0, y: 0 };
+    serverIconCropDimensions = { width: 0, height: 0 };
+    serverIconCropScale = 1;
+    serverIconCropMinScale = 1;
+    serverIconCropMaxScale = 3;
+  }
+
+  function renderServerIconFromCrop(): string {
+    if (!serverIconCropImage || !serverIconCropDimensions.width || !serverIconCropDimensions.height) {
+      throw new Error('No image to crop.');
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = ICON_MAX_DIMENSION;
+    canvas.height = ICON_MAX_DIMENSION;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas unavailable');
+    const frame = ICON_CROP_FRAME;
+    const displayWidth = serverIconCropDimensions.width * serverIconCropScale;
+    const displayHeight = serverIconCropDimensions.height * serverIconCropScale;
+    const imageLeft = (frame - displayWidth) / 2 + serverIconCropOffset.x;
+    const imageTop = (frame - displayHeight) / 2 + serverIconCropOffset.y;
+    const cropX = Math.max(0, -imageLeft / serverIconCropScale);
+    const cropY = Math.max(0, -imageTop / serverIconCropScale);
+    const cropSize = frame / serverIconCropScale;
+    const sourceX = Math.min(Math.max(cropX, 0), Math.max(0, serverIconCropDimensions.width - cropSize));
+    const sourceY = Math.min(Math.max(cropY, 0), Math.max(0, serverIconCropDimensions.height - cropSize));
+    ctx.fillStyle = '#0b1220';
+    ctx.fillRect(0, 0, ICON_MAX_DIMENSION, ICON_MAX_DIMENSION);
+    ctx.drawImage(
+      serverIconCropImage,
+      sourceX,
+      sourceY,
+      cropSize,
+      cropSize,
+      0,
+      0,
+      ICON_MAX_DIMENSION,
+      ICON_MAX_DIMENSION
+    );
+    return exportCanvasToDataUrl(canvas);
+  }
+
+  async function applyServerIconCrop() {
     try {
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = reject;
-        image.src = objectUrl;
-      });
+      const processed = renderServerIconFromCrop();
+      serverIcon = processed;
+      serverIconError = null;
+      scheduleSaveOverview();
+      closeServerIconCropper();
+    } catch (error: any) {
+      serverIconError = error?.message ?? 'Could not finalize the selected image.';
+    }
+  }
 
-      const scale = Math.min(1, ICON_MAX_DIMENSION / Math.max(img.width, img.height));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.floor(img.width * scale));
-      canvas.height = Math.max(1, Math.floor(img.height * scale));
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Canvas unavailable');
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  async function openServerIconCropperFromFile(file: File) {
+    const dataUrl = await readFileAsDataUrl(file);
+    await openServerIconCropperFromSource(dataUrl);
+  }
 
-      let quality = 0.92;
-      let result = canvas.toDataURL('image/webp', quality);
-      while (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT && quality > 0.4) {
-        quality -= 0.1;
-        result = canvas.toDataURL('image/webp', quality);
-      }
-      if (dataUrlBytes(result) > FIRESTORE_IMAGE_LIMIT) {
-        throw new Error('Image is still too large after compression.');
-      }
-      return result;
-    } finally {
-      URL.revokeObjectURL(objectUrl);
+  async function editCurrentServerIcon() {
+    if (!serverIcon || !serverIcon.trim().length) return;
+    try {
+      await openServerIconCropperFromSource(serverIcon);
+    } catch (error: any) {
+      serverIconError = error?.message ?? 'Could not open the image editor.';
     }
   }
 
@@ -1330,10 +1492,7 @@ let roleMemberSearch = $state('');
       return;
     }
     try {
-      const processed = await compressServerImage(file);
-      serverIcon = processed;
-      serverIconError = null;
-      scheduleSaveOverview();
+      await openServerIconCropperFromFile(file);
     } catch (error: any) {
       serverIconError = error?.message ?? 'Could not process the selected file.';
     }
@@ -2270,14 +2429,23 @@ async function clearPendingInvites() {
                   <div class="h-14 w-14 rounded-full border border-dashed border-subtle bg-white/5"></div>
                 {/if}
                 <div class="flex flex-col gap-2">
-                  <button type="button" class="btn btn-ghost btn-sm w-fit" onclick={triggerServerIconUpload}>
-                    Upload image
-                  </button>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" class="btn btn-ghost btn-sm w-fit" onclick={triggerServerIconUpload}>
+                      Upload image
+                    </button>
+                    {#if serverIcon}
+                      <button type="button" class="btn btn-ghost btn-sm w-fit" onclick={editCurrentServerIcon}>
+                        Adjust crop
+                      </button>
+                    {/if}
+                  </div>
                   <input class="hidden" id="server-icon-upload" type="file" accept="image/*" bind:this={serverIconInput} onchange={onServerIconSelected} />
                   {#if serverIconError}
                     <p class="text-xs text-red-300">{serverIconError}</p>
                   {:else}
-                    <p class="text-xs text-soft">JPG, PNG, GIF up to 8MB. Larger images compress automatically.</p>
+                    <p class="text-xs text-soft">
+                      JPG, PNG, GIF up to 8MB. Drag to center and zoom after you pick a photo.
+                    </p>
                   {/if}
                 </div>
               </div>
@@ -2933,7 +3101,9 @@ async function clearPendingInvites() {
                 <div class="settings-card__title">Ticket AI (Issue analytics)</div>
                 <p class="settings-card__subtitle">Monitor issue threads and export response metrics.</p>
               </div>
-              <span class="text-xs uppercase tracking-[0.2em] text-emerald-300">New</span>
+              <span class={`text-sm ${ticketAiEnabled ? 'text-emerald-400' : 'text-white/60'}`}>
+                {ticketAiEnabled ? 'Enabled' : 'Disabled'}
+              </span>
             </div>
           </button>
           <button
@@ -4242,6 +4412,94 @@ async function clearPendingInvites() {
     display: grid;
     gap: 14px;
   }
+  .avatar-cropper-modal {
+    width: min(900px, 96vw);
+  }
+  .avatar-cropper {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: 1fr 260px;
+    align-items: start;
+  }
+  .avatar-cropper__stage {
+    display: grid;
+    gap: 0.5rem;
+    justify-items: center;
+  }
+  .avatar-cropper__frame {
+    position: relative;
+    border-radius: 9999px;
+    overflow: hidden;
+    border: 1px solid var(--color-border-subtle);
+    background: color-mix(in srgb, var(--color-panel) 90%, #0b1220);
+    touch-action: none;
+    cursor: grab;
+  }
+  .avatar-cropper__frame:active {
+    cursor: grabbing;
+  }
+  .avatar-cropper__frame--mini {
+    transform-origin: top left;
+    pointer-events: none;
+  }
+  .avatar-cropper__image {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform-origin: center;
+    user-select: none;
+  }
+  .avatar-cropper__mask {
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    pointer-events: none;
+    box-shadow: 0 0 0 999px rgba(10, 12, 20, 0.75) inset;
+  }
+  .avatar-cropper__hint {
+    font-size: 0.85rem;
+    color: var(--text-70);
+    text-align: center;
+  }
+  .avatar-cropper__controls {
+    display: grid;
+    gap: 0.75rem;
+    align-content: start;
+  }
+  .avatar-cropper__preview {
+    display: grid;
+    gap: 0.4rem;
+    justify-items: center;
+  }
+  .avatar-cropper__label {
+    font-size: 0.82rem;
+    color: var(--text-70);
+  }
+  .avatar-cropper__slider {
+    display: grid;
+    gap: 0.4rem;
+    font-size: 0.9rem;
+    color: var(--color-text-primary);
+  }
+  .avatar-cropper__slider input[type='range'] {
+    accent-color: var(--color-accent, #33c8bf);
+  }
+  .avatar-cropper__actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  @media (max-width: 820px) {
+    .avatar-cropper {
+      grid-template-columns: 1fr;
+    }
+    .avatar-cropper__controls {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .avatar-cropper__actions {
+      justify-content: flex-start;
+    }
+  }
 
   @keyframes pop {
     0% {
@@ -4452,6 +4710,93 @@ async function clearPendingInvites() {
   }
 }
 </style>
+
+{#if serverIconCropOpen && serverIconCropSrc}
+  <div
+    class="role-modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    tabindex="0"
+    onclick={(event) => {
+      if (event.target === event.currentTarget) closeServerIconCropper();
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeServerIconCropper();
+      }
+    }}
+  >
+    <div class="role-modal role-modal--wide avatar-cropper-modal" role="document">
+      <div class="role-modal__header">
+        <div>
+          <h3>Adjust server icon</h3>
+          <p class="text-xs text-white/70">Drag to reposition; scroll or use the slider to zoom.</p>
+        </div>
+        <button type="button" class="settings-chip-btn" aria-label="Close" onclick={closeServerIconCropper}>
+          <i class="bx bx-x"></i>
+        </button>
+      </div>
+      <div class="avatar-cropper">
+        <div class="avatar-cropper__stage">
+          <div
+            class="avatar-cropper__frame"
+            style={`width:${ICON_CROP_FRAME}px;height:${ICON_CROP_FRAME}px;`}
+            onpointerdown={startIconCropDrag}
+            onwheel={onIconCropWheel}
+          >
+            {#if serverIconCropSrc}
+              <img
+                src={serverIconCropSrc}
+                alt="Server icon being cropped"
+                class="avatar-cropper__image"
+                draggable="false"
+                style={`width:${serverIconCropDimensions.width}px;height:${serverIconCropDimensions.height}px;transform: translate(calc(-50% + ${serverIconCropOffset.x}px), calc(-50% + ${serverIconCropOffset.y}px)) scale(${serverIconCropScale});`}
+              />
+            {/if}
+            <div class="avatar-cropper__mask" aria-hidden="true"></div>
+          </div>
+          <p class="avatar-cropper__hint">Drag with your mouse or finger to re-center.</p>
+        </div>
+        <div class="avatar-cropper__controls">
+          <div class="avatar-cropper__preview">
+            <div
+              class="avatar-cropper__frame avatar-cropper__frame--mini"
+              style={`width:${ICON_CROP_FRAME}px;height:${ICON_CROP_FRAME}px;transform: scale(${iconCropPreviewScale});`}
+            >
+              {#if serverIconCropSrc}
+                <img
+                  src={serverIconCropSrc}
+                  alt="Server icon preview"
+                  class="avatar-cropper__image"
+                  draggable="false"
+                  style={`width:${serverIconCropDimensions.width}px;height:${serverIconCropDimensions.height}px;transform: translate(calc(-50% + ${serverIconCropOffset.x}px), calc(-50% + ${serverIconCropOffset.y}px)) scale(${serverIconCropScale});`}
+                />
+              {/if}
+              <div class="avatar-cropper__mask" aria-hidden="true"></div>
+            </div>
+            <p class="avatar-cropper__label">Live preview</p>
+          </div>
+          <label class="avatar-cropper__slider">
+            <span>Zoom</span>
+            <input
+              type="range"
+              min={serverIconCropMinScale}
+              max={serverIconCropMaxScale}
+              step="0.01"
+              value={serverIconCropScale}
+              oninput={(e) => adjustIconCropScale(parseFloat((e.currentTarget as HTMLInputElement).value))}
+            />
+          </label>
+          <div class="avatar-cropper__actions">
+            <button type="button" class="btn btn-ghost" onclick={closeServerIconCropper}>Cancel</button>
+            <button type="button" class="btn btn-primary" onclick={applyServerIconCrop}>Save icon</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if ticketAiModalOpen && serverId}
   <TicketAIModal
@@ -5147,19 +5492,6 @@ async function clearPendingInvites() {
     </div>
   </div>
 {/if}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

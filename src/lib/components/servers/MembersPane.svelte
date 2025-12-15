@@ -1,3 +1,4 @@
+
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
@@ -94,19 +95,22 @@ type RoleDoc = {
     () => Boolean(selectedMember && me?.uid && selectedMember.uid !== me?.uid)
   );
   let mediaQuery: MediaQueryList | null = null;
-  let me: any = $state(null);
+  const me = $derived.by(() => $user);
   const myMember = $derived.by(() => (me?.uid ? (members[me.uid] as MemberDoc | undefined) ?? null : null));
   const myBaseRole = $derived.by(() =>
     typeof (myMember as any)?.role === 'string'
       ? ((myMember as any).role as 'owner' | 'admin' | 'member')
       : null
   );
-  const canInviteMembers = $derived.by(() => myBaseRole === 'owner' || myBaseRole === 'admin');
+  const canInviteMembers = $derived.by(() => myBaseRole === 'owner');
   const INITIAL_MEMBER_BATCH = 60;
   const MEMBER_BATCH_SIZE = 40;
   const LAZY_LOAD_THRESHOLD = 20;
   let visibleMemberCount = $state(INITIAL_MEMBER_BATCH);
   let shouldLazyLoad = $state(false);
+  let brokenAvatars: Set<string> = $state(new Set());
+  let hideScrollbarForWheel = $state(false);
+  let wheelHideTimer: ReturnType<typeof setTimeout> | null = null;
   let statusBuckets: Record<PresenceState, MemberRow[]> = $state({
     online: [],
     busy: [],
@@ -124,19 +128,28 @@ type RoleDoc = {
   let memberScrollContainer: HTMLDivElement | null = $state(null);
   let loadObserver: IntersectionObserver | null = null;
   let showInviteDialog = $state(false);
-  run(() => {
-    me = $user;
-  });
 
   let membersUnsub: Unsubscribe | null = null;
   let rolesUnsub: Unsubscribe | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
-  let currentServer: string | null = $state(null);
   const statusOrder: PresenceState[] = ['online', 'busy', 'idle', 'offline'];
   const statusLabels: Record<PresenceState, string> = presenceLabels;
   const MAX_VISIBLE_MEMBER_ROLES = 2;
+  const WHEEL_SCROLLBAR_HIDE_MS = 700;
   // derived above
+
+  function clearRolesIfAny() {
+    const hasRoles = Object.keys(roles).length > 0;
+    if (hasRoles) {
+      roles = {};
+    }
+  }
+
+  function resetMemberVisibility() {
+    visibleMemberCount = INITIAL_MEMBER_BATCH;
+    syncVisibilityState(0);
+  }
 
   function syncVisibilityState(total: number) {
     const lazy = total > LAZY_LOAD_THRESHOLD;
@@ -183,8 +196,18 @@ type RoleDoc = {
     const member = members[uid] ?? {};
     const profile = profiles[uid] ?? {};
     const fallback = pickString(member.photoURL) ?? null;
-    return resolveProfilePhotoURL(profile, fallback);
+    // Pass the full profile object which may contain cachedPhotoURL, customPhotoURL, authPhotoURL
+    return resolveProfilePhotoURL({ ...member, ...profile }, fallback);
   };
+
+  function handleAvatarError(uid: string) {
+    brokenAvatars = new Set([...brokenAvatars, uid]);
+  }
+
+  function getDisplayAvatar(member: MemberRow): string | null {
+    if (brokenAvatars.has(member.uid)) return null;
+    return member.avatar;
+  }
 
   function presenceState(uid: string): PresenceState {
     return presenceFromSources([presenceDocs[uid], profiles[uid], members[uid]]);
@@ -433,6 +456,23 @@ type RoleDoc = {
     }
   }
 
+  function handleMembersWheelScroll() {
+    hideScrollbarForWheel = true;
+    if (wheelHideTimer) clearTimeout(wheelHideTimer);
+    wheelHideTimer = setTimeout(() => {
+      hideScrollbarForWheel = false;
+      wheelHideTimer = null;
+    }, WHEEL_SCROLLBAR_HIDE_MS);
+  }
+
+  function resetWheelScrollbarHide() {
+    if (wheelHideTimer) {
+      clearTimeout(wheelHideTimer);
+      wheelHideTimer = null;
+    }
+    hideScrollbarForWheel = false;
+  }
+
   run(() => {
     loadMoreSentinel;
     memberScrollContainer;
@@ -485,8 +525,6 @@ type RoleDoc = {
   }
 
   function subscribeMembers(server: string) {
-    if (currentServer === server) return;
-    currentServer = server;
     visibleMemberCount = INITIAL_MEMBER_BATCH;
 
     const prevMembersUnsub = untrack(() => membersUnsub);
@@ -551,11 +589,9 @@ type RoleDoc = {
       const prevRolesUnsub = untrack(() => rolesUnsub);
       prevRolesUnsub?.();
       rolesUnsub = null;
-      roles = {};
+      clearRolesIfAny();
       cleanupProfiles();
-      currentServer = null;
-      visibleMemberCount = INITIAL_MEMBER_BATCH;
-      syncVisibilityState(0);
+      resetMemberVisibility();
     }
   });
 
@@ -564,6 +600,7 @@ type RoleDoc = {
     rolesUnsub?.();
     cleanupProfiles();
     teardownLoadObserver();
+    if (wheelHideTimer) clearTimeout(wheelHideTimer);
   });
 </script>
 
@@ -576,36 +613,20 @@ type RoleDoc = {
         <span class="text-sm font-semibold sm:text-base text-primary">Members</span>
       </div>
       <div class="ml-auto flex flex-1 items-center justify-end gap-2">
-        {#if canInviteMembers}
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-white/60 focus-visible:ring-offset-transparent sm:text-sm"
-            onclick={openInviteDialog}
-            aria-label="Invite members"
-          >
-            <i class="bx bx-plus text-sm"></i>
-            <span class="hidden sm:inline">Invite</span>
-          </button>
-        {/if}
         <span class="inline-flex h-7 min-w-[3.5rem] items-center justify-center rounded-full bg-white/[0.08] px-3 text-xs font-semibold text-soft sm:h-8 sm:min-w-[4rem] sm:text-sm">
           {rows.length}
         </span>
-        {#if onHide}
-          <button
-            type="button"
-            class="members-pane__collapse"
-            aria-label="Hide members panel"
-            onclick={() => onHide?.()}
-          >
-            <i class="bx bx-chevron-right text-base" aria-hidden="true"></i>
-          </button>
-        {/if}
       </div>
     </div>
   {/if}
     <div
     class="members-pane__scroll flex flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 touch-pan-y"
+    class:members-pane__scroll--wheel={hideScrollbarForWheel}
     bind:this={memberScrollContainer}
+    role="region"
+    aria-label="Members list"
+    onwheel={handleMembersWheelScroll}
+    onmouseleave={resetWheelScrollbarHide}
   >
     {#if rows.length}
       <div class="member-groups">
@@ -620,6 +641,7 @@ type RoleDoc = {
               <ul class="member-group__list">
                 {#if groupMembers.length}
                   {#each groupMembers as member (member.uid)}
+                    {@const displayAvatar = getDisplayAvatar(member)}
                     <li>
                       <button
                         type="button"
@@ -627,16 +649,19 @@ type RoleDoc = {
                         onclick={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
                       >
                         <div class="member-row__avatar">
-                          {#if member.avatar}
-                            <img
-                              src={member.avatar}
-                              alt={member.label}
-                              class="h-full w-full object-cover"
-                              loading="lazy"
-                            />
-                          {:else}
-                            <i class="bx bx-user text-soft"></i>
-                          {/if}
+                          <div class="member-row__avatar-inner">
+                            {#if displayAvatar}
+                              <img
+                                src={displayAvatar}
+                                alt={member.label}
+                                class="h-full w-full object-cover"
+                                loading="lazy"
+                                onerror={() => handleAvatarError(member.uid)}
+                              />
+                            {:else}
+                              <i class="bx bx-user text-soft"></i>
+                            {/if}
+                          </div>
                           <span
                             class={`presence-dot ${statusClass(member.status)}`}
                             aria-label={member.status}
@@ -731,6 +756,7 @@ type RoleDoc = {
   </div>
 {/if}
 
+
 <MemberProfileCard
   open={!!selectedMember}
   member={selectedMember}
@@ -748,142 +774,25 @@ type RoleDoc = {
 
 <style>
   .members-pane__scroll {
-    min-height: 0;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    scrollbar-gutter: stable both-edges;
   }
 
-  .members-pane {
-    border-radius: 0;
+  :global(.members-pane__scroll--wheel) {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none;
+    scrollbar-color: transparent transparent !important;
   }
 
-  .members-pane__header {
-    min-height: 3rem;
-    padding: 0 1rem;
+  :global(.members-pane__scroll--wheel::-webkit-scrollbar) {
+    width: 0 !important;
+    height: 0 !important;
+    background: transparent;
+    display: none;
   }
 
-  .members-pane__collapse {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 1.9rem;
-    height: 1.9rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
-    color: var(--color-text-primary);
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 160ms ease;
-  }
-
-  .members-pane__collapse:hover,
-  .members-pane__collapse:focus-visible {
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-    outline: none;
-  }
-
-  .members-pane__collapse:active {
-    transform: scale(0.92);
-  }
-
-  .member-row--placeholder {
-    cursor: default;
-    justify-content: center;
-    font-size: 0.85rem;
-    font-style: italic;
-    color: var(--text-60);
-  }
-
-  .members-pane__sentinel {
-    text-align: center;
-    padding: 0.5rem 0 0.25rem;
-    color: var(--text-60);
-  }
-
-  .members-pane__invite-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 30;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: clamp(1rem, 3vw, 2.5rem);
-  }
-
-  .members-pane__invite-backdrop {
-    position: absolute;
-    inset: 0;
-    background: color-mix(in srgb, var(--color-app-overlay, rgba(0, 0, 0, 0.55)) 85%, transparent);
-    backdrop-filter: blur(4px);
-  }
-
-  .members-pane__invite-card {
-    position: relative;
-    width: min(640px, 100%);
-    max-height: 90vh;
-    border-radius: var(--radius-lg);
-    background: var(--color-panel);
-    border: 1px solid var(--color-border-subtle);
-    box-shadow: var(--shadow-elevated);
-    padding: 1rem 1.25rem 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .members-pane__invite-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
-  }
-
-  .members-pane__invite-title {
-    margin: 0;
-    font-size: 1.1rem;
-    font-weight: 600;
-  }
-
-  .members-pane__invite-subtitle {
-    margin: 0.3rem 0 0;
-    font-size: 0.9rem;
-    color: var(--text-70);
-  }
-
-  .members-pane__invite-close {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2.25rem;
-    height: 2.25rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel) 70%, transparent);
-    color: inherit;
-    cursor: pointer;
-    transition: background 120ms ease, transform 120ms ease;
-  }
-
-  .members-pane__invite-close:hover {
-    background: color-mix(in srgb, var(--color-panel) 85%, white 8%);
-  }
-
-  .members-pane__invite-close:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
-  }
-
-  .members-pane__invite-body {
-    overflow: auto;
-    padding-right: 0.25rem;
-  }
-
-  @media (max-width: 640px) {
-    .members-pane__invite-card {
-      padding: 0.9rem;
-      border-radius: var(--radius-md);
-    }
+  :global(.members-pane__scroll--wheel::-webkit-scrollbar-thumb),
+  :global(.members-pane__scroll--wheel::-webkit-scrollbar-track) {
+    display: none;
+    background: transparent;
   }
 </style>

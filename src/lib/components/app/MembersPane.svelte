@@ -73,12 +73,14 @@
             <div
               class="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-700 transition-colors cursor-pointer group"
             >
-              <div class="relative flex-shrink-0">
-                <img
-                  src={resolveProfilePhotoURL(member)}
-                  alt={member.displayName || member.email || 'User'}
-                  class="w-8 h-8 rounded-full object-cover bg-gray-700 border border-gray-600"
-                />
+              <div class="relative flex-shrink-0 w-8 h-8 rounded-full overflow-visible aspect-square bg-gray-700 border border-gray-600">
+                <div class="w-full h-full rounded-full overflow-hidden">
+                  <img
+                    src={resolveProfilePhotoURL(member)}
+                    alt={member.displayName || member.email || 'User'}
+                    class="w-full h-full object-cover"
+                  />
+                </div>
                 <div
                   class="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-gray-800"
                 ></div>
@@ -113,12 +115,14 @@
             <div
               class="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-700 transition-colors cursor-pointer group opacity-60"
             >
-              <div class="relative flex-shrink-0">
-                <img
-                  src={resolveProfilePhotoURL(member)}
-                  alt={member.displayName || member.email || 'User'}
-                  class="w-8 h-8 rounded-full object-cover bg-gray-700 border border-gray-600 opacity-60"
-                />
+              <div class="relative flex-shrink-0 w-8 h-8 rounded-full overflow-visible aspect-square bg-gray-700 border border-gray-600 opacity-60">
+                <div class="w-full h-full rounded-full overflow-hidden">
+                  <img
+                    src={resolveProfilePhotoURL(member)}
+                    alt={member.displayName || member.email || 'User'}
+                    class="w-full h-full object-cover"
+                  />
+                </div>
               </div>
               <div class="flex-1 min-w-0">
                 <p class="text-sm font-medium text-gray-300 truncate">

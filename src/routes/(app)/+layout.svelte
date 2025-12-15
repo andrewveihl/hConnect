@@ -32,12 +32,13 @@
   import ServerSettingsModal from '$lib/components/servers/ServerSettingsModal.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import { mobileDockSuppressed } from '$lib/stores/ui';
-  import { user } from '$lib/stores/user';
+  import { user, startProfileListener } from '$lib/stores/user';
   import { acceptInvite, declineInvite, subscribeInbox, type ServerInvite } from '$lib/firestore/invites';
   import { requestDomainAutoInvites } from '$lib/servers/domainAutoInvite';
   import type { SettingsSectionId } from '$lib/settings/sections';
   import type { VoiceSession } from '$lib/stores/voice';
   import { setupSwipeGestures } from '$lib/utils/swipeGestures';
+  import { primeSoundPlayback } from '$lib/utils/sounds';
   interface Props {
     children?: import('svelte').Snippet;
   }
@@ -344,8 +345,14 @@
   onMount(() => {
     const stopAuth = startAuthListener();
     const stopPresence = startPresenceService();
+    let stopProfileListener: (() => void) | null = null;
     let detachGestureGuards: (() => void) | null = null;
     let detachSwipeGestures: (() => void) | null = null;
+
+    // Start listening to the current user's Firestore profile for cached avatars
+    startProfileListener().then((unsub) => {
+      stopProfileListener = unsub ?? null;
+    });
 
     stopDeepLinkListener = startDeepLinkListener((payload) => {
       skipResumeRestore = true;
@@ -358,6 +365,7 @@
       document.title = APP_TITLE;
       // Best-effort register SW for push/notifications (no permission prompt here)
       registerFirebaseMessagingSW().catch(() => {});
+      primeSoundPlayback();
       
       // Setup swipe gestures for mobile navigation
       if (mobileViewport && typeof window !== 'undefined') {
@@ -427,6 +435,7 @@
     return () => {
       stopPresence?.();
       stopAuth?.();
+      stopProfileListener?.();
       detachGestureGuards?.();
       detachSwipeGestures?.();
       stopDeepLinkListener?.();
@@ -503,8 +512,8 @@
       class="voice-mini-fab pointer-events-none fixed left-0 right-0 z-40 flex justify-center px-4"
       style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem)"
     >
-      <div class="pointer-events-auto w-full max-w-lg">
-        <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} />
+      <div class="pointer-events-auto">
+        <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} draggable={true} />
       </div>
     </div>
   {/if}

@@ -385,46 +385,132 @@
   }
 </script>
 
-<div class="flex h-dvh text-primary overflow-hidden mobile-full-bleed">
-  <div class="hidden md:flex md:shrink-0">
+<div class="activity-shell">
+  <div class="hidden md:flex md:shrink-0" aria-label="Navigation">
     <LeftPane activeServerId={null} />
   </div>
 
-  <div class="activity-surface">
+  <div class="activity-surface" role="main">
     <header class="activity-header">
-      <div class="activity-header__text">
-        <p class="activity-eyebrow">Inbox</p>
-        <h1>Activity</h1>
-        <p class="activity-description">
-          {#if $activityUnreadCount === 0}
-            You're caught up on mentions and DMs.
-          {:else}
-            {formatCount($activityUnreadCount)} unread waiting for you.
+      <div class="activity-header__copy">
+        <span class="activity-eyebrow">Inbox</span>
+        <div class="activity-title-row">
+          <h1>Activity</h1>
+          {#if $activityUnreadCount}
+            <span class="activity-chip">{formatCount($activityUnreadCount)} new</span>
           {/if}
+        </div>
+        <p class="activity-description">
+          Mentions, replies, and direct messages across your servers.
         </p>
-        <div class="activity-header__stats" role="status">
-          <span>{formatCount($channelUnreadCount)} channels</span>
-          <span>{formatCount($dmUnreadCount)} DMs</span>
+        <div class="activity-header__stats" aria-label="Unread counts">
+          <span>Activity {formatCount($activityUnreadCount)}</span>
+          <span>Channels {formatCount($channelUnreadCount)}</span>
+          <span>DMs {formatCount($dmUnreadCount)}</span>
         </div>
       </div>
-      {#if shouldShowPushPrompt}
-        <div class="activity-header__actions">
+      <div class="activity-header__actions">
+        {#if groupedFeed.length}
+          <button
+            type="button"
+            class="clear-feed-btn"
+            disabled={clearState === 'running'}
+            onclick={clearActivityFeed}
+          >
+            {clearState === 'running'
+              ? 'Clearing...'
+              : shouldShowBulkClear
+                  ? 'Mark everything read'
+                  : 'Mark all read'}
+          </button>
+        {/if}
+
+        {#if shouldShowPushPrompt}
           <button
             type="button"
             class="enable-push-btn"
+            disabled={pushRequestState === 'loading'}
             onclick={requestPushEnable}
-            aria-busy={pushRequestState === 'loading'}
           >
-            {pushRequestState === 'loading' ? 'Enabling...' : 'Enable push'}
+            {pushRequestState === 'loading'
+              ? 'Enabling...'
+              : pushRequestState === 'success'
+                  ? 'Push ready'
+                  : 'Enable push alerts'}
           </button>
           {#if pushError}
-            <p class="push-inline-error" role="status">{pushError}</p>
+            <p class="push-inline-error">{pushError}</p>
+          {:else if pushRequestState === 'success'}
+            <p class="push-inline-success">Notifications will be delivered on this device.</p>
           {/if}
-        </div>
-      {/if}
+        {:else if pushRequestState === 'success'}
+          <p class="push-inline-success">Push alerts are enabled on this browser.</p>
+        {/if}
+      </div>
     </header>
 
-    <main class="activity-main">
+    <main class="activity-main" aria-busy={!$activityReady}>
+      <div class="activity-mobile-hero">
+        <div class="activity-mobile-hero__copy">
+          <span class="activity-eyebrow">Inbox</span>
+          <div class="activity-title-row">
+            <h2>Activity</h2>
+            {#if $activityUnreadCount}
+              <span class="activity-chip">{formatCount($activityUnreadCount)} new</span>
+            {/if}
+          </div>
+          <p class="activity-description">Mentions, replies, and DMs across your org.</p>
+          <div class="activity-header__stats">
+            <span>Activity {formatCount($activityUnreadCount)}</span>
+            <span>Channels {formatCount($channelUnreadCount)}</span>
+            <span>DMs {formatCount($dmUnreadCount)}</span>
+          </div>
+        </div>
+        {#if groupedFeed.length}
+          <div class="activity-toolbar">
+            <span class="activity-toolbar__label">
+              {formatCount(groupedFeed.length)} {groupedFeed.length === 1 ? 'group' : 'groups'}
+            </span>
+            <button
+              type="button"
+              class="clear-feed-btn"
+              disabled={clearState === 'running'}
+              onclick={clearActivityFeed}
+            >
+              {clearState === 'running' ? 'Clearing...' : 'Mark all read'}
+            </button>
+          </div>
+        {/if}
+      </div>
+
+      {#if shouldShowPushPrompt && pushRequestState !== 'success'}
+        <div class="activity-banner" role="status">
+          <div class="activity-banner__copy">
+            <strong>Enable push alerts</strong>
+            <p>Mirror desktop mentions on this device.</p>
+            {#if pushError}
+              <span class="push-inline-error">{pushError}</span>
+            {/if}
+          </div>
+          <button
+            type="button"
+            class="enable-push-btn enable-push-btn--inline"
+            disabled={pushRequestState === 'loading'}
+            onclick={requestPushEnable}
+          >
+            {pushRequestState === 'loading' ? 'Enabling...' : 'Enable'}
+          </button>
+        </div>
+      {:else if pushRequestState === 'success' && !shouldShowPushPrompt}
+        <p class="push-inline-success push-inline-success--mobile">
+          Push alerts enabled for this device.
+        </p>
+      {/if}
+
+      {#if clearMessage}
+        <p class="activity-error">{clearMessage}</p>
+      {/if}
+
       {#if !$activityReady}
         <div class="activity-placeholder">
           <div class="spinner" aria-hidden="true"></div>
@@ -441,93 +527,80 @@
           </div>
         </div>
       {:else}
-        {#if clearMessage}
-          <p class="activity-error">{clearMessage}</p>
-        {/if}
-        {#if shouldShowBulkClear}
-          <div class="bulk-clear">
-            <button
-              type="button"
-              class="clear-feed-btn"
-              onclick={clearActivityFeed}
-              disabled={clearState === 'running'}
-              aria-busy={clearState === 'running'}
-            >
-              {clearState === 'running' ? 'Clearing...' : 'Clear all'}
-            </button>
-          </div>
-        {/if}
         <ul class="activity-feed" aria-live="polite">
           {#each groupedFeed as group (group.key)}
             {@const { entry, item } = group.latest}
             {@const timestamp = timelineTimestamp(entry, item)}
             {@const location = group.location}
             <li>
-              <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-              <article
-                class={`activity-item activity-item--${group.kind}`}
-                role="button"
-                tabindex="0"
-                onclick={() => openActivityGroup(group)}
-                onkeydown={(event) => handleCardKey(event, () => openActivityGroup(group))}
-              >
-                <div class="activity-item__icon" aria-hidden="true">
-                  {#if group.kind === 'dm'}
-                    <span>DM</span>
-                  {:else if group.kind === 'thread'}
-                    <span>@</span>
-                  {:else}
-                    <span>#</span>
-                  {/if}
-                </div>
-                <div class="activity-item__body">
-                  <div class="activity-item__header">
-                    <div class="activity-item__origin">
-                      <span class="activity-item__badge">{describeEntry(item)}</span>
-                      <div class="activity-item__location">
-                        <strong>{location.primary}</strong>
-                        {#if location.secondary}
-                          <span>{location.secondary}</span>
-                        {/if}
-                      </div>
-                      {#if group.count > 1}
-                        <span class="activity-item__bundle">{group.count} updates</span>
+              <article class={`activity-item activity-item--${group.kind}`}>
+                <div class="activity-item__content">
+                  <button
+                    type="button"
+                    class="activity-item__hit"
+                    aria-label={`${group.reasonSummary} in ${location.primary}`}
+                    onclick={() => openActivityGroup(group)}
+                    onkeydown={(event) => handleCardKey(event, () => openActivityGroup(group))}
+                  >
+                    <div class="activity-item__icon" aria-hidden="true">
+                      {#if group.kind === 'dm'}
+                        <span>DM</span>
+                      {:else if group.kind === 'thread'}
+                        <span>@</span>
+                      {:else}
+                        <span>#</span>
                       {/if}
-                      <button
-                        type="button"
-                        class="activity-item__dismiss"
-                        aria-label={`Clear ${group.count} notifications`}
-                        onclick={(event) => {
-                          event.stopPropagation();
-                          clearGroup(group);
-                        }}
-                      >
-                        Clear
-                      </button>
                     </div>
-                    <time datetime={timestamp ? new Date(timestamp).toISOString() : undefined}>
-                      {formatRelativeTime(timestamp) || 'just now'}
-                    </time>
-                  </div>
-                  <h3>{item.title}</h3>
-                  <p>{item.preview}</p>
-                  {#if group.items.length > 1}
-                    <ul class="activity-item__stack">
-                      {#each group.items.slice(0, 3) as child}
-                        <li>{child.title}</li>
-                      {/each}
-                      {#if group.items.length > 3}
-                        <li>+{group.items.length - 3} more...</li>
+                    <div class="activity-item__body">
+                      <div class="activity-item__header">
+                        <div class="activity-item__origin">
+                          <span class="activity-item__badge">{describeEntry(item)}</span>
+                          <div class="activity-item__location">
+                            <strong>{location.primary}</strong>
+                            {#if location.secondary}
+                              <span>{location.secondary}</span>
+                            {/if}
+                          </div>
+                          {#if group.count > 1}
+                            <span class="activity-item__bundle">{group.count} updates</span>
+                          {/if}
+                        </div>
+                        <time datetime={timestamp ? new Date(timestamp).toISOString() : undefined}>
+                          {formatRelativeTime(timestamp) || 'just now'}
+                        </time>
+                      </div>
+                      <h3>{item.title}</h3>
+                      <p>{item.preview}</p>
+                      {#if group.items.length > 1}
+                        <ul class="activity-item__stack">
+                          {#each group.items.slice(0, 3) as child}
+                            <li>{child.title}</li>
+                          {/each}
+                          {#if group.items.length > 3}
+                            <li>+{group.items.length - 3} more...</li>
+                          {/if}
+                        </ul>
                       {/if}
-                    </ul>
-                  {/if}
-                  <div class="activity-item__meta">
-                    <span class="activity-item__reason">{group.reasonSummary}</span>
-                    <span class="activity-item__volume">
-                      {group.count} {group.count === 1 ? 'notification' : 'notifications'}
-                    </span>
-                    <span class="activity-item__count">+{formatCount(group.unreadTotal)}</span>
-                  </div>
+                      <div class="activity-item__meta">
+                        <span class="activity-item__reason">{group.reasonSummary}</span>
+                        <span class="activity-item__volume">
+                          {group.count} {group.count === 1 ? 'notification' : 'notifications'}
+                        </span>
+                        <span class="activity-item__count">+{formatCount(group.unreadTotal)}</span>
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    class="activity-item__dismiss"
+                    aria-label="Mark this thread as read"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      clearGroup(group);
+                    }}
+                  >
+                    Mark read
+                  </button>
                 </div>
               </article>
             </li>
@@ -539,38 +612,57 @@
 </div>
 
 <style>
+  .activity-shell {
+    display: flex;
+    min-height: 100dvh;
+    align-items: stretch;
+    background: var(--surface-root, var(--color-panel));
+    color: var(--text-100);
+    overflow: hidden;
+  }
+
   .activity-surface {
     flex: 1;
     display: flex;
     flex-direction: column;
+    min-height: 100dvh;
     background: transparent;
     color: var(--text-100);
     overflow: hidden;
   }
 
   .activity-header {
-    padding: clamp(1.2rem, 4vw, 2.6rem);
+    padding: clamp(1.2rem, 4vw, 2.4rem);
     border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     display: flex;
     flex-wrap: wrap;
-    gap: clamp(1rem, 3vw, 2.5rem);
+    gap: clamp(1rem, 3vw, 2rem);
     align-items: flex-start;
     background: var(--color-panel);
+    position: sticky;
+    top: 0;
+    z-index: 5;
   }
 
-  /* Mobile: Activity header extends into safe area on iPhone 15+ */
-  @media (max-width: 767px) {
-    .activity-header {
-      padding-top: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-top, 0px));
-      padding-left: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-left, 0px));
-      padding-right: calc(clamp(1.2rem, 4vw, 2.6rem) + env(safe-area-inset-right, 0px));
-    }
+  .activity-header__copy {
+    display: grid;
+    gap: 0.4rem;
+    min-width: 0;
   }
 
-  .activity-header__text h1 {
-    font-size: clamp(1.7rem, 4vw, 2.4rem);
-    line-height: 1.05;
-    margin: 0;
+  .activity-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .activity-chip {
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: var(--color-accent);
   }
 
   .activity-eyebrow {
@@ -581,7 +673,7 @@
   }
 
   .activity-description {
-    margin-top: 0.35rem;
+    margin-top: 0.15rem;
     color: var(--text-70);
     font-size: 0.95rem;
   }
@@ -590,7 +682,7 @@
     display: flex;
     gap: 0.6rem;
     flex-wrap: wrap;
-    margin-top: 0.8rem;
+    margin-top: 0.35rem;
     font-size: 0.85rem;
     color: var(--text-70);
   }
@@ -608,6 +700,7 @@
     flex-direction: column;
     gap: 0.4rem;
     align-items: flex-end;
+    min-width: 12rem;
   }
 
   .clear-feed-btn {
@@ -646,21 +739,82 @@
     color: var(--text-100);
   }
 
+  .enable-push-btn--inline {
+    padding: 0.5rem 1rem;
+    white-space: nowrap;
+  }
+
   .push-inline-error {
     font-size: 0.85rem;
     color: var(--color-danger, #ff6b6b);
     text-align: right;
   }
 
+  .push-inline-success {
+    font-size: 0.85rem;
+    color: var(--color-success, #22c55e);
+    text-align: right;
+  }
+
+  .push-inline-success--mobile {
+    text-align: left;
+  }
+
   .activity-main {
     flex: 1;
     overflow-y: auto;
-    padding: clamp(1.2rem, 4vw, 2.4rem);
-    padding-bottom: calc(clamp(1.2rem, 4vw, 2.4rem) + var(--mobile-dock-height, 0px));
+    padding: clamp(1rem, 3vw, 1.6rem);
+    padding-bottom: calc(clamp(1rem, 3vw, 1.6rem) + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px));
     display: flex;
     flex-direction: column;
-    gap: clamp(1rem, 3vw, 1.6rem);
+    gap: 1rem;
     background: transparent;
+  }
+
+  .activity-mobile-hero {
+    display: none;
+    gap: 0.6rem;
+    background: var(--color-panel);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+    border-radius: 1rem;
+    padding: 0.9rem 1rem;
+  }
+
+  .activity-mobile-hero__copy {
+    display: grid;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .activity-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.35rem;
+    flex-wrap: wrap;
+  }
+
+  .activity-toolbar__label {
+    font-size: 0.9rem;
+    color: var(--text-70);
+  }
+
+  .activity-banner {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.95rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .activity-banner__copy {
+    display: grid;
+    gap: 0.2rem;
+    color: var(--text-90);
   }
 
   .activity-placeholder,
@@ -690,27 +844,36 @@
     gap: 0.9rem;
   }
 
-  .bulk-clear {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .bulk-clear .clear-feed-btn {
-    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
-  }
-
   .activity-item {
+    position: relative;
     width: 100%;
     border-radius: 1rem;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
     background: color-mix(in srgb, var(--color-panel) 55%, transparent);
     padding: 0.95rem 1.1rem;
+    display: block;
+    text-align: left;
+    color: inherit;
+    transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+
+  .activity-item__content {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.65rem;
+    align-items: start;
+  }
+
+  .activity-item__hit {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 0.85rem;
     text-align: left;
     color: inherit;
-    transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    background: transparent;
+    border: none;
+    padding: 0;
+    width: 100%;
     cursor: pointer;
   }
 
@@ -720,9 +883,10 @@
     background: color-mix(in srgb, var(--color-panel) 70%, transparent);
   }
 
-  .activity-item:focus-visible {
+  .activity-item__hit:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
-    outline-offset: 3px;
+    outline-offset: 4px;
+    border-radius: 0.85rem;
   }
 
   .activity-item__icon {
@@ -794,24 +958,24 @@
   }
 
   .activity-item__dismiss {
-    margin-left: auto;
-    border: none;
-    background: transparent;
-    font-size: 0.72rem;
+    align-self: start;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 20%, transparent);
+    font-size: 0.78rem;
     font-weight: 600;
-    color: var(--text-60);
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
+    color: var(--text-70);
     cursor: pointer;
-    padding: 0.2rem 0.6rem;
+    padding: 0.4rem 0.75rem;
     border-radius: 999px;
-    transition: color 120ms ease, background 120ms ease;
+    transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+    white-space: nowrap;
   }
 
   .activity-item__dismiss:hover,
   .activity-item__dismiss:focus-visible {
     color: var(--color-accent);
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
     outline: none;
   }
 
@@ -933,16 +1097,26 @@
   }
 
   @media (max-width: 768px) {
+    .activity-shell {
+      flex-direction: column;
+    }
+
     .activity-header {
       display: none;
     }
 
     .activity-main {
-      padding: 1.2rem;
+      padding: 0.85rem 0.7rem
+        calc(0.85rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
+      gap: 0.85rem;
     }
 
-    .bulk-clear {
-      justify-content: flex-start;
+    .activity-mobile-hero {
+      display: grid;
+    }
+
+    .activity-banner {
+      display: flex;
     }
   }
 

@@ -2,17 +2,82 @@ export type AdminNavItem = {
   id: string;
   label: string;
   href: string;
-  icon?: string;
+  icon: string;
+  description?: string;
+  badge?: 'new' | 'beta' | null;
 };
 
 export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
-  { id: 'overview', label: 'Overview', href: '/admin' },
-  { id: 'servers', label: 'Servers', href: '/admin/servers' },
-  { id: 'dms', label: 'DMs', href: '/admin/dms' },
-  { id: 'users', label: 'Users', href: '/admin/users' },
-  { id: 'features', label: 'Features', href: '/admin/features' },
-  { id: 'logs', label: 'Logs', href: '/admin/logs' },
-  { id: 'archive', label: 'Archive', href: '/admin/archive' }
+  { 
+    id: 'overview', 
+    label: 'Overview', 
+    href: '/admin',
+    icon: 'bx-home-circle',
+    description: 'Dashboard with key metrics'
+  },
+  { 
+    id: 'servers', 
+    label: 'Servers', 
+    href: '/admin/servers',
+    icon: 'bx-server',
+    description: 'Manage all servers'
+  },
+  { 
+    id: 'users', 
+    label: 'Users', 
+    href: '/admin/users',
+    icon: 'bx-group',
+    description: 'User accounts & permissions'
+  },
+  { 
+    id: 'dms', 
+    label: 'DMs', 
+    href: '/admin/dms',
+    icon: 'bx-message-detail',
+    description: 'Direct message threads'
+  },
+  { 
+    id: 'features', 
+    label: 'Features', 
+    href: '/admin/features',
+    icon: 'bx-toggle-right',
+    description: 'Feature flags & toggles'
+  },
+  { 
+    id: 'logs', 
+    label: 'Logs', 
+    href: '/admin/logs',
+    icon: 'bx-list-ul',
+    description: 'System activity logs'
+  },
+  { 
+    id: 'archive', 
+    label: 'Archive', 
+    href: '/admin/archive',
+    icon: 'bx-archive',
+    description: 'Soft-deleted content'
+  },
+  { 
+    id: 'health', 
+    label: 'System', 
+    href: '/admin/health',
+    icon: 'bx-pulse',
+    description: 'System health & metrics'
+  },
+  { 
+    id: 'announcements', 
+    label: 'Alerts', 
+    href: '/admin/announcements',
+    icon: 'bx-bell',
+    description: 'System announcements'
+  },
+  { 
+    id: 'appearance', 
+    label: 'Appearance', 
+    href: '/admin/super-admins',
+    icon: 'bx-palette',
+    description: 'Themes, splash, and global sounds'
+  }
 ];
 
 export type FeatureFlagKey =

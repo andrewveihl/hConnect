@@ -45,12 +45,21 @@
     previewUrl: string | null;
   };
 
+  type PopoverPlacement = {
+    left: string;
+    bottom: string;
+    width: string;
+    maxHeight: string;
+  };
+
   const canonical = (value: string) =>
     (value ?? '')
       .normalize('NFKD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
+
+  const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
   const initialsFor = (value: string) => {
     const words = (value ?? '')
@@ -154,6 +163,12 @@
   let popOpen = $state(false);
   let plusTriggerEl: HTMLButtonElement | null = $state(null);
   let popoverEl: HTMLDivElement | null = $state(null);
+  let popoverPlacement: PopoverPlacement = $state({
+    left: '0.75rem',
+    bottom: '3.5rem',
+    width: 'min(20rem, 90vw)',
+    maxHeight: 'min(65vh, 26rem)'
+  });
   let popoverOutsideCleanup: (() => void) | null = null;
   let showGif = $state(false);
   let showPoll = $state(false);
@@ -655,6 +670,38 @@
     if (!popOpen) {
       closeRewriteMenu();
     }
+  });
+
+  $effect(() => {
+    if (!popOpen && platform === 'mobile' && !inputFocused) {
+      releaseDockSuppression();
+    }
+  });
+
+  $effect(() => {
+    if (!popOpen) return;
+    platform;
+    attachments;
+    textareaExpanded;
+    void tick().then(() => syncPopoverPosition());
+  });
+
+  $effect(() => {
+    if (!popOpen) return;
+    syncPopoverPosition();
+    if (typeof window === 'undefined') return;
+    const handleReposition = () => syncPopoverPosition();
+    const viewport = window.visualViewport;
+    window.addEventListener('resize', handleReposition);
+    window.addEventListener('scroll', handleReposition, true);
+    viewport?.addEventListener('resize', handleReposition);
+    viewport?.addEventListener('scroll', handleReposition);
+    return () => {
+      window.removeEventListener('resize', handleReposition);
+      window.removeEventListener('scroll', handleReposition, true);
+      viewport?.removeEventListener('resize', handleReposition);
+      viewport?.removeEventListener('scroll', handleReposition);
+    };
   });
 
   function engageDockSuppression() {
@@ -1236,6 +1283,20 @@
     popOpen = false;
   };
 
+  function togglePopover(event?: Event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (disabled) return;
+    popOpen = !popOpen;
+    if (popOpen) {
+      showEmoji = false;
+      engageDockSuppression();
+      void tick().then(() => syncPopoverPosition());
+    } else if (!inputFocused) {
+      releaseDockSuppression();
+    }
+  }
+
   function onGifPicked(url: string) {
     const payload = { url, replyTo: replyTarget ?? undefined };
     onSendGif(payload);
@@ -1297,6 +1358,53 @@
     };
     document.addEventListener('pointerdown', handler);
     return () => document.removeEventListener('pointerdown', handler);
+  }
+
+  function syncPopoverPosition() {
+    if (!popoverEl || !plusTriggerEl || typeof window === 'undefined') return;
+    const viewport = window.visualViewport;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const offsetLeft = viewport?.offsetLeft ?? 0;
+    const offsetTop = viewport?.offsetTop ?? 0;
+    const padding = 12;
+    const gap = 10;
+    const maxHeightCap = 520;
+    const comfortHeight = 220;
+    const minWidth = 240;
+    const triggerRect = plusTriggerEl.getBoundingClientRect();
+    const naturalWidth = popoverEl.offsetWidth || 320;
+    const maxWidth = Math.max(minWidth, viewportWidth - padding * 2);
+    const baseWidth = clampValue(naturalWidth, minWidth, maxWidth);
+    const width = platform === 'mobile' ? maxWidth : baseWidth;
+    const desiredLeft = triggerRect.left - offsetLeft + triggerRect.width / 2 - width / 2;
+    const left =
+      platform === 'mobile'
+        ? offsetLeft + padding
+        : clampValue(desiredLeft + offsetLeft, padding + offsetLeft, offsetLeft + viewportWidth - width - padding);
+
+    let bottom = Math.max(padding, viewportHeight - (triggerRect.top - offsetTop) + gap);
+    let availableHeight = Math.max(0, viewportHeight - bottom - padding);
+    let maxHeight = Math.min(maxHeightCap, availableHeight);
+
+    if (maxHeight < comfortHeight) {
+      const fallbackHeight = clampValue(viewportHeight - padding * 2, 160, maxHeightCap);
+      bottom = Math.max(padding, viewportHeight - fallbackHeight - padding);
+      availableHeight = Math.max(0, viewportHeight - bottom - padding);
+      maxHeight = Math.min(maxHeightCap, availableHeight);
+    }
+
+    if (maxHeight <= 0) {
+      bottom = padding;
+      maxHeight = Math.min(maxHeightCap, Math.max(0, viewportHeight - bottom - padding));
+    }
+
+    popoverPlacement = {
+      left: `${left}px`,
+      bottom: `${bottom}px`,
+      width: `${width}px`,
+      maxHeight: `${maxHeight}px`
+    };
   }
 
 
@@ -1601,7 +1709,7 @@
           aria-expanded={popOpen}
           aria-label="Add to message"
           title="Add to message"
-          onclick={() => (popOpen = !popOpen)}
+          onclick={togglePopover}
           disabled={disabled}
           bind:this={plusTriggerEl}
         >
@@ -1610,11 +1718,27 @@
 
         {#if popOpen}
           <div
+            class="chat-input-popover__backdrop"
+            role="button"
+            tabindex="0"
+            aria-label="Close add menu"
+            onclick={() => (popOpen = false)}
+            onkeydown={(event) => {
+              if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                popOpen = false;
+              }
+            }}
+          ></div>
+          <div
             class="chat-input-popover"
             class:chat-input-popover--mobile={platform === 'mobile'}
             bind:this={popoverEl}
             role="menu"
-            style:--chat-popover-offset={platform === 'mobile' ? '8rem' : undefined}
+            style:left={popoverPlacement.left}
+            style:bottom={popoverPlacement.bottom}
+            style:width={popoverPlacement.width}
+            style:max-height={popoverPlacement.maxHeight}
           >
             <div class="chat-input-popover__header">Add to message</div>
             <div class="chat-input-menu">
@@ -2038,12 +2162,16 @@
   }
 
   .chat-input-popover {
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    margin-bottom: 0.5rem;
-    width: min(20rem, 80vw);
-    z-index: 50;
+    position: fixed;
+    left: 0.75rem;
+    bottom: 3.5rem;
+    width: min(20rem, 90vw);
+    max-width: calc(100vw - 1.5rem);
+    max-height: min(65vh, 26rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    margin-bottom: 0;
+    z-index: 620;
     border-radius: var(--radius-lg);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
     background: color-mix(in srgb, var(--color-panel) 92%, transparent);
@@ -2051,6 +2179,20 @@
     box-shadow: var(--shadow-elevated);
     padding: 0.75rem 0.6rem;
     color: var(--color-text-primary);
+  }
+
+  .chat-input-popover--mobile {
+    left: 0.6rem;
+    right: 0.6rem;
+    width: auto;
+    max-width: none;
+  }
+
+  .chat-input-popover__backdrop {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    z-index: 610;
   }
 
   .chat-input-popover__header {

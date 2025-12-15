@@ -223,20 +223,29 @@ async function afterLoginEnsureDoc() {
   const snap = await getDoc(ref);
   const existing: Record<string, any> | null = snap.exists() ? (snap.data() as any) : null;
   const hasCustom = !!existing?.customPhotoURL;
-  const hasCached = !!existing?.photoURL && existing.photoURL !== existing?.authPhotoURL;
+  const hasCached = !!existing?.cachedPhotoURL;
 
-  let cachedPhotoURL = existing?.photoURL;
-  // If no custom/cached photo, cache Google photoURL in Storage
+  let cachedPhotoURL = existing?.cachedPhotoURL ?? null;
+  // If no custom/cached photo, cache Google photoURL in Firebase Storage
   if (!hasCustom && !hasCached && current.photoURL) {
     try {
       // Fetch Google photo as blob
       const response = await fetch(current.photoURL);
+      if (!response.ok) throw new Error(`Failed to fetch avatar: ${response.status}`);
       const blob = await response.blob();
       const file = new File([blob], 'google-avatar.jpg', { type: blob.type || 'image/jpeg' });
       // Upload to Storage
       const { uploadProfileAvatar } = await import('./storage');
       const uploaded = await uploadProfileAvatar({ file, uid: current.uid });
       cachedPhotoURL = uploaded.url;
+      // Store cachedPhotoURL directly to ensure it persists (use setDoc with merge for safety)
+      await setDoc(ref, {
+        cachedPhotoURL,
+        photoURL: cachedPhotoURL,
+        authPhotoURL: current.photoURL,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      return; // Skip ensureUserDoc since we just updated
     } catch (e) {
       console.warn('Failed to cache Google photoURL:', e);
     }
@@ -245,7 +254,7 @@ async function afterLoginEnsureDoc() {
   await ensureUserDoc(current.uid, {
     email: current.email,
     name: current.displayName ?? (current.email ? current.email.split('@')[0] : current.uid),
-    photoURL: cachedPhotoURL || current.photoURL
+    photoURL: cachedPhotoURL || existing?.photoURL || current.photoURL
   });
 }
 
@@ -259,10 +268,48 @@ export function startAuthListener() {
     unsubscribe = onAuthStateChanged(auth!, async (u) => {
       userStore.set(u);
       if (u) {
+        // Check existing profile to preserve cached/custom photos
+        const ref = profileRef(u.uid);
+        const snap = await getDoc(ref);
+        const existing: Record<string, any> | null = snap.exists() ? (snap.data() as any) : null;
+        const hasCustom = !!existing?.customPhotoURL;
+        const hasCached = !!existing?.cachedPhotoURL;
+        
+        // If user has a Google photo but no cached version, cache it now
+        if (!hasCustom && !hasCached && u.photoURL) {
+          try {
+            const response = await fetch(u.photoURL);
+            if (response.ok) {
+              const blob = await response.blob();
+              const file = new File([blob], 'google-avatar.jpg', { type: blob.type || 'image/jpeg' });
+              const { uploadProfileAvatar } = await import('./storage');
+              const uploaded = await uploadProfileAvatar({ file, uid: u.uid });
+              await setDoc(ref, {
+                cachedPhotoURL: uploaded.url,
+                photoURL: uploaded.url,
+                authPhotoURL: u.photoURL,
+                updatedAt: serverTimestamp()
+              }, { merge: true });
+              // Update ensureUserDoc with cached photo
+              await ensureUserDoc(u.uid, {
+                email: u.email,
+                name: u.displayName ?? (u.email ? u.email.split('@')[0] : null),
+                photoURL: uploaded.url
+              });
+              return;
+            }
+          } catch (e) {
+            console.warn('Failed to cache avatar on auth state change:', e);
+          }
+        }
+        
+        const preservedPhoto = existing?.cachedPhotoURL ?? existing?.customPhotoURL ?? existing?.photoURL ?? null;
+        
         await ensureUserDoc(u.uid, {
           email: u.email,
           name: u.displayName ?? (u.email ? u.email.split('@')[0] : null),
-          photoURL: u.photoURL
+          // Preserve existing cached/custom photo, don't overwrite with Google URL
+          photoURL: preservedPhoto || u.photoURL
         });
       }
     });
@@ -312,6 +359,9 @@ export async function ensureUserDoc(
 
   const finalPhoto = customPhoto || authPhotoURL || '';
 
+  // Preserve cachedPhotoURL if it exists
+  const existingCached = trim(existing?.cachedPhotoURL ?? null);
+
   const payload: Record<string, any> = {
     uid,
     email,
@@ -320,7 +370,8 @@ export async function ensureUserDoc(
     displayName: name ?? null, // keep legacy
     authPhotoURL: authPhotoURL || null,
     customPhotoURL: customPhoto || null,
-    photoURL: finalPhoto || null,
+    cachedPhotoURL: existingCached || null,
+    photoURL: customPhoto || existingCached || finalPhoto || null,
     updatedAt: serverTimestamp()
   };
 

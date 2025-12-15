@@ -47,6 +47,10 @@ import {
   let drilldownEl: HTMLDivElement | null = null;
   let lastRangeKey = '';
   let staffSuggestions: MemberOption[] = [];
+  let staffDomainInput = '';
+
+  // SLA configuration (response within X minutes)
+  const SLA_TARGET_MINUTES = 60;
 
   let filters = {
     timeRange: '30d',
@@ -176,6 +180,19 @@ import {
 
   function removeStaff(uid: string) {
     settings = { ...settings, staffMemberIds: settings.staffMemberIds.filter((id) => id !== uid) };
+  }
+
+  function addStaffDomain() {
+    const raw = staffDomainInput.trim().toLowerCase();
+    if (!raw) return;
+    const domain = raw.startsWith('@') ? raw : `@${raw}`;
+    if (settings.staffDomains.includes(domain)) return;
+    settings = { ...settings, staffDomains: [...settings.staffDomains, domain] };
+    staffDomainInput = '';
+  }
+
+  function removeStaffDomain(domain: string) {
+    settings = { ...settings, staffDomains: settings.staffDomains.filter((d) => d !== domain) };
   }
 
   const memberLabel = (uid: string) => {
@@ -321,20 +338,117 @@ import {
     return map;
   }
 
+  // Calculate SLA compliance rate (% of issues responded within target)
+  function calcSlaCompliance(rows: TicketAiIssue[]): number | null {
+    const withResponse = rows.filter((r) => typeof r.timeToFirstResponseMs === 'number');
+    if (!withResponse.length) return null;
+    const targetMs = SLA_TARGET_MINUTES * 60 * 1000;
+    const metSla = withResponse.filter((r) => (r.timeToFirstResponseMs ?? Infinity) <= targetMs);
+    return (metSla.length / withResponse.length) * 100;
+  }
+
+  // Count reopened tickets
+  function countReopened(rows: TicketAiIssue[]): number {
+    return rows.filter((r) => r.reopenedAfterClose).length;
+  }
+
+  // Staff leaderboard: who resolved the most issues
+  function staffLeaderboard(rows: TicketAiIssue[]): Array<{ uid: string; name: string; count: number }> {
+    const map = new Map<string, number>();
+    for (const row of rows) {
+      if (row.status === 'closed' && row.staffMemberIds?.length) {
+        for (const uid of row.staffMemberIds) {
+          map.set(uid, (map.get(uid) ?? 0) + 1);
+        }
+      }
+    }
+    return Array.from(map.entries())
+      .map(([uid, count]) => ({ uid, name: memberLabel(uid), count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+  }
+
+  // Status breakdown
+  function statusBreakdown(rows: TicketAiIssue[]) {
+    const map = { opened: 0, in_progress: 0, closed: 0 };
+    for (const row of rows) {
+      const status = row.status ?? 'opened';
+      if (status in map) map[status as keyof typeof map]++;
+    }
+    return map;
+  }
+
   function buildInsights(rows: TicketAiIssue[]): string[] {
     const list: string[] = [];
     const avgFirst = average(rows.map((r) => r.timeToFirstResponseMs ?? null));
     const avgResolution = average(rows.map((r) => r.timeToResolutionMs ?? null));
     const openCount = rows.filter((r) => r.status !== 'closed').length;
+    const inProgressCount = rows.filter((r) => r.status === 'in_progress').length;
+    const closedCount = rows.filter((r) => r.status === 'closed').length;
     const typeMap = typeBreakdown(rows);
     const busiestType = Object.entries(typeMap).sort((a, b) => b[1] - a[1])[0];
-    if (avgFirst) list.push(`Avg first response: ${formatDuration(avgFirst)}.`);
-    if (avgResolution) list.push(`Avg resolution time: ${formatDuration(avgResolution)}.`);
-    if (openCount > 0) list.push(`${openCount} open issues remain in this window.`);
-    if (busiestType && busiestType[1] > 0) {
-      list.push(`${busiestType[0].replace('_', ' ')} threads are most common.`);
+    const slaRate = calcSlaCompliance(rows);
+    const reopenedCount = countReopened(rows);
+    const leaderboard = staffLeaderboard(rows);
+
+    // Response time insight
+    if (avgFirst) {
+      const minutes = avgFirst / (60 * 1000);
+      if (minutes < 30) {
+        list.push(`🚀 Excellent response time: ${formatDuration(avgFirst)} average.`);
+      } else if (minutes < 60) {
+        list.push(`✅ Good response time: ${formatDuration(avgFirst)} average.`);
+      } else {
+        list.push(`⚠️ Response time could improve: ${formatDuration(avgFirst)} average.`);
+      }
     }
-    if (!list.length) list.push('Not enough data yet — monitor a few channels to see trends.');
+
+    // SLA compliance insight
+    if (slaRate !== null) {
+      if (slaRate >= 90) {
+        list.push(`🎯 ${slaRate.toFixed(0)}% of issues responded within ${SLA_TARGET_MINUTES} min SLA.`);
+      } else if (slaRate >= 70) {
+        list.push(`📊 ${slaRate.toFixed(0)}% SLA compliance — room for improvement.`);
+      } else {
+        list.push(`🔴 ${slaRate.toFixed(0)}% SLA compliance — needs attention.`);
+      }
+    }
+
+    // Resolution time insight
+    if (avgResolution) {
+      const hours = avgResolution / (60 * 60 * 1000);
+      if (hours < 4) {
+        list.push(`⚡ Fast resolution: averaging ${formatDuration(avgResolution)}.`);
+      } else if (hours < 24) {
+        list.push(`📈 Resolution time: ${formatDuration(avgResolution)} average.`);
+      } else {
+        list.push(`📉 Resolution taking ${formatDuration(avgResolution)} on average.`);
+      }
+    }
+
+    // Open issues insight
+    if (openCount > 0) {
+      const pct = rows.length > 0 ? ((openCount / rows.length) * 100).toFixed(0) : 0;
+      list.push(`📋 ${openCount} open issue${openCount > 1 ? 's' : ''} (${pct}% of total).`);
+    }
+
+    // Reopened insight
+    if (reopenedCount > 0) {
+      list.push(`🔄 ${reopenedCount} issue${reopenedCount > 1 ? 's' : ''} reopened after closure.`);
+    }
+
+    // Type insight
+    if (busiestType && busiestType[1] > 0 && rows.length >= 5) {
+      const pct = ((busiestType[1] / rows.length) * 100).toFixed(0);
+      list.push(`📌 ${busiestType[0].replace('_', ' ')} issues are most common (${pct}%).`);
+    }
+
+    // Top performer insight
+    if (leaderboard.length > 0 && leaderboard[0].count > 1) {
+      list.push(`🏆 Top responder: ${leaderboard[0].name} (${leaderboard[0].count} resolved).`);
+    }
+
+    if (!list.length) list.push('📊 Not enough data yet — monitor a few channels to see trends.');
     return list;
   }
 
@@ -516,46 +630,89 @@ import {
             <div class="section-header">
               <div>
                 <h3>Staff responders</h3>
-                <p>Pick engineers whose replies count as staff responses.</p>
+                <p>Pick staff members or use email domains to identify responders.</p>
               </div>
             </div>
-            <div class="domain-input">
-              <input
-                class="input"
-                placeholder="Search engineers by name or email"
-                bind:value={staffSearch}
-                disabled={!settings.enabled}
-                on:keydown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addFirstSuggestion();
-                  }
-                }}
-              />
-            </div>
-            <div class="pill-list">
-              {#each staffSuggestions as member (member.uid)}
-                <button type="button" class="pill" on:click={() => addStaff(member.uid)}>
-                  <span>{member.displayName ?? member.nickname ?? member.email ?? member.uid}</span>
-                  <span class="text-xs text-white/70">Tap to add</span>
-                </button>
-              {/each}
-              {#if staffSuggestions.length === 0}
-                <p class="muted">No matching members.</p>
-              {/if}
-            </div>
-            <div class="pill-list">
-              {#each settings.staffMemberIds as uid (uid)}
-                <span class="tag">
-                  {memberLabel(uid)}
-                  <button type="button" aria-label={`Remove ${memberLabel(uid)}`} on:click={() => removeStaff(uid)}>
-                    <i class="bx bx-x"></i>
+            
+            <div class="staff-config-grid">
+              <div class="staff-column">
+                <p class="settings-label">Individual staff members</p>
+                <div class="domain-input">
+                  <input
+                    class="input"
+                    placeholder="Search by name or email"
+                    bind:value={staffSearch}
+                    disabled={!settings.enabled}
+                    on:keydown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addFirstSuggestion();
+                      }
+                    }}
+                  />
+                </div>
+                <div class="pill-list">
+                  {#each staffSuggestions.slice(0, 8) as member (member.uid)}
+                    <button type="button" class="pill pill--suggestion" on:click={() => addStaff(member.uid)}>
+                      <span>{member.displayName ?? member.nickname ?? member.email ?? member.uid}</span>
+                      <i class="bx bx-plus"></i>
+                    </button>
+                  {/each}
+                </div>
+                <div class="pill-list">
+                  {#each settings.staffMemberIds as uid (uid)}
+                    <span class="tag">
+                      {memberLabel(uid)}
+                      <button type="button" aria-label={`Remove ${memberLabel(uid)}`} on:click={() => removeStaff(uid)}>
+                        <i class="bx bx-x"></i>
+                      </button>
+                    </span>
+                  {/each}
+                  {#if settings.staffMemberIds.length === 0}
+                    <p class="muted">No staff selected.</p>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="staff-column">
+                <p class="settings-label">Staff email domains</p>
+                <p class="settings-caption">Anyone with these email domains will be recognized as staff.</p>
+                <div class="domain-input">
+                  <input
+                    class="input"
+                    placeholder="e.g. @yourcompany.com"
+                    bind:value={staffDomainInput}
+                    disabled={!settings.enabled}
+                    on:keydown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addStaffDomain();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-secondary"
+                    disabled={!settings.enabled || !staffDomainInput.trim()}
+                    on:click={addStaffDomain}
+                  >
+                    Add domain
                   </button>
-                </span>
-              {/each}
-              {#if settings.staffMemberIds.length === 0}
-                <p class="muted">No staff selected yet.</p>
-              {/if}
+                </div>
+                <div class="pill-list">
+                  {#each settings.staffDomains as domain (domain)}
+                    <span class="tag tag--domain">
+                      {domain}
+                      <button type="button" aria-label={`Remove ${domain}`} on:click={() => removeStaffDomain(domain)}>
+                        <i class="bx bx-x"></i>
+                      </button>
+                    </span>
+                  {/each}
+                  {#if settings.staffDomains.length === 0}
+                    <p class="muted">No domains added.</p>
+                  {/if}
+                </div>
+              </div>
             </div>
           </section>
 
@@ -717,19 +874,29 @@ import {
                 <strong>{filteredIssues.filter((i) => i.status !== 'closed').length}</strong>
               </button>
               <button class="metric" type="button" on:click={() => focusMetric('first')}>
-                <p>Avg time to first response</p>
+                <p>Avg first response</p>
                 <strong>{formatDuration(average(filteredIssues.map((i) => i.timeToFirstResponseMs ?? null)))}</strong>
               </button>
               <button class="metric" type="button" on:click={() => focusMetric('resolution')}>
-                <p>Avg time to resolution</p>
+                <p>Avg resolution</p>
                 <strong>{formatDuration(average(filteredIssues.map((i) => i.timeToResolutionMs ?? null)))}</strong>
               </button>
               <button class="metric" type="button" on:click={() => focusMetric('volume')}>
-                <p>Issues this period</p>
+                <p>Total issues</p>
                 <strong>{filteredIssues.length}</strong>
               </button>
+              <button class="metric" type="button" on:click={() => focusMetric('sla')}>
+                <p>SLA compliance</p>
+                <strong>
+                  {#if calcSlaCompliance(filteredIssues) !== null}
+                    {calcSlaCompliance(filteredIssues)?.toFixed(0)}%
+                  {:else}
+                    —
+                  {/if}
+                </strong>
+              </button>
               <button class="metric" type="button" on:click={() => focusMetric('messages')}>
-                <p>Avg messages per issue</p>
+                <p>Avg messages</p>
                 <strong>
                   {#if filteredIssues.length === 0}
                     —
@@ -737,6 +904,14 @@ import {
                     {(filteredIssues.reduce((sum, issue) => sum + (issue.messageCount ?? 0), 0) / filteredIssues.length).toFixed(1)}
                   {/if}
                 </strong>
+              </button>
+              <button class="metric" type="button" on:click={() => focusMetric('reopened')}>
+                <p>Reopened</p>
+                <strong>{countReopened(filteredIssues)}</strong>
+              </button>
+              <button class="metric" type="button" on:click={() => focusMetric('closed')}>
+                <p>Closed</p>
+                <strong>{filteredIssues.filter((i) => i.status === 'closed').length}</strong>
               </button>
             </div>
           </div>
@@ -784,6 +959,81 @@ import {
                     </div>
                   {/each}
                 </div>
+              {/if}
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-head">
+                <p>Status breakdown</p>
+              </div>
+              {#if issuesLoading}
+                <p class="muted">Loading…</p>
+              {:else}
+                {@const statuses = statusBreakdown(filteredIssues)}
+                <div class="type-breakdown">
+                  <div class="type-row">
+                    <span class="label status-opened">Open</span>
+                    <div class="bar-fill">
+                      <div
+                        class="bar-inner bar-inner--open"
+                        style={`width:${Math.min(100, (statuses.opened / Math.max(filteredIssues.length, 1)) * 100)}%`}
+                      ></div>
+                    </div>
+                    <span class="value">{statuses.opened}</span>
+                  </div>
+                  <div class="type-row">
+                    <span class="label status-in_progress">In progress</span>
+                    <div class="bar-fill">
+                      <div
+                        class="bar-inner bar-inner--progress"
+                        style={`width:${Math.min(100, (statuses.in_progress / Math.max(filteredIssues.length, 1)) * 100)}%`}
+                      ></div>
+                    </div>
+                    <span class="value">{statuses.in_progress}</span>
+                  </div>
+                  <div class="type-row">
+                    <span class="label status-closed">Closed</span>
+                    <div class="bar-fill">
+                      <div
+                        class="bar-inner bar-inner--closed"
+                        style={`width:${Math.min(100, (statuses.closed / Math.max(filteredIssues.length, 1)) * 100)}%`}
+                      ></div>
+                    </div>
+                    <span class="value">{statuses.closed}</span>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-head">
+                <p>Top responders</p>
+              </div>
+              {#if issuesLoading}
+                <p class="muted">Loading…</p>
+              {:else}
+                {@const leaders = staffLeaderboard(filteredIssues)}
+                {#if leaders.length === 0}
+                  <p class="muted">No resolved issues yet.</p>
+                {:else}
+                  <div class="type-breakdown">
+                    {#each leaders as person, i (person.uid)}
+                      <div class="type-row">
+                        <span class="label">
+                          {#if i === 0}🥇{:else if i === 1}🥈{:else if i === 2}🥉{:else}{i + 1}.{/if}
+                          {person.name}
+                        </span>
+                        <div class="bar-fill">
+                          <div
+                            class="bar-inner bar-inner--leader"
+                            style={`width:${Math.min(100, (person.count / Math.max(leaders[0].count, 1)) * 100)}%`}
+                          ></div>
+                        </div>
+                        <span class="value">{person.count}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               {/if}
             </div>
           </div>
@@ -1326,5 +1576,90 @@ import {
     align-items: center;
     justify-content: center;
     cursor: pointer;
+  }
+
+  /* Staff config grid */
+  .staff-config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  @media (max-width: 640px) {
+    .staff-config-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .staff-column {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pill--suggestion {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .pill--suggestion i {
+    font-size: 14px;
+    opacity: 0.7;
+  }
+
+  .tag--domain {
+    background: color-mix(in srgb, var(--color-accent, #33c8bf) 15%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent, #33c8bf) 35%, transparent);
+  }
+
+  .btn-sm {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  /* Status colors */
+  .status-opened,
+  .status-open {
+    color: #f97316;
+  }
+
+  .status-in_progress,
+  .status-in-progress {
+    color: #fbbf24;
+  }
+
+  .status-closed {
+    color: #22c55e;
+  }
+
+  /* Bar inner variants */
+  .bar-inner--open {
+    background: linear-gradient(90deg, #f97316, #f97316cc);
+  }
+
+  .bar-inner--progress {
+    background: linear-gradient(90deg, #fbbf24, #fbbf24cc);
+  }
+
+  .bar-inner--closed {
+    background: linear-gradient(90deg, #22c55e, #22c55ecc);
+  }
+
+  .bar-inner--leader {
+    background: linear-gradient(90deg, var(--color-accent, #33c8bf), var(--color-accent, #33c8bf)cc);
+  }
+
+  /* Metrics grid adjustment for more items */
+  .metrics {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  .metric p {
+    font-size: 12px;
+  }
+
+  .metric strong {
+    font-size: 18px;
   }
 </style>
