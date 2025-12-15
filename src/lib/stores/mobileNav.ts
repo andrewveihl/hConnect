@@ -86,8 +86,7 @@ export function openOverlay(id: MobileOverlayId) {
   const entryId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : fallbackId(id);
   entryDirectory.set(entryId, id);
   const nextState = { ...(window.history.state ?? {}), [STATE_KEY]: entryId };
-  // Use native history.pushState to avoid router-init timing issues on first paint.
-  window.history.pushState(nextState, '', window.location.href);
+  pushState(window.location.href, nextState);
   stackStore.update((stack) => [...stack, { id, entryId }]);
 }
 

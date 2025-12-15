@@ -26,7 +26,7 @@
     resolveManualPresenceFromSources,
     type PresenceState
   } from '$lib/presence/state';
-  import { user } from '$lib/stores/user';
+  import { user, userProfile } from '$lib/stores/user';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   interface Props {
@@ -434,8 +434,7 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
     dragCandidateId = serverId;
     dragPointerId = event.pointerId;
     dragStartY = event.clientY;
-    draggingServerId = serverId;
-    dragPreview = [...serverList];
+    draggingServerId = null;
   }
 
   function handleWindowPointerMove(event: PointerEvent) {
@@ -734,8 +733,8 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
             aria-current={isSettingsOpen || currentPath.startsWith('/settings') ? 'page' : undefined}
             onclick={openUserSettings}
           >
-            {#if $user?.photoURL}
-              <img src={$user.photoURL} alt="Me" class="rail-button__image" draggable="false" />
+            {#if $user?.photoURL || $userProfile}
+              <img src={resolveProfilePhotoURL($userProfile ?? $user)} alt="Me" class="rail-button__image" draggable="false" />
             {:else}
               <i class="bx bx-user text-xl leading-none"></i>
             {/if}

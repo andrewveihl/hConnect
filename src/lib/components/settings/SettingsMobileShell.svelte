@@ -5,7 +5,8 @@
   import SettingsPanel from '$lib/components/settings/SettingsPanel.svelte';
   import { goto } from '$app/navigation';
   import { settingsSections, type SettingsSection, type SettingsSectionId } from '$lib/settings/sections';
-  import { user } from '$lib/stores/user';
+  import { user, userProfile } from '$lib/stores/user';
+  import { resolveProfilePhotoURL } from '$lib/utils/profile';
 
   interface Props {
     open: boolean;
@@ -214,8 +215,8 @@
             <p class="text-sm font-semibold text-[color:var(--color-text-primary)]">Settings</p>
           </div>
           <div class="h-8 w-8 overflow-hidden rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]">
-            {#if $user?.photoURL}
-              <img src={$user.photoURL} alt="Me" class="h-full w-full object-cover" />
+            {#if $user?.photoURL || $userProfile}
+              <img src={resolveProfilePhotoURL($userProfile ?? $user)} alt="Me" class="h-full w-full object-cover" />
             {:else}
               <div class="grid h-full w-full place-items-center text-[color:var(--text-70)]">
                 <i class="bx bx-user" aria-hidden="true"></i>

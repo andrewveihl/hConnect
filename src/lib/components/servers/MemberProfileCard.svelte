@@ -162,22 +162,18 @@
           {:else}
             <span class="member-role member-role--large">Member</span>
           {/if}
+          {#if canMessage && isMobile}
+            <button
+              type="button"
+              class="profile-card__dm-btn"
+              onclick={() => dispatch('dm')}
+              aria-label="Direct message"
+            >
+              <i class="bx bx-message-dots"></i>
+              <span>Message</span>
+            </button>
+          {/if}
         </div>
-        {#if member.roles.length}
-          <div class="member-profile__roles">
-            <p class="member-profile__label">Custom roles</p>
-            <div class="member-roles">
-              {#each member.roles as role}
-                <span
-                  class="member-role"
-                  style={role.color ? `--member-role-color: ${role.color}` : undefined}
-                >
-                  {role.name}
-                </span>
-              {/each}
-            </div>
-          </div>
-        {/if}
         {#if aboutText()}
           <div>
             <p class="member-profile__label">About</p>

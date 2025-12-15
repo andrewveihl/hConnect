@@ -6,6 +6,9 @@
   import { initMobileNavigation } from '$lib/stores/mobileNav';
   import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
   import { initClientErrorReporting, teardownClientErrorReporting } from '$lib/telemetry/clientErrors';
+  import { customizationConfigStore, applyThemeOverrides, type CustomizationConfig } from '$lib/admin/customization';
+  import { theme } from '$lib/stores/theme';
+  import { setSoundOverrides } from '$lib/utils/sounds';
 
   interface Props {
     children?: import('svelte').Snippet;
@@ -19,6 +22,27 @@
   let detachViewportListeners: (() => void) | null = null;
   const currentPath = $derived($page?.url?.pathname ?? '/');
   const hideFloatingDock = $derived(currentPath.startsWith('/splash'));
+
+  // Global customization config for themes and splash
+  const customization = customizationConfigStore();
+  let currentTheme = $state<'dark' | 'light' | 'midnight'>('dark');
+
+  // Subscribe to theme changes and apply admin overrides
+  $effect(() => {
+    const unsub = theme.subscribe((t) => {
+      // Map holiday to dark for override purposes
+      currentTheme = (t === 'holiday' ? 'dark' : t) as 'dark' | 'light' | 'midnight';
+    });
+    return unsub;
+  });
+
+  // Apply theme overrides whenever config or theme changes
+  $effect(() => {
+    if ($customization) {
+      applyThemeOverrides($customization, currentTheme);
+      setSoundOverrides($customization.sounds);
+    }
+  });
 
   // Prefer the largest available viewport metric so iOS URL bars don't shrink the app.
   const setAppHeight = () => {

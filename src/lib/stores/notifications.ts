@@ -31,6 +31,7 @@ import {
   pickMessageSnippet,
   truncate
 } from '$lib/utils/messagePreview';
+import { playSound } from '$lib/utils/sounds';
 
 type ChannelMeta = {
   id: string;
@@ -80,6 +81,7 @@ type ThreadState = {
   stopMeta?: Unsubscribe;
   recomputeRunning: boolean;
   recomputeQueued: boolean;
+  unreadBlocked?: boolean;
 };
 
 type LatestMessage = {
@@ -135,6 +137,7 @@ const channelUnreadCountInternal = writable(0);
 const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>({});
 let lastBadgeValue: number | null = null;
+let lastNotificationSoundTotal: number | null = null;
 
 export const notifications: Readable<NotificationItem[]> = {
   subscribe: notificationsInternal.subscribe
@@ -563,6 +566,7 @@ function applyThreadContribution(state: ThreadState, nextUnread: number) {
 }
 
 function scheduleThreadRecompute(state: ThreadState) {
+  if (state.unreadBlocked) return;
   if (state.recomputeRunning) {
     state.recomputeQueued = true;
     return;
@@ -584,6 +588,13 @@ function scheduleThreadRecompute(state: ThreadState) {
 
 async function computeThreadUnread(state: ThreadState) {
   try {
+    if (!servers.has(state.serverId)) {
+      state.unreadBlocked = true;
+      applyThreadContribution(state, 0);
+      updateThreadActivityEntry(state);
+      return;
+    }
+
     const db = getDb();
     const base = collection(
       db,
@@ -601,7 +612,14 @@ async function computeThreadUnread(state: ThreadState) {
     applyThreadContribution(state, unread);
     updateThreadActivityEntry(state);
     recompute();
-  } catch (err) {
+  } catch (err: any) {
+    const code = err?.code ?? err?.message ?? '';
+    if (typeof code === 'string' && code.toLowerCase().includes('permission')) {
+      state.unreadBlocked = true;
+      applyThreadContribution(state, 0);
+      updateThreadActivityEntry(state);
+      return;
+    }
     console.warn('[notifications] thread unread fetch failed', { threadId: state.threadId }, err);
   }
 }
@@ -667,7 +685,8 @@ function startThreadWatchers(uid: string) {
             lastReadAt: data.lastReadAt ?? null,
             unread: 0,
             recomputeQueued: false,
-            recomputeRunning: false
+            recomputeRunning: false,
+            unreadBlocked: false
           };
           threadStates.set(docSnap.id, state);
           attachThreadMeta(state);
@@ -733,6 +752,7 @@ function cleanupAll() {
   channelUnreadCountInternal.set(0);
   channelIndicatorsInternal.set({});
   readyInternal.set(false);
+  lastNotificationSoundTotal = null;
   if (browser) {
     const nav = navigator as any;
     const clearer: (() => Promise<void> | void) | undefined =
@@ -752,6 +772,21 @@ function cleanupAll() {
   } else {
     lastBadgeValue = null;
   }
+}
+
+function maybePlayNotificationSound(total: number) {
+  if (!browser) {
+    lastNotificationSoundTotal = total;
+    return;
+  }
+  if (lastNotificationSoundTotal === null) {
+    lastNotificationSoundTotal = total;
+    return;
+  }
+  if (total > lastNotificationSoundTotal) {
+    playSound('notification');
+  }
+  lastNotificationSoundTotal = total;
 }
 
 function recompute() {
@@ -891,6 +926,7 @@ function recompute() {
 
   const total = channelTotal + dmTotal;
 
+  maybePlayNotificationSound(total);
   notificationsInternal.set(list);
   notificationCountInternal.set(total);
   dmUnreadCountInternal.set(dmTotal);
@@ -954,6 +990,3 @@ if (browser) {
     startThreadWatchers(uid);
   });
 }
-
-
-

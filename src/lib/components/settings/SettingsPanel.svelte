@@ -8,6 +8,14 @@ import { theme as themeStore, setTheme, type ThemeMode } from '$lib/stores/theme
 import { db } from '$lib/firestore/client';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { uploadProfileAvatar } from '$lib/firebase/storage';
+import { getStorageInstance } from '$lib/firebase';
+import { getBlob, ref as storageRef } from 'firebase/storage';
+import {
+  customizationConfigStore,
+  applyThemeOverrides,
+  type CustomizationConfig,
+  type CustomTheme
+} from '$lib/admin/customization';
 import {
     enablePushForUser,
     requestNotificationPermission,
@@ -32,6 +40,9 @@ import { defaultSettingsSection, settingsSections, type SettingsSectionId } from
   let { serverId = null, activeSection = defaultSettingsSection }: Props = $props();
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const AVATAR_MAX_DIMENSION = 512;
+const AVATAR_CROP_FRAME = 260;
+const AVATAR_FIRESTORE_LIMIT = 900 * 1024;
 
 function pickString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -39,6 +50,271 @@ function pickString(value: unknown): string | undefined {
   return trimmed.length ? trimmed : undefined;
 }
 
+function dataUrlBytes(dataUrl: string): number {
+  const base64 = dataUrl.split(',')[1] ?? '';
+  return Math.ceil((base64.length * 3) / 4);
+}
+
+function exportCanvasToDataUrl(canvas: HTMLCanvasElement, limitBytes = AVATAR_FIRESTORE_LIMIT): string {
+  let quality = 0.92;
+  let result = canvas.toDataURL('image/webp', quality);
+  while (dataUrlBytes(result) > limitBytes && quality > 0.4) {
+    quality = Math.max(0.4, quality - 0.08);
+    result = canvas.toDataURL('image/webp', quality);
+  }
+  if (dataUrlBytes(result) > limitBytes) {
+    throw new Error('Image is still too large after compression.');
+  }
+  return result;
+}
+
+function clampAvatarOffset(
+  offset: { x: number; y: number },
+  scale = avatarCropScale,
+  dims = avatarCropDimensions
+) {
+  if (!dims.width || !dims.height) return { x: 0, y: 0 };
+  const frame = AVATAR_CROP_FRAME;
+  const displayWidth = dims.width * scale;
+  const displayHeight = dims.height * scale;
+  const maxX = Math.max(0, (displayWidth - frame) / 2);
+  const maxY = Math.max(0, (displayHeight - frame) / 2);
+  return {
+    x: Math.min(Math.max(offset.x, -maxX), maxX),
+    y: Math.min(Math.max(offset.y, -maxY), maxY)
+  };
+}
+
+function adjustAvatarCropScale(value: number) {
+  const clamped = Math.min(Math.max(value, avatarCropMinScale), avatarCropMaxScale);
+  avatarCropScale = clamped;
+  avatarCropOffset = clampAvatarOffset(avatarCropOffset, clamped);
+}
+
+function onAvatarCropWheel(event: WheelEvent) {
+  event.preventDefault();
+  const delta = event.deltaY > 0 ? -0.08 : 0.08;
+  adjustAvatarCropScale(avatarCropScale + delta);
+}
+
+const handleAvatarCropDrag = (event: PointerEvent) => {
+  if (!avatarCropDragging) return;
+  const deltaX = event.clientX - avatarCropDragStart.x;
+  const deltaY = event.clientY - avatarCropDragStart.y;
+  avatarCropOffset = clampAvatarOffset(
+    { x: avatarCropDragOrigin.x + deltaX, y: avatarCropDragOrigin.y + deltaY },
+    avatarCropScale
+  );
+};
+
+function endAvatarCropDrag() {
+  avatarCropDragging = false;
+  window.removeEventListener('pointermove', handleAvatarCropDrag);
+  window.removeEventListener('pointerup', endAvatarCropDrag);
+}
+
+function startAvatarCropDrag(event: PointerEvent) {
+  if (!avatarCropOpen) return;
+  event.preventDefault();
+  avatarCropDragging = true;
+  avatarCropDragStart = { x: event.clientX, y: event.clientY };
+  avatarCropDragOrigin = { ...avatarCropOffset };
+  window.addEventListener('pointermove', handleAvatarCropDrag);
+  window.addEventListener('pointerup', endAvatarCropDrag);
+}
+
+async function readFileAsDataUrl(file: File): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string) ?? '');
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadImageFromSource(src: string): Promise<{ img: HTMLImageElement; src: string; revoke?: () => void }> {
+  const loadFromUrl = (url: string) =>
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.crossOrigin = 'anonymous';
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Could not open that image.'));
+      image.src = url;
+    });
+
+  async function tryStorageBlob(url: string) {
+    try {
+      const storage = getStorageInstance();
+      // Use ref() for both full URLs and storage paths
+      const storageReference = storageRef(storage, url);
+      const blob = await getBlob(storageReference);
+      const objectUrl = URL.createObjectURL(blob);
+      const img = await loadFromUrl(objectUrl);
+      return { img, src: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+    } catch {
+      return null;
+    }
+  }
+
+  // Try Storage SDK first for CORS-safe blob
+  if (!src.startsWith('data:')) {
+    const storageLoad = await tryStorageBlob(src);
+    if (storageLoad) return storageLoad;
+  }
+
+  // Fallback: fetch and object URL if CORS allows
+  if (!src.startsWith('data:')) {
+    try {
+      const response = await fetch(src, { mode: 'cors' });
+      if (!response.ok) throw new Error('Could not open that image.');
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const img = await loadFromUrl(objectUrl);
+      return { img, src: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+    } catch {
+      // Fall back to direct load below
+    }
+  }
+
+  const img = await loadFromUrl(src);
+  return { img, src };
+}
+
+async function openAvatarCropperFromSource(source: string) {
+  const { img, src, revoke } = await loadImageFromSource(source);
+  const minScale = Math.max(AVATAR_CROP_FRAME / img.width, AVATAR_CROP_FRAME / img.height);
+  const maxScale = Math.max(minScale * 3, minScale + 1.5);
+  avatarCropImage = img;
+  if (avatarCropObjectUrl) {
+    URL.revokeObjectURL(avatarCropObjectUrl);
+    avatarCropObjectUrl = null;
+  }
+  avatarCropObjectUrl = revoke ? src : avatarCropObjectUrl;
+  avatarCropSrc = src;
+  avatarCropDimensions = { width: img.width, height: img.height };
+  avatarCropMinScale = minScale;
+  avatarCropMaxScale = maxScale;
+  avatarCropScale = minScale;
+  avatarCropOffset = clampAvatarOffset({ x: 0, y: 0 }, minScale, { width: img.width, height: img.height });
+  avatarCropOpen = true;
+  avatarError = null;
+}
+
+function closeAvatarCropper() {
+  endAvatarCropDrag();
+  avatarCropOpen = false;
+  avatarCropSrc = null;
+  avatarCropImage = null;
+  if (avatarCropObjectUrl) {
+    URL.revokeObjectURL(avatarCropObjectUrl);
+    avatarCropObjectUrl = null;
+  }
+  avatarCropDragging = false;
+  avatarCropOffset = { x: 0, y: 0 };
+  avatarCropDimensions = { width: 0, height: 0 };
+  avatarCropScale = 1;
+  avatarCropMinScale = 1;
+  avatarCropMaxScale = 3;
+}
+
+function renderAvatarCropDataUrl(): string {
+  if (!avatarCropImage || !avatarCropDimensions.width || !avatarCropDimensions.height) {
+    throw new Error('No image to crop.');
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = AVATAR_MAX_DIMENSION;
+  canvas.height = AVATAR_MAX_DIMENSION;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas unavailable');
+  const frame = AVATAR_CROP_FRAME;
+  const displayWidth = avatarCropDimensions.width * avatarCropScale;
+  const displayHeight = avatarCropDimensions.height * avatarCropScale;
+  const imageLeft = (frame - displayWidth) / 2 + avatarCropOffset.x;
+  const imageTop = (frame - displayHeight) / 2 + avatarCropOffset.y;
+  const cropX = Math.max(0, -imageLeft / avatarCropScale);
+  const cropY = Math.max(0, -imageTop / avatarCropScale);
+  const cropSize = frame / avatarCropScale;
+  const sourceX = Math.min(Math.max(cropX, 0), Math.max(0, avatarCropDimensions.width - cropSize));
+  const sourceY = Math.min(Math.max(cropY, 0), Math.max(0, avatarCropDimensions.height - cropSize));
+  ctx.fillStyle = '#0b1220';
+  ctx.fillRect(0, 0, AVATAR_MAX_DIMENSION, AVATAR_MAX_DIMENSION);
+  ctx.drawImage(
+    avatarCropImage,
+    sourceX,
+    sourceY,
+    cropSize,
+    cropSize,
+    0,
+    0,
+    AVATAR_MAX_DIMENSION,
+    AVATAR_MAX_DIMENSION
+  );
+  return exportCanvasToDataUrl(canvas, AVATAR_FIRESTORE_LIMIT);
+}
+
+async function renderAvatarCropFile(): Promise<File> {
+  const dataUrl = renderAvatarCropDataUrl();
+  const blob = await fetch(dataUrl).then((res) => res.blob());
+  return new File([blob], 'avatar.webp', { type: 'image/webp' });
+}
+
+async function openAvatarCropperFromFile(file: File) {
+  const dataUrl = await readFileAsDataUrl(file);
+  await openAvatarCropperFromSource(dataUrl);
+}
+
+async function editAvatarCropExisting() {
+  const source =
+    pickString(previewPhotoURL) ??
+    pickString(photoURL) ??
+    pickString($user?.photoURL) ??
+    pickString(authPhotoURL);
+  if (!source) {
+    avatarError = 'No profile photo to edit yet.';
+    return;
+  }
+  try {
+    await openAvatarCropperFromSource(source);
+  } catch (error: any) {
+    avatarError = error?.message ?? 'Could not open the image.';
+  }
+}
+
+async function applyAvatarCrop() {
+  if (!$user?.uid) {
+    avatarError = 'Sign in to upload a profile photo.';
+    return;
+  }
+  const previousPreview = previewPhotoURL;
+  if (saveState !== 'saving') {
+    saveState = 'pending';
+  }
+  avatarUploadBusy = true;
+  avatarUploadProgress = 0;
+  try {
+    const dataUrl = renderAvatarCropDataUrl();
+    previewPhotoURL = dataUrl;
+    const croppedFile = await renderAvatarCropFile();
+    const result = await uploadProfileAvatar({
+      file: croppedFile,
+      uid: $user.uid,
+      onProgress: (progress) => {
+        avatarUploadProgress = progress;
+      }
+    });
+    photoURL = result.url;
+    previewPhotoURL = result.url;
+    avatarError = null;
+    void flushAutoSave();
+    closeAvatarCropper();
+  } catch (error: any) {
+    avatarError = error?.message ?? 'Could not upload the selected file.';
+    previewPhotoURL = previousPreview;
+  } finally {
+    avatarUploadBusy = false;
+    avatarUploadProgress = 0;
+  }
+}
 const IOS_DEVICE_REGEX = /iP(ad|hone|od)/i;
 const SAFARI_REGEX = /Safari/i;
 const IOS_ALT_BROWSERS = /(CriOS|FxiOS|OPiOS|EdgiOS)/i;
@@ -72,6 +348,7 @@ const IOS_ALT_BROWSERS = /(CriOS|FxiOS|OPiOS|EdgiOS)/i;
     $derived(settingsSections.find((section) => section.id === activeSection));
   const currentSectionLabel = $derived(currentSection?.label ?? 'Settings');
   const currentSectionGroup = $derived(currentSection?.group ?? 'User Settings');
+  const avatarCropPreviewScale = $derived(Math.min(1, 140 / AVATAR_CROP_FRAME));
   let voicePrefs = $state<VoicePreferences>(loadVoicePreferences());
   const stopVoicePref = voicePreferences.subscribe((value) => (voicePrefs = value));
   const VOICE_TAB_KEY = 'hconnect:settings:voiceTab';
@@ -253,6 +530,7 @@ let diagnosticSampleUrl = $state<string | null>(null);
 
   onDestroy(() => {
     stopVoicePref?.();
+    stopCustomizationSub?.();
     stopMicTest();
     stopVideoTest();
     stopDiagnosticRecorder();
@@ -448,6 +726,19 @@ let avatarFileInput: HTMLInputElement | null = $state(null);
 let avatarError: string | null = $state(null);
 let avatarUploadBusy = $state(false);
 let avatarUploadProgress = $state(0);
+let avatarPreviewObjectUrl: string | null = $state(null);
+let avatarCropObjectUrl: string | null = $state(null);
+let avatarCropOpen = $state(false);
+let avatarCropSrc: string | null = $state(null);
+let avatarCropImage: HTMLImageElement | null = $state(null);
+let avatarCropScale = $state(1);
+let avatarCropMinScale = $state(1);
+let avatarCropMaxScale = $state(3);
+let avatarCropOffset = $state({ x: 0, y: 0 });
+let avatarCropDragging = $state(false);
+let avatarCropDragStart = $state({ x: 0, y: 0 });
+let avatarCropDragOrigin = $state({ x: 0, y: 0 });
+let avatarCropDimensions = $state({ width: 0, height: 0 });
 
   const AUTOSAVE_DELAY = 900;
   type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
@@ -493,16 +784,41 @@ let notif = $state<NotifPrefs>({
       Boolean(pickString(authPhotoURL) ?? pickString($user?.photoURL));
   });
 
-  const themeChoices: Array<{ id: ThemeMode; label: string; description: string }> = [
-    { id: 'light', label: 'Light', description: 'Bright panels and the same teal accent palette.' },
-    { id: 'dark', label: 'Dark', description: 'Charcoal surfaces with teal highlights.' },
-    { id: 'midnight', label: 'Midnight', description: 'Pure black panels with neon teal glow.' },
-    { id: 'holiday', label: 'Holiday', description: 'Auto palette that mirrors major celebrations.' }
+  // Built-in themes
+  const builtInThemeChoices: Array<{ id: string; label: string; description: string; isCustom: boolean }> = [
+    { id: 'light', label: 'Light', description: 'Bright panels and the same teal accent palette.', isCustom: false },
+    { id: 'dark', label: 'Dark', description: 'Charcoal surfaces with teal highlights.', isCustom: false },
+    { id: 'midnight', label: 'Midnight', description: 'Pure black panels with neon teal glow.', isCustom: false },
+    { id: 'holiday', label: 'Holiday', description: 'Auto palette that mirrors major celebrations.', isCustom: false }
   ];
 
+  // Subscribe to customization config for custom themes
+  let customizationConfig = $state<CustomizationConfig | null>(null);
+  const customizationStore = customizationConfigStore();
+  const stopCustomizationSub = customizationStore.subscribe((config) => {
+    customizationConfig = config;
+  });
+
+  // Combine built-in and custom themes
+  const themeChoices = $derived(() => {
+    const customThemes = (customizationConfig?.customThemes ?? []).map((t: CustomTheme) => ({
+      id: t.id,
+      label: t.name,
+      description: 'Custom theme created by admin.',
+      isCustom: true
+    }));
+    return [...builtInThemeChoices, ...customThemes];
+  });
+
+  // Track selected theme (can be built-in ThemeMode or custom theme id)
+  let selectedThemeId = $state<string>(get(themeStore));
   let themeMode: ThemeMode = $state(get(themeStore));
   run(() => {
     themeMode = $themeStore;
+    // If themeMode changes and it's a built-in theme, sync selectedThemeId
+    if (['light', 'dark', 'midnight', 'holiday'].includes(themeMode)) {
+      selectedThemeId = themeMode;
+    }
   });
 
   async function loadProfile(uid: string) {
@@ -559,11 +875,40 @@ let notif = $state<NotifPrefs>({
       enabled: aiPrefs.enabled !== false
     };
 
-    const themePref = settings.theme as ThemeMode | 'seasonal' | undefined;
-    if (themePref === 'seasonal') {
+    // Handle theme preference (built-in or custom)
+    const themePref = settings.theme as string | undefined;
+    const customThemeId = settings.customThemeId as string | undefined;
+    
+    if (customThemeId && customThemeId.startsWith('custom-')) {
+      // Custom theme - restore it
+      selectedThemeId = customThemeId;
+      // Apply custom theme colors after customization config loads
+      const waitForConfig = () => {
+        if (customizationConfig?.customThemes?.length) {
+          const customTheme = customizationConfig.customThemes.find(t => t.id === customThemeId);
+          if (customTheme) {
+            setTheme('dark', { persist: true });
+            const customConfig: CustomizationConfig = {
+              themeOverrides: { dark: customTheme.colors },
+              customThemes: [],
+              splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+              splashGifs: [],
+              sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '' }
+            };
+            applyThemeOverrides(customConfig, 'dark');
+          }
+        } else {
+          // Config not loaded yet, wait a bit
+          setTimeout(waitForConfig, 100);
+        }
+      };
+      waitForConfig();
+    } else if (themePref === 'seasonal') {
       setTheme('holiday', { persist: true });
+      selectedThemeId = 'holiday';
     } else if (themePref === 'light' || themePref === 'dark' || themePref === 'midnight' || themePref === 'holiday') {
       setTheme(themePref, { persist: true });
+      selectedThemeId = themePref;
     }
   }
 
@@ -695,24 +1040,24 @@ let notif = $state<NotifPrefs>({
       input.value = '';
       return;
     }
-    avatarUploadBusy = true;
-    avatarUploadProgress = 0;
     try {
-      const result = await uploadProfileAvatar({
-        file,
-        uid: $user.uid,
-        onProgress: (progress) => {
-          avatarUploadProgress = progress;
-        }
-      });
-      photoURL = result.url;
+      if (avatarPreviewObjectUrl) {
+        URL.revokeObjectURL(avatarPreviewObjectUrl);
+        avatarPreviewObjectUrl = null;
+      }
+      const tempPreview = URL.createObjectURL(file);
+      avatarPreviewObjectUrl = tempPreview;
+      previewPhotoURL = tempPreview;
       avatarError = null;
-      queueAutoSave();
+      await openAvatarCropperFromFile(file);
+      previewPhotoURL = avatarCropSrc ?? previewPhotoURL;
     } catch (error: any) {
       avatarError = error?.message ?? 'Could not upload the selected file.';
     } finally {
-      avatarUploadBusy = false;
-      avatarUploadProgress = 0;
+      if (avatarPreviewObjectUrl) {
+        URL.revokeObjectURL(avatarPreviewObjectUrl);
+        avatarPreviewObjectUrl = null;
+      }
       input.value = '';
     }
   }
@@ -1231,15 +1576,41 @@ let enablePushLoading = $state(false);
     }
   }
 
-  async function updateThemePreference(mode: ThemeMode) {
-    const current = get(themeStore);
-    if (current === mode) return;
-    setTheme(mode, { persist: true });
+  async function updateThemePreference(themeId: string) {
+    if (selectedThemeId === themeId) return;
+    selectedThemeId = themeId;
+    
+    // Check if it's a built-in theme
+    const isBuiltIn = ['light', 'dark', 'midnight', 'holiday'].includes(themeId);
+    
+    if (isBuiltIn) {
+      // Set the built-in theme mode
+      setTheme(themeId as ThemeMode, { persist: true });
+      // Clear any custom theme overrides
+      applyThemeOverrides(null, themeId as 'dark' | 'light' | 'midnight');
+    } else {
+      // Custom theme - apply its colors as CSS overrides
+      const customTheme = customizationConfig?.customThemes?.find(t => t.id === themeId);
+      if (customTheme) {
+        // Base it on dark theme and apply custom colors
+        setTheme('dark', { persist: true });
+        const customConfig: CustomizationConfig = {
+          themeOverrides: { dark: customTheme.colors },
+          customThemes: [],
+          splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+          splashGifs: [],
+          sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '' }
+        };
+        applyThemeOverrides(customConfig, 'dark');
+      }
+    }
+    
     if (!$user?.uid) return;
     try {
       const database = db();
       await updateDoc(doc(database, 'profiles', $user.uid), {
-        'settings.theme': mode,
+        'settings.theme': themeId,
+        'settings.customThemeId': isBuiltIn ? null : themeId,
         lastActiveAt: serverTimestamp()
       });
     } catch (error) {
@@ -1324,6 +1695,16 @@ let enablePushLoading = $state(false);
                     >
                       {avatarUploadBusy ? 'Uploading...' : 'Upload photo'}
                     </button>
+                    {#if previewPhotoURL || photoURL || $user?.photoURL}
+                      <button
+                        type="button"
+                        class={secondaryButtonClasses}
+                        onclick={editAvatarCropExisting}
+                        disabled={avatarUploadBusy}
+                      >
+                        Adjust crop
+                      </button>
+                    {/if}
                     {#if providerPhotoAvailable}
                       <button
                         type="button"
@@ -2105,23 +2486,28 @@ let enablePushLoading = $state(false);
           <p class={mutedTextClasses}>Choose your theme.</p>
         </div>
         <div class="grid gap-3 sm:grid-cols-2">
-          {#each themeChoices as choice}
+          {#each themeChoices() as choice (choice.id)}
             <button
               type="button"
               class={`flex items-center gap-3 rounded-lg border p-4 text-left transition ${
-                themeMode === choice.id
+                selectedThemeId === choice.id
                   ? 'border-[color:var(--color-accent)] bg-[color:var(--color-panel)] ring-2 ring-[color:var(--color-accent)]'
                   : 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] hover:border-[color:var(--color-accent)]'
               }`}
               onclick={() => updateThemePreference(choice.id)}
             >
-              <span class={themeSwatchClasses(choice.id)}></span>
-              <div class="space-y-1">
-                <span class="block text-sm font-semibold text-[color:var(--color-text-primary)]">{choice.label}</span>
+              <span class={choice.isCustom ? 'h-10 w-14 rounded-md border border-[color:var(--color-accent)] bg-gradient-to-br from-[color:var(--color-panel)] via-[color:var(--color-sidebar)] to-[color:var(--color-app-bg)] shadow-inner ring-1 ring-[color:var(--color-accent)]/50' : themeSwatchClasses(choice.id as ThemeMode)}></span>
+              <div class="space-y-1 flex-1 min-w-0">
+                <span class="block text-sm font-semibold text-[color:var(--color-text-primary)] truncate">
+                  {choice.label}
+                  {#if choice.isCustom}
+                    <span class="ml-1 text-[10px] font-medium text-[color:var(--color-accent)]">Custom</span>
+                  {/if}
+                </span>
                 <span class="block text-xs leading-snug text-[color:var(--text-70)]">{choice.description}</span>
               </div>
-              {#if themeMode === choice.id}
-                <span class="ml-auto rounded-full bg-[color:var(--color-accent-soft)] px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-primary)]">
+              {#if selectedThemeId === choice.id}
+                <span class="ml-auto shrink-0 rounded-full bg-[color:var(--color-accent-soft)] px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-primary)]">
                   Active
                 </span>
               {/if}
@@ -2139,5 +2525,90 @@ let enablePushLoading = $state(false);
       </div>
     {/if}
   </div>
-{/if}
 
+  {#if avatarCropOpen && avatarCropSrc}
+    <div
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 px-4 py-8"
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+      onclick={(event) => {
+        if (event.target === event.currentTarget) closeAvatarCropper();
+      }}
+      onkeydown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeAvatarCropper();
+        }
+      }}
+    >
+      <div class="w-full max-w-4xl rounded-2xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] text-[color:var(--color-text-primary)] shadow-2xl">
+        <div class="flex items-center justify-between border-b border-[color:var(--color-border-subtle)] px-5 py-4">
+          <div>
+            <h3 class="text-lg font-semibold">Adjust profile photo</h3>
+            <p class="text-sm text-[color:var(--text-70)]">Drag to reposition. Scroll or use the slider to zoom.</p>
+          </div>
+          <button
+            type="button"
+            class="flex h-9 w-9 items-center justify-center rounded-md text-[color:var(--text-70)] transition hover:bg-[color:var(--color-panel-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--color-accent)]"
+            aria-label="Close"
+            onclick={closeAvatarCropper}
+          >
+            <i class="bx bx-x text-2xl leading-none" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="grid gap-6 px-5 py-5 md:grid-cols-[1.1fr_0.9fr] items-start">
+          <div class="flex flex-col items-center gap-3">
+            <div
+              class="relative overflow-hidden rounded-full border border-[color:var(--color-border-strong,#2f3545)] bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 touch-none cursor-grab active:cursor-grabbing shadow-xl"
+              style={`width:${AVATAR_CROP_FRAME}px;height:${AVATAR_CROP_FRAME}px;`}
+              onpointerdown={startAvatarCropDrag}
+              onwheel={onAvatarCropWheel}
+            >
+              <img
+                src={avatarCropSrc}
+                alt="Profile photo being cropped"
+                class="absolute left-1/2 top-1/2 select-none"
+                draggable="false"
+                style={`width:${avatarCropDimensions.width}px;height:${avatarCropDimensions.height}px;max-width:none;max-height:none;transform: translate(calc(-50% + ${avatarCropOffset.x}px), calc(-50% + ${avatarCropOffset.y}px)) scale(${avatarCropScale});`}
+              />
+              <div class="pointer-events-none absolute inset-0 rounded-full shadow-[0_0_0_9999px_rgba(6,9,16,0.82)_inset]"></div>
+            </div>
+            <p class="text-sm text-[color:var(--text-70)]">Drag with mouse or touch to re-center.</p>
+          </div>
+          <div class="flex flex-col gap-4">
+            <label class="grid gap-2 text-sm text-[color:var(--color-text-primary)]">
+              <span>Zoom</span>
+              <input
+                type="range"
+                min={avatarCropMinScale}
+                max={avatarCropMaxScale}
+                step="0.01"
+                value={avatarCropScale}
+                oninput={(e) => adjustAvatarCropScale(parseFloat((e.currentTarget as HTMLInputElement).value))}
+              />
+            </label>
+            <div class="flex flex-wrap gap-3">
+              <button
+                type="button"
+                class={secondaryButtonClasses}
+                onclick={closeAvatarCropper}
+                disabled={avatarUploadBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                class={primaryButtonClasses}
+                onclick={applyAvatarCrop}
+                disabled={avatarUploadBusy}
+              >
+                {avatarUploadBusy ? 'Saving...' : 'Save photo'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+{/if}

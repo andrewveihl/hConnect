@@ -1,0 +1,26 @@
+[
+  {
+    "origin": [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "https://hconnect.healthspaces.io"
+    ],
+    "method": [
+      "GET",
+      "HEAD",
+      "PUT",
+      "POST",
+      "DELETE",
+      "OPTIONS"
+    ],
+    "responseHeader": [
+      "Content-Type",
+      "X-Goog-Download-File-Name",
+      "X-Goog-Upload-Status",
+      "X-Goog-Upload-Content-Type",
+      "X-Goog-Upload-Protocol",
+      "X-Goog-Upload-File-Name"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

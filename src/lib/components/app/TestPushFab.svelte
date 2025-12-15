@@ -106,7 +106,7 @@ let statusDebugLines = $state<string[]>([]);
     const allowList = Array.isArray($superAdminEmails) ? $superAdminEmails : [];
     return allowList.includes(email);
   });
-  const canShowFab = $derived($showNotificationDebugTools && isSuperAdmin);
+  const canShowFab = $derived($showNotificationDebugTools);
 
   function scheduleClear(options: { force?: boolean } = {}) {
     const { force = false } = options;

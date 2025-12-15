@@ -4,8 +4,8 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
-  import { goto } from '$app/navigation';
-  import { user } from '$lib/stores/user';
+  import { afterNavigate, goto } from '$app/navigation';
+  import { user, userProfile } from '$lib/stores/user';
 
   import LeftPane from '$lib/components/app/LeftPane.svelte';
   import ServerSidebar from '$lib/components/servers/ServerSidebar.svelte';
@@ -16,8 +16,7 @@ import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte'
   import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
   import ThreadPane from '$lib/components/chat/ThreadPane.svelte';
   import VideoChat from '$lib/components/voice/VideoChat.svelte';
-  import VoiceLobby from '$lib/components/voice/VoiceLobby.svelte';
-  import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
+  import CallPreview from '$lib/components/voice/CallPreview.svelte';
   import VoiceParticipantsPanel from '$lib/components/voice/VoiceParticipantsPanel.svelte';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
@@ -45,6 +44,8 @@ import { looksLikeImage } from '$lib/utils/fileType';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { openOverlay, closeOverlay } from '$lib/stores/mobileNav';
+  import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 
   
   interface Props {
@@ -97,7 +98,9 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
 let channels: Channel[] = $state([]);
 let activeChannel: Channel | null = $state(null);
 let requestedChannelId: string | null = $state(null);
-let channelListServerId: string | null = $state(null);
+  let handledRequestedChannelId: string | null = null;
+  let channelListServerId: string | null = null;
+  let routerReady = false;
 let messages: any[] = $state([]);
 let messagesLoadError: string | null = $state(null);
 let lastSidebarChannels: ChannelEventDetail | null = $state(null);
@@ -222,15 +225,15 @@ let floatingCallChatResizeStartPos = { x: 0, y: 0 };
 let floatingCallChatResizeEdge: 'left' | 'right' | 'top' | 'bottom' | 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | null =
   null;
 let callChatHeaderPointerId: number | null = null;
-let lastVoiceVisible = $state(false);
+let lastVoiceVisible = false;
 const profileUnsubs: Record<string, Unsubscribe> = {};
 let serverDisplayName = $state('Server');
-  let serverMetaUnsub: Unsubscribe | null = $state(null);
+  let serverMetaUnsub: Unsubscribe | null = null;
   let mentionOptions: MentionDirectoryEntry[] = $state([]);
   let memberMentionOptions: MentionDirectoryEntry[] = $state([]);
   let roleMentionOptions: MentionDirectoryEntry[] = $state([]);
-let mentionDirectoryStop: Unsubscribe | null = $state(null);
-let mentionRolesStop: Unsubscribe | null = $state(null);
+let mentionDirectoryStop: Unsubscribe | null = null;
+let mentionRolesStop: Unsubscribe | null = null;
 let lastMentionServer: string | null = null;
 let isCurrentServerMember = false;
 let memberEnsurePromise: Promise<void> | null = null;
@@ -304,6 +307,51 @@ let memberEnsurePromise: Promise<void> | null = null;
     );
   }
 
+  /* ===========================
+     Channel Memory (per server)
+     =========================== */
+  type ChannelMemory = Record<string, string>;
+  let serverChannelMemory: ChannelMemory = {};
+
+  function loadServerChannelMemory() {
+    if (!browser) return;
+    try {
+      const raw = localStorage.getItem(SERVER_CHANNEL_MEMORY_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        serverChannelMemory = parsed;
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function persistServerChannelMemory(map: ChannelMemory) {
+    if (!browser) return;
+    try {
+      const keys = Object.keys(map);
+      if (!keys.length) {
+        localStorage.removeItem(SERVER_CHANNEL_MEMORY_KEY);
+      } else {
+        localStorage.setItem(SERVER_CHANNEL_MEMORY_KEY, JSON.stringify(map));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function rememberServerChannel(sId: string, channelId: string | null | undefined) {
+    if (!sId || !channelId) return;
+    const existing = serverChannelMemory[sId];
+    if (existing === channelId) return;
+    serverChannelMemory = { ...serverChannelMemory, [sId]: channelId };
+    persistServerChannelMemory(serverChannelMemory);
+  }
+
+  function getRememberedChannel(sId: string): string | null {
+    return serverChannelMemory[sId] ?? null;
+  }
 
 
   function pickString(value: unknown): string | undefined {
@@ -917,6 +965,7 @@ let memberEnsurePromise: Promise<void> | null = null;
   let isViewingActiveVoiceChannel = $state(false);
   let showVoiceLobby = $state(false);
   let voiceInviteUrl: string | null = $state(null);
+  let isMobile = $state(false);
 let currentUserDisplayName = $state('');
 let currentUserPhotoURL: string | null = $state(null);
 const unsubscribeVoice = voiceSession.subscribe((value) => {
@@ -943,7 +992,6 @@ const blockedChannels = new Set<string>();
       closeFloatingCallChat();
     } else if (!visible && !inLobby) {
       // Keep open when minimized/hidden on desktop, just record last visibility.
-      callPanelOpen = callPanelOpen;
     }
 
     lastVoiceVisible = visible;
@@ -1175,10 +1223,11 @@ const blockedChannels = new Set<string>();
           }
         }
 
+        const nextLen = nextMessages.length;
         messages = nextMessages;
         triggerScrollToBottom();
-        if (messages.length) {
-          earliestLoaded = messages[0]?.createdAt ?? null;
+        if (nextLen) {
+          earliestLoaded = nextMessages[0]?.createdAt ?? null;
         }
         seen.forEach((uid) => ensureProfileSubscription(database, uid));
         messagesLoadError = null;
@@ -1585,6 +1634,14 @@ function sidebarThreadList() {
     // close channels panel on mobile
     showChannels = false;
 
+    // Remember this channel for this server
+    if (serverId) {
+      rememberServerChannel(serverId, id);
+    }
+
+    // Scroll to the most recent message when switching channels
+    scrollToBottomSignal++;
+
     if (browser) {
       try {
         const current = $page?.url?.searchParams?.get('channel') ?? null;
@@ -1601,8 +1658,8 @@ function sidebarThreadList() {
     }
   }
 
-  function syncVisibleChannels(payload: ChannelEventDetail | null) {
-    if (payload) {
+  function syncVisibleChannels(payload: ChannelEventDetail | null, cachePayload = true) {
+    if (payload && cachePayload) {
       lastSidebarChannels = payload;
     }
     if (!serverId || !$user?.uid) {
@@ -1622,6 +1679,10 @@ function sidebarThreadList() {
     const isDesktop = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
 
     channels = nextChannels;
+    const popoutId = channelMessagesPopoutChannelId;
+    if (popoutId && !nextChannels.some((c) => c.id === popoutId)) {
+      closeChannelMessagesPopout();
+    }
 
     if (!nextChannels.length) {
       resetChannelState();
@@ -1635,6 +1696,15 @@ function sidebarThreadList() {
         const target = nextChannels.find((c) => c.id === requestedId);
         if (target) {
           pickChannel(target.id);
+          return;
+        }
+      }
+      // Try to restore remembered channel for this server
+      const rememberedId = getRememberedChannel(payloadServer);
+      if (rememberedId) {
+        const remembered = nextChannels.find((c) => c.id === rememberedId);
+        if (remembered) {
+          pickChannel(remembered.id);
           return;
         }
       }
@@ -1742,7 +1812,6 @@ function sidebarThreadList() {
   let desktopMembersWideEnough = $state(true);
   let showThreadPanel = $state(false);
   let showThreadMembersSheet = $state(false);
-  let isMobile = $state(false);
   let mobileVoicePane: 'call' | 'chat' = $state('chat');
   let mobilePaneTracking = false;
   let mobilePaneStartX = 0;
@@ -1750,7 +1819,11 @@ function sidebarThreadList() {
   let lastIsMobile = false;
   let lastShowThreadPanel = false;
   let channelHeaderEl: { focusHeader?: () => void } | null = null;
-  const pendingChannelRedirect = $derived.by(() => Boolean(requestedChannelId && !activeChannel));
+  const pendingChannelRedirect = $derived.by(() => {
+    const requested = requestedChannelId;
+    if (!requested || activeChannel) return false;
+    return !blockedChannels.has(requested);
+  });
   const channelPanelInteractive = $derived.by(() => showChannels);
   const activeServerCall = $derived.by(
     () =>
@@ -1764,10 +1837,42 @@ function sidebarThreadList() {
       )
   );
   const voiceDesktopLayout = $derived.by(() => !isMobile && isVoiceChannelView && activeServerCall);
+  const channelPanelShowing = $derived.by(
+    () =>
+      showChannels ||
+      (channelSwipeActive && channelSwipeMode === 'open' && channelSwipeDelta > 0)
+  );
+
+  let dockClaimedForChannel = false;
+  const releaseChannelDockSuppression = () => {
+    if (!dockClaimedForChannel) return;
+    dockClaimedForChannel = false;
+    mobileDockSuppressed.release();
+  };
+
+  afterNavigate(() => {
+    routerReady = true;
+  });
+
+  // Hide the mobile dock while a channel is open (list closed) to maximize chat space
+  $effect(() => {
+    if (!isMobile) {
+      releaseChannelDockSuppression();
+      return;
+    }
+    if (channelPanelShowing) {
+      releaseChannelDockSuppression();
+      return;
+    }
+    if (!dockClaimedForChannel) {
+      mobileDockSuppressed.claim();
+      dockClaimedForChannel = true;
+    }
+  });
 
   // Sync showChannels/showMembers with global overlay stack so mobile nav can hide/show properly
   $effect(() => {
-    if (!isMobile) return;
+    if (!isMobile || !routerReady) return;
     if (showChannels) {
       openOverlay('channel-list');
     } else {
@@ -1775,7 +1880,7 @@ function sidebarThreadList() {
     }
   });
   $effect(() => {
-    if (!isMobile) return;
+    if (!isMobile || !routerReady) return;
     if (showMembers) {
       openOverlay('members-pane');
     } else {
@@ -2566,6 +2671,8 @@ function sidebarThreadList() {
   }
 
   onMount(() => {
+    // Load channel memory on mount
+    loadServerChannelMemory();
     const cleanupGestures = setupGestures();
     const cleanupMembersWatcher = setupDesktopMembersWatcher();
     return () => {
@@ -2616,6 +2723,7 @@ function sidebarThreadList() {
     clearServerThreads();
     cleanupProfileSubscriptions();
     cleanupPopoutProfileSubscriptions();
+    releaseChannelDockSuppression();
     unsubscribeVoice();
     serverMetaUnsub?.();
     serverMetaUnsub = null;
@@ -3685,12 +3793,7 @@ function sidebarThreadList() {
     }
   });
   run(() => {
-    if (floatingThreadVisible && !floatingThread?.thread) {
-      closeFloatingThread();
-    }
-  });
-  run(() => {
-    if (floatingThreadVisible && isMobile) {
+    if (isMobile) {
       closeFloatingThread();
     }
   });
@@ -3735,13 +3838,14 @@ function sidebarThreadList() {
     requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
   });
   run(() => {
+    const prevServerForChannels = untrack(() => channelListServerId);
     const currentServer = serverId ?? null;
     if (!currentServer || !$user?.uid) {
       channelListServerId = currentServer;
       resetChannelState();
       return;
     }
-    if (currentServer !== channelListServerId) {
+    if (currentServer !== prevServerForChannels) {
       channelListServerId = currentServer;
       resetChannelState();
     }
@@ -3752,8 +3856,9 @@ function sidebarThreadList() {
     }
   });
   run(() => {
-    if (serverId && $user?.uid && lastSidebarChannels) {
-      syncVisibleChannels(lastSidebarChannels);
+    const cachedChannels = untrack(() => lastSidebarChannels);
+    if (serverId && $user?.uid && cachedChannels) {
+      syncVisibleChannels(cachedChannels, false);
     }
   });
   run(() => {
@@ -3867,12 +3972,16 @@ function sidebarThreadList() {
   });
   run(() => {
     if ($user?.uid) {
-      const fallbackPhoto = pickString($user.photoURL) ?? null;
+      // Prefer userProfile (from Firestore) for cached/custom photos, fall back to auth photoURL
+      const profileData = $userProfile;
+      const fallbackPhoto = profileData?.cachedPhotoURL ?? profileData?.customPhotoURL ?? profileData?.photoURL ?? pickString($user.photoURL) ?? null;
       updateProfileCache($user.uid, {
-        displayName: pickString($user.displayName) ?? pickString($user.email) ?? 'You',
+        displayName: profileData?.displayName ?? pickString($user.displayName) ?? pickString($user.email) ?? 'You',
         photoURL: fallbackPhoto,
-        authPhotoURL: fallbackPhoto,
-        email: pickString($user.email) ?? undefined
+        authPhotoURL: profileData?.authPhotoURL ?? pickString($user.photoURL) ?? null,
+        cachedPhotoURL: profileData?.cachedPhotoURL ?? null,
+        customPhotoURL: profileData?.customPhotoURL ?? null,
+        email: profileData?.email ?? pickString($user.email) ?? undefined
       });
     }
   });
@@ -3958,15 +4067,15 @@ function sidebarThreadList() {
       clearThreadReadTimer();
     }
   });
+  const handleThreadMembersKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      showThreadMembersSheet = false;
+    }
+  };
   run(() => {
     if (!showThreadMembersSheet) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        showThreadMembersSheet = false;
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', handleThreadMembersKeydown);
+    return () => window.removeEventListener('keydown', handleThreadMembersKeydown);
   });
   run(() => {
     const uid = $user?.uid ?? null;
@@ -4040,29 +4149,24 @@ function sidebarThreadList() {
     }
   });
   run(() => {
-    if (!requestedChannelId) return;
-    if (blockedChannels.has(requestedChannelId)) {
-      clearRequestedChannel(requestedChannelId);
+    const requested = requestedChannelId;
+    if (!requested) {
+      handledRequestedChannelId = null;
       return;
     }
-    if (
-      requestedChannelId !== activeChannel?.id &&
-      channels.some((c) => c.id === requestedChannelId)
-    ) {
-      pickChannel(requestedChannelId);
+    if (handledRequestedChannelId === requested) return;
+    if (blockedChannels.has(requested)) {
+      handledRequestedChannelId = requested;
+      return;
+    }
+    if (requested !== activeChannel?.id && channels.some((c) => c.id === requested)) {
+      handledRequestedChannelId = requested;
+      pickChannel(requested);
     }
   });
   run(() => {
     if (voiceState && serverId && voiceState.serverId !== serverId && voiceState.visible) {
       voiceSession.setVisible(false);
-    }
-  });
-  run(() => {
-    if (channelMessagesPopout && channelMessagesPopoutChannelId && serverId) {
-      const stillExists = channels.some((c) => c.id === channelMessagesPopoutChannelId);
-      if (!stillExists) {
-        closeChannelMessagesPopout();
-      }
     }
   });
   run(() => {
@@ -4209,51 +4313,28 @@ function sidebarThreadList() {
       {:else}
         {#if showVoiceLobby && !(isMobile && showChannels)}
           <div class="px-3 pt-1 md:px-5 md:pt-0 mb-3">
-            <VoiceLobby
+            <CallPreview
               serverId={serverId}
               channelId={activeChannel?.id ?? null}
               channelName={activeChannel?.name ?? 'Voice channel'}
-              serverName={serverDisplayName}
-              inviteUrl={voiceInviteUrl}
-              currentUserAvatar={currentUserPhotoURL}
-              currentUserName={currentUserDisplayName}
-              connectedChannelId={voiceState?.channelId ?? null}
+              connectedElsewhere={voiceState?.channelId != null && voiceState?.channelId !== activeChannel?.id}
               connectedChannelName={voiceState?.channelName ?? null}
-              connectedServerId={voiceState?.serverId ?? null}
-              connectedServerName={voiceState?.serverName ?? voiceState?.serverId ?? null}
-              on:joinVoice={(event) => joinSelectedVoiceChannel(event.detail ?? {})}
-              on:joinMuted={(event) => joinSelectedVoiceChannel({ muted: true, ...(event.detail ?? {}) })}
-              on:startStreaming={(event) => joinSelectedVoiceChannel(event.detail ?? {})}
+              on:join={() => joinSelectedVoiceChannel({})}
               on:returnToSession={() => voiceSession.setVisible(true)}
-              on:openChat={openChannelMessages}
             />
           </div>
         {/if}
 
         {#if !isMobile && voiceState}
-          {#if voiceDesktopLayout}
-            <div class={`desktop-call-layout ${voiceState.visible ? '' : 'hidden'}`}>
-              <div class="desktop-call-main">
-                <VideoChat
-                  layout="standalone"
-                  sidePanelOpen={false}
-                  sidePanelTab={callPanelTab}
-                  stageOnly={true}
-                  showChatToggle={false}
-                  on:openMobileChat={() => {}}
-                  on:toggleSideChat={() => {}}
-                  on:toggleSideMembers={() => {}}
-                  on:openChannelChat={openChannelMessages}
-                />
-              </div>
-            </div>
-          {:else}
-            <div class={`flex-none mb-3 md:mb-4 ${voiceState.visible ? '' : 'hidden'}`}>
+          <!-- Single VideoChat instance to prevent unmount/remount when switching between voice and text channel views.
+               The wrapper div handles layout changes via CSS classes while keeping the VideoChat component alive. -->
+          <div class={voiceDesktopLayout ? 'desktop-call-layout' : 'flex-none mb-3 md:mb-4'} class:hidden={!voiceState.visible}>
+            <div class={voiceDesktopLayout ? 'desktop-call-main' : ''}>
               <VideoChat
-                layout="embedded"
+                layout={voiceDesktopLayout ? "standalone" : "embedded"}
                 sidePanelOpen={false}
                 sidePanelTab={callPanelTab}
-                stageOnly={false}
+                stageOnly={voiceDesktopLayout}
                 showChatToggle={false}
                 on:openMobileChat={() => {}}
                 on:toggleSideChat={() => {}}
@@ -4261,11 +4342,6 @@ function sidebarThreadList() {
                 on:openChannelChat={openChannelMessages}
               />
             </div>
-          {/if}
-        {/if}
-        {#if voiceState && !voiceState.visible}
-          <div class="sticky bottom-0 z-10 mt-3 border-t border-subtle bg-[color:var(--color-panel)]/80 px-2 py-2 backdrop-blur">
-            <VoiceMiniPanel serverId={serverId} session={voiceState} />
           </div>
         {/if}
 
@@ -4725,6 +4801,7 @@ function sidebarThreadList() {
     top: 0;
     bottom: 0 !important;
     background: #2b2d31; /* Discord's background */
+    overscroll-behavior: contain;
   }
 
   .mobile-panel__servers {
@@ -4737,6 +4814,8 @@ function sidebarThreadList() {
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
+    margin-bottom: calc(-1 * (env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px)));
   }
 
   .mobile-panel__servers :global(.app-rail) {
@@ -4775,6 +4854,45 @@ function sidebarThreadList() {
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    padding-bottom: calc(10rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
+    margin-bottom: calc(-1 * (env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px)));
+  }
+
+  /* Mobile: hide scrollbars and contain scroll so the dock stays put */
+  :global(.mobile-panel *::-webkit-scrollbar) {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  :global(.mobile-panel *::-webkit-scrollbar-thumb) {
+    display: none;
+  }
+
+  .mobile-panel * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  /* Keep layout stable when the iOS scroll indicator appears */
+  .mobile-panel__servers,
+  .mobile-panel__channels :global(.server-sidebar > div:last-child) {
+    scrollbar-gutter: stable both-edges;
+    overscroll-behavior: contain;
+  }
+
+  /* Mobile: hide scrollbars and keep scroll from tugging the dock */
+  .mobile-panel__servers,
+  .mobile-panel__channels :global(.server-sidebar > div:last-child) {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
+
+  .mobile-panel__servers::-webkit-scrollbar,
+  :global(.server-sidebar > div:last-child::-webkit-scrollbar) {
+    display: none;
   }
 
   .thread-pane-desktop {
@@ -5656,6 +5774,3 @@ function sidebarThreadList() {
     }
   }
 </style>
-
-
-

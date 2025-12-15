@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { getDb } from '$lib/firebase';
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
@@ -14,10 +14,10 @@
   const stopSession = voiceSession.subscribe((s) => (session = s));
 
   let participants = $state(0);
-  let unsub: Unsubscribe | null = $state(null);
+  let unsub: Unsubscribe | null = null;
 
   run(() => {
-    unsub?.();
+    untrack(() => unsub)?.();
     participants = 0;
     if (session?.serverId && session?.channelId) {
       const db = getDb();
@@ -65,7 +65,6 @@
     </button>
   </div>
 {/if}
-
 
 
 

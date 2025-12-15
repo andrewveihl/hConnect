@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { PageData } from './$types';
-  import AdminCard from '$lib/admin/components/AdminCard.svelte';
   import { ensureFirebaseReady, getDb } from '$lib/firebase';
   import {
     collection,
@@ -15,6 +14,7 @@
     type QueryConstraint
   } from 'firebase/firestore';
   import { showAdminToast } from '$lib/admin/stores/toast';
+  import { isMobileViewport } from '$lib/stores/viewport';
 
   type DMMessage = {
     id: string;
@@ -30,7 +30,7 @@
 
   let { data }: Props = $props();
   let search = $state('');
-  let selectedThreadId: string | null = $state(data.threads[0]?.id ?? null);
+  let selectedThreadId: string | null = $state(null);
   let threadMessages: DMMessage[] = $state([]);
   let loading = $state(false);
   const MESSAGE_BATCH = 100;
@@ -40,6 +40,7 @@
   let messageSearch = $state('');
   let messageScroller = $state<HTMLDivElement | null>(null);
   let topSentinel = $state<HTMLDivElement | null>(null);
+  let showDetailPanel = $state(false);
 
   const filteredThreads = $derived(
     data.threads.filter((thread) => {
@@ -56,11 +57,37 @@
   );
 
   let lastLoadedThread: string | null = null;
-$effect(() => {
-  if (!selectedThreadId || selectedThreadId === lastLoadedThread) return;
-  lastLoadedThread = selectedThreadId;
-  void loadThread(selectedThreadId);
-});
+  $effect(() => {
+    if (!selectedThreadId || selectedThreadId === lastLoadedThread) return;
+    lastLoadedThread = selectedThreadId;
+    void loadThread(selectedThreadId);
+  });
+
+  function formatRelativeTime(date: Date | null | undefined): string {
+    if (!date) return '';
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString();
+  }
+
+  function selectThread(threadId: string) {
+    selectedThreadId = threadId;
+    if ($isMobileViewport) {
+      showDetailPanel = true;
+    }
+  }
+
+  function closeDetail() {
+    showDetailPanel = false;
+  }
 
   async function loadThread(threadId: string) {
     loading = true;
@@ -188,123 +215,617 @@ $effect(() => {
   });
 </script>
 
-<section class="admin-page admin-page--split h-full w-full">
-  <div class="dm-panel">
-    <AdminCard title="DM Threads" description="Select a thread to inspect messages." padded={false}>
-      <div class="flex h-full flex-col">
-        <div class="border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] px-6 py-4">
-          <input
-            type="search"
-            placeholder="Search by participant or ID"
-            class="w-full rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-transparent px-4 py-2 text-sm text-[color:var(--color-text-primary,#0f172a)] placeholder:text-[color:var(--text-50,#94a3b8)] focus:border-[color:var(--color-text-primary,#0f172a)]"
-            bind:value={search}
-          />
-        </div>
-        <div class="flex-1 overflow-y-auto p-4">
-          {#if filteredThreads.length === 0}
-            <p class="text-sm text-[color:var(--text-60,#6b7280)]">No threads match.</p>
-          {:else}
-            <ul class="space-y-2">
-              {#each filteredThreads as thread}
-                <li>
-                  <button
-                    type="button"
-                    class="w-full rounded-2xl border px-4 py-3 text-left text-sm transition"
-                    class:border-teal-400={thread.id === selectedThreadId}
-                    class:border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)]={thread.id !== selectedThreadId}
-                    onclick={() => (selectedThreadId = thread.id)}
-                  >
-                    <p class="font-semibold text-[color:var(--color-text-primary,#0f172a)]">{(thread.participantLabels ?? thread.participants ?? []).join(', ')}</p>
-                    {#if thread.lastMessage}
-                      <p class="text-xs text-[color:var(--text-60,#6b7280)] truncate">{thread.lastMessage}</p>
-                    {/if}
-                    <p class="text-xs text-[color:var(--text-55,#6b7280)]">
-                      {thread.updatedAt ? thread.updatedAt.toLocaleString() : '--'}
-                    </p>
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      </div>
-    </AdminCard>
+<section class="dms-page" class:show-detail={showDetailPanel && $isMobileViewport}>
+  <!-- Stats header -->
+  <div class="stats-bar">
+    <div class="stat">
+      <i class='bx bx-conversation'></i>
+      <span class="value">{data.threads.length}</span>
+      <span class="label">Threads</span>
+    </div>
+    <div class="stat">
+      <i class='bx bx-user'></i>
+      <span class="value">{Object.keys(profileLookup).length}</span>
+      <span class="label">Users</span>
+    </div>
+    <div class="stat">
+      <i class='bx bx-message-detail'></i>
+      <span class="value">{threadMessages.length}</span>
+      <span class="label">Messages</span>
+    </div>
   </div>
 
-  <div class="dm-panel">
-    <AdminCard title="Conversation" description="Messages are read-only." padded={false}>
-      <div class="flex h-full min-h-0 flex-col overflow-hidden">
-        {#if loading}
-          <p class="p-6 text-sm text-[color:var(--text-60,#6b7280)]">Loading messages…</p>
-          <p class="p-6 text-sm text-[color:var(--text-60,#6b7280)]">Select a thread.</p>
-        {:else if threadMessages.length === 0}
-          <p class="p-6 text-sm text-[color:var(--text-60,#6b7280)]">No messages in this thread.</p>
-        {:else}
-          <div class="flex flex-col gap-4 border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] px-6 py-4">
-            <div>
-              <p class="text-xs uppercase tracking-[0.3em] text-[color:var(--text-60,#6b7280)]">Participants</p>
-              <p class="text-sm font-semibold text-[color:var(--color-text-primary,#0f172a)]">
-                {selectedThreadLabel || 'Choose a thread'}
-              </p>
-            </div>
-            <input
-              type="search"
-              placeholder={selectedThreadLabel ? `Search ${selectedThreadLabel}` : 'Search within conversation'}
-              class="w-full rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-transparent px-4 py-2 text-sm text-[color:var(--color-text-primary,#0f172a)] placeholder:text-[color:var(--text-50,#94a3b8)] focus:border-[color:var(--color-text-primary,#0f172a)]"
-              bind:value={messageSearch}
-            />
+  <div class="content-grid">
+    <!-- Threads list panel -->
+    <div class="list-panel">
+      <div class="search-bar">
+        <i class='bx bx-search'></i>
+        <input
+          type="search"
+          placeholder="Search threads..."
+          bind:value={search}
+        />
+        {#if search}
+          <button class="clear-btn" onclick={() => (search = '')} aria-label="Clear search">
+            <i class='bx bx-x'></i>
+          </button>
+        {/if}
+      </div>
+
+      <div class="results-info">
+        <span>{filteredThreads.length} thread{filteredThreads.length === 1 ? '' : 's'}</span>
+      </div>
+
+      <div class="threads-list">
+        {#if filteredThreads.length === 0}
+          <div class="empty-state">
+            <i class='bx bx-conversation'></i>
+            <p>No threads match your search</p>
           </div>
-          <div
-            class="flex-1 overflow-y-auto bg-[color-mix(in_srgb,var(--surface-panel)90%,transparent)] p-6"
-            bind:this={messageScroller}
-          >
-            <div class="h-0" bind:this={topSentinel} aria-hidden="true"></div>
-            <div class="space-y-4">
-              {#each visibleMessages as message}
-                <div class="max-w-2xl rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)95%,transparent)] p-4 shadow">
-                  <p class="text-xs uppercase tracking-wide text-[color:var(--text-60,#6b7280)]">{labelFor(message.authorId)}</p>
-                  <p class="mt-2 text-sm text-[color:var(--color-text-primary,#0f172a)]">{message.text ?? `[${message.type}]`}</p>
-                  <p class="mt-2 text-[11px] text-[color:var(--text-60,#6b7280)]">
-                    {message.createdAt ? message.createdAt.toLocaleString() : '--'}
-                  </p>
-                </div>
-              {/each}
+        {:else}
+          {#each filteredThreads as thread (thread.id)}
+            <button
+              class="thread-card"
+              class:selected={selectedThreadId === thread.id}
+              onclick={() => selectThread(thread.id)}
+            >
+              <div class="thread-avatar">
+                <i class='bx bx-group'></i>
+              </div>
+              <div class="thread-info">
+                <span class="thread-participants">
+                  {(thread.participantLabels ?? thread.participants ?? []).join(', ')}
+                </span>
+                {#if thread.lastMessage}
+                  <span class="thread-preview">{thread.lastMessage}</span>
+                {/if}
+                <span class="thread-time">{formatRelativeTime(thread.updatedAt)}</span>
+              </div>
+              <i class='bx bx-chevron-right chevron'></i>
+            </button>
+          {/each}
+        {/if}
+      </div>
+    </div>
+
+    <!-- Conversation panel -->
+    <div class="detail-panel" class:visible={showDetailPanel || !$isMobileViewport}>
+      {#if $isMobileViewport && showDetailPanel}
+        <button class="back-btn" onclick={closeDetail}>
+          <i class='bx bx-arrow-left'></i>
+          Back to threads
+        </button>
+      {/if}
+
+      {#if !selectedThreadId}
+        <div class="empty-state">
+          <i class='bx bx-message-square-detail'></i>
+          <p>Select a thread to view messages</p>
+        </div>
+      {:else if loading && threadMessages.length === 0}
+        <div class="loading-state">
+          <i class='bx bx-loader-alt bx-spin'></i>
+          <p>Loading messages...</p>
+        </div>
+      {:else}
+        <div class="conversation-container">
+          <!-- Conversation header -->
+          <div class="conversation-header">
+            <div class="header-info">
+              <span class="header-label">Participants</span>
+              <h2>{selectedThreadLabel || 'Unknown participants'}</h2>
             </div>
+            <div class="message-search">
+              <i class='bx bx-search'></i>
+              <input
+                type="search"
+                placeholder="Search messages..."
+                bind:value={messageSearch}
+              />
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <div class="messages-scroller" bind:this={messageScroller}>
+            <div class="top-sentinel" bind:this={topSentinel}></div>
+            
             {#if hasMore}
-              <div class="mt-4 flex justify-center">
-                <button
-                  type="button"
-                  class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] px-4 py-2 text-xs font-semibold text-[color:var(--color-text-primary,#0f172a)]"
-                  onclick={loadMoreMessages}
-                  disabled={loading}
-                >
-                  {loading ? 'Loading…' : 'Load older messages'}
-                </button>
+              <button 
+                class="load-more-btn"
+                onclick={loadMoreMessages}
+                disabled={loading}
+              >
+                {#if loading}
+                  <i class='bx bx-loader-alt bx-spin'></i> Loading...
+                {:else}
+                  <i class='bx bx-history'></i> Load older messages
+                {/if}
+              </button>
+            {/if}
+
+            {#if visibleMessages.length === 0}
+              <div class="empty-messages">
+                <i class='bx bx-message-x'></i>
+                <p>{messageSearch ? 'No messages match your search' : 'No messages in this thread'}</p>
+              </div>
+            {:else}
+              <div class="messages-list">
+                {#each visibleMessages as message (message.id)}
+                  <div class="message-bubble">
+                    <div class="message-header">
+                      <span class="message-author">{labelFor(message.authorId)}</span>
+                      <span class="message-time">
+                        {message.createdAt ? message.createdAt.toLocaleString() : ''}
+                      </span>
+                    </div>
+                    <div class="message-content">
+                      {#if message.text}
+                        {message.text}
+                      {:else}
+                        <span class="message-type">[{message.type}]</span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
             {/if}
           </div>
-        {/if}
-      </div>
-    </AdminCard>
+
+          <!-- Read-only notice -->
+          <div class="readonly-notice">
+            <i class='bx bx-lock-alt'></i>
+            <span>Read-only mode</span>
+          </div>
+        </div>
+      {/if}
+    </div>
   </div>
 </section>
 
 <style>
-  .dm-panel {
-    min-height: 0;
-  }
-
-  .dm-panel :global(section) {
-    height: 100%;
+  .dms-page {
     display: flex;
     flex-direction: column;
+    gap: 1rem;
+    height: 100%;
+    padding: 1rem;
+    overflow: hidden;
   }
 
-  .dm-panel :global(section > div:last-child) {
+  /* Stats bar */
+  .stats-bar {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    flex-shrink: 0;
+  }
+
+  .stat {
     flex: 1;
     display: flex;
     flex-direction: column;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.5rem;
+  }
+
+  .stat i {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .stat .value {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .stat .label {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+  }
+
+  /* Content grid */
+  .content-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.5fr;
+    gap: 1rem;
+    flex: 1;
     min-height: 0;
+    overflow: hidden;
+  }
+
+  /* List panel */
+  .list-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    padding: 1rem;
+    overflow: hidden;
+  }
+
+  .search-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+    border-radius: 8px;
+  }
+
+  .search-bar i {
+    color: var(--color-text-secondary);
+  }
+
+  .search-bar input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--color-text-primary);
+    font-size: 0.875rem;
+  }
+
+  .search-bar input::placeholder {
+    color: var(--color-text-secondary);
+  }
+
+  .clear-btn {
+    width: 1.5rem;
+    height: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+
+  .results-info {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+  }
+
+  .threads-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .thread-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    border-radius: 10px;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s;
+  }
+
+  .thread-card:hover {
+    border-color: color-mix(in srgb, var(--accent-primary) 30%, transparent);
+  }
+
+  .thread-card.selected {
+    background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
+    border-color: var(--accent-primary);
+  }
+
+  .thread-avatar {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-primary), color-mix(in srgb, var(--accent-primary) 70%, #8b5cf6));
+    flex-shrink: 0;
+  }
+
+  .thread-avatar i {
+    font-size: 1.125rem;
+    color: white;
+  }
+
+  .thread-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .thread-participants {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .thread-preview {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .thread-time {
+    font-size: 0.625rem;
+    color: var(--color-text-secondary);
+  }
+
+  .chevron {
+    color: var(--color-text-secondary);
+  }
+
+  /* Detail panel */
+  .detail-panel {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    overflow: hidden;
+  }
+
+  .back-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    background: transparent;
+    color: var(--accent-primary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .conversation-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .conversation-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+  }
+
+  .header-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .header-label {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+  }
+
+  .conversation-header h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  .message-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+    border-radius: 8px;
+  }
+
+  .message-search i {
+    color: var(--color-text-secondary);
+    font-size: 0.875rem;
+  }
+
+  .message-search input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--color-text-primary);
+    font-size: 0.8125rem;
+  }
+
+  .message-search input::placeholder {
+    color: var(--color-text-secondary);
+  }
+
+  .messages-scroller {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .top-sentinel {
+    height: 0;
+  }
+
+  .load-more-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    margin: 0 auto 1rem;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 15%, transparent);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .load-more-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .load-more-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .messages-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .message-bubble {
+    max-width: 85%;
+    padding: 0.75rem;
+    background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+    border-radius: 12px;
+    border-top-left-radius: 4px;
+  }
+
+  .message-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.375rem;
+  }
+
+  .message-author {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--accent-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .message-time {
+    font-size: 0.625rem;
+    color: var(--color-text-secondary);
+  }
+
+  .message-content {
+    font-size: 0.8125rem;
+    color: var(--color-text-primary);
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
+  .message-type {
+    color: var(--color-text-secondary);
+    font-style: italic;
+  }
+
+  .readonly-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.625rem 1rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    background: color-mix(in srgb, var(--color-text-primary) 3%, transparent);
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+  }
+
+  .readonly-notice i {
+    font-size: 0.875rem;
+  }
+
+  /* Empty and loading states */
+  .empty-state,
+  .loading-state,
+  .empty-messages {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 2rem;
+    color: var(--color-text-secondary);
+    flex: 1;
+  }
+
+  .empty-state i,
+  .loading-state i,
+  .empty-messages i {
+    font-size: 2rem;
+    opacity: 0.5;
+  }
+
+  .empty-state p,
+  .loading-state p,
+  .empty-messages p {
+    margin: 0;
+    font-size: 0.8125rem;
+  }
+
+  /* Mobile responsiveness */
+  @media (max-width: 768px) {
+    .content-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .detail-panel {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      border-radius: 0;
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+    }
+
+    .detail-panel.visible {
+      transform: translateX(0);
+    }
+
+    .dms-page.show-detail .list-panel {
+      display: none;
+    }
+
+    .message-bubble {
+      max-width: 95%;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .dms-page {
+      padding: 1.5rem;
+    }
+
+    .back-btn {
+      display: none;
+    }
   }
 </style>
 

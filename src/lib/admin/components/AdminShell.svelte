@@ -1,9 +1,15 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
   import AdminToasts from './AdminToasts.svelte';
+  import AdminMobileNav from './AdminMobileNav.svelte';
   import type { AdminNavItem } from '$lib/admin/types';
   import { ADMIN_NAV_ITEMS } from '$lib/admin/types';
+  import { adminNav, mobilePanel, mobileNavOpen, hasDetailPanel } from '$lib/admin/stores/adminNav';
+  import { setupSwipeGestures } from '$lib/utils/swipeGestures';
+  import { isMobileViewport } from '$lib/stores/viewport';
   import LeftPane from '$lib/components/app/LeftPane.svelte';
   import type { Snippet } from 'svelte';
 
@@ -15,6 +21,9 @@
     navItems?: AdminNavItem[];
     children?: Snippet;
     toolbar?: Snippet;
+    detailPanel?: Snippet;
+    showBackButton?: boolean;
+    onBack?: (() => void) | null;
   }
 
   let {
@@ -24,13 +33,30 @@
     userEmail = '',
     navItems = ADMIN_NAV_ITEMS,
     children,
-    toolbar
+    toolbar,
+    detailPanel,
+    showBackButton = false,
+    onBack = null
   }: Props = $props();
 
-  let mobileNavOpen = $state(false);
+  let mainContentEl: HTMLDivElement | null = $state(null);
+  let detachSwipe: (() => void) | null = null;
 
   const resolvedPath = $derived(currentPath || $page?.url?.pathname || '/admin');
   const hasToolbar = $derived(Boolean(toolbar));
+  const hasDetail = $derived(Boolean(detailPanel));
+  const mobileViewport = $derived($isMobileViewport);
+  const currentMobilePanel = $derived($mobilePanel);
+  const navOpen = $derived($mobileNavOpen);
+
+  // Update detail panel availability
+  $effect(() => {
+    if (hasDetail) {
+      adminNav.enableDetailPanel();
+    } else {
+      adminNav.disableDetailPanel();
+    }
+  });
 
   const isActive = (href: string) => {
     if (href === '/admin') {
@@ -40,202 +66,280 @@
   };
 
   const handleNavigate = (href: string) => {
-    mobileNavOpen = false;
+    adminNav.closeNav();
     goto(href);
   };
 
   const goBackToApp = () => goto('/');
+
+  const handleBackButton = () => {
+    if (onBack) {
+      onBack();
+    } else if (mobileViewport && currentMobilePanel === 'detail') {
+      adminNav.showContent();
+    } else {
+      goBackToApp();
+    }
+  };
+
+  // Setup swipe gestures
+  onMount(() => {
+    if (browser && mainContentEl) {
+      detachSwipe = setupSwipeGestures(mainContentEl, {
+        onSwipeLeft: () => {
+          if (hasDetail) {
+            adminNav.swipeLeft();
+          }
+        },
+        onSwipeRight: () => {
+          adminNav.swipeRight();
+        }
+      }, {
+        minDistance: 60,
+        maxDuration: 400,
+        verticalThreshold: 80
+      });
+    }
+  });
+
+  onDestroy(() => {
+    detachSwipe?.();
+    adminNav.reset();
+  });
 </script>
 
-<div class="flex h-screen overflow-hidden" style="background: var(--surface-root); color: var(--color-text-primary);">
+<div 
+  class="admin-shell flex h-[100dvh] overflow-hidden"
+  style="background: var(--surface-root); color: var(--color-text-primary);"
+>
+  <!-- Desktop Left Pane (server rail) -->
   <div class="hidden md:flex md:shrink-0">
     <LeftPane activeServerId={null} padForDock={false} showBottomActions={true} />
   </div>
+
+  <!-- Desktop Sidebar Navigation -->
   <aside
-    class="hidden h-full w-64 flex-col overflow-y-auto text-[color:var(--color-text-primary,#f8fafc)] shadow-2xl md:flex"
-    style="background: color-mix(in srgb, var(--surface-panel) 92%, transparent);"
+    class="admin-sidebar hidden h-full w-64 flex-col overflow-y-auto md:flex"
+    style="background: color-mix(in srgb, var(--surface-panel) 95%, transparent); border-right: 1px solid color-mix(in srgb, var(--color-text-primary) 8%, transparent);"
   >
-    <div class="px-6 py-5">
-      <p class="text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--text-50,#94a3b8)]">hConnect</p>
-      <p class="text-xl font-semibold text-[color:var(--color-text-primary,#f8fafc)]">Super Admin</p>
+    <!-- Logo / Brand -->
+    <div class="px-5 py-5">
+      <div class="flex items-center gap-3">
+        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-500">
+          <i class="bx bx-shield-quarter text-xl text-white"></i>
+        </div>
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-[0.15em] text-[color:var(--text-50,#94a3b8)]">hConnect</p>
+          <p class="font-bold text-[color:var(--color-text-primary)]">Super Admin</p>
+        </div>
+      </div>
       {#if userEmail}
-        <p class="mt-1 truncate text-sm text-[color:var(--text-70,#cbd5f5)]">{userEmail}</p>
+        <p class="mt-3 truncate rounded-lg bg-[color-mix(in_srgb,var(--color-text-primary)6%,transparent)] px-3 py-2 text-xs text-[color:var(--text-60,#6b7280)]">
+          {userEmail}
+        </p>
       {/if}
     </div>
-    <nav class="flex-1 space-y-1 px-3 pb-6">
+
+    <!-- Nav Items -->
+    <nav class="flex-1 space-y-1 px-3 pb-4">
       {#each navItems as item}
         <button
           type="button"
-          class="w-full rounded-2xl px-4 py-3 text-left text-sm font-semibold text-[color:var(--color-text-primary,#0f172a)] transition hover:bg-[color-mix(in_srgb,var(--color-text-primary)12%,transparent)]"
-          class:admin-nav__item-active={isActive(item.href)}
-          class:admin-nav__item-muted={!isActive(item.href)}
+          class="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-all duration-200"
+          class:bg-[color-mix(in_srgb,var(--accent-primary,#14b8a6)15%,transparent)]={isActive(item.href)}
+          class:text-[color:var(--accent-primary,#14b8a6)]={isActive(item.href)}
+          class:text-[color:var(--text-70,#475569)]={!isActive(item.href)}
+          class:hover:bg-[color-mix(in_srgb,var(--color-text-primary)8%,transparent)]={!isActive(item.href)}
           onclick={() => handleNavigate(item.href)}
         >
-          {item.label}
+          <div 
+            class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
+            class:bg-[color:var(--accent-primary,#14b8a6)]={isActive(item.href)}
+            class:text-white={isActive(item.href)}
+            class:bg-[color-mix(in_srgb,var(--color-text-primary)10%,transparent)]={!isActive(item.href)}
+            class:group-hover:bg-[color-mix(in_srgb,var(--color-text-primary)15%,transparent)]={!isActive(item.href)}
+          >
+            <i class="bx {item.icon} text-lg"></i>
+          </div>
+          <span class="flex-1">{item.label}</span>
+          {#if item.badge}
+            <span 
+              class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
+              class:bg-emerald-500={item.badge === 'new'}
+              class:bg-blue-500={item.badge === 'beta'}
+              class:text-white={true}
+            >
+              {item.badge}
+            </span>
+          {/if}
         </button>
       {/each}
     </nav>
-  </aside>
 
-  <div class="flex flex-1 flex-col h-full overflow-hidden">
-    <header class="sticky top-0 z-40 flex shrink-0 items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-4 py-4 shadow-sm backdrop-blur md:hidden">
-      <div class="flex items-center gap-3">
-        <button
-          type="button"
-          class="inline-flex items-center gap-2 rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] px-3 py-1.5 text-xs font-semibold text-[color:var(--color-text-primary,#0f172a)] shadow-sm transition hover:bg-[color-mix(in_srgb,var(--surface-panel)80%,transparent)]"
-          aria-label="Back to hConnect"
-          onclick={goBackToApp}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6 4.5 12m0 0 6 6m-6-6H21" />
-          </svg>
-          Back
-        </button>
-        <div>
-          <p class="text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--text-60,#6b7280)]">Super Admin</p>
-          <h1 class="text-lg font-semibold text-[color:var(--color-text-primary,#0f172a)]">{title}</h1>
-        </div>
-      </div>
+    <!-- Back to App -->
+    <div class="border-t border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] px-4 py-4">
       <button
         type="button"
-        class="rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)18%,transparent)] p-2 text-[color:var(--color-text-primary,#0f172a)]"
-        aria-label="Open admin navigation"
-        onclick={() => (mobileNavOpen = true)}
+        class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-[color:var(--text-60,#6b7280)] transition hover:bg-[color-mix(in_srgb,var(--color-text-primary)8%,transparent)] hover:text-[color:var(--color-text-primary)]"
+        onclick={goBackToApp}
       >
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-6 w-6">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6h16.5M3.75 12h16.5M3.75 18h16.5" />
-        </svg>
+        <i class="bx bx-arrow-back text-lg"></i>
+        Back to hConnect
       </button>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <div 
+    bind:this={mainContentEl}
+    class="admin-content flex flex-1 flex-col overflow-hidden"
+  >
+    <!-- Mobile Header -->
+    <header 
+      class="admin-header sticky top-0 z-30 flex shrink-0 items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] px-4 py-3 md:hidden"
+      style="background: color-mix(in srgb, var(--surface-panel) 90%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);"
+    >
+      <div class="flex items-center gap-3">
+        {#if showBackButton || (mobileViewport && currentMobilePanel === 'detail')}
+          <button
+            type="button"
+            class="flex h-9 w-9 items-center justify-center rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] text-[color:var(--color-text-primary)] transition hover:bg-[color-mix(in_srgb,var(--color-text-primary)8%,transparent)]"
+            aria-label="Go back"
+            onclick={handleBackButton}
+          >
+            <i class="bx bx-chevron-left text-xl"></i>
+          </button>
+        {:else}
+          <button
+            type="button"
+            class="flex h-9 w-9 items-center justify-center rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] text-[color:var(--color-text-primary)] transition hover:bg-[color-mix(in_srgb,var(--color-text-primary)8%,transparent)]"
+            aria-label="Back to app"
+            onclick={goBackToApp}
+          >
+            <i class="bx bx-arrow-back text-lg"></i>
+          </button>
+        {/if}
+        <div>
+          <p class="text-[10px] font-semibold uppercase tracking-[0.2em] text-[color:var(--text-50,#94a3b8)]">Super Admin</p>
+          <h1 class="text-base font-bold text-[color:var(--color-text-primary)]">{title}</h1>
+        </div>
+      </div>
+
+      {#if hasToolbar}
+        <div class="flex items-center gap-2">
+          {@render toolbar?.()}
+        </div>
+      {/if}
     </header>
-    <main class="flex-1 overflow-y-auto min-h-0">
-      <section class="admin-shell__body w-full max-w-screen-2xl px-4 sm:px-6 lg:px-8 mx-auto">
+
+    <!-- Desktop Header -->
+    <header class="hidden shrink-0 border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] px-6 py-4 md:block" style="background: color-mix(in srgb, var(--surface-panel) 50%, transparent);">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="text-xl font-bold text-[color:var(--color-text-primary)]">{title}</h1>
+          {#if description}
+            <p class="mt-1 text-sm text-[color:var(--text-60,#6b7280)]">{description}</p>
+          {/if}
+        </div>
         {#if hasToolbar}
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex items-center gap-3">
             {@render toolbar?.()}
           </div>
         {/if}
-        {@render children?.()}
-      </section>
-    </main>
+      </div>
+    </header>
+
+    <!-- Content Wrapper with Swipe Panels -->
+    <div class="admin-panels relative flex flex-1 overflow-hidden">
+      <!-- Main Content -->
+      <main 
+        class="admin-main flex-1 overflow-y-auto"
+        class:translate-x-0={!mobileViewport || currentMobilePanel === 'content'}
+        class:-translate-x-full={mobileViewport && currentMobilePanel === 'detail'}
+        class:translate-x-full={mobileViewport && currentMobilePanel === 'nav'}
+        style="-webkit-overflow-scrolling: touch;"
+      >
+        <div class="admin-main-inner mx-auto w-full max-w-7xl px-4 py-4 pb-24 sm:px-6 md:pb-6 lg:px-8">
+          {@render children?.()}
+        </div>
+      </main>
+
+      <!-- Detail Panel (slides in from right on mobile) -->
+      {#if hasDetail}
+        <aside 
+          class="admin-detail absolute inset-y-0 right-0 w-full overflow-y-auto transition-transform duration-300 ease-out md:relative md:w-96 md:translate-x-0 md:border-l md:border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)]"
+          class:translate-x-0={!mobileViewport || currentMobilePanel === 'detail'}
+          class:translate-x-full={mobileViewport && currentMobilePanel !== 'detail'}
+          style="background: var(--surface-panel); -webkit-overflow-scrolling: touch;"
+        >
+          {@render detailPanel?.()}
+        </aside>
+      {/if}
+    </div>
   </div>
 </div>
 
-{#if mobileNavOpen}
-  <div class="fixed inset-0 z-50 flex md:hidden">
-    <div class="h-full w-72 p-6 text-[color:var(--color-text-primary,#f8fafc)] shadow-2xl" style="background: color-mix(in srgb, var(--surface-panel) 94%, transparent);">
-      <div class="flex items-center justify-between">
-        <div>
-          <p class="text-xs uppercase tracking-[0.2em] text-[color:var(--text-50,#94a3b8)]">Super Admin</p>
-          <p class="text-lg font-semibold text-[color:var(--color-text-primary,#f8fafc)]">hConnect</p>
-        </div>
-        <button
-          type="button"
-          class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] p-2 text-[color:var(--color-text-primary,#f8fafc)]"
-          aria-label="Close admin navigation"
-          onclick={() => (mobileNavOpen = false)}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-5 w-5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6m0 12L6 6" />
-          </svg>
-        </button>
-      </div>
-      <nav class="mt-6 space-y-1">
-        {#each navItems as item}
-          <button
-            type="button"
-            class="w-full rounded-2xl px-4 py-3 text-left text-sm font-semibold text-[color:var(--color-text-primary,#0f172a)] transition hover:bg-[color-mix(in_srgb,var(--color-text-primary)12%,transparent)]"
-            class:admin-nav__item-active={isActive(item.href)}
-            class:admin-nav__item-muted={!isActive(item.href)}
-            onclick={() => handleNavigate(item.href)}
-          >
-            {item.label}
-          </button>
-        {/each}
-      </nav>
-    </div>
-    <button
-      type="button"
-      class="flex-1"
-      style="background: color-mix(in srgb, var(--surface-root) 50%, transparent);"
-      aria-label="Dismiss admin navigation"
-      onclick={() => (mobileNavOpen = false)}
-    ></button>
-  </div>
-{/if}
+<!-- Mobile Bottom Navigation -->
+<AdminMobileNav {userEmail} />
 
+<!-- Toasts -->
 <AdminToasts />
 
 <style>
-  :global(.admin-nav__item-active) {
-    background: color-mix(in srgb, var(--color-text-primary) 14%, transparent);
-    color: var(--color-text-primary);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-primary) 18%, transparent);
+  .admin-shell {
+    --admin-accent: var(--accent-primary, #14b8a6);
   }
 
-  :global(.admin-nav__item-muted) {
-    color: color-mix(in srgb, var(--color-text-primary) 70%, transparent);
+  .admin-main {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  :global(.admin-page) {
-    width: 100%;
-    max-width: min(100%, 80rem);
-    height: 100%;
-    min-height: 0;
-    margin: 0 auto;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: clamp(1.25rem, 3vw, 2rem);
-  }
-
-  :global(.admin-page.admin-page--split) {
-    grid-template-columns: minmax(0, 1fr);
+  .admin-detail {
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.1);
   }
 
   @media (min-width: 768px) {
-    :global(.admin-page:not(.admin-page--split)) {
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    .admin-detail {
+      box-shadow: none;
+    }
+  }
+
+  /* Ensure proper bottom padding for mobile nav */
+  @supports (padding-bottom: env(safe-area-inset-bottom)) {
+    .admin-main-inner {
+      padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+    }
+
+    @media (min-width: 768px) {
+      .admin-main-inner {
+        padding-bottom: 1.5rem;
+      }
+    }
+  }
+
+  /* Global admin page styles */
+  :global(.admin-page) {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  :global(.admin-grid) {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: 1fr;
+  }
+
+  @media (min-width: 640px) {
+    :global(.admin-grid) {
+      grid-template-columns: repeat(2, 1fr);
     }
   }
 
   @media (min-width: 1024px) {
-    :global(.admin-page.admin-page--split) {
-      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-      gap: 1.75rem;
-    }
-
-    :global(.admin-page.admin-page--stack) {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: auto auto;
-    }
-  }
-
-  @media (min-width: 768px) {
-    :global(.admin-page.admin-page--stack) {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
-
-  .admin-shell__body {
-    width: 100%;
-    max-width: min(100%, 80rem);
-    height: 100%;
-    min-height: 0;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: clamp(1.5rem, 4vw, 3rem);
-    padding-top: clamp(0.75rem, 2vw, 2.5rem);
-    padding-bottom: clamp(2rem, 6vh, 4rem);
-  }
-
-  @media (max-width: 640px) {
-    .admin-shell__body {
-      height: auto;
-      min-height: auto;
-      padding-top: 1.25rem;
-      padding-bottom: 3.5rem;
-      gap: 1.25rem;
+    :global(.admin-grid) {
+      grid-template-columns: repeat(3, 1fr);
     }
   }
 

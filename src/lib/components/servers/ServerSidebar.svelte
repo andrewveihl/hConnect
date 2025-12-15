@@ -5,12 +5,11 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { openServerSettings } from '$lib/stores/serverSettingsUI';
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { getDb } from '$lib/firebase';
   import { user } from '$lib/stores/user';
   import ChannelCreateModal from '$lib/components/servers/ChannelCreateModal.svelte';
-  import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
   import { appendVoiceDebugEvent, removeVoiceDebugSection, setVoiceDebugSection } from '$lib/utils/voiceDebugContext';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
   import { voiceSession } from '$lib/stores/voice';
@@ -87,6 +86,8 @@
   let myChannelOrder: string[] = [];
   let reorderMode: 'none' | 'default' | 'personal' = $state('none');
   let workingOrder: string[] = $state([]);
+  // Snapshot of the current working order to use in effects without creating self-dependencies.
+  let workingOrderSnapshot: string[] = $state([]);
   let savingOrder = $state(false);
   let orderError: string | null = $state(null);
   let draggingChannelId: string | null = $state(null);
@@ -139,7 +140,7 @@
   let isMemberDoc = $state(false);
   let profileMembership = $state(false);
   let myRoleIds: string[] = [];
-  let lastServerId: string | null = $state(null);
+  let lastServerId: string | null = null;
   let mentionHighlights: Set<string> = $state(new Set());
 
   // Basic notification prefs (subset of full settings)
@@ -861,7 +862,8 @@
       let publicChannels: Chan[] = [];
       const refresh = () => mergeAndSortChannels([publicChannels]);
 
-      const qPublic = query(baseCol, where('isPrivate', '==', false), orderBy('position'));
+      // Avoid composite index requirement by sorting client-side instead of ordering in Firestore.
+      const qPublic = query(baseCol, where('isPrivate', '==', false));
       unsubPublicChannels = onSnapshot(
         qPublic,
         (snap) => {
@@ -1057,7 +1059,7 @@
   // Unread state map
   type ChannelIndicator = { high: number; low: number };
   let unreadByChannel: Record<string, ChannelIndicator> = $state({});
-  let prevUnread: Record<string, number> = $state({});
+  let prevUnread: Record<string, number> = {};
   let unreadReady = $state(false);
 
   let computedServerId =
@@ -1069,7 +1071,7 @@
     const indicators = $channelIndicators ?? {};
     const serverKey = computedServerId ?? null;
     unreadByChannel = serverKey ? indicators[serverKey] ?? {} : {};
-    if (!unreadReady) unreadReady = true;
+    unreadReady = true;
   });
   run(() => {
     if (browser) {
@@ -1169,18 +1171,23 @@
       'You do not have permission to view any channels. Ask an admin to adjust your role or default role permissions.'
     );
   });
-run(() => {
+  run(() => {
+    // Track current working order separately to avoid reading and writing the same state inside this effect.
+    workingOrderSnapshot = workingOrder;
+  });
+  run(() => {
+    const currentOrder = workingOrderSnapshot;
     if (reorderMode === 'default') {
-    const target = defaultOrderIds();
-    const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
-    if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
-  } else if (reorderMode === 'personal') {
-    const target = personalOrderIds();
-    const merged = mergeOrder(workingOrder.length ? workingOrder : target, target);
-    if (!arraysEqual(workingOrder, merged)) workingOrder = merged;
-  } else if (workingOrder.length) {
-    workingOrder = [];
-  }
+      const target = defaultOrderIds();
+      const merged = mergeOrder(currentOrder.length ? currentOrder : target, target);
+      if (!arraysEqual(currentOrder, merged)) workingOrder = merged;
+    } else if (reorderMode === 'personal') {
+      const target = personalOrderIds();
+      const merged = mergeOrder(currentOrder.length ? currentOrder : target, target);
+      if (!arraysEqual(currentOrder, merged)) workingOrder = merged;
+    } else if (currentOrder.length) {
+      workingOrder = [];
+    }
   });
   run(() => {
     displayOrderIds = getDisplayOrderIds();
@@ -1198,14 +1205,17 @@ run(() => {
     });
   });
   run(() => {
-    if (computedServerId && $user?.uid && computedServerId !== lastServerId) {
-      lastServerId = computedServerId;
-      subscribeAll(computedServerId);
+    const prevServer = untrack(() => lastServerId);
+    const nextServer = computedServerId ?? null;
+    if (nextServer && $user?.uid && nextServer !== prevServer) {
+      lastServerId = nextServer;
+      subscribeAll(nextServer);
     }
   });
   run(() => {
-    if (computedServerId && $user?.uid) {
-      watchMyMember(computedServerId);
+    const nextServer = computedServerId ?? null;
+    if (nextServer && $user?.uid) {
+      watchMyMember(nextServer);
     }
   });
   run(() => {
@@ -1229,11 +1239,12 @@ run(() => {
       const entry = unreadByChannel[id];
       totals[id] = (entry?.high ?? 0) + (entry?.low ?? 0);
     }
+    const previousTotals = untrack(() => prevUnread);
     if (browser && unreadReady && document.visibilityState === 'hidden' && notifDesktopEnabled && notifAllMessages) {
       try {
         for (const id in totals) {
           const curr = totals[id] ?? 0;
-          const prev = prevUnread[id] ?? 0;
+          const prev = previousTotals[id] ?? 0;
           if (curr > prev && id !== activeChannelId) {
             const chan = channels.find((c) => c.id === id);
             const title = chan?.name ? `#${chan.name}` : 'New message';
@@ -1275,8 +1286,6 @@ run(() => {
           <span class="server-name truncate" title={serverName}>{serverName}</span>
           {#if isOwner}
             <span class="badge-accent text-[10px] px-1.5 py-0.5">owner</span>
-          {:else if isAdminLike}
-            <span class="badge-accent text-[10px] px-1.5 py-0.5">admin</span>
           {/if}
         </span>
       </span>
@@ -1288,11 +1297,6 @@ run(() => {
   {/if}
 
   <div class="channel-scroll-area flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3 -webkit-overflow-scrolling-touch">
-    {#if activeVoice}
-      <div class="hidden md:block">
-        <VoiceMiniPanel serverId={computedServerId} session={activeVoice} />
-      </div>
-    {/if}
     <!-- Channels heading - clickable on mobile for admins to access server settings -->
     {#if isAdminLike}
       <button
@@ -1321,11 +1325,18 @@ run(() => {
             aria-current={activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'page' : undefined}
             title={c.name}
           >
-            {#if c.type === 'voice'}
-              <i class="bx bx-headphone" aria-hidden="true"></i>
-            {:else}
-              <i class="bx bx-hash" aria-hidden="true"></i>
-            {/if}
+            <span class="channel-icon {c.isPrivate ? 'channel-icon--private' : ''}">
+              {#if c.type === 'voice'}
+                <i class="bx bx-headphone" aria-hidden="true"></i>
+              {:else}
+                <i class="bx bx-hash" aria-hidden="true"></i>
+              {/if}
+              {#if c.isPrivate === true}
+                <span class="channel-icon__lock" title="Private channel" aria-hidden="true">
+                  <i class="bx bx-lock text-[0.55rem]" aria-hidden="true"></i>
+                </span>
+              {/if}
+            </span>
             <span class="channel-name truncate">{c.name}</span>
             <span class="channel-row__meta ml-auto">
               {#if threadUnreadByChannel?.[c.id]}
@@ -1351,9 +1362,6 @@ run(() => {
                 {:else if (unreadByChannel[c.id]?.low ?? 0) > 0}
                   <span class="channel-teal-dot" aria-hidden="true"></span>
                 {/if}
-              {/if}
-              {#if c.isPrivate === true}
-                <i class="bx bx-lock text-xs opacity-70" title="Private channel" aria-hidden="true"></i>
               {/if}
             </span>
           </button>
@@ -1460,9 +1468,20 @@ run(() => {
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    /* Leave room for the mobile dock so the last channel isn't hidden */
+    padding-bottom: calc(
+      3.5rem + var(--mobile-dock-height, 3rem) + env(safe-area-inset-bottom, 0px)
+    );
   }
 
   @media (max-width: 767px) {
+    .channel-scroll-area {
+      /* Extra breathing room on mobile for scrolling to the very last channel */
+      padding-bottom: calc(
+        10rem + var(--mobile-dock-height, 3rem) + env(safe-area-inset-bottom, 0px)
+      );
+    }
+
     aside.server-sidebar {
       width: 100% !important;
       max-width: 100%;
@@ -1720,6 +1739,46 @@ run(() => {
     box-shadow: none;
     color: inherit;
     font-weight: 600;
+  }
+
+  .channel-icon {
+    position: relative;
+    width: 1.1rem;
+    height: 1.1rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--text-70);
+  }
+
+  .channel-icon i {
+    font-size: 1.05rem;
+  }
+
+  .channel-row--active .channel-icon {
+    color: inherit;
+  }
+
+  .channel-icon__lock {
+    position: absolute;
+    right: -0.08rem;
+    bottom: -0.1rem;
+    display: grid;
+    place-items: center;
+    color: color-mix(in srgb, var(--color-accent) 78%, var(--color-text-primary) 22%);
+    text-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+  }
+
+  .channel-icon__lock i {
+    font-size: 0.6rem;
+    line-height: 1;
+  }
+
+  .channel-row--active .channel-icon__lock {
+    color: var(--color-text-primary);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--color-accent) 65%, transparent);
   }
 
   .channel-row--active .channel-row__button:hover,

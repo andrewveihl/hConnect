@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { createEventDispatcher, onMount, tick } from 'svelte';
+  import { createEventDispatcher, onMount, tick, untrack } from 'svelte';
   import type { PendingUploadPreview } from './types';
   import EmojiPicker from './EmojiPicker.svelte';
   import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
@@ -105,6 +105,13 @@ let lastFirstMessageId: string | null = null;
 
 const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
   scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
+};
+
+// Re-scroll when images load to ensure full content is visible
+const handleImageLoad = () => {
+  if (shouldStickToBottom && scroller) {
+    tick().then(() => scrollToBottom('auto'));
+  }
 };
 
 onMount(() => {
@@ -508,10 +515,12 @@ let isMobileViewport = $state(false);
 
   run(() => {
     const currentFirstId = messages[0]?.id ?? null;
-    if (messages.length !== lastLen) {
-      const wasEmpty = lastLen === 0;
-      const lengthIncreased = messages.length > lastLen;
-      lastLen = messages.length;
+    const prevLen = lastLen;
+    const nextLen = messages.length;
+    if (nextLen !== prevLen) {
+      const wasEmpty = prevLen === 0;
+      const lengthIncreased = nextLen > prevLen;
+      lastLen = nextLen;
 
       if (pendingPrependAdjustment && lengthIncreased && currentFirstId !== lastFirstMessageId && scroller) {
         const snapshot = pendingPrependAdjustment;
@@ -537,15 +546,18 @@ let isMobileViewport = $state(false);
   });
 
   run(() => {
-    if (scrollToBottomSignal && scrollToBottomSignal !== lastScrollSignal) {
+    const prev = untrack(() => lastScrollSignal);
+    if (scrollToBottomSignal && scrollToBottomSignal !== prev) {
       lastScrollSignal = scrollToBottomSignal;
       tick().then(() => scrollToBottom('auto'));
     }
   });
 
   run(() => {
-    if (pendingUploads.length !== lastPendingLen) {
-      lastPendingLen = pendingUploads.length;
+    const prev = lastPendingLen;
+    const next = pendingUploads.length;
+    if (next !== prev) {
+      lastPendingLen = next;
       tick().then(() => scrollToBottom('auto'));
     }
   });
@@ -570,11 +582,26 @@ onMount(() => {
           return;
         closeReactionMenu();
       };
+      
+      // Handle mobile keyboard opening - scroll to bottom when viewport shrinks
+      let lastViewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const handleViewportResize = () => {
+        const currentHeight = window.visualViewport?.height ?? window.innerHeight;
+        // Keyboard likely opened if viewport shrunk significantly (more than 100px)
+        if (lastViewportHeight - currentHeight > 100 && shouldStickToBottom) {
+          tick().then(() => scrollToBottom('auto'));
+        }
+        lastViewportHeight = currentHeight;
+      };
+      
       window.addEventListener('resize', handleResize);
       window.addEventListener('pointerdown', handleGlobalPointerDown, true);
+      window.visualViewport?.addEventListener('resize', handleViewportResize);
+      
       return () => {
         window.removeEventListener('resize', handleResize);
         window.removeEventListener('pointerdown', handleGlobalPointerDown, true);
+        window.visualViewport?.removeEventListener('resize', handleViewportResize);
       };
     }
     return () => {};
@@ -920,13 +947,20 @@ onMount(() => {
   let formDrafts: Record<string, string[]> = $state({});
 
   run(() => {
+    const drafts = untrack(() => formDrafts);
+    let nextDrafts = drafts;
     for (const m of messages) {
       if (m && (m as any).type === 'form' && (m as any).form?.questions) {
         const len = (m as any).form.questions.length;
-        if (!formDrafts[m.id] || formDrafts[m.id].length !== len) {
-          formDrafts[m.id] = Array(len).fill('');
+        const existing = drafts[m.id];
+        if (!existing || existing.length !== len) {
+          if (nextDrafts === drafts) nextDrafts = { ...drafts };
+          nextDrafts[m.id] = Array(len).fill('');
         }
       }
+    }
+    if (nextDrafts !== drafts) {
+      formDrafts = nextDrafts;
     }
   });
 
@@ -1004,7 +1038,7 @@ onMount(() => {
   }
 
   .message-author--mine {
-    color: color-mix(in srgb, var(--chat-bubble-self-bg) 65%, var(--chat-bubble-self-text));
+    color: var(--color-accent);
   }
 
   .message-timestamp {
@@ -1023,6 +1057,18 @@ onMount(() => {
   .message-block--system {
     align-items: center;
     text-align: center;
+  }
+
+  .message-row {
+    width: 100%;
+  }
+
+  .message-row--mine {
+    justify-content: flex-start;
+  }
+
+  .message-row--other {
+    justify-content: flex-start;
   }
 
   .chat-scroll,
@@ -1051,6 +1097,7 @@ onMount(() => {
     align-items: flex-start;
     gap: 0.65rem;
     position: relative;
+    box-sizing: border-box;
   }
 
   .message-layout--mine {
@@ -1077,7 +1124,8 @@ onMount(() => {
     align-self: flex-start;
     width: fit-content;
     max-width: min(48rem, 100%);
-    overflow: hidden;
+    overflow: visible;
+    box-sizing: border-box;
   }
 
   /* Mobile: Ensure message content doesn't overflow */
@@ -1285,8 +1333,8 @@ onMount(() => {
     display: inline-flex;
     flex-direction: column;
     gap: 0.2rem;
-    align-items: stretch;
-    width: 100%;
+    align-items: flex-start;
+    width: fit-content;
     max-width: 100%;
     margin-left: 0;
     margin-top: 0;
@@ -1297,7 +1345,7 @@ onMount(() => {
   }
 
   .message-payload--mine {
-    align-items: stretch;
+    align-items: flex-end;
     margin-left: 0;
   }
   
@@ -1310,9 +1358,23 @@ onMount(() => {
     padding-left: 0;
   }
 
+  .message-layout--has-reply .message-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+  }
+
+  .message-layout--mine.message-layout--has-reply .message-header {
+    align-items: flex-end;
+  }
+
   .message-header__dot {
     color: var(--text-55);
     font-size: 0.8rem;
+  }
+
+  .message-layout--has-reply .message-header__dot {
+    display: none;
   }
 
   .message-timestamp-inline {
@@ -1320,18 +1382,25 @@ onMount(() => {
     color: var(--text-55);
   }
 
+  .message-layout--has-reply .message-timestamp-inline {
+    position: static;
+    padding: 0;
+    background: transparent;
+  }
+
   .reply-thread {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.15rem;
+    gap: 0.3rem;
     position: relative;
     padding: 0;
-    margin: 0 0 0.35rem 0;
+    margin: 0 0 0.5rem 0;
+    width: 100%;
   }
 
   .reply-thread--mine {
-    align-items: flex-start;
+    align-items: flex-end;
   }
 
   .reply-elbow {
@@ -1347,23 +1416,26 @@ onMount(() => {
   }
 
   .reply-inline {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 0.45rem;
     min-width: 0;
-    color: var(--text-65);
+    color: var(--text-80);
     font-size: 0.9rem;
-    padding: 0.35rem 0.5rem;
+    padding: 0.5rem 0.65rem;
     margin: 0;
     position: relative;
-    background: rgba(0, 0, 0, 0.15);
-    border-radius: 0.4rem;
-    border-left: 2px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+    max-width: min(36rem, 100%);
   }
 
   .reply-thread--mine .reply-inline {
-    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-    border-left-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 18%, var(--color-panel) 70%);
+    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 75%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, transparent);
   }
 
   .reply-inline__avatar {
@@ -1399,7 +1471,7 @@ onMount(() => {
 
   .reply-inline__author {
     font-weight: 700;
-    color: var(--text-80);
+    color: var(--text-90);
     white-space: nowrap;
   }
 
@@ -1411,30 +1483,47 @@ onMount(() => {
     white-space: nowrap;
   }
 
+  .reply-thread--mine .reply-inline__author {
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 92%, transparent);
+  }
+
+  .reply-thread--mine .reply-inline__snippet {
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 78%, transparent);
+  }
+
 @media (max-width: 640px) {
   .reply-thread {
     padding: 0;
-    margin: 0 0 0.3rem 0;
-    gap: 0.2rem;
+    margin: 0 0 0.35rem 0;
+    gap: 0.25rem;
     position: relative;
   }
 
   .reply-thread--mine {
+    align-items: flex-end;
     padding: 0;
   }
 
   .reply-inline {
-    padding: 0.3rem 0.45rem;
+    padding: 0.45rem 0.65rem;
     margin: 0;
-    font-size: 0.85rem;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 0.35rem;
-    border-left: 2px solid rgba(255, 255, 255, 0.2);
+    font-size: 0.88rem;
+    background: color-mix(in srgb, var(--color-panel) 70%, var(--chat-bubble-other-bg) 30%);
+    border-radius: 0.95rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+    max-width: 100%;
+    color: color-mix(in srgb, var(--text-100) 92%, var(--text-80) 8%);
+  }
+
+  .reply-thread:not(.reply-thread--mine) .reply-inline {
+    color: color-mix(in srgb, var(--text-100) 92%, var(--text-80) 8%);
   }
 
   .reply-thread--mine .reply-inline {
-    background: rgba(255, 255, 255, 0.12);
-    border-left-color: rgba(255, 255, 255, 0.35);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 70%, var(--color-panel) 30%);
+    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 70%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 92%, var(--text-100) 8%);
   }
 
   .reply-elbow {
@@ -1450,42 +1539,57 @@ onMount(() => {
   }
 
   .reply-thread--mine .reply-inline__author {
-    color: rgba(255, 255, 255, 0.95);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 94%, var(--text-100) 6%);
   }
 
   .reply-thread--mine .reply-inline__snippet {
-    color: rgba(255, 255, 255, 0.75);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%);
+  }
+
+  .reply-thread:not(.reply-thread--mine) .reply-inline__author {
+    color: color-mix(in srgb, var(--text-100) 94%, var(--text-80) 6%);
+  }
+
+  .reply-thread:not(.reply-thread--mine) .reply-inline__snippet {
+    color: color-mix(in srgb, var(--text-100) 88%, var(--text-70) 12%);
   }
 
   .reply-inline__avatar {
-    width: 1.15rem;
-    height: 1.15rem;
+    width: 1.1rem;
+    height: 1.1rem;
   }
 
-  .reply-inline__avatar span {
-    font-size: 0.65rem;
+    .reply-inline__avatar span {
+      font-size: 0.65rem;
+    }
+
+    .reply-inline__text {
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
   }
-}
 
   .message-bubble {
     position: relative;
-    display: block;
-    width: 100%;
-    max-width: 100%;
-    padding: 0.12rem 0;
-    margin: 0.08rem 0;
-    border-radius: 0.5rem;
-    border: 0;
+    display: inline-flex;
+    flex-direction: column;
+    width: auto;
+    max-width: min(46rem, 100%);
+    padding: 0.9rem 1.05rem;
+    margin: 0.12rem 0;
+    border-radius: 1rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
     text-align: left;
     font-size: 1rem;
-    box-shadow: none;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.2);
     background-clip: padding-box;
     isolation: isolate;
-    transition: background 120ms ease, border 120ms ease, color 120ms ease, box-shadow 120ms ease;
-    color: var(--color-text-primary);
+    transition: background 140ms ease, border 140ms ease, color 140ms ease, box-shadow 140ms ease;
+    color: var(--chat-bubble-other-text);
+    background: color-mix(in srgb, var(--chat-bubble-other-bg) 70%, transparent);
   }
 
   .system-message {
@@ -1500,13 +1604,16 @@ onMount(() => {
   }
 
   .message-bubble--mine {
-    background: transparent;
-    color: var(--color-text-primary);
+    background: var(--chat-bubble-self-bg);
+    color: var(--chat-bubble-self-text);
+    border-color: var(--chat-bubble-self-border);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.24);
   }
 
   .message-bubble--other {
-    background: transparent;
-    color: var(--color-text-primary);
+    background: var(--chat-bubble-other-bg);
+    color: var(--chat-bubble-other-text);
+    border-color: var(--chat-bubble-other-border);
   }
 
   .message-bubble--first-other::before,
@@ -1529,132 +1636,385 @@ onMount(() => {
 
   .message-bubble--compact {
     text-align: left;
-    padding-left: 0;
-    padding-right: 0;
-    font-size: clamp(1.05rem, 1.3vw, 1.22rem);
+    padding-left: 0.05rem;
+    padding-right: 0.05rem;
+    font-size: clamp(1rem, 1.15vw, 1.12rem);
+  }
+
+  @media (hover: hover) {
+    .message-bubble:hover {
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.24);
+      border-color: color-mix(in srgb, var(--color-border-subtle) 40%, var(--color-accent) 15%);
+    }
   }
 
   @media (max-width: 800px) {
     .message-bubble {
       max-width: 100%;
-      padding: 0.7rem 1.1rem;
-      font-size: 1.08rem;
+      padding: 0.8rem 0.95rem;
+      font-size: 1.02rem;
       line-height: 1.4;
     }
 
     .message-bubble--compact {
-      font-size: 1.2rem;
+      font-size: 1.05rem;
     }
   }
 
   @media (max-width: 640px) {
+    .message-payload {
+      max-width: calc(100vw - 3.4rem);
+    }
+
+    .message-layout {
+      gap: 0.45rem;
+      align-items: flex-end;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
     .message-layout--continued {
-      padding-left: calc(1.75rem + 0.45rem);
+      padding-left: 1.9rem;
     }
 
     .message-layout--mine.message-layout--continued {
-      padding-right: 0;
+      padding-right: 1.1rem;
       padding-left: 0;
     }
 
-    /* Mobile: Hide avatar for user messages */
     .message-layout--mine .message-avatar {
       display: none;
     }
 
-    /* Mobile: Show avatar for other users - modern compact size */
     .message-layout:not(.message-layout--mine) .message-avatar {
-      width: 2rem;
-      height: 2rem;
-      min-width: 2rem;
+      width: 2.05rem;
+      height: 2.05rem;
+      min-width: 2.05rem;
       border-radius: 50%;
       overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      background: #fff;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+      margin-top: 0.15rem;
     }
 
-    /* Mobile: User messages styled with modern gradient teal */
-    .message-bubble--mine {
-      background: linear-gradient(135deg, #33c8bf 0%, #2ba8a0 100%) !important;
-      color: #ffffff !important;
-      border-radius: 1.125rem 1.125rem 0.35rem 1.125rem;
-      padding: 0.6rem 0.85rem !important;
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-    }
-
-    .message-bubble--mine .chat-mention {
-      color: #ffffff !important;
-      background: rgba(0, 0, 0, 0.15) !important;
-      border-color: rgba(0, 0, 0, 0.2) !important;
-      text-shadow: none !important;
-    }
-
-    /* Mobile: Other users' messages with modern glass effect */
-    .message-bubble--other {
-      background: rgba(255, 255, 255, 0.07) !important;
-      color: var(--color-text-primary) !important;
-      border-radius: 1.125rem 1.125rem 1.125rem 0.35rem;
-      padding: 0.6rem 0.85rem !important;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    /* Mobile: User message content - right aligned */
     .message-layout--mine .message-content {
-      width: auto;
-      max-width: 78%;
-      margin-left: auto;
-      align-items: flex-end;
-    }
-
-    /* Mobile: Other users' content aligns left with avatar */
-    .message-layout:not(.message-layout--mine) .message-content {
-      max-width: calc(100% - 2.75rem);
+      width: 100%;
+      max-width: 100%;
+      margin-left: 0;
       align-items: flex-start;
     }
 
-    /* Mobile: Compact message header */
+    .message-layout:not(.message-layout--mine) .message-content {
+      max-width: calc(100% - 2.35rem);
+      align-items: flex-start;
+    }
+
+    .message-body {
+      gap: 0.25rem;
+    }
+
+    .message-body--continued {
+      margin-top: 0.08rem;
+    }
+
+    .message-content {
+      padding-bottom: 0.35rem;
+      max-width: calc(100vw - 1.25rem);
+    }
+
+    .message-bubble {
+      max-width: calc(100vw - 3.4rem);
+      padding: 0.8rem 1rem !important;
+      border-radius: 1.2rem;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.12);
+      background: color-mix(in srgb, var(--color-panel) 70%, var(--chat-bubble-other-bg) 30%);
+      color: color-mix(in srgb, var(--text-100) 90%, var(--chat-bubble-other-text) 10%);
+      border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+    }
+
+    .message-bubble--mine {
+      background: color-mix(in srgb, var(--chat-bubble-self-bg) 70%, var(--color-panel) 30%) !important;
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%) !important;
+      border-color: color-mix(in srgb, var(--chat-bubble-self-border) 70%, transparent);
+      border-radius: 1.2rem 1.2rem 0.5rem 1.2rem;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+    }
+
+    .message-bubble--mine .chat-mention {
+      color: var(--chat-bubble-self-text) !important;
+      background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, transparent) !important;
+      border-color: color-mix(in srgb, var(--chat-bubble-self-border) 50%, transparent) !important;
+      text-shadow: none !important;
+    }
+
+    .message-bubble--other {
+      background: color-mix(in srgb, var(--color-panel) 70%, var(--chat-bubble-other-bg) 30%) !important;
+      color: color-mix(in srgb, var(--text-100) 90%, var(--chat-bubble-other-text) 10%) !important;
+      border-radius: 1.2rem 1.2rem 1.2rem 0.5rem;
+      padding: 0.8rem 1rem !important;
+      border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+    }
+
+    .message-bubble--other .chat-link {
+      color: color-mix(in srgb, var(--text-100) 85%, var(--chat-bubble-other-text) 15%);
+    }
+
+    .message-bubble--mine .chat-link {
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%);
+    }
+
     .message-header {
       display: flex;
       align-items: center;
-      gap: 0.35rem;
-      margin-bottom: 0.15rem;
-      font-size: 0.8rem;
-    }
-
-    /* Adjust author name color for user messages on mobile */
-    .message-author--mine {
-      color: rgba(255, 255, 255, 0.9) !important;
-      font-weight: 600;
-      font-size: 0.75rem;
+      gap: 0.3rem;
+      margin-bottom: 0.08rem;
+      font-size: 0.78rem;
+      color: color-mix(in srgb, var(--text-100) 90%, var(--text-80) 10%);
     }
 
     .message-author {
-      font-size: 0.8rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: color-mix(in srgb, var(--text-100) 92%, var(--text-80) 8%);
+    }
+
+    .message-author--mine {
+      color: color-mix(in srgb, var(--color-accent) 80%, var(--text-100) 20%) !important;
       font-weight: 600;
     }
 
-    /* Adjust timestamp color for user messages on mobile */
-    .message-bubble--mine .message-timestamp-inline {
-      color: rgba(255, 255, 255, 0.65) !important;
-      font-size: 0.7rem;
+    .message-timestamp-inline {
+      font-size: 0.72rem;
+      color: color-mix(in srgb, var(--text-70) 85%, transparent);
     }
 
-    .message-timestamp-inline {
-      font-size: 0.7rem;
-      color: var(--text-50);
+    .message-bubble--mine .message-timestamp-inline {
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, transparent) !important;
     }
 
     .message-bubble--mine .message-header__dot {
-      color: rgba(255, 255, 255, 0.5) !important;
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 70%, transparent) !important;
     }
 
-    /* Adjust action bar positioning for mobile */
+    .message-header__dot {
+      color: rgba(0, 0, 0, 0.3);
+    }
+
     .message-action-bar--mine {
       right: auto;
-      left: -2.5rem;
+      left: -2rem;
     }
 
     .message-action-bar--other {
       left: auto;
-      right: -2.5rem;
+      right: -2rem;
+    }
+
+    .message-thread-stack--indented {
+      margin-left: clamp(0.6rem, 3vw, 1.4rem);
+    }
+
+    .message-thread-stack--mine.message-thread-stack--indented {
+      margin-right: clamp(0.6rem, 3vw, 1.4rem);
+    }
+
+    .chat-gif {
+      max-width: calc(100vw - 3.4rem);
+      border-radius: 1.1rem;
+      border-color: rgba(15, 23, 42, 0.08);
+    }
+
+    .chat-file {
+      max-width: calc(100vw - 3.4rem);
+    }
+
+    .chat-file__card {
+      background: color-mix(in srgb, var(--chat-bubble-other-bg) 94%, #fff 10%);
+      border-color: rgba(15, 23, 42, 0.08);
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
+      color: var(--chat-bubble-other-text);
+    }
+
+    .chat-file--mine .chat-file__card {
+      background: var(--chat-bubble-self-bg);
+      border-color: var(--chat-bubble-self-border);
+      color: var(--chat-bubble-self-text);
+    }
+
+    .chat-file__subtext {
+      color: color-mix(in srgb, var(--chat-bubble-other-text) 82%, transparent);
+    }
+
+    .chat-file--mine .chat-file__subtext {
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 88%, transparent);
+    }
+
+    .reply-thread {
+      width: 100%;
+    }
+
+    .reply-inline {
+      max-width: calc(100vw - 3.4rem);
+    }
+
+    .reply-inline__snippet {
+      white-space: normal;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .message-row--mine,
+    .message-row--other {
+      justify-content: flex-start;
+    }
+
+    .message-block {
+      max-width: 100%;
+    }
+
+    .message-layout {
+      gap: 0.8rem;
+    }
+
+    .message-layout--continued {
+      padding-left: 0;
+    }
+
+    .message-layout--mine.message-layout--continued {
+      padding-right: 0;
+    }
+
+    .message-layout--continued .message-avatar {
+      visibility: hidden;
+    }
+
+    .message-layout--continued .message-header {
+      display: none;
+    }
+
+    .message-avatar {
+      margin-top: 0.2rem;
+      box-shadow: none;
+      border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+      background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+    }
+
+    .message-content,
+    .message-content--mine {
+      align-items: flex-start;
+      align-self: stretch;
+      width: 100%;
+      text-align: left;
+      margin-left: 0;
+      margin-right: 0;
+    }
+
+    .message-content--mine .message-body {
+      align-items: flex-start;
+      align-self: flex-start;
+    }
+
+    .message-body,
+    .message-body--continued {
+      align-items: flex-start;
+    }
+
+    .message-payload,
+    .message-payload--mine {
+      align-items: flex-start;
+      width: 100%;
+      text-align: left;
+      margin-left: 0;
+      margin-right: 0;
+      max-width: 100%;
+    }
+
+    .message-bubble {
+      background: color-mix(in srgb, var(--chat-bubble-other-bg) 75%, var(--color-panel) 25%);
+      border: 1px solid color-mix(in srgb, var(--chat-bubble-other-border) 75%, transparent);
+      color: color-mix(in srgb, var(--chat-bubble-other-text) 90%, var(--text-90) 10%);
+      box-shadow: none;
+    }
+
+    .message-bubble--mine {
+      background: color-mix(in srgb, var(--chat-bubble-self-bg) 80%, var(--color-panel) 20%);
+      border-color: color-mix(in srgb, var(--chat-bubble-self-border) 80%, transparent);
+      color: color-mix(in srgb, var(--chat-bubble-self-text) 92%, var(--text-90) 8%);
+    }
+
+    .message-bubble--mine .chat-link {
+      color: var(--chat-bubble-self-text);
+    }
+
+    .message-bubble--other .chat-link {
+      color: var(--chat-bubble-other-text);
+    }
+
+    .message-header {
+      margin-bottom: 0.08rem;
+      font-size: 0.95rem;
+      gap: 0.45rem;
+    }
+
+    .message-block--mine .message-heading-row,
+    .message-block--other .message-heading-row {
+      margin-left: calc(2.5rem + 0.6rem);
+      margin-right: 0;
+      justify-content: flex-start;
+      text-align: left;
+    }
+
+    .message-heading-row--mine {
+      justify-content: flex-start;
+      text-align: left;
+    }
+
+    .message-bubble {
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      padding: 0.1rem 0;
+      margin: 0.05rem 0;
+      max-width: 100%;
+      color: var(--color-text-primary);
+    }
+
+    .message-bubble--mine,
+    .message-bubble--other {
+      background: transparent;
+      color: var(--color-text-primary);
+    }
+
+    .message-bubble--compact {
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .message-thread-stack {
+      gap: 0.35rem;
+      align-items: flex-start;
+    }
+
+    .message-thread-stack--indented {
+      margin-left: calc(2.5rem + 0.6rem);
+    }
+
+    .message-thread-stack--mine.message-thread-stack--indented {
+      margin-left: calc(2.5rem + 0.6rem);
+      margin-right: 0;
+    }
+
+    .message-action {
+      background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
+      border-color: color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+      box-shadow: none;
+    }
+
+    .message-action:not(:disabled):hover,
+    .message-action:not(:disabled):focus-visible {
+      background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
     }
   }
 
@@ -1719,8 +2079,8 @@ onMount(() => {
   /* Mobile: Constrain GIF and image sizes */
   @media (max-width: 767px) {
     .chat-gif {
-      max-width: min(280px, calc(100vw - 5rem));
-      border-radius: 1rem;
+      max-width: calc(100vw - 3.4rem);
+      border-radius: 1.1rem;
     }
   }
 
@@ -1735,7 +2095,7 @@ onMount(() => {
   /* Mobile: Constrain file cards */
   @media (max-width: 767px) {
     .chat-file {
-      max-width: min(280px, calc(100vw - 5rem));
+      max-width: calc(100vw - 3.4rem);
     }
   }
 
@@ -2195,11 +2555,6 @@ onMount(() => {
   background: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
 }
 
-.thread-preview--mine::after {
-  left: auto;
-  right: 1.1rem;
-}
-
 .thread-preview::before {
   content: '';
   position: absolute;
@@ -2210,6 +2565,37 @@ onMount(() => {
   border-left: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
   border-bottom: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
   border-bottom-left-radius: 14px;
+}
+
+.thread-preview--mine::after,
+.thread-preview--mine::before {
+  display: none;
+}
+
+.thread-preview--unread::after,
+.thread-preview--unread::before {
+  background: color-mix(in srgb, var(--color-accent) 75%, var(--color-panel) 25%);
+  border-color: transparent;
+}
+
+@media (min-width: 768px) {
+  .message-thread-stack--mine {
+    align-items: flex-start;
+  }
+
+  .message-thread-stack--mine.message-thread-stack--indented {
+    margin-left: clamp(1.5rem, 4vw, 2.8rem);
+    margin-right: 0;
+  }
+
+  .thread-preview--mine {
+    align-self: flex-start;
+  }
+
+  .thread-preview::after,
+  .thread-preview::before {
+    display: none;
+  }
 }
 
 .thread-preview--mine::before {
@@ -2540,7 +2926,7 @@ onMount(() => {
       {@const replyRef = (m as any).replyTo ?? null}
       {@const threadMeta = threadStats?.[m.id]}
       {#if isSystem}
-        <div class="flex w-full justify-center" data-message-id={m.id}>
+        <div class="message-row message-row--system flex w-full justify-center" data-message-id={m.id}>
           <div
             class={`message-block w-full max-w-3xl message-block--system ${minuteHovered ? 'is-minute-hovered' : ''}`}
             style={`margin-top: ${(continued ? 0 : 0.15)}rem;`}
@@ -2552,7 +2938,7 @@ onMount(() => {
         </div>
       {:else}
       <div
-        class={`flex w-full ${mine ? 'justify-end' : 'justify-start'}`}
+        class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''}`}
         data-message-id={m.id}
         onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
         onpointerleave={() => { onMessagePointerLeave(m.id, minuteKey); handlePointerUp(); }}
@@ -2725,6 +3111,7 @@ onMount(() => {
                       src={(m as any).url}
                       alt="GIF"
                       loading="lazy"
+                      onload={handleImageLoad}
                     />
                   {:else if m.type === 'file' && (m as any).file?.url}
                     {@const file = (m as any).file}
@@ -2745,7 +3132,7 @@ onMount(() => {
                       >
                         {#if isImageFile}
                           <div class="chat-file__preview">
-                            <img src={file.url} alt={file.name ?? 'Image attachment'} loading="lazy" />
+                            <img src={file.url} alt={file.name ?? 'Image attachment'} loading="lazy" onload={handleImageLoad} />
                           </div>
                         {:else}
                           <div class="chat-file__icon" aria-hidden="true">
@@ -2912,7 +3299,7 @@ onMount(() => {
                   <div class={`chat-file__card chat-file__card--upload ${upload.isImage ? 'chat-file__card--image' : 'chat-file__card--generic'}`}>
                     {#if upload.isImage && upload.previewUrl}
                       <div class="chat-file__preview">
-                        <img src={upload.previewUrl} alt={upload.name} loading="lazy" />
+                        <img src={upload.previewUrl} alt={upload.name} loading="lazy" onload={handleImageLoad} />
                         <div class="chat-file__preview-overlay">
                           <div class="chat-upload-spinner" aria-hidden="true"></div>
                           <div class="chat-upload-percent">{uploadPercent}%</div>

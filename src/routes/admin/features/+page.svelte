@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { PageData } from './$types';
   import { browser } from '$app/environment';
-  import AdminCard from '$lib/admin/components/AdminCard.svelte';
   import { FEATURE_FLAGS, type FeatureFlagKey, type FeatureFlagMeta } from '$lib/admin/types';
   import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
   import { showAdminToast } from '$lib/admin/stores/toast';
@@ -10,6 +9,7 @@
   import { triggerTestPush } from '$lib/notify/testPush';
   import { setTheme, resetThemeToSystem, type ThemeMode } from '$lib/stores/theme';
   import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+  import { isMobileViewport } from '$lib/stores/viewport';
 
   interface Props {
     data: PageData;
@@ -29,12 +29,21 @@
   ];
   let previewInvite: ServerInvite | null = $state(null);
   let testPushLoading = $state(false);
+  
+  // Mobile: active tab for feature sections
+  type TabId = 'toggles' | 'testing';
+  let activeTab: TabId = $state('toggles');
+  
+  // Collapsed sections on mobile
+  let collapsedSections: Record<string, boolean> = $state({});
+
   type FeatureSectionConfig = {
     id: string;
     title: string;
     description: string;
     keys: FeatureFlagKey[];
     accent?: 'ai' | 'ops';
+    icon?: string;
   };
   type FeatureSection = {
     id: string;
@@ -42,13 +51,15 @@
     description: string;
     flags: FeatureFlagMeta[];
     accent?: 'ai' | 'ops';
+    icon?: string;
   };
   const sectionDefinitions: FeatureSectionConfig[] = [
     {
       id: 'core',
       title: 'Core Platform',
       description: 'Enable baseline access to servers, channels, and invites.',
-      keys: ['enableServers', 'enableChannels', 'enableServerCreation', 'enableInviteLinks', 'enableDMs', 'enablePresence']
+      keys: ['enableServers', 'enableChannels', 'enableServerCreation', 'enableInviteLinks', 'enableDMs', 'enablePresence'],
+      icon: 'bx-server'
     },
     {
       id: 'engagement',
@@ -62,27 +73,31 @@
         'enableNotifications',
         'enableTypingIndicators',
         'enableReadReceipts'
-      ]
+      ],
+      icon: 'bx-movie-play'
     },
     {
       id: 'messages',
       title: 'Message Controls',
       description: 'Set edit and delete abilities to match your compliance posture.',
-      keys: ['enableMessageEditing', 'enableMessageDeleting']
+      keys: ['enableMessageEditing', 'enableMessageDeleting'],
+      icon: 'bx-message-square-edit'
     },
     {
       id: 'ai',
       title: 'AI Assist Surfaces',
       description: 'Individually disable the AI experiences in chat.',
       keys: ['enableAIFeatures', 'enableAISuggestedReplies', 'enableAIPredictions', 'enableAISummaries'],
-      accent: 'ai'
+      accent: 'ai',
+      icon: 'bx-bot'
     },
     {
       id: 'ops',
       title: 'Ops & QA',
       description: 'Safety, lockdown, and debugging switches.',
       keys: ['readOnlyMode', 'showNotificationDebugTools'],
-      accent: 'ops'
+      accent: 'ops',
+      icon: 'bx-cog'
     }
   ];
   const flagMetaMap = new Map<FeatureFlagKey, FeatureFlagMeta>(FEATURE_FLAGS.map((flag) => [flag.key, flag]));
@@ -95,6 +110,7 @@
         title: section.title,
         description: section.description,
         accent: section.accent,
+        icon: section.icon,
         flags: section.keys
           .map((key) => flagMetaMap.get(key))
           .filter((flag): flag is FeatureFlagMeta => Boolean(flag))
@@ -110,10 +126,20 @@
             id: 'misc',
             title: 'Additional toggles',
             description: 'Flags that still need a dedicated home.',
-            flags: leftoverFlags
+            flags: leftoverFlags,
+            icon: 'bx-dots-horizontal-rounded'
           }
         ]
       : sectionBlocks;
+
+  // Count enabled flags
+  const enabledCount = $derived(
+    FEATURE_FLAGS.filter((f) => flags[f.key]).length
+  );
+
+  const toggleSection = (sectionId: string) => {
+    collapsedSections = { ...collapsedSections, [sectionId]: !collapsedSections[sectionId] };
+  };
 
   const toggleFlag = async (key: FeatureFlagKey) => {
     const nextValue = !flags[key];
@@ -284,238 +310,320 @@
   };
 </script>
 
-<section class="admin-page h-full w-full">
-  <div class="flex flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)] lg:items-start">
-    <div class="min-h-0">
-      <AdminCard title="Feature Toggles" description="Flip platform capabilities instantly." padded={false}>
-        <div class="flex h-full flex-col">
-          <div class="flex-1 overflow-y-auto px-6 py-5">
-            <div class="space-y-6 pb-2">
-              {#each featureSections as section (section.id)}
-                <section
-                  class={`space-y-4 ${
-                    section.accent
-                      ? 'pt-4'
-                      : 'border-t border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] pt-6 first:border-t-0 first:pt-0'
-                  } ${
-                    section.accent === 'ai'
-                      ? 'rounded-3xl border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)96%,transparent)] px-6 pb-4'
-                      : ''
-                  } ${
-                    section.accent === 'ops'
-                      ? 'rounded-3xl bg-[color-mix(in_srgb,var(--surface-panel)92%,transparent)] px-5 pb-3'
-                      : ''
-                  }`}
-                >
-                  <div class="flex flex-col gap-1 text-[color:var(--color-text-primary,#0f172a)]">
-                    {#if section.accent === 'ai'}
-                      <span class="mb-1 inline-flex items-center rounded-full bg-gradient-to-r from-sky-400/30 to-emerald-400/30 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                        AI
-                      </span>
-                    {:else if section.accent === 'ops'}
-                      <span class="mb-1 inline-flex items-center rounded-full bg-rose-400/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-rose-800">
-                        Ops
-                      </span>
-                    {/if}
-                    <h3 class="text-[1.05rem] font-semibold tracking-tight">{section.title}</h3>
-                    <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#6b7280)85%,transparent)]">
-                      {section.description}
-                    </p>
-                  </div>
-                  <div class="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
-                    {#each section.flags as flag (flag.key)}
-                      <label
-                        class="flex min-h-[156px] flex-col justify-between rounded-3xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)94%,transparent)] p-5 shadow-sm transition hover:shadow-lg"
-                        for={`flag-${flag.key}`}
-                      >
-                        <div>
-                          <div class="flex items-start justify-between gap-4">
-                            <div class="flex-1">
-                              <p class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">{flag.label}</p>
-                              <p class="text-sm text-[color:var(--text-60,#6b7280)]">{flag.description}</p>
-                            </div>
-                            <button
-                              id={`flag-${flag.key}`}
-                              type="button"
-                              class="relative h-6 w-11 shrink-0 rounded-full transition"
-                              class:bg-slate-200={!flags[flag.key]}
-                              class:bg-emerald-500={flags[flag.key]}
-                              aria-pressed={flags[flag.key]}
-                              aria-label={`Toggle ${flag.label}`}
-                              title={`Toggle ${flag.label}`}
-                              onclick={() => toggleFlag(flag.key)}
-                              disabled={pending[flag.key]}
-                            >
-                              <span
-                                class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition"
-                                class:translate-x-5={flags[flag.key]}
-                              ></span>
-                            </button>
-                          </div>
-                        </div>
-                        <div class="mt-4 flex items-center justify-between">
-                          <span
-                            class="rounded-full px-3 py-1 text-xs font-semibold"
-                            style:background={flags[flag.key] ? 'rgba(16,185,129,0.18)' : 'rgba(255,255,255,0.08)'}
-                            style:color={flags[flag.key] ? '#0f766e' : '#e2e8f0'}
-                          >
-                            {flags[flag.key] ? 'Enabled' : 'Disabled'}
-                          </span>
-                          {#if pending[flag.key]}
-                            <span class="text-xs text-white/60">Updating...</span>
-                          {/if}
-                        </div>
-                      </label>
-                    {/each}
-                  </div>
-                </section>
-              {/each}
-            </div>
-          </div>
-        </div>
-      </AdminCard>
+<section class="features-page">
+  <!-- Summary stats on mobile -->
+  {#if $isMobileViewport}
+    <div class="stats-bar">
+      <div class="stat">
+        <i class='bx bx-toggle-right'></i>
+        <span class="value">{enabledCount}</span>
+        <span class="label">Enabled</span>
+      </div>
+      <div class="stat">
+        <i class='bx bx-toggle-left'></i>
+        <span class="value">{FEATURE_FLAGS.length - enabledCount}</span>
+        <span class="label">Disabled</span>
+      </div>
+      <div class="stat">
+        <i class='bx bx-layer'></i>
+        <span class="value">{featureSections.length}</span>
+        <span class="label">Sections</span>
+      </div>
     </div>
 
-    <div class="min-h-0">
-      <AdminCard title="Feature Testing" description="Quick shortcuts for QA routines.">
-        <div class="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Domain auto-invite prompt</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Clears the local dismissal flag so the new domain invite modal reappears for pending invites.
-              </p>
+    <!-- Tab switcher for mobile -->
+    <div class="tab-bar">
+      <button
+        class="tab"
+        class:active={activeTab === 'toggles'}
+        onclick={() => (activeTab = 'toggles')}
+      >
+        <i class='bx bx-toggle-right'></i>
+        Feature Toggles
+      </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'testing'}
+        onclick={() => (activeTab = 'testing')}
+      >
+        <i class='bx bx-test-tube'></i>
+        Testing Tools
+      </button>
+    </div>
+  {/if}
+
+  <div class="content-grid" class:mobile={$isMobileViewport}>
+    <!-- Feature Toggles Panel -->
+    {#if !$isMobileViewport || activeTab === 'toggles'}
+      <div class="toggles-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <i class='bx bx-toggle-right'></i>
+            <h3>Feature Toggles</h3>
+          </div>
+          <p class="panel-description">Flip platform capabilities instantly.</p>
+        </div>
+
+        <div class="sections-list">
+          {#each featureSections as section (section.id)}
+            {@const isCollapsed = collapsedSections[section.id] && $isMobileViewport}
+            {@const enabledInSection = section.flags.filter(f => flags[f.key]).length}
+            
+            <div 
+              class="feature-section"
+              class:ai={section.accent === 'ai'}
+              class:ops={section.accent === 'ops'}
+            >
+              <button
+                class="section-header"
+                onclick={() => $isMobileViewport && toggleSection(section.id)}
+                aria-expanded={!isCollapsed}
+              >
+                <div class="section-icon">
+                  <i class='bx {section.icon ?? "bx-grid-alt"}'></i>
+                </div>
+                <div class="section-info">
+                  <div class="section-title-row">
+                    <h4>{section.title}</h4>
+                    {#if section.accent === 'ai'}
+                      <span class="badge ai">AI</span>
+                    {:else if section.accent === 'ops'}
+                      <span class="badge ops">OPS</span>
+                    {/if}
+                  </div>
+                  <p class="section-desc">{section.description}</p>
+                  <div class="section-meta">
+                    <span class="enabled-count">{enabledInSection}/{section.flags.length} enabled</span>
+                  </div>
+                </div>
+                {#if $isMobileViewport}
+                  <i class='bx {isCollapsed ? "bx-chevron-down" : "bx-chevron-up"} chevron'></i>
+                {/if}
+              </button>
+
+              {#if !isCollapsed}
+                <div class="flags-grid">
+                  {#each section.flags as flag (flag.key)}
+                    <div class="flag-card" class:enabled={flags[flag.key]}>
+                      <div class="flag-content">
+                        <div class="flag-header">
+                          <span class="flag-label">{flag.label}</span>
+                          <button
+                            type="button"
+                            class="toggle-switch"
+                            class:on={flags[flag.key]}
+                            aria-pressed={flags[flag.key]}
+                            aria-label={`Toggle ${flag.label}`}
+                            onclick={() => toggleFlag(flag.key)}
+                            disabled={pending[flag.key]}
+                          >
+                            <span class="toggle-knob"></span>
+                          </button>
+                        </div>
+                        <p class="flag-desc">{flag.description}</p>
+                      </div>
+                      <div class="flag-footer">
+                        <span class="status-badge" class:enabled={flags[flag.key]}>
+                          {flags[flag.key] ? 'Enabled' : 'Disabled'}
+                        </span>
+                        {#if pending[flag.key]}
+                          <span class="updating">
+                            <i class='bx bx-loader-alt bx-spin'></i>
+                          </span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Testing Tools Panel -->
+    {#if !$isMobileViewport || activeTab === 'testing'}
+      <div class="testing-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <i class='bx bx-test-tube'></i>
+            <h3>Feature Testing</h3>
+          </div>
+          <p class="panel-description">Quick shortcuts for QA routines.</p>
+        </div>
+
+        <div class="test-tools-grid">
+          <!-- Domain invite prompt -->
+          <article class="test-card">
+            <div class="test-icon domain">
+              <i class='bx bx-envelope'></i>
+            </div>
+            <div class="test-content">
+              <h4>Domain auto-invite prompt</h4>
+              <p>Clears the local dismissal flag so the new domain invite modal reappears.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full bg-gradient-to-r from-emerald-400/80 to-cyan-300/80 px-4 py-2 text-sm font-semibold text-slate-900 shadow transition hover:opacity-90"
+                class="btn primary"
                 onclick={handleResetDomainPrompt}
               >
-                Reset prompt dismissal
+                <i class='bx bx-reset'></i>
+                Reset prompt
               </button>
               <a
-                class="rounded-full border border-[color:color-mix(in_srgb,var(--surface-panel)40%,transparent)] px-4 py-2 text-sm text-inherit no-underline transition hover:border-white/40"
+                class="btn secondary"
                 href="/settings#invites"
                 target="_blank"
                 rel="noreferrer"
               >
-                Open invite inbox
+                <i class='bx bx-inbox'></i>
+                Inbox
               </a>
               <button
                 type="button"
-                class="rounded-full border border-dashed border-[color:color-mix(in_srgb,var(--surface-panel)40%,transparent)] px-4 py-2 text-sm font-semibold transition hover:border-[color:color-mix(in_srgb,var(--surface-panel)60%,transparent)]"
+                class="btn outline"
                 onclick={triggerDomainPromptPreview}
               >
-                Show sample invite
+                <i class='bx bx-show'></i>
+                Preview
               </button>
             </div>
           </article>
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Splash screen preview</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Opens the standalone splash page in a new tab so you can confirm animation and branding tweaks.
-              </p>
+
+          <!-- Splash screen preview -->
+          <article class="test-card">
+            <div class="test-icon splash">
+              <i class='bx bx-rocket'></i>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="test-content">
+              <h4>Splash screen preview</h4>
+              <p>Opens the standalone splash page to verify animations and branding.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full bg-gradient-to-r from-emerald-400/80 to-cyan-300/80 px-4 py-2 text-sm font-semibold text-slate-900 shadow transition hover:opacity-90"
+                class="btn primary"
                 onclick={openSplashDemo}
               >
-                Open splash demo
+                <i class='bx bx-window-open'></i>
+                Open demo
               </button>
             </div>
           </article>
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Push delivery test</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Sends the callable <code>sendTestPush</code> request to this device to confirm push wiring.
-              </p>
+
+          <!-- Push delivery test -->
+          <article class="test-card">
+            <div class="test-icon push">
+              <i class='bx bx-bell'></i>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="test-content">
+              <h4>Push delivery test</h4>
+              <p>Sends a test push notification to this device to confirm wiring.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full bg-gradient-to-r from-amber-300/80 via-rose-300/80 to-pink-400/80 px-4 py-2 text-sm font-semibold text-slate-900 shadow transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                class="btn warning"
                 onclick={handleSendTestPush}
                 disabled={testPushLoading}
               >
-                {testPushLoading ? 'Sending…' : 'Send test push'}
+                {#if testPushLoading}
+                  <i class='bx bx-loader-alt bx-spin'></i>
+                  Sending…
+                {:else}
+                  <i class='bx bx-send'></i>
+                  Send test push
+                {/if}
               </button>
             </div>
           </article>
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Theme labs</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Preview alternate themes instantly or reset back to the system default.
-              </p>
+
+          <!-- Theme labs -->
+          <article class="test-card">
+            <div class="test-icon theme">
+              <i class='bx bx-palette'></i>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="test-content">
+              <h4>Theme labs</h4>
+              <p>Preview alternate themes instantly or reset to system default.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full border border-white/20 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                class="btn outline"
                 onclick={() => previewTheme('holiday', 'Holiday')}
               >
-                Preview Holiday
+                <i class='bx bx-gift'></i>
+                Holiday
               </button>
               <button
                 type="button"
-                class="rounded-full border border-white/20 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                class="btn outline"
                 onclick={() => previewTheme('midnight', 'Midnight')}
               >
-                Preview Midnight
+                <i class='bx bx-moon'></i>
+                Midnight
               </button>
               <button
                 type="button"
-                class="rounded-full bg-white/90 px-4 py-2 text-sm font-semibold text-slate-900 shadow transition hover:bg-white"
+                class="btn secondary"
                 onclick={handleResetThemePreference}
               >
-                Reset theme
+                <i class='bx bx-reset'></i>
+                Reset
               </button>
             </div>
           </article>
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Navigation cache</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Clears remembered servers, channels, and DM scroll markers stored on this device.
-              </p>
+
+          <!-- Navigation cache -->
+          <article class="test-card">
+            <div class="test-icon nav">
+              <i class='bx bx-compass'></i>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="test-content">
+              <h4>Navigation cache</h4>
+              <p>Clears remembered servers, channels, and DM scroll markers.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full border border-dashed border-white/30 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/70 hover:bg-white/5"
+                class="btn outline"
                 onclick={resetNavigationMemory}
               >
-                Reset navigation cache
+                <i class='bx bx-trash'></i>
+                Clear cache
               </button>
             </div>
           </article>
-          <article class="space-y-3 rounded-[1.25rem] border border-[color:color-mix(in_srgb,var(--surface-panel)35%,transparent)] bg-[color-mix(in_srgb,var(--surface-panel)75%,transparent)] p-5">
-            <div>
-              <h4 class="text-base font-semibold text-[color:var(--color-text-primary,#0f172a)]">Voice debug state</h4>
-              <p class="text-sm text-[color:color-mix(in_srgb,var(--text-70,#475569)90%,transparent)]">
-                Clears the toggles that keep the voice debug panel or quick stats pinned open.
-              </p>
+
+          <!-- Voice debug state -->
+          <article class="test-card">
+            <div class="test-icon voice">
+              <i class='bx bx-microphone'></i>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="test-content">
+              <h4>Voice debug state</h4>
+              <p>Clears toggles that keep the voice debug panel pinned open.</p>
+            </div>
+            <div class="test-actions">
               <button
                 type="button"
-                class="rounded-full border border-dashed border-white/30 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/70 hover:bg-white/5"
+                class="btn outline"
                 onclick={resetVoiceDebugState}
               >
-                Reset voice debug
+                <i class='bx bx-trash'></i>
+                Reset debug
               </button>
             </div>
           </article>
         </div>
-      </AdminCard>
-    </div>
+      </div>
+    {/if}
   </div>
 </section>
+
 <DomainInvitePrompt
   invite={previewInvite}
   busy={false}
@@ -524,4 +632,604 @@
   onDecline={handlePreviewDecline}
   onDismiss={closePreviewInvite}
 />
+
+<style>
+  .features-page {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    height: 100%;
+    padding: 1rem;
+    overflow-y: auto;
+  }
+
+  /* Stats bar */
+  .stats-bar {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+  }
+
+  .stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.5rem;
+  }
+
+  .stat i {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .stat .value {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .stat .label {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+  }
+
+  /* Tab bar */
+  .tab-bar {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.25rem;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+  }
+
+  .tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    padding: 0.625rem 0.75rem;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .tab.active {
+    background: var(--accent-primary);
+    color: white;
+  }
+
+  .tab i {
+    font-size: 1rem;
+  }
+
+  /* Content grid */
+  .content-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 1.5rem;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .content-grid.mobile {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  /* Panels */
+  .toggles-panel,
+  .testing-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    background: var(--surface-panel);
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    padding: 1.25rem;
+    overflow: hidden;
+    max-height: calc(100vh - 200px);
+  }
+
+  .toggles-panel {
+    overflow-y: auto;
+  }
+
+  .content-grid.mobile .toggles-panel,
+  .content-grid.mobile .testing-panel {
+    background: transparent;
+    border: none;
+    padding: 0;
+    border-radius: 0;
+  }
+
+  .panel-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .content-grid.mobile .panel-header {
+    display: none;
+  }
+
+  .panel-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .panel-title i {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .panel-title h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  .panel-description {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  /* Sections list */
+  .sections-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .feature-section {
+    background: color-mix(in srgb, var(--surface-panel) 50%, transparent);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+    overflow: hidden;
+  }
+
+  .content-grid.mobile .feature-section {
+    background: var(--surface-panel);
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+  }
+
+  .feature-section.ai {
+    border-color: color-mix(in srgb, var(--accent-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--accent-primary) 5%, var(--surface-panel));
+  }
+
+  .feature-section.ops {
+    border-color: color-mix(in srgb, #f43f5e 30%, transparent);
+    background: color-mix(in srgb, #f43f5e 5%, var(--surface-panel));
+  }
+
+  .section-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 1rem;
+    width: 100%;
+    border: none;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .section-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent-primary) 15%, transparent);
+    flex-shrink: 0;
+  }
+
+  .section-icon i {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .feature-section.ai .section-icon {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(52, 211, 153, 0.2));
+  }
+
+  .feature-section.ai .section-icon i {
+    color: #10b981;
+  }
+
+  .feature-section.ops .section-icon {
+    background: color-mix(in srgb, #f43f5e 15%, transparent);
+  }
+
+  .feature-section.ops .section-icon i {
+    color: #f43f5e;
+  }
+
+  .section-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .section-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .section-title-row h4 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  .badge {
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.625rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .badge.ai {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.3), rgba(52, 211, 153, 0.3));
+    color: #059669;
+  }
+
+  .badge.ops {
+    background: color-mix(in srgb, #f43f5e 20%, transparent);
+    color: #be123c;
+  }
+
+  .section-desc {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    margin: 0.25rem 0 0;
+    line-height: 1.4;
+  }
+
+  .section-meta {
+    margin-top: 0.375rem;
+  }
+
+  .enabled-count {
+    font-size: 0.6875rem;
+    color: var(--accent-primary);
+    font-weight: 500;
+  }
+
+  .chevron {
+    font-size: 1.25rem;
+    color: var(--color-text-secondary);
+    transition: transform 0.2s;
+  }
+
+  /* Flags grid */
+  .flags-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+    padding: 0 1rem 1rem;
+  }
+
+  .content-grid.mobile .flags-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .flag-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 1rem;
+    background: var(--surface-panel);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    min-height: 120px;
+    transition: all 0.2s;
+  }
+
+  .flag-card:hover {
+    border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
+  }
+
+  .flag-card.enabled {
+    border-color: color-mix(in srgb, #10b981 30%, transparent);
+    background: color-mix(in srgb, #10b981 5%, var(--surface-panel));
+  }
+
+  .flag-content {
+    flex: 1;
+  }
+
+  .flag-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .flag-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    line-height: 1.3;
+  }
+
+  .flag-desc {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 2.5rem;
+    height: 1.375rem;
+    border-radius: 9999px;
+    border: none;
+    background: color-mix(in srgb, var(--color-text-primary) 20%, transparent);
+    cursor: pointer;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+
+  .toggle-switch.on {
+    background: #10b981;
+  }
+
+  .toggle-switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 50%;
+    background: white;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: transform 0.2s;
+  }
+
+  .toggle-switch.on .toggle-knob {
+    transform: translateX(1.125rem);
+  }
+
+  .flag-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+  }
+
+  .status-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    color: var(--color-text-secondary);
+  }
+
+  .status-badge.enabled {
+    background: color-mix(in srgb, #10b981 15%, transparent);
+    color: #059669;
+  }
+
+  .updating {
+    color: var(--accent-primary);
+  }
+
+  /* Testing tools grid */
+  .test-tools-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .test-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: color-mix(in srgb, var(--surface-panel) 75%, transparent);
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+  }
+
+  .content-grid.mobile .test-card {
+    background: var(--surface-panel);
+  }
+
+  .test-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent-primary) 15%, transparent);
+  }
+
+  .test-icon i {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .test-icon.domain {
+    background: linear-gradient(135deg, rgba(52, 211, 153, 0.2), rgba(6, 182, 212, 0.2));
+  }
+
+  .test-icon.domain i {
+    color: #10b981;
+  }
+
+  .test-icon.splash {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.2));
+  }
+
+  .test-icon.splash i {
+    color: #8b5cf6;
+  }
+
+  .test-icon.push {
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(249, 115, 22, 0.2));
+  }
+
+  .test-icon.push i {
+    color: #f59e0b;
+  }
+
+  .test-icon.theme {
+    background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2));
+  }
+
+  .test-icon.theme i {
+    color: #ec4899;
+  }
+
+  .test-icon.nav {
+    background: color-mix(in srgb, #3b82f6 15%, transparent);
+  }
+
+  .test-icon.nav i {
+    color: #3b82f6;
+  }
+
+  .test-icon.voice {
+    background: color-mix(in srgb, #14b8a6 15%, transparent);
+  }
+
+  .test-icon.voice i {
+    color: #14b8a6;
+  }
+
+  .test-content h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  .test-content p {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    margin: 0.25rem 0 0;
+    line-height: 1.4;
+  }
+
+  .test-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.5rem 0.875rem;
+    border-radius: 8px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+    border: none;
+  }
+
+  .btn i {
+    font-size: 1rem;
+  }
+
+  .btn.primary {
+    background: linear-gradient(135deg, var(--accent-primary), color-mix(in srgb, var(--accent-primary) 80%, #10b981));
+    color: white;
+  }
+
+  .btn.primary:hover {
+    opacity: 0.9;
+  }
+
+  .btn.secondary {
+    background: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .btn.secondary:hover {
+    background: color-mix(in srgb, var(--color-text-primary) 15%, transparent);
+  }
+
+  .btn.warning {
+    background: linear-gradient(135deg, #f59e0b, #f97316);
+    color: white;
+  }
+
+  .btn.warning:hover {
+    opacity: 0.9;
+  }
+
+  .btn.warning:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btn.outline {
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--color-text-primary) 20%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  .btn.outline:hover {
+    background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+    border-color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
+  }
+
+  /* Desktop tweaks */
+  @media (min-width: 768px) {
+    .features-page {
+      padding: 1.5rem;
+    }
+
+    .toggles-panel {
+      max-height: calc(100vh - 12rem);
+    }
+
+    .testing-panel {
+      max-height: calc(100vh - 12rem);
+    }
+  }
+</style>
 

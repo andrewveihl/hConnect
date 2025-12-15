@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run } from 'svelte/legacy';
 
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { browser } from '$app/environment';
   import { getDb } from '$lib/firebase';
   import { voiceSession } from '$lib/stores/voice';
@@ -9,7 +9,6 @@
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
   import {
     appendVoiceDebugEvent,
-    copyVoiceDebugAggregate,
     removeVoiceDebugSection,
     setVoiceDebugSection
   } from '$lib/utils/voiceDebugContext';
@@ -19,11 +18,13 @@
   interface Props {
     serverId?: string | null;
     session?: VoiceSession | null;
+    draggable?: boolean;
   }
 
-  let { serverId = null, session = null }: Props = $props();
+  let { serverId = null, session = null, draggable = false }: Props = $props();
 
   const CALL_DOC_ID = 'live';
+  const STORAGE_KEY = 'hconnect:voice-mini-panel:position';
 
   type VoiceParticipant = {
     uid: string;
@@ -35,14 +36,23 @@
   };
 
   let participants: VoiceParticipant[] = $state([]);
-  let unsub: Unsubscribe | null = $state(null);
-  let copyStatus = $state('');
-  let copyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let unsub: Unsubscribe | null = null;
+
+  // Drag state
+  let isDragging = $state(false);
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let panelStartX = 0;
+  let panelStartY = 0;
+  let positionX = $state(0);
+  let positionY = $state(0);
+  let panelEl: HTMLElement | null = null;
+  let pointerId: number | null = null;
 
   const callState = $derived($voiceClientState);
 
   run(() => {
-    unsub?.();
+    untrack(() => unsub)?.();
     participants = [];
     if (!session?.serverId || !session?.channelId) {
       unsub = null;
@@ -84,12 +94,72 @@
   onDestroy(() => {
     unsub?.();
     unsub = null;
-    if (copyTimeout) {
-      clearTimeout(copyTimeout);
-      copyTimeout = null;
-    }
     removeVoiceDebugSection('miniPanel.snapshot');
+    if (browser) {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    }
   });
+
+  onMount(() => {
+    if (browser && draggable) {
+      loadSavedPosition();
+    }
+  });
+
+  function loadSavedPosition() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const { x, y } = JSON.parse(saved);
+        positionX = x;
+        positionY = y;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function savePosition() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: positionX, y: positionY }));
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleDragStart(event: PointerEvent) {
+    if (!draggable) return;
+    event.preventDefault();
+    isDragging = true;
+    pointerId = event.pointerId;
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+    panelStartX = positionX;
+    panelStartY = positionY;
+    (event.target as HTMLElement)?.setPointerCapture?.(event.pointerId);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  }
+
+  function handlePointerMove(event: PointerEvent) {
+    if (!isDragging || event.pointerId !== pointerId) return;
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
+    positionX = panelStartX + dx;
+    positionY = panelStartY + dy;
+  }
+
+  function handlePointerUp(event: PointerEvent) {
+    if (event.pointerId !== pointerId) return;
+    isDragging = false;
+    pointerId = null;
+    window.removeEventListener('pointermove', handlePointerMove);
+    window.removeEventListener('pointerup', handlePointerUp);
+    if (draggable) {
+      savePosition();
+    }
+  }
 
   function leaveCall() {
     voiceSession.leave();
@@ -97,22 +167,6 @@
 
   function openVoice() {
     voiceSession.setVisible(true);
-  }
-
-  async function copyDebug() {
-    appendVoiceDebugEvent('mini-panel', 'copy debug requested', {
-      serverId: session?.serverId ?? null,
-      channelId: session?.channelId ?? null,
-      participantCount: participants.length
-    });
-    const success = await copyVoiceDebugAggregate({ includeLogs: 50, includeEvents: 80 });
-    copyStatus = success ? 'Debug info copied.' : 'Debug info logged to console.';
-    if (copyTimeout) {
-      clearTimeout(copyTimeout);
-    }
-    copyTimeout = setTimeout(() => {
-      copyStatus = '';
-    }, 4000);
   }
 
   function initials(name?: string) {
@@ -128,8 +182,6 @@
     invokeVoiceClientControl('toggleDeafen');
   }
 
-  let namesLine = $derived(participants.slice(0, 3).map((p) => p.displayName || 'Member').join(', '));
-  let serverLabel = $derived(session?.serverName ?? session?.serverId ?? 'Server');
   let connectedElsewhere = $derived(!!session && !!serverId && session.serverId !== serverId);
   run(() => {
     if (browser) {
@@ -150,113 +202,132 @@
 </script>
 
 {#if session}
-  <div class="rounded-2xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/90 p-3 shadow-xl backdrop-blur">
-    <div class="flex flex-wrap items-center gap-3">
-      <div class="relative grid h-12 w-12 place-items-center rounded-2xl bg-[color:var(--color-panel-muted)]">
-        <i class="bx bx-headphone text-lg text-[color:var(--color-text-primary)]"></i>
-        <span class="absolute -right-1 -bottom-1 inline-flex h-3 w-3 items-center justify-center rounded-full bg-[color:var(--color-panel)] shadow-inner">
-          <span class={`h-2 w-2 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
-        </span>
-      </div>
-      <div class="min-w-0 flex-1 space-y-0.5">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="truncate text-sm font-semibold text-[color:var(--color-text-primary)]">#{session.channelName}</span>
-          <span class="text-[11px] uppercase tracking-wide text-[color:var(--color-text-tertiary)]">{serverLabel}</span>
-          {#if connectedElsewhere}
-            <span class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
-              Other server
-            </span>
-          {/if}
-        </div>
-        <div class="flex flex-wrap items-center gap-2 text-xs text-[color:var(--color-text-secondary)]">
-          <span class="inline-flex items-center gap-1">
-            <span class={`h-2 w-2 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
-            <span>{callState.connected ? 'Voice connected' : 'Reconnecting...'}</span>
-          </span>
-          <span class="rounded-full bg-[color:var(--color-panel-muted)] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-secondary)]">
-            {participants.length} in call
-          </span>
-          {#if namesLine}
-            <span class="truncate">• {namesLine}</span>
-          {/if}
-        </div>
-      </div>
-      <div class="flex items-center gap-1">
-        <button
-          class={`inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)] ${callState.muted ? 'opacity-90' : ''}`}
-          type="button"
-          title={callState.muted ? 'Unmute' : 'Mute'}
-          aria-pressed={!callState.muted}
-          onclick={toggleMute}
-        >
-          <i class={`bx ${callState.muted ? 'bx-microphone-off' : 'bx-microphone'} text-lg`}></i>
-        </button>
-        <button
-          class={`inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)] ${callState.deafened ? 'opacity-90' : ''}`}
-          type="button"
-          title={callState.deafened ? 'Undeafen' : 'Deafen'}
-          aria-pressed={!callState.deafened}
-          onclick={toggleDeafen}
-        >
-          <i class={`bx ${callState.deafened ? 'bx-volume-mute' : 'bx-volume-full'} text-lg`}></i>
-        </button>
-        <button
-          class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)] transition hover:border-[color:var(--color-accent)]"
-          type="button"
-          title="Return to call"
-          aria-label="Return to call"
-          onclick={openVoice}
-        >
-          <i class="bx bx-window-open text-lg"></i>
-        </button>
-        <button
-          class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[color:var(--color-danger,#ef4444)]/60 bg-[color:var(--color-danger,#ef4444)]/15 text-[color:var(--color-danger,#ef4444)] transition hover:bg-[color:var(--color-danger,#ef4444)]/25"
-          type="button"
-          title="Leave call"
-          aria-label="Leave call"
-          onclick={leaveCall}
-        >
-          <i class="bx bx-phone-off text-lg"></i>
-        </button>
-      </div>
-    </div>
-
-    {#if participants.length}
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        {#each participants.slice(0, 6) as p (p.uid)}
-          <div class="relative h-9 w-9 overflow-hidden rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]">
-            {#if p.photoURL}
-              <img src={p.photoURL} alt={p.displayName} class="h-full w-full object-cover" loading="lazy" />
-            {:else}
-              <div class="grid h-full w-full place-items-center text-[11px] font-semibold text-[color:var(--color-text-primary)]">
-                {initials(p.displayName)}
-              </div>
-            {/if}
-            {#if p.hasAudio === false}
-              <i class="bx bx-microphone-off absolute -right-1 -bottom-1 rounded-full bg-[color:var(--color-panel)] px-1 text-[10px] text-rose-200 shadow"></i>
-            {/if}
-          </div>
-        {/each}
-        {#if participants.length > 6}
-          <div class="h-9 px-3 inline-flex items-center justify-center rounded-full border border-dashed border-[color:var(--color-border-subtle)] text-[11px] font-semibold text-[color:var(--color-text-secondary)]">
-            +{participants.length - 6}
-          </div>
-        {/if}
+  <div
+    bind:this={panelEl}
+    class="voice-mini-panel rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/95 shadow-lg backdrop-blur"
+    class:dragging={isDragging}
+    class:is-draggable={draggable}
+    style={draggable ? `transform: translate(${positionX}px, ${positionY}px)` : ''}
+  >
+    <!-- Drag handle -->
+    {#if draggable}
+      <div
+        class="drag-handle flex items-center justify-center py-1 cursor-grab active:cursor-grabbing"
+        onpointerdown={handleDragStart}
+      >
+        <div class="w-8 h-1 rounded-full bg-[color:var(--color-border-subtle)]"></div>
       </div>
     {/if}
 
-    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--color-text-tertiary)]">
-      <button
-        type="button"
-        class="inline-flex items-center gap-1 rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] px-2 py-1 text-[color:var(--color-text-secondary)] transition hover:border-[color:var(--color-accent)]"
-        onclick={copyDebug}
-      >
-        <i class="bx bx-clipboard text-xs"></i>
-        <span>Copy debug</span>
-      </button>
-      {#if copyStatus}
-        <span class="text-[color:var(--color-text-primary)]">{copyStatus}</span>
+    <div class="px-2.5 pb-2.5" class:pt-2={!draggable}>
+      <div class="flex items-center gap-2">
+        <!-- Status indicator + channel info -->
+        <div class="relative grid h-8 w-8 flex-shrink-0 place-items-center rounded-lg bg-[color:var(--color-panel-muted)]">
+          <i class="bx bx-headphone text-sm text-[color:var(--color-text-primary)]"></i>
+          <span class="absolute -right-0.5 -bottom-0.5 inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-[color:var(--color-panel)] shadow-inner">
+            <span class={`h-1.5 w-1.5 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+          </span>
+        </div>
+
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5">
+            <span class="truncate text-xs font-semibold text-[color:var(--color-text-primary)]">#{session.channelName}</span>
+            {#if connectedElsewhere}
+              <span class="rounded bg-amber-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-200">other</span>
+            {/if}
+          </div>
+          <div class="flex items-center gap-1.5 text-[10px] text-[color:var(--color-text-tertiary)]">
+            <span class="inline-flex items-center gap-1">
+              <span class={`h-1.5 w-1.5 rounded-full ${callState.connected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+              <span>{callState.connected ? 'Connected' : 'Reconnecting'}</span>
+            </span>
+            <span>•</span>
+            <span>{participants.length} {participants.length === 1 ? 'member' : 'members'}</span>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="flex items-center gap-0.5">
+          <button
+            class={`inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-text-primary)] transition hover:bg-[color:var(--color-panel-muted)] ${callState.muted ? 'text-rose-400' : ''}`}
+            type="button"
+            title={callState.muted ? 'Unmute' : 'Mute'}
+            aria-pressed={!callState.muted}
+            onclick={toggleMute}
+          >
+            <i class={`bx ${callState.muted ? 'bx-microphone-off' : 'bx-microphone'} text-sm`}></i>
+          </button>
+          <button
+            class={`inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-text-primary)] transition hover:bg-[color:var(--color-panel-muted)] ${callState.deafened ? 'text-rose-400' : ''}`}
+            type="button"
+            title={callState.deafened ? 'Undeafen' : 'Deafen'}
+            aria-pressed={!callState.deafened}
+            onclick={toggleDeafen}
+          >
+            <i class={`bx ${callState.deafened ? 'bx-volume-mute' : 'bx-volume-full'} text-sm`}></i>
+          </button>
+          <button
+            class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-text-primary)] transition hover:bg-[color:var(--color-panel-muted)]"
+            type="button"
+            title="Return to call"
+            aria-label="Return to call"
+            onclick={openVoice}
+          >
+            <i class="bx bx-window-open text-sm"></i>
+          </button>
+          <button
+            class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-danger,#ef4444)] transition hover:bg-[color:var(--color-danger,#ef4444)]/15"
+            type="button"
+            title="Leave call"
+            aria-label="Leave call"
+            onclick={leaveCall}
+          >
+            <i class="bx bx-phone-off text-sm"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Participant avatars (compact) -->
+      {#if participants.length}
+        <div class="mt-2 flex items-center gap-1">
+          {#each participants.slice(0, 4) as p (p.uid)}
+            <div class="relative h-6 w-6 overflow-hidden rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]">
+              {#if p.photoURL}
+                <img src={p.photoURL} alt={p.displayName} class="h-full w-full object-cover" loading="lazy" />
+              {:else}
+                <div class="grid h-full w-full place-items-center text-[9px] font-semibold text-[color:var(--color-text-primary)]">
+                  {initials(p.displayName)}
+                </div>
+              {/if}
+              {#if p.hasAudio === false}
+                <i class="bx bx-microphone-off absolute -right-0.5 -bottom-0.5 rounded-full bg-[color:var(--color-panel)] text-[8px] text-rose-300"></i>
+              {/if}
+            </div>
+          {/each}
+          {#if participants.length > 4}
+            <div class="h-6 px-1.5 inline-flex items-center justify-center rounded-full bg-[color:var(--color-panel-muted)] text-[9px] font-medium text-[color:var(--color-text-secondary)]">
+              +{participants.length - 4}
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>
 {/if}
+
+<style>
+  .voice-mini-panel {
+    min-width: 260px;
+    max-width: 320px;
+    user-select: none;
+  }
+  .voice-mini-panel.is-draggable {
+    will-change: transform;
+  }
+  .voice-mini-panel.dragging {
+    opacity: 0.95;
+  }
+  .drag-handle {
+    touch-action: none;
+  }
+</style>

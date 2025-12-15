@@ -87,6 +87,19 @@
         <i class="bx bx-message-dots text-xl"></i>
       </button>
     {/if}
+    <!-- Members toggle button (desktop only, when not in thread) -->
+    {#if onToggleMembers && !thread}
+      <button
+        class="channel-header__members-toggle hidden md:flex"
+        type="button"
+        aria-label={membersVisible ? 'Hide members' : 'Show members'}
+        title={membersVisible ? 'Hide members' : 'Show members'}
+        onclick={() => onToggleMembers?.()}
+        class:channel-header__members-toggle--active={membersVisible}
+      >
+        <i class="bx bx-group text-lg"></i>
+      </button>
+    {/if}
   </div>
 </header>
 
@@ -185,5 +198,39 @@
 
   .channel-header__toggle:active {
     transform: scale(0.92);
+  }
+
+  .channel-header__members-toggle {
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: transparent;
+    color: var(--text-70);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+  }
+
+  .channel-header__members-toggle:hover,
+  .channel-header__members-toggle:focus-visible {
+    background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+    color: var(--color-text-primary);
+    outline: none;
+  }
+
+  .channel-header__members-toggle--active {
+    background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    color: var(--color-accent);
+  }
+
+  .channel-header__members-toggle--active:hover,
+  .channel-header__members-toggle--active:focus-visible {
+    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+    border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    color: var(--color-accent);
   }
 </style>
