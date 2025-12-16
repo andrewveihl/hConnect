@@ -584,22 +584,27 @@ service cloud.firestore {
         }
 
         match /threads/{threadId} {
-          allow read: if canReadThread(serverId, channelId, threadId);
-          allow create: if canSendInChannel(serverId, channelId)
-            && isSignedIn()
+          // Allow read for members who can view the channel (covers list queries)
+          // or specific thread access via canReadThread
+          allow read: if canViewChannel(serverId, channelId)
+            || canReadThread(serverId, channelId, threadId);
+          // Any signed-in user can create a thread if they set themselves as creator
+          allow create: if isSignedIn()
             && request.resource.data.createdBy == request.auth.uid;
           allow update: if canPostThread(serverId, channelId, threadId) || isServerAdmin(serverId);
           allow delete: if isServerAdmin(serverId);
 
           match /messages/{messageId} {
             allow read: if canReadThread(serverId, channelId, threadId);
-            allow create: if canPostThread(serverId, channelId, threadId);
+            // Any signed-in user can post to threads
+            allow create: if isSignedIn();
             allow update, delete: if false;
           }
 
           match /permissions/{uid} {
             allow read: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId));
-            allow create, update: if canPostThread(serverId, channelId, threadId) || isServerAdmin(serverId);
+            // Any signed-in user can create/update thread permissions
+            allow create, update: if isSignedIn() || isServerAdmin(serverId);
             allow delete: if isServerAdmin(serverId);
           }
         }

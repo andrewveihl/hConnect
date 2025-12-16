@@ -84,6 +84,21 @@ const unlockEvents = ['pointerdown', 'mousedown', 'touchstart', 'keydown'] as co
 let unlocked = false;
 let unlockAttached = false;
 
+// Use window global for notification debounce to survive HMR
+declare global {
+	interface Window {
+		__notificationSoundLock?: { time: number; scheduled: boolean };
+	}
+}
+
+function getNotificationLock() {
+	if (typeof window === 'undefined') return { time: 0, scheduled: false };
+	if (!window.__notificationSoundLock) {
+		window.__notificationSoundLock = { time: 0, scheduled: false };
+	}
+	return window.__notificationSoundLock;
+}
+
 function getAudio(id: SoundEffect): HTMLAudioElement | null {
 	if (!browser || typeof Audio === 'undefined') return null;
 	let audio = audioCache.get(id);
@@ -153,6 +168,30 @@ export function playSound(id: SoundEffect, force = false) {
 
 	// Check if this sound is enabled (unless forced for preview)
 	if (!force && !isSoundEnabled(id)) return;
+
+	// Debounce notification sounds with global lock (survives HMR)
+	if (id === 'notification' && !force) {
+		const lock = getNotificationLock();
+		const now = Date.now();
+		
+		// Block if already scheduled or within cooldown
+		if (lock.scheduled || now - lock.time < 3000) {
+			return;
+		}
+		
+		// Set locks immediately
+		lock.scheduled = true;
+		lock.time = now;
+		
+		// Play after short delay to coalesce multiple triggers
+		setTimeout(() => {
+			lock.scheduled = false;
+			if (unlocked) {
+				tryPlay('notification');
+			}
+		}, 100);
+		return;
+	}
 
 	if (unlocked) {
 		tryPlay(id);

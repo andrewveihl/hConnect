@@ -1171,35 +1171,6 @@
 
 							<div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
 								<div class={`message-body ${continued ? 'message-body--continued' : ''}`}>
-									{#if replyRef && !hideReplyPreview}
-										{@const replyChain = flattenReplyChain(replyRef)}
-										{#if replyChain.length}
-											<div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
-												<span class="reply-elbow" aria-hidden="true">
-													<span class="reply-elbow__vertical"></span>
-													<span class="reply-elbow__horizontal"></span>
-												</span>
-												{#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
-													{@const entryAvatar = replyAvatar(entry)}
-													{@const entryAuthor = replyAuthorLabel(entry)}
-													<div class="reply-inline" title="Jump to message">
-														<i class="bx bx-reply reply-inline__icon" aria-hidden="true"></i>
-														<div class="reply-inline__avatar">
-															{#if entryAvatar}
-																<img src={entryAvatar} alt={entryAuthor} />
-															{:else}
-																<span>{initialsFor(entryAuthor)}</span>
-															{/if}
-														</div>
-														<div class="reply-inline__text">
-															<span class="reply-inline__author">{entryAuthor}</span>
-															<span class="reply-inline__snippet">{replyPreviewText(entry)}</span>
-														</div>
-													</div>
-												{/each}
-											</div>
-										{/if}
-									{/if}
 									<div
 										class={`message-payload ${mine ? 'message-payload--mine' : ''}`}
 										role="button"
@@ -1213,16 +1184,40 @@
 										}}
 									>
 										<div class="message-header">
-											<span class={`message-author ${mine ? 'message-author--mine' : ''}`}
-												>{mine ? 'You' : nameFor(m)}</span
-											>
 											{#if (m as any).createdAt}
-												<span class="message-header__dot" aria-hidden="true">•</span>
 												<span class="message-timestamp-inline"
 													>{formatTime((m as any).createdAt)}</span
 												>
 											{/if}
+											<span class={`message-author ${mine ? 'message-author--mine' : ''}`}
+												>{mine ? 'You' : nameFor(m)}</span
+											>
 										</div>
+										{#if replyRef && !hideReplyPreview}
+											{@const replyChain = flattenReplyChain(replyRef)}
+											{#if replyChain.length}
+												<div class={`reply-thread ${mine ? 'reply-thread--mine' : ''}`}>
+													{#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
+														{@const entryAvatar = replyAvatar(entry)}
+														{@const entryAuthor = replyAuthorLabel(entry)}
+														<div class="reply-inline" title="Jump to message">
+															<i class="bx bx-reply reply-inline__icon" aria-hidden="true"></i>
+															<div class="reply-inline__avatar">
+																{#if entryAvatar}
+																	<img src={entryAvatar} alt={entryAuthor} />
+																{:else}
+																	<span>{initialsFor(entryAuthor)}</span>
+																{/if}
+															</div>
+															<div class="reply-inline__text">
+																<span class="reply-inline__author">{entryAuthor}</span>
+																<span class="reply-inline__snippet">{replyPreviewText(entry)}</span>
+															</div>
+														</div>
+													{/each}
+												</div>
+											{/if}
+										{/if}
 										{#if currentUserId}
 											<div
 												class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}
@@ -2114,25 +2109,25 @@
 	.message-header {
 		display: flex;
 		align-items: baseline;
-		gap: 0.35rem;
+		gap: 0.4rem;
 		font-size: 0.94rem;
 		line-height: 1.2;
 		padding-left: 0;
+		margin-bottom: 0.15rem;
 	}
 
 	.message-layout--has-reply .message-header {
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 0.1rem;
+		flex-direction: row;
+		align-items: baseline;
+		gap: 0.4rem;
 	}
 
 	.message-layout--mine.message-layout--has-reply .message-header {
-		align-items: flex-end;
+		align-items: baseline;
 	}
 
 	.message-header__dot {
-		color: var(--text-55);
-		font-size: 0.8rem;
+		display: none;
 	}
 
 	.message-layout--has-reply .message-header__dot {
@@ -2154,15 +2149,15 @@
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: 0.25rem;
+		gap: 0.15rem;
 		position: relative;
 		padding: 0;
-		margin: 0 0 0.35rem 0;
+		margin: 0.1rem 0 0.2rem 0;
 		width: 100%;
 	}
 
 	.reply-thread--mine {
-		align-items: flex-end;
+		align-items: flex-start;
 	}
 
 	.reply-elbow {
@@ -2180,16 +2175,16 @@
 	.reply-inline {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: 0.35rem;
 		min-width: 0;
-		color: var(--text-75);
-		font-size: 0.82rem;
-		padding: 0.35rem 0.6rem;
+		color: var(--text-90);
+		font-size: 0.8rem;
+		padding: 0.25rem 0.5rem;
 		margin: 0;
 		position: relative;
-		background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-		border-radius: 0.65rem;
-		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 80%, var(--color-accent) 10%);
+		border-radius: 0.5rem;
+		border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 40%);
 		box-shadow: none;
 		max-width: min(32rem, 100%);
 		cursor: pointer;
@@ -2199,18 +2194,18 @@
 	}
 
 	.reply-inline:hover {
-		background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-		border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 70%, var(--color-accent) 20%);
+		border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border-subtle) 40%);
 	}
 
 	.reply-thread--mine .reply-inline {
-		background: color-mix(in srgb, var(--chat-bubble-self-bg) 15%, var(--color-panel-muted) 70%);
-		border-color: color-mix(in srgb, var(--chat-bubble-self-border) 40%, transparent);
-		color: color-mix(in srgb, var(--chat-bubble-self-text) 80%, var(--text-75) 20%);
+		background: color-mix(in srgb, var(--color-panel-muted) 80%, var(--color-accent) 10%);
+		border-color: color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 40%);
+		color: var(--text-90);
 	}
 
 	.reply-thread--mine .reply-inline:hover {
-		background: color-mix(in srgb, var(--chat-bubble-self-bg) 25%, var(--color-panel-muted) 75%);
+		background: color-mix(in srgb, var(--color-panel-muted) 70%, var(--color-accent) 20%);
 	}
 
 	.reply-inline__icon {
@@ -2258,70 +2253,70 @@
 
 	.reply-inline__author {
 		font-weight: 600;
-		font-size: 0.78rem;
-		color: var(--text-80);
+		font-size: 0.75rem;
+		color: var(--text-100);
 		white-space: nowrap;
 	}
 
 	.reply-inline__snippet {
-		color: var(--text-55);
-		font-size: 0.78rem;
+		color: var(--text-80);
+		font-size: 0.75rem;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		max-width: 18ch;
+		max-width: 22ch;
 	}
 
 	.reply-thread--mine .reply-inline__author {
-		color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, var(--text-80) 15%);
+		color: var(--text-100);
 	}
 
 	.reply-thread--mine .reply-inline__snippet {
-		color: color-mix(in srgb, var(--chat-bubble-self-text) 65%, var(--text-55) 35%);
+		color: var(--text-80);
 	}
 
 	@media (max-width: 640px) {
 		.reply-thread {
 			padding: 0;
-			margin: 0 0 0.25rem 0;
-			gap: 0.2rem;
+			margin: 0.1rem 0 0.15rem 0;
+			gap: 0.15rem;
 			position: relative;
 		}
 
 		.reply-thread--mine {
-			align-items: flex-end;
+			align-items: flex-start;
 			padding: 0;
 		}
 
 		.reply-inline {
-			padding: 0.3rem 0.55rem;
+			padding: 0.2rem 0.45rem;
 			margin: 0;
-			font-size: 0.78rem;
-			background: color-mix(in srgb, var(--color-panel) 60%, var(--chat-bubble-other-bg) 20%);
-			border-radius: 0.8rem;
-			border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
-			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-			max-width: calc(100% - 1rem);
-			color: color-mix(in srgb, var(--text-100) 85%, var(--text-70) 15%);
+			font-size: 0.75rem;
+			background: color-mix(in srgb, var(--color-panel-muted) 80%, var(--color-accent) 10%);
+			border-radius: 0.45rem;
+			border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 40%);
+			box-shadow: none;
+			max-width: calc(100% - 0.5rem);
+			color: var(--text-100);
 		}
 
 		.reply-inline:active {
-			background: color-mix(in srgb, var(--color-panel) 75%, var(--chat-bubble-other-bg) 25%);
+			background: color-mix(in srgb, var(--color-panel-muted) 70%, var(--color-accent) 20%);
 		}
 
 		.reply-thread:not(.reply-thread--mine) .reply-inline {
-			color: color-mix(in srgb, var(--text-100) 85%, var(--text-70) 15%);
+			color: var(--text-100);
 		}
 
 		.reply-thread--mine .reply-inline {
-			background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, var(--color-panel) 50%);
-			border-color: color-mix(in srgb, var(--chat-bubble-self-border) 35%, transparent);
-			color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, var(--text-100) 15%);
+			background: color-mix(in srgb, var(--color-panel-muted) 80%, var(--color-accent) 10%);
+			border-color: color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 40%);
+			color: var(--text-100);
 		}
 
 		.reply-thread--mine .reply-inline:active {
-			background: color-mix(in srgb, var(--chat-bubble-self-bg) 50%, var(--color-panel) 50%);
+			background: color-mix(in srgb, var(--color-panel-muted) 70%, var(--color-accent) 20%);
 		}
 
 		.reply-elbow {
@@ -2349,23 +2344,23 @@
 		}
 
 		.reply-thread--mine .reply-inline__author {
-			color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%);
-			font-size: 0.75rem;
+			color: var(--text-100);
+			font-size: 0.7rem;
 		}
 
 		.reply-thread--mine .reply-inline__snippet {
-			color: color-mix(in srgb, var(--chat-bubble-self-text) 75%, var(--text-100) 25%);
-			max-width: 14ch;
+			color: var(--text-80);
+			max-width: 16ch;
 		}
 
 		.reply-thread:not(.reply-thread--mine) .reply-inline__author {
-			color: color-mix(in srgb, var(--text-100) 90%, var(--text-80) 10%);
-			font-size: 0.75rem;
+			color: var(--text-100);
+			font-size: 0.7rem;
 		}
 
 		.reply-thread:not(.reply-thread--mine) .reply-inline__snippet {
-			color: color-mix(in srgb, var(--text-100) 70%, var(--text-60) 30%);
-			max-width: 14ch;
+			color: var(--text-80);
+			max-width: 16ch;
 		}
 
 		.reply-inline__avatar {
@@ -3370,12 +3365,12 @@
 	}
 
 	.message-thread-stack--indented {
-		margin-left: clamp(1.5rem, 4vw, 2.8rem);
+		margin-left: 0;
 	}
 
 	.message-thread-stack--mine.message-thread-stack--indented {
 		margin-left: 0;
-		margin-right: clamp(1.5rem, 4vw, 2.8rem);
+		margin-right: 0;
 	}
 
 	.message-thread-stack--has-reactions {
@@ -3602,7 +3597,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 1rem;
-		z-index: 80;
+		z-index: 9999;
 		overflow: hidden;
 	}
 
