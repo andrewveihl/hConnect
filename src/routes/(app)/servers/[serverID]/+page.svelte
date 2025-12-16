@@ -5209,8 +5209,8 @@
 	.mobile-panel__body {
 		flex: 1;
 		display: flex;
-		background: #2b2d31; /* Discord's sidebar background */
-		border-top: 1px solid rgba(255, 255, 255, 0.06);
+		background: var(--color-sidebar);
+		border-top: 1px solid var(--color-border-subtle);
 		min-height: 0;
 		height: 100%;
 		overflow: hidden;
@@ -5220,7 +5220,7 @@
 		padding-bottom: 0;
 		top: 0;
 		bottom: 0 !important;
-		background: #2b2d31; /* Discord's background */
+		background: var(--color-sidebar);
 		overscroll-behavior: contain;
 	}
 
@@ -5229,7 +5229,7 @@
 		flex: 0 0 72px;
 		display: flex;
 		justify-content: center;
-		background: #1e1f22; /* Discord's server list background */
+		background: var(--color-panel-muted);
 		border-right: none;
 		overflow-y: auto;
 		overflow-x: hidden;
@@ -5248,13 +5248,13 @@
 		box-shadow: none;
 		/* Server icons positioned below safe area with some breathing room */
 		padding-top: calc(0.35rem + env(safe-area-inset-top, 0px) * 0.5);
-		background: #1e1f22;
+		background: var(--color-panel-muted);
 	}
 
 	.mobile-panel__channels {
 		flex: 1;
 		min-width: 0;
-		background: #2b2d31; /* Discord's channel list background */
+		background: var(--color-sidebar);
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
@@ -5266,7 +5266,7 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		background: #2b2d31;
+		background: var(--color-sidebar);
 	}
 
 	.mobile-panel__channels :global(.server-sidebar > div:last-child) {

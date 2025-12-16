@@ -81,7 +81,7 @@ html {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #1e1f22; /* Match mobile nav bar for seamless safe area */
+  background: var(--color-panel-muted);
   overscroll-behavior: none;
 }
 
@@ -96,7 +96,7 @@ body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #1e1f22; /* Match mobile nav bar for seamless safe area */
+  background: var(--color-panel-muted);
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   -webkit-font-smoothing: antialiased;
@@ -119,7 +119,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #1e1f22; /* Match mobile nav bar */
+  background: var(--color-panel-muted);
   padding: 0;
 }
 
@@ -234,75 +234,78 @@ body {
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --color-app-bg: #f3f6f8;
+  --color-app-bg: #f5f8fa;
   --surface-root: var(--color-app-bg);
-  --color-app-overlay: rgba(8, 12, 18, 0.08);
+  --color-app-overlay: rgba(8, 12, 18, 0.12);
   --color-sidebar: #ffffff;
   --color-panel: #ffffff;
-  --color-panel-muted: #f0f3f5;
-  --color-card: #edf2f4;
+  --color-panel-muted: #f0f4f6;
+  --color-card: #e8eef2;
 
-  --color-border-subtle: rgba(13, 20, 26, 0.14);
-  --color-border-strong: rgba(13, 20, 26, 0.24);
+  --color-border-subtle: rgba(13, 20, 26, 0.12);
+  --color-border-strong: rgba(13, 20, 26, 0.22);
 
-  --color-text-primary: #1f262c;
-  --color-text-secondary: rgba(31, 38, 44, 0.72);
-  --color-text-tertiary: rgba(31, 38, 44, 0.55);
-  --color-text-inverse: #041312;
+  /* Improved text colors with better contrast */
+  --color-text-primary: #0f1419;
+  --color-text-secondary: #3d4d5c;
+  --color-text-tertiary: #5c6e7e;
+  --color-text-inverse: #ffffff;
 
-  --color-scroll-thumb: rgba(31, 38, 44, 0.28);
-  --color-scroll-track: rgba(31, 38, 44, 0.08);
+  --color-scroll-thumb: rgba(31, 38, 44, 0.32);
+  --color-scroll-track: rgba(31, 38, 44, 0.06);
 
-  --color-accent: #33c8bf;
-  --color-accent-strong: #28b0a8;
-  --color-accent-soft: rgba(40, 178, 168, 0.18);
+  /* Teal accent - slightly darker for better contrast on light backgrounds */
+  --color-accent: #0e9f97;
+  --color-accent-strong: #0a8a83;
+  --color-accent-soft: rgba(14, 159, 151, 0.14);
 
-  --color-danger: #c04b4b;
-  --color-warning: #d79739;
+  --color-danger: #c9363a;
+  --color-warning: #c87f1a;
 
-  --button-primary-bg: #33c8bf;
-  --button-primary-text: #041312;
-  --button-primary-hover: #2ab7af;
+  --button-primary-bg: #0e9f97;
+  --button-primary-text: #ffffff;
+  --button-primary-hover: #0a8a83;
 
-  --button-ghost-bg: rgba(24, 32, 38, 0.08);
-  --button-ghost-hover: rgba(24, 32, 38, 0.12);
-  --button-ghost-border: rgba(24, 32, 38, 0.16);
+  --button-ghost-bg: rgba(14, 159, 151, 0.08);
+  --button-ghost-hover: rgba(14, 159, 151, 0.14);
+  --button-ghost-border: rgba(14, 159, 151, 0.24);
   --button-ghost-text: var(--color-text-primary);
 
   --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --chat-input-height: 0px;
 
-  --input-bg: rgba(24, 32, 38, 0.06);
-  --input-border: rgba(24, 32, 38, 0.14);
-  --input-placeholder: rgba(24, 32, 38, 0.42);
+  --input-bg: #ffffff;
+  --input-border: rgba(13, 20, 26, 0.18);
+  --input-placeholder: #7a8a99;
 
-  --ring-color: rgba(51, 200, 191, 0.35);
-  --shadow-elevated: 0 18px 36px rgba(25, 34, 42, 0.12);
+  --ring-color: rgba(14, 159, 151, 0.45);
+  --shadow-elevated: 0 4px 16px rgba(15, 20, 25, 0.08), 0 12px 32px rgba(15, 20, 25, 0.12);
 
-  --chat-bubble-self-bg: var(--color-accent);
-  --chat-bubble-self-text: var(--color-text-inverse);
-  --chat-bubble-self-border: color-mix(in srgb, var(--color-accent) 45%, transparent);
-  --chat-bubble-other-bg: #e7ebf3;
-  --chat-bubble-other-text: #1f262c;
-  --chat-bubble-other-border: rgba(31, 38, 44, 0.16);
+  --chat-bubble-self-bg: #0e9f97;
+  --chat-bubble-self-text: #ffffff;
+  --chat-bubble-self-border: rgba(14, 159, 151, 0.35);
+  --chat-bubble-other-bg: #e4eaf0;
+  --chat-bubble-other-text: #0f1419;
+  --chat-bubble-other-border: rgba(13, 20, 26, 0.12);
 
-  --text-100: var(--color-text-primary);
-  --text-90: color-mix(in srgb, var(--color-text-primary) 90%, transparent);
-  --text-80: color-mix(in srgb, var(--color-text-primary) 80%, transparent);
-  --text-70: color-mix(in srgb, var(--color-text-primary) 70%, transparent);
-  --text-60: color-mix(in srgb, var(--color-text-primary) 60%, transparent);
-  --text-55: color-mix(in srgb, var(--color-text-primary) 55%, transparent);
-  --text-50: color-mix(in srgb, var(--color-text-primary) 50%, transparent);
-  --text-40: color-mix(in srgb, var(--color-text-primary) 40%, transparent);
-  --text-30: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
-  --text-25: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
-  --text-20: color-mix(in srgb, var(--color-text-primary) 20%, transparent);
-  --text-15: color-mix(in srgb, var(--color-text-primary) 15%, transparent);
-  --text-12: color-mix(in srgb, var(--color-text-primary) 12%, transparent);
-  --text-10: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
-  --text-08: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
-  --text-07: color-mix(in srgb, var(--color-text-primary) 7%, transparent);
-  --text-05: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+  /* Text opacity levels - using solid colors for better readability */
+  --text-100: #0f1419;
+  --text-90: #1a252e;
+  --text-80: #2a3844;
+  --text-70: #3d4d5c;
+  --text-60: #4f6070;
+  --text-55: #5c6e7e;
+  --text-50: #6a7c8c;
+  --text-40: #7a8a99;
+  --text-30: #9aa7b3;
+  --text-25: #a8b4bf;
+  --text-20: #b8c2cb;
+  --text-15: #c8d0d7;
+  --text-12: #d4dae0;
+  --text-10: #dde2e7;
+  --text-08: #e4e8ec;
+  --text-07: #e8ecf0;
+  --text-05: #f0f3f5;
 }
 
 :root[data-theme='midnight'] {

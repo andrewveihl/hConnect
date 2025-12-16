@@ -7,10 +7,11 @@
 </script>
 
 <aside
-	class="h-full w-64 shrink-0 bg-slate-950/70 backdrop-blur-xl border-r border-white/10 flex flex-col"
+	class="h-full w-64 shrink-0 backdrop-blur-xl flex flex-col"
+	style="background: var(--color-sidebar); border-right: 1px solid var(--color-border-subtle);"
 >
-	<div class="flex items-center justify-between px-3 py-3 border-b border-white/10">
-		<h2 class="text-white/90 font-semibold truncate">{serverName}</h2>
+	<div class="flex items-center justify-between px-3 py-3" style="border-bottom: 1px solid var(--color-border-subtle);">
+		<h2 class="font-semibold truncate" style="color: var(--color-text-primary);">{serverName}</h2>
 	</div>
-	<div class="p-3 text-white/60 text-sm">No channels yet. (We’ll wire channels next.)</div>
+	<div class="p-3 text-sm" style="color: var(--color-text-tertiary);">No channels yet. (We'll wire channels next.)</div>
 </aside>
