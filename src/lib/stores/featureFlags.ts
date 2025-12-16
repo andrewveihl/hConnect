@@ -5,4 +5,4 @@ import type { FeatureFlagKey } from '$lib/admin/types';
 export const featureFlags = featureFlagsStore();
 
 export const featureFlag = (key: FeatureFlagKey) =>
-  derived(featureFlags, (flags) => Boolean(flags[key]));
+	derived(featureFlags, (flags) => Boolean(flags[key]));

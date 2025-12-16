@@ -1,3461 +1,3458 @@
 <script lang="ts">
-  import { run, preventDefault } from 'svelte/legacy';
-
-  import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
-  import GifPicker from './GifPicker.svelte';
-  import EmojiPicker from './EmojiPicker.svelte';
-  import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
-  import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
-  import type { ReplyReferenceInput } from '$lib/firestore/messages';
-  import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
-  import { requestReplySuggestion, requestPredictions, requestRewriteSuggestions } from '$lib/api/ai';
-  import type { ReplyMessageContext } from '$lib/api/ai';
-  import { mobileDockSuppressed } from '$lib/stores/ui';
-  import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
-  import { featureFlags } from '$lib/stores/featureFlags';
-  import { playSound } from '$lib/utils/sounds';
-
-  type MentionCandidate = {
-    uid: string;
-    label: string;
-    handle: string;
-    avatar: string | null;
-    search: string;
-    aliases: string[];
-    kind?: 'member' | 'role' | 'special';
-    color?: string | null;
-  };
-
-  type MentionRecord = {
-    uid: string;
-    handle: string;
-    label: string;
-    color?: string | null;
-    kind?: 'member' | 'role' | 'special';
-  };
-
-  type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
-  type UploadRequest = { files: File[]; replyTo?: ReplyReferenceInput | null };
-  type AttachmentDraft = {
-    id: string;
-    file: File;
-    name: string;
-    size?: number;
-    contentType?: string | null;
-    isImage: boolean;
-    previewUrl: string | null;
-  };
-
-  type PopoverPlacement = {
-    left: string;
-    bottom: string;
-    width: string;
-    maxHeight: string;
-  };
-
-  const canonical = (value: string) =>
-    (value ?? '')
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '');
-
-  const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-
-  const initialsFor = (value: string) => {
-    const words = (value ?? '')
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2);
-    if (!words.length) return '?';
-    return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
-  };
-
-  const pickString = (value: unknown) => {
-    if (typeof value !== 'string') return '';
-    const trimmed = value.trim();
-    return trimmed.length ? trimmed : '';
-  };
-
-  type RewriteMode =
-    | 'rephrase'
-    | 'shorten'
-    | 'elaborate'
-    | 'formal'
-    | 'casual'
-    | 'bulletize'
-    | 'summarize';
-
-  const MAX_AI_CONTEXT = 10;
-  const MIN_REWRITE_LENGTH = 20;
-
-  const rewriteActions: Array<{ id: RewriteMode; label: string; icon: string; description: string }> = [
-    { id: 'rephrase', label: 'Rephrase', icon: 'bx-wand', description: 'Same meaning, fresher wording.' },
-    { id: 'shorten', label: 'Shorten', icon: 'bx-cut', description: 'Trim it down to the essentials.' },
-    { id: 'elaborate', label: 'Elaborate', icon: 'bx-expand', description: 'Add a bit more helpful detail.' },
-    { id: 'formal', label: 'More formal', icon: 'bx-briefcase', description: 'Polish it for announcements.' },
-    { id: 'casual', label: 'More casual', icon: 'bx-coffee', description: 'Relaxed tone for friends.' },
-    { id: 'bulletize', label: 'Bulletize', icon: 'bx-list-ul', description: 'Break it into quick bullets.' },
-    { id: 'summarize', label: 'Summarize', icon: 'bx-notepad', description: 'Recap the draft in a blurb.' }
-  ];
-
-  const rewriteActionLookup = new Map<RewriteMode, (typeof rewriteActions)[number]>(
-    rewriteActions.map((action) => [action.id, action])
-  );
-
-  function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
-    if (!rawQuery) return 0;
-    const lower = rawQuery.toLowerCase();
-    let score = 0;
-    const handle = option.handle.toLowerCase();
-    if (handle.startsWith(lower)) score += 5;
-    else if (handle.includes(lower)) score += 2;
-    const label = option.label.toLowerCase();
-    if (label.startsWith(lower)) score += 4;
-    else if (label.includes(lower)) score += 1;
-    if (canonicalQuery) {
-      const aliasHit = option.aliases.some((alias) => alias.startsWith(canonicalQuery));
-      if (aliasHit) score += 3;
-    }
-    if (option.kind === 'member') score += 0.1;
-    if (option.kind === 'special') score += 12;
-    return score;
-  }
-
-
-  interface Props {
-    placeholder?: string;
-    disabled?: boolean;
-    mentionOptions?: MentionCandidate[];
-    replyTarget?: ReplyReferenceInput | null;
-    replySource?: any | null;
-    defaultSuggestionSource?: any | null;
-    conversationContext?: any[] | null;
-    aiAssistEnabled?: boolean;
-    threadLabel?: string | null;
-    onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
-    onUpload?: (payload: UploadRequest) => void;
-    onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
-    onCreatePoll?: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void;
-    onCreateForm?: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void;
-  }
-
-  let {
-    placeholder = 'Message #channel',
-    disabled = false,
-    mentionOptions = [],
-    replyTarget = null,
-    replySource = null,
-    defaultSuggestionSource = null,
-    conversationContext = [],
-    aiAssistEnabled = false,
-    threadLabel = '',
-    onSend = () => {},
-    onUpload = () => {},
-    onSendGif = () => {},
-    onCreatePoll = () => {},
-    onCreateForm = () => {}
-  }: Props = $props();
-
-  const dispatch = createEventDispatcher();
-
-  let text = $state('');
-  let popOpen = $state(false);
-  let plusTriggerEl: HTMLButtonElement | null = $state(null);
-  let popoverEl: HTMLDivElement | null = $state(null);
-  let popoverPlacement: PopoverPlacement = $state({
-    left: '0.75rem',
-    bottom: '5rem',
-    width: 'min(20rem, 90vw)',
-    maxHeight: 'min(65vh, 26rem)'
-  });
-  let popoverOutsideCleanup: (() => void) | null = null;
-  let showGif = $state(false);
-  let showPoll = $state(false);
-  let showForm = $state(false);
-  let showEmoji = $state(false);
-  let emojiSupported = $state(false);
-  let emojiTriggerEl: HTMLDivElement | null = $state(null);
-  let emojiPickerEl: HTMLDivElement | null = $state(null);
-  let disposeEmojiOutside: (() => void) | null = $state(null);
-  let fileEl: HTMLInputElement | null = $state(null);
-  let inputEl: HTMLTextAreaElement | null = $state(null);
-  let rootEl: HTMLDivElement | null = $state(null);
-  let attachments: AttachmentDraft[] = $state([]);
-  let platform: 'desktop' | 'mobile' = $state('desktop');
-  const sendDisabled = $derived.by(() => disabled || (!text.trim() && attachments.length === 0));
-  const showMobileSend = $derived.by(() => platform === 'mobile' && text.trim().length > 0);
-  let inputFocused = false;
-  let keyboardInsetFrame: number | null = null;
-  let syncKeyboardInset: (() => void) | null = null;
-  let dockSuppressionActive = false;
-  let dockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
-
-  let mentionActive = $state(false);
-  let mentionFiltered: MentionCandidate[] = $state([]);
-  let mentionIndex = $state(0);
-  let mentionQuery = '';
-  let mentionStart = -1;
-  let mentionLookup = $state(new Map<string, MentionCandidate>());
-  let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
-  const mentionDraft = new Map<string, MentionRecord>();
-  let mentionMenuPosition = $state({ left: '0px', bottom: '5rem', maxHeight: '16rem' });
-  let emojiPickerPosition = $state({ left: 'auto', right: '12px', bottom: '5rem', top: 'auto', maxHeight: '440px' });
-
-  type TextSegment = { type: 'text'; content: string } | { type: 'mention'; content: string; record: MentionRecord };
-  let textSegments = $state<TextSegment[]>([]);
-
-  const featureFlagStore = featureFlags;
-  const aiPlatformEnabled = $derived(Boolean($featureFlagStore.enableAIFeatures));
-  const aiSuggestionsEnabled = $derived(Boolean($featureFlagStore.enableAISuggestedReplies));
-  const aiPredictionsEnabled = $derived(Boolean($featureFlagStore.enableAIPredictions));
-  let aiServiceAvailable = $state(true);
-  let aiReplySuggestion = $state<string | null>(null);
-  let aiReplyLoading = $state(false);
-  let aiReplyError: string | null = $state(null);
-  let replySuggestionAbort: AbortController | null = null;
-  let lastReplySuggestionId: string | null = null;
-
-  let aiGeneralSuggestion = $state<string | null>(null);
-  let aiGeneralLoading = $state(false);
-  let aiGeneralError: string | null = $state(null);
-  let generalSuggestionAbort: AbortController | null = null;
-  let lastGeneralSuggestionId: string | null = null;
-
-  let aiInlineSuggestion = $state('');
-  let predictionAbort: AbortController | null = null;
-  let predictionTimer: ReturnType<typeof setTimeout> | null = null;
-  let predictionScroll = $state(0);
-  let predictionBoxStyle = $state('');
-  let predictionContentEl: HTMLDivElement | null = $state(null);
-  let predictionVerticalPadding = 0;
-  let suggestedGhostEl: HTMLDivElement | null = $state(null);
-  let suggestedGhostHeight = $state(0);
-  let lastPredictionSeed = '';
-  let aiContextWindow: ReplyMessageContext[] = $state([]);
-  let rewriteMenuOpen = $state(false);
-  let rewriteMode: RewriteMode | null = $state(null);
-  let rewriteDefaultMode: RewriteMode = $state('rephrase');
-  let rewriteOptions: string[] = $state([]);
-  let rewriteIndex = $state(0);
-  let rewriteLoading = $state(false);
-  let rewriteError: string | null = $state(null);
-  let rewriteAbort: AbortController | null = null;
-  let rewriteSeed = '';
-  let suggestionTapPrimed = false;
-  let textareaExpanded = $state(false);
-
-  const aiAssistAllowed = $derived(Boolean(aiAssistEnabled && aiServiceAvailable && aiPlatformEnabled));
-  const aiSuggestionCoachAllowed = $derived(Boolean(aiAssistAllowed && aiSuggestionsEnabled));
-  const isDesktop = $derived(platform === 'desktop');
-  const isReplying = $derived(Boolean(replyTarget?.messageId));
-  const mobileSuggestionContext = $derived(replySource ?? replyTarget ?? defaultSuggestionSource ?? null);
-  const showReplyCoach = $derived(Boolean(aiSuggestionCoachAllowed && isDesktop && isReplying));
-  const showGeneralCoach = $derived(
-    Boolean(aiSuggestionCoachAllowed && !isDesktop && isReplying && mobileSuggestionContext && !text.trim())
-  );
-  const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
-  const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
-  const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
-  const showInlinePrediction = $derived(Boolean(aiAssistAllowed && aiPredictionsEnabled));
-  const hasInlinePrediction = $derived(Boolean(showInlinePrediction && aiInlineSuggestion));
-  const canUseGeneralSuggestion = $derived(Boolean(showGeneralCoach && pickString(aiGeneralSuggestion)));
-  const rewriteEligible = $derived(Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH));
-  const showRewriteCoach = $derived(
-    Boolean(aiAssistAllowed && rewriteMode && (rewriteLoading || rewriteError || rewriteOptions.length))
-  );
-  const activeRewrite = $derived(
-    rewriteOptions.length ? rewriteOptions[Math.min(rewriteIndex, rewriteOptions.length - 1)] ?? '' : ''
-  );
-  const rewriteModeLabel = $derived(
-    rewriteMode
-      ? rewriteActionLookup.get(rewriteMode)?.label ?? 'Rewrite'
-      : rewriteActionLookup.get(rewriteDefaultMode)?.label ?? 'Rewrite'
-  );
-  const rewriteModeIcon = $derived(
-    rewriteMode
-      ? rewriteActionLookup.get(rewriteMode)?.icon ?? 'bx-wand'
-      : rewriteActionLookup.get(rewriteDefaultMode)?.icon ?? 'bx-wand'
-  );
-
-  const REPLY_PREVIEW_LIMIT = 160;
-  const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
-  const SAFE_AREA_VAR = '--chat-safe-area-bottom';
-  const KEYBOARD_MOBILE_MAX_WIDTH = 900;
-  const KEYBOARD_ACTIVATION_THRESHOLD = 80;
-  const createAttachmentId = () => {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    return `draft-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6)
-      .toString(36)
-      .padStart(4, '0')}`;
-  };
-
-  const buildAttachmentDraft = (file: File): AttachmentDraft => {
-    const isImage = looksLikeImage({ name: file?.name, type: file?.type });
-    const previewUrl =
-      isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
-        ? URL.createObjectURL(file)
-        : null;
-    return {
-      id: createAttachmentId(),
-      file,
-      name: file?.name || 'Attachment',
-      size: file?.size,
-      contentType: file?.type ?? null,
-      isImage,
-      previewUrl
-    };
-  };
-
-  const revokeAttachmentPreview = (entry: AttachmentDraft | null | undefined) => {
-    if (entry?.previewUrl) {
-      try {
-        URL.revokeObjectURL(entry.previewUrl);
-      } catch {
-        // ignore
-      }
-    }
-  };
-
-  function queueAttachments(files: File[]) {
-    const selection = files.filter((file): file is File => file instanceof File);
-    if (!selection.length) return;
-    const drafts = selection.map((file) => buildAttachmentDraft(file));
-    attachments = [...attachments, ...drafts];
-  }
-
-  const dedupeFiles = (list: File[]) => {
-    const result: File[] = [];
-    const seen = new Set<string>();
-    for (const file of list) {
-      if (!(file instanceof File)) continue;
-      const key = `${file.name ?? 'unknown'}|${file.size ?? 0}|${file.lastModified ?? 0}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push(file);
-    }
-    return result;
-  };
-
-  function removeAttachment(id: string) {
-    const target = attachments.find((item) => item.id === id);
-    if (target) revokeAttachmentPreview(target);
-    attachments = attachments.filter((item) => item.id !== id);
-  }
-
-  function clearAttachments() {
-    attachments.forEach((entry) => revokeAttachmentPreview(entry));
-    attachments = [];
-  }
-
-  function clipReply(value: string | null | undefined, limit = REPLY_PREVIEW_LIMIT) {
-    if (!value) return '';
-    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
-  }
-
-  function replyRecipientLabel(target: ReplyReferenceInput | null) {
-    if (!target) return '';
-    return target.authorName || target.authorId || 'Member';
-  }
-
-  function replyPreviewText(target: ReplyReferenceInput | null) {
-    if (!target) return '';
-    const value = clipReply(target.preview ?? target.text ?? '');
-    if (value) return value;
-    switch (target.type) {
-      case 'gif':
-        return 'GIF';
-      case 'file':
-        return 'File';
-      case 'poll':
-        return 'Poll';
-      case 'form':
-        return 'Form';
-      default:
-        return 'Message';
-    }
-  }
-
-  async function cancelReply() {
-    dispatch('cancelReply');
-    await tick();
-    inputEl?.focus();
-  }
-
-
-  function submit(e?: Event) {
-    e?.preventDefault();
-    if (disabled) return;
-    const trimmed = text.trim();
-    const hasText = Boolean(trimmed);
-    const hasAttachments = attachments.length > 0;
-    if (!hasText && !hasAttachments) return;
-    const replyRef = replyTarget ?? null;
-
-    if (hasText) {
-      const mentions = collectMentions(text);
-      const payload = {
-        text: trimmed,
-        mentions,
-        replyTo: replyRef ?? undefined
-      };
-      onSend(payload);
-      dispatch('send', payload);
-      playSound('message-send');
-      text = '';
-      clearRewriteState(true);
-      clearPredictions();
-      lastPredictionSeed = '';
-      mentionDraft.clear();
-      closeMentionMenu();
-    }
-
-    if (hasAttachments) {
-      const payload: UploadRequest = {
-        files: attachments.map((item) => item.file),
-        replyTo: replyRef
-      };
-      onUpload(payload);
-      dispatch('upload', payload);
-      playSound('message-send');
-      clearAttachments();
-    }
-
-    if (typeof queueMicrotask === 'function') {
-      queueMicrotask(() => {
-        inputEl?.focus();
-      });
-    } else {
-      setTimeout(() => inputEl?.focus(), 0);
-    }
-  }
-
-  function onKeydown(e: KeyboardEvent) {
-    if (!mentionActive && e.key === 'Tab' && !e.shiftKey) {
-      if (showReplyGhost && canUseReplySuggestion) {
-        e.preventDefault();
-        applyReplySuggestion();
-        return;
-      }
-      if (canUseGeneralSuggestion) {
-        e.preventDefault();
-        applyGeneralSuggestion();
-        return;
-      }
-      if (showInlinePrediction && aiInlineSuggestion) {
-        e.preventDefault();
-        acceptInlineSuggestion();
-        return;
-      }
-    }
-
-    if (mentionActive) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        mentionIndex = (mentionIndex + 1) % mentionFiltered.length;
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        mentionIndex = (mentionIndex - 1 + mentionFiltered.length) % mentionFiltered.length;
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        const choice = mentionFiltered[mentionIndex] ?? mentionFiltered[0];
-        if (choice) void insertMention(choice);
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        closeMentionMenu();
-        return;
-      }
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      submit();
-    }
-  }
-
-  function pickFiles() {
-    popOpen = false;
-    fileEl?.click();
-  }
-
-  function onFilesChange(e: Event) {
-    const input = e.target as HTMLInputElement | null;
-    const files = Array.from(input?.files ?? []);
-    if (!files.length) return;
-    if (disabled) {
-      if (input) input.value = '';
-      return;
-    }
-    queueAttachments(files);
-    if (input) {
-      input.value = '';
-    }
-  }
-
-  function handlePaste(event: ClipboardEvent) {
-    if (disabled) return;
-    const data = event.clipboardData;
-    if (!data) return;
-    const directFiles = Array.from(data.files ?? []);
-    const itemFiles = Array.from(data.items ?? [])
-      .map((item) => (item.kind === 'file' ? item.getAsFile() : null))
-      .filter((file): file is File => file instanceof File);
-    const merged = dedupeFiles([...directFiles, ...itemFiles]);
-    if (!merged.length) return;
-    queueAttachments(merged);
-  }
-
-  function handleInput() {
-    suggestionTapPrimed = false;
-    refreshMentionDraft();
-    if (mentionOptions.length) {
-      updateMentionState();
-    }
-    syncTextareaSize();
-    syncPredictionOverlay();
-  }
-
-  function syncTextareaSize() {
-    if (typeof window === 'undefined' || !inputEl) return;
-    const node = inputEl;
-    const computed = window.getComputedStyle(node);
-    const minHeight = parseFloat(computed.minHeight || '0') || 0;
-    const maxHeightValue = computed.maxHeight;
-    const maxHeight =
-      !maxHeightValue || maxHeightValue === 'none' ? Number.POSITIVE_INFINITY : parseFloat(maxHeightValue);
-    node.style.height = 'auto';
-    const scrollHeight = node.scrollHeight;
-    const textHeight = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
-    const ghostHeight = showSuggestionGhost
-      ? Math.max(minHeight, Math.min(suggestedGhostHeight || 0, maxHeight))
-      : 0;
-    const inlinePredictionHeight =
-      showInlinePrediction && aiInlineSuggestion && predictionContentEl
-        ? Math.max(
-            minHeight,
-            Math.min(
-              (predictionContentEl.scrollHeight || 0) + predictionVerticalPadding,
-              maxHeight
-            )
-          )
-        : 0;
-    const nextHeight = Math.max(textHeight, ghostHeight || 0, inlinePredictionHeight || 0);
-    node.style.height = `${nextHeight}px`;
-    textareaExpanded = nextHeight > minHeight + 2;
-    if (scrollHeight > nextHeight) {
-      node.style.overflowY = 'auto';
-    } else {
-      node.style.overflowY = 'hidden';
-    }
-  }
-
-  function syncPredictionOverlay() {
-    if (!inputEl) {
-      predictionScroll = 0;
-      return;
-    }
-    predictionScroll = inputEl.scrollTop ?? 0;
-  }
-
-  function handleTextareaScroll() {
-    syncPredictionOverlay();
-  }
-
-  function schedulePredictionResize() {
-    if (typeof window === 'undefined') return;
-    void tick().then(() => {
-      syncTextareaSize();
-      syncPredictionOverlay();
-    });
-  }
-
-  function syncPredictionBoxStyle() {
-    if (typeof window === 'undefined' || !inputEl) {
-      predictionBoxStyle = '';
-      return;
-    }
-    const computed = window.getComputedStyle(inputEl);
-    const paddingTop = parseFloat(computed.paddingTop || '0') || 0;
-    const paddingBottom = parseFloat(computed.paddingBottom || '0') || 0;
-    predictionVerticalPadding = paddingTop + paddingBottom;
-    const padding = `${computed.paddingTop} ${computed.paddingRight} ${computed.paddingBottom} ${computed.paddingLeft}`;
-    predictionBoxStyle = [
-      `padding:${padding}`,
-      `font-family:${computed.fontFamily}`,
-      `font-size:${computed.fontSize}`,
-      `font-weight:${computed.fontWeight}`,
-      `font-style:${computed.fontStyle}`,
-      `line-height:${computed.lineHeight}`,
-      `letter-spacing:${computed.letterSpacing}`
-    ].join(';');
-  }
-
-  function handleSelectionChange() {
-    if (!mentionOptions.length) return;
-    requestAnimationFrame(() => updateMentionState());
-  }
-
-  function syncSuggestedGhostHeight() {
-    if (!showSuggestionGhost) {
-      suggestedGhostHeight = 0;
-      return;
-    }
-    suggestedGhostHeight = suggestedGhostEl?.scrollHeight ?? 0;
-  }
-
-  onMount(() => {
-    if (typeof window === 'undefined') return;
-    const handleResize = () => {
-      syncTextareaSize();
-      syncPredictionBoxStyle();
-    };
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  });
-
-  $effect(() => {
-    text;
-    syncTextareaSize();
-    syncPredictionOverlay();
-  });
-
-  $effect(() => {
-    const node = inputEl;
-    if (!node) {
-      predictionBoxStyle = '';
-      return;
-    }
-    syncPredictionBoxStyle();
-    if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
-    const observer = new window.ResizeObserver(() => {
-      syncPredictionBoxStyle();
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => syncTextareaSize());
-      } else {
-        syncTextareaSize();
-      }
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  });
-
-  $effect(() => {
-    syncSuggestedGhostHeight();
-    syncTextareaSize();
-    if (!showSuggestionGhost) return;
-    if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
-    const target = suggestedGhostEl;
-    if (!target) return;
-    const observer = new window.ResizeObserver(() => {
-      syncSuggestedGhostHeight();
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => syncTextareaSize());
-      } else {
-        syncTextareaSize();
-      }
-    });
-    observer.observe(target);
-    return () => observer.disconnect();
-  });
-
-  $effect(() => {
-    if (!showSuggestionGhost) {
-      suggestionTapPrimed = false;
-    }
-  });
-
-  $effect(() => {
-    popoverOutsideCleanup?.();
-    popoverOutsideCleanup = popOpen ? registerPopoverOutsideWatcher() : null;
-    if (!popOpen) {
-      closeRewriteMenu();
-    }
-  });
-
-  $effect(() => {
-    if (!popOpen && platform === 'mobile' && !inputFocused) {
-      releaseDockSuppression();
-    }
-  });
-
-  $effect(() => {
-    if (!popOpen) return;
-    platform;
-    attachments;
-    textareaExpanded;
-    void tick().then(() => syncPopoverPosition());
-  });
-
-  $effect(() => {
-    if (!popOpen) return;
-    syncPopoverPosition();
-    if (typeof window === 'undefined') return;
-    const handleReposition = () => syncPopoverPosition();
-    const viewport = window.visualViewport;
-    window.addEventListener('resize', handleReposition);
-    window.addEventListener('scroll', handleReposition, true);
-    viewport?.addEventListener('resize', handleReposition);
-    viewport?.addEventListener('scroll', handleReposition);
-    return () => {
-      window.removeEventListener('resize', handleReposition);
-      window.removeEventListener('scroll', handleReposition, true);
-      viewport?.removeEventListener('resize', handleReposition);
-      viewport?.removeEventListener('scroll', handleReposition);
-    };
-  });
-
-  $effect(() => {
-    if (!mentionActive) return;
-    syncMentionMenuPosition();
-    if (typeof window === 'undefined') return;
-    const handleReposition = () => syncMentionMenuPosition();
-    const viewport = window.visualViewport;
-    window.addEventListener('resize', handleReposition);
-    window.addEventListener('scroll', handleReposition, true);
-    viewport?.addEventListener('resize', handleReposition);
-    viewport?.addEventListener('scroll', handleReposition);
-    return () => {
-      window.removeEventListener('resize', handleReposition);
-      window.removeEventListener('scroll', handleReposition, true);
-      viewport?.removeEventListener('resize', handleReposition);
-      viewport?.removeEventListener('scroll', handleReposition);
-    };
-  });
-
-  $effect(() => {
-    if (!showEmoji) return;
-    syncEmojiPickerPosition();
-    if (typeof window === 'undefined') return;
-    const handleReposition = () => syncEmojiPickerPosition();
-    const viewport = window.visualViewport;
-    window.addEventListener('resize', handleReposition);
-    window.addEventListener('scroll', handleReposition, true);
-    viewport?.addEventListener('resize', handleReposition);
-    viewport?.addEventListener('scroll', handleReposition);
-    return () => {
-      window.removeEventListener('resize', handleReposition);
-      window.removeEventListener('scroll', handleReposition, true);
-      viewport?.removeEventListener('resize', handleReposition);
-      viewport?.removeEventListener('scroll', handleReposition);
-    };
-  });
-
-  function engageDockSuppression() {
-    if (platform !== 'mobile') return;
-    if (dockReleaseTimer) {
-      clearTimeout(dockReleaseTimer);
-      dockReleaseTimer = null;
-    }
-    if (dockSuppressionActive) return;
-    dockSuppressionActive = true;
-    mobileDockSuppressed.claim();
-  }
-
-  function releaseDockSuppression(immediate = false) {
-    if (!dockSuppressionActive) return;
-    const release = () => {
-      dockSuppressionActive = false;
-      mobileDockSuppressed.release();
-    };
-    if (dockReleaseTimer) {
-      clearTimeout(dockReleaseTimer);
-      dockReleaseTimer = null;
-    }
-    if (immediate || platform !== 'mobile') {
-      release();
-      return;
-    }
-    dockReleaseTimer = setTimeout(release, 140);
-  }
-
-  function handleTextareaFocus() {
-    inputFocused = true;
-    syncKeyboardInset?.();
-    engageDockSuppression();
-    dispatch('focusInput');
-  }
-
-  function handleTextareaBlur() {
-    inputFocused = false;
-    syncKeyboardInset?.();
-    releaseDockSuppression();
-    suggestionTapPrimed = false;
-    dispatch('blurInput');
-  }
-
-  function collectMentions(value: string): MentionRecord[] {
-    const collected = new Map<string, MentionRecord>();
-    mentionDraft.forEach((record) => {
-      if (value.includes(record.handle)) collected.set(record.uid, record);
-    });
-
-    const regex = /@([a-z0-9._-]{2,64})/gi;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(value))) {
-      const raw = match[1] ?? '';
-      const byHandle = mentionLookup.get(raw.toLowerCase());
-      const byAlias = mentionAliasLookup.get(canonical(raw));
-      const candidate = byHandle ?? byAlias;
-      if (candidate) {
-        const record: MentionRecord = {
-          uid: candidate.uid,
-          handle: `@${candidate.handle}`,
-          label: candidate.label,
-          color: candidate.color ?? null,
-          kind: candidate.kind
-        };
-        collected.set(candidate.uid, record);
-      }
-    }
-
-    return Array.from(collected.values());
-  }
-
-  function parseTextSegments(value: string): TextSegment[] {
-    if (!value) return [];
-    
-    // Collect all mentions for lookup
-    const mentionRecords = new Map<string, MentionRecord>();
-    mentionDraft.forEach((record) => {
-      if (value.includes(record.handle)) {
-        mentionRecords.set(record.handle.toLowerCase(), record);
-      }
-    });
-    
-    // Also check for mentions that match by handle/alias
-    const regex = /@([a-z0-9._-]{2,64})/gi;
-    let match: RegExpExecArray | null;
-    const tempValue = value;
-    while ((match = regex.exec(tempValue))) {
-      const raw = match[1] ?? '';
-      const fullHandle = `@${raw}`;
-      if (mentionRecords.has(fullHandle.toLowerCase())) continue;
-      
-      const byHandle = mentionLookup.get(raw.toLowerCase());
-      const byAlias = mentionAliasLookup.get(canonical(raw));
-      const candidate = byHandle ?? byAlias;
-      if (candidate) {
-        const record: MentionRecord = {
-          uid: candidate.uid,
-          handle: `@${candidate.handle}`,
-          label: candidate.label,
-          color: candidate.color ?? null,
-          kind: candidate.kind
-        };
-        mentionRecords.set(record.handle.toLowerCase(), record);
-      }
-    }
-    
-    if (mentionRecords.size === 0) {
-      return [{ type: 'text', content: value }];
-    }
-    
-    // Build segments by finding mentions in order
-    const segments: TextSegment[] = [];
-    let remaining = value;
-    let lastIndex = 0;
-    
-    // Create a pattern that matches any of the mention handles
-    const handles = Array.from(mentionRecords.keys()).map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    const mentionPattern = new RegExp(`(${handles.join('|')})`, 'gi');
-    
-    let segMatch: RegExpExecArray | null;
-    while ((segMatch = mentionPattern.exec(value))) {
-      const matchedHandle = segMatch[1];
-      const record = mentionRecords.get(matchedHandle.toLowerCase());
-      
-      // Add text before this mention
-      if (segMatch.index > lastIndex) {
-        segments.push({ type: 'text', content: value.slice(lastIndex, segMatch.index) });
-      }
-      
-      // Add the mention segment
-      if (record) {
-        segments.push({ type: 'mention', content: matchedHandle, record });
-      } else {
-        segments.push({ type: 'text', content: matchedHandle });
-      }
-      
-      lastIndex = segMatch.index + matchedHandle.length;
-    }
-    
-    // Add remaining text after last mention
-    if (lastIndex < value.length) {
-      segments.push({ type: 'text', content: value.slice(lastIndex) });
-    }
-    
-    return segments;
-  }
-
-  function contextIdOf(source: any): string | null {
-    const raw = source?.id ?? source?.messageId ?? null;
-    if (typeof raw === 'string' && raw.trim().length) return raw.trim();
-    return null;
-  }
-
-  function buildMessagePayload(source: any): ReplyMessageContext | null {
-    if (!source) return null;
-    const text =
-      pickString(source?.text) ??
-      pickString(source?.content) ??
-      pickString(source?.preview ?? '');
-    const preview =
-      pickString(source?.preview ?? '') ??
-      pickString(source?.text ?? '') ??
-      pickString(source?.content ?? '') ??
-      '';
-    const type = pickString(source?.type ?? '');
-    const author =
-      pickString(source?.displayName) ??
-      pickString(source?.authorName) ??
-      pickString(source?.author?.displayName) ??
-      pickString(source?.name) ??
-      null;
-    if (!text && !preview && !type) return null;
-    return {
-      text: text || null,
-      preview: preview || null,
-      author,
-      type: type || null
-    };
-  }
-
-  function cancelReplySuggestion(clear = true) {
-    replySuggestionAbort?.abort();
-    replySuggestionAbort = null;
-    if (clear) {
-      aiReplyLoading = false;
-      aiReplySuggestion = null;
-      aiReplyError = null;
-      lastReplySuggestionId = null;
-    }
-  }
-
-  async function fetchReplyCoach(force = false) {
-    if (!showReplyCoach) return;
-    const contextSource = replySource ?? replyTarget ?? null;
-    const messageId = contextIdOf(contextSource);
-    if (!messageId) return;
-    if (!force && messageId === lastReplySuggestionId && aiReplySuggestion) return;
-    const payload = buildMessagePayload(contextSource);
-    if (!payload) return;
-    replySuggestionAbort?.abort();
-    const controller = new AbortController();
-    replySuggestionAbort = controller;
-    aiReplyLoading = true;
-    aiReplyError = null;
-    try {
-      const suggestion = await requestReplySuggestion(
-        {
-          message: payload,
-          threadLabel: pickString(threadLabel) || null,
-          context: aiContextWindow
-        },
-        controller.signal
-      );
-      if (replySuggestionAbort !== controller) return;
-      aiReplySuggestion = suggestion || null;
-      lastReplySuggestionId = messageId;
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const message = error instanceof Error ? error.message : String(error);
-      aiReplyError = message;
-      if (/openai api key missing/i.test(message)) {
-        aiServiceAvailable = false;
-      }
-    } finally {
-      if (replySuggestionAbort === controller) {
-        aiReplyLoading = false;
-      }
-    }
-  }
-
-  function cancelGeneralSuggestion(clear = true) {
-    generalSuggestionAbort?.abort();
-    generalSuggestionAbort = null;
-    if (clear) {
-      aiGeneralLoading = false;
-      aiGeneralSuggestion = null;
-      aiGeneralError = null;
-      lastGeneralSuggestionId = null;
-    }
-  }
-
-  async function fetchGeneralSuggestion(force = false) {
-    if (!showGeneralCoach) return;
-    const source = mobileSuggestionContext;
-    const messageId = contextIdOf(source);
-    if (!messageId) return;
-    if (!force && messageId === lastGeneralSuggestionId && aiGeneralSuggestion) return;
-    const payload = buildMessagePayload(source);
-    if (!payload) return;
-    generalSuggestionAbort?.abort();
-    const controller = new AbortController();
-    generalSuggestionAbort = controller;
-    aiGeneralLoading = true;
-    aiGeneralError = null;
-    try {
-      const suggestion = await requestReplySuggestion(
-        {
-          message: payload,
-          threadLabel: pickString(threadLabel) || null,
-          context: aiContextWindow
-        },
-        controller.signal
-      );
-      if (generalSuggestionAbort !== controller) return;
-      aiGeneralSuggestion = suggestion || null;
-      lastGeneralSuggestionId = messageId;
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const message = error instanceof Error ? error.message : String(error);
-      aiGeneralError = message;
-      if (/openai api key missing/i.test(message)) {
-        aiServiceAvailable = false;
-      }
-    } finally {
-      if (generalSuggestionAbort === controller) {
-        aiGeneralLoading = false;
-      }
-    }
-  }
-
-  function clearPredictions() {
-    predictionAbort?.abort();
-    predictionAbort = null;
-    aiInlineSuggestion = '';
-    schedulePredictionResize();
-  }
-
-  function queuePrediction() {
-    if (!showInlinePrediction) return;
-    if (predictionTimer) {
-      clearTimeout(predictionTimer);
-      predictionTimer = null;
-    }
-    if (!text.trim()) {
-      clearPredictions();
-      lastPredictionSeed = '';
-      return;
-    }
-    predictionTimer = setTimeout(() => {
-      predictionTimer = null;
-      void fetchPrediction();
-    }, 280);
-  }
-
-  async function fetchPrediction(force = false) {
-    if (!showInlinePrediction) return;
-    const seed = text;
-    if (!seed.trim()) {
-      clearPredictions();
-      lastPredictionSeed = '';
-      return;
-    }
-    if (!force && seed === lastPredictionSeed && aiInlineSuggestion) {
-      return;
-    }
-    predictionAbort?.abort();
-    const controller = new AbortController();
-    predictionAbort = controller;
-    try {
-      const suggestions = await requestPredictions(
-        {
-          text: seed,
-          platform
-        },
-        controller.signal
-      );
-      if (predictionAbort !== controller) return;
-      lastPredictionSeed = seed;
-      aiInlineSuggestion = showInlinePrediction ? suggestions[0] ?? '' : '';
-      schedulePredictionResize();
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const message = error instanceof Error ? error.message : String(error);
-      if (/openai api key missing/i.test(message)) {
-        aiServiceAvailable = false;
-      }
-    }
-  }
-
-  function appendSuggestion(next: string) {
-    const value = pickString(next);
-    if (!value) return;
-    const needsSpace = text.length > 0 && !/\s$/.test(text);
-    const base = needsSpace ? `${text} ${value}` : `${text}${value}`;
-    text = `${base} `;
-    lastPredictionSeed = '';
-    queuePrediction();
-    requestAnimationFrame(() => inputEl?.focus());
-  }
-
-  function acceptInlineSuggestion() {
-    if (!aiInlineSuggestion) return;
-    appendSuggestion(aiInlineSuggestion);
-    aiInlineSuggestion = '';
-    schedulePredictionResize();
-  }
-
-  function insertSuggestionText(source: string | null) {
-    const suggestion = pickString(source);
-    if (!suggestion) return false;
-    if (!text.trim()) {
-      text = `${suggestion} `;
-    } else {
-      const needsBreak = !text.endsWith('\n\n');
-      text = `${text}${needsBreak ? '\n\n' : ''}${suggestion} `;
-    }
-    lastPredictionSeed = '';
-    queuePrediction();
-    requestAnimationFrame(() => inputEl?.focus());
-    suggestionTapPrimed = false;
-    return true;
-  }
-
-  function activeSuggestionText() {
-    if (!showSuggestionGhost) return null;
-    if (showReplyGhost) return pickString(aiReplySuggestion);
-    if (showGeneralCoach) return pickString(aiGeneralSuggestion);
-    return null;
-  }
-
-  function handleTextareaPointerDown(event: PointerEvent) {
-    if (platform !== 'mobile') return;
-    const suggestion = activeSuggestionText();
-    if (!suggestion || text.trim().length) {
-      suggestionTapPrimed = false;
-      return;
-    }
-    if (!suggestionTapPrimed) {
-      suggestionTapPrimed = true;
-      return;
-    }
-    event.preventDefault();
-    suggestionTapPrimed = false;
-    insertSuggestionText(suggestion);
-  }
-
-  function handlePredictionPointer(event: PointerEvent) {
-    if (platform !== 'mobile') return;
-    if (!aiInlineSuggestion) return;
-    event.preventDefault();
-    acceptInlineSuggestion();
-  }
-
-  function applyReplySuggestion() {
-    void insertSuggestionText(aiReplySuggestion);
-  }
-
-  function regenerateReplySuggestion() {
-    lastReplySuggestionId = null;
-    void fetchReplyCoach(true);
-  }
-
-  function applyGeneralSuggestion() {
-    void insertSuggestionText(aiGeneralSuggestion);
-  }
-
-  function regenerateGeneralSuggestion() {
-    lastGeneralSuggestionId = null;
-    void fetchGeneralSuggestion(true);
-  }
-
-  function closeRewriteMenu() {
-    rewriteMenuOpen = false;
-  }
-
-  function clearRewriteState(clearMode = false) {
-    rewriteAbort?.abort();
-    rewriteAbort = null;
-    rewriteLoading = false;
-    rewriteError = null;
-    rewriteOptions = [];
-    rewriteIndex = 0;
-    rewriteSeed = '';
-    if (clearMode) {
-      rewriteMode = null;
-    }
-  }
-
-  function handleRewriteAction(mode: RewriteMode) {
-    rewriteDefaultMode = mode;
-    rewriteMode = mode;
-    void runRewrite(mode, true);
-    closeRewriteMenu();
-  }
-
-  async function runRewrite(mode: RewriteMode, force = false) {
-    if (!aiAssistAllowed) {
-      rewriteError = 'AI currently unavailable.';
-      rewriteLoading = false;
-      return;
-    }
-    const trimmed = text.trim();
-    const minimum = mode === 'rephrase' ? 1 : MIN_REWRITE_LENGTH;
-    if (!trimmed || trimmed.length < minimum) {
-      rewriteError = mode === 'rephrase' ? 'Draft is too short to rephrase.' : 'Type a bit more first.';
-      rewriteLoading = false;
-      return;
-    }
-    if (!force && rewriteSeed === trimmed && rewriteOptions.length) {
-      return;
-    }
-    rewriteAbort?.abort();
-    const controller = new AbortController();
-    rewriteAbort = controller;
-    rewriteLoading = true;
-    rewriteError = null;
-    rewriteSeed = trimmed;
-    rewriteOptions = [];
-    rewriteIndex = 0;
-    try {
-      const options = await requestRewriteSuggestions(
-        {
-          text: trimmed,
-          threadLabel: pickString(threadLabel) || null,
-          context: aiContextWindow,
-          mode
-        },
-        controller.signal
-      );
-      if (rewriteAbort !== controller) return;
-      rewriteOptions = options;
-      rewriteIndex = 0;
-      if (!options.length) {
-        rewriteError = 'No rewrite ready yet.';
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const message = error instanceof Error ? error.message : String(error);
-      rewriteError = message;
-      if (/openai api key missing/i.test(message)) {
-        aiServiceAvailable = false;
-      }
-    } finally {
-      if (rewriteAbort === controller) {
-        rewriteLoading = false;
-      }
-    }
-  }
-
-  function acceptRewrite() {
-    const proposal = pickString(activeRewrite);
-    if (!proposal) return;
-    text = proposal;
-    clearRewriteState(true);
-    lastPredictionSeed = '';
-    queuePrediction();
-    requestAnimationFrame(() => inputEl?.focus());
-  }
-
-  function dismissRewrite() {
-    clearRewriteState(true);
-  }
-
-  function cycleRewriteOption() {
-    if (rewriteOptions.length > 1) {
-      rewriteIndex = (rewriteIndex + 1) % rewriteOptions.length;
-    } else {
-      void runRewrite(rewriteDefaultMode, true);
-    }
-  }
-
-  function retryRewrite() {
-    rewriteOptions = [];
-    rewriteIndex = 0;
-    rewriteError = null;
-    rewriteSeed = '';
-    void runRewrite(rewriteDefaultMode, true);
-  }
-
-  function refreshMentionDraft() {
-    if (!mentionDraft.size) return;
-    for (const [uid, record] of mentionDraft) {
-      if (!text.includes(record.handle)) {
-        mentionDraft.delete(uid);
-      }
-    }
-  }
-
-  function updateMentionState() {
-    if (!inputEl || !mentionOptions.length || disabled) {
-      closeMentionMenu();
-      return;
-    }
-
-    const caret = inputEl.selectionStart ?? text.length;
-    const prefix = text.slice(0, caret);
-    const atIndex = prefix.lastIndexOf('@');
-
-    if (atIndex === -1) {
-      closeMentionMenu();
-      return;
-    }
-
-    const prevChar = atIndex > 0 ? prefix.charAt(atIndex - 1) : ' ';
-    if (/\S/.test(prevChar) && !/[\(\[\{]/.test(prevChar)) {
-      closeMentionMenu();
-      return;
-    }
-
-    const fragment = prefix.slice(atIndex + 1);
-    if (fragment.includes(' ') || fragment.includes('\n') || fragment.includes('\t')) {
-      closeMentionMenu();
-      return;
-    }
-
-    mentionStart = atIndex;
-    mentionQuery = fragment.toLowerCase();
-    const canonicalQuery = canonical(fragment);
-
-    let filtered: MentionCandidate[] = [];
-    if (!mentionOptions.length) {
-      filtered = [];
-    } else if (!mentionQuery) {
-      filtered = mentionOptions
-        .slice()
-        .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
-        .slice(0, 3);
-    } else {
-      filtered = mentionOptions
-        .map((option) => ({
-          option,
-          score: mentionScore(option, mentionQuery, canonicalQuery)
-        }))
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) =>
-          b.score !== a.score
-            ? b.score - a.score
-            : a.option.label.localeCompare(b.option.label, undefined, { sensitivity: 'base' })
-        )
-        .slice(0, 3)
-        .map((entry) => entry.option);
-    }
-
-    mentionFiltered = filtered;
-    if (!mentionFiltered.length) {
-      closeMentionMenu();
-      return;
-    }
-
-    mentionActive = true;
-    mentionIndex = Math.min(mentionIndex, mentionFiltered.length - 1);
-    void tick().then(() => syncMentionMenuPosition());
-  }
-
-  async function insertMention(option: MentionCandidate) {
-    if (mentionStart < 0) return;
-    const caret = inputEl?.selectionStart ?? text.length;
-    const before = text.slice(0, mentionStart);
-    const after = text.slice(caret);
-    const displayName = option.label?.trim()?.length ? option.label.trim() : option.handle;
-    const handleText = `@${displayName}`;
-    const needsSpaceBeforeAfter = after.length > 0 && !/^\s/.test(after);
-    const suffix = after.length ? `${needsSpaceBeforeAfter ? ' ' : ''}${after}` : ' ';
-    text = `${before}${handleText}${suffix}`;
-    mentionDraft.set(option.uid, {
-      uid: option.uid,
-      handle: handleText,
-      label: option.label,
-      color: option.color ?? null,
-      kind: option.kind
-    });
-    await tick();
-    const insertedSpace = after.length === 0 || needsSpaceBeforeAfter ? 1 : 0;
-    const nextCaret = before.length + handleText.length + insertedSpace;
-    inputEl?.setSelectionRange(nextCaret, nextCaret);
-    closeMentionMenu();
-    refreshMentionDraft();
-  }
-
-  function closeMentionMenu() {
-    mentionActive = false;
-    mentionFiltered = [];
-    mentionIndex = 0;
-    mentionQuery = '';
-    mentionStart = -1;
-  }
-
-  const openGif = () => {
-    showGif = true;
-    popOpen = false;
-  };
-
-  const openEmoji = () => {
-    if (disabled || !emojiSupported) return;
-    showEmoji = !showEmoji;
-    if (showEmoji) {
-      popOpen = false;
-      void tick().then(() => syncEmojiPickerPosition());
-    }
-  };
-  const openPoll = () => {
-    showPoll = true;
-    popOpen = false;
-  };
-  const openForm = () => {
-    showForm = true;
-    popOpen = false;
-  };
-
-  function togglePopover(event?: Event) {
-    event?.preventDefault?.();
-    event?.stopPropagation?.();
-    if (disabled) return;
-    popOpen = !popOpen;
-    if (popOpen) {
-      showEmoji = false;
-      engageDockSuppression();
-      void tick().then(() => syncPopoverPosition());
-    } else if (!inputFocused) {
-      releaseDockSuppression();
-    }
-  }
-
-  function onGifPicked(url: string) {
-    const payload = { url, replyTo: replyTarget ?? undefined };
-    onSendGif(payload);
-    dispatch('sendGif', payload);
-    playSound('message-send');
-    showGif = false;
-  }
-  function onPollCreate(poll: { question: string; options: string[] }) {
-    const payload = { ...poll, replyTo: replyTarget ?? undefined };
-    onCreatePoll(payload);
-    dispatch('createPoll', payload);
-    showPoll = false;
-  }
-  function onFormCreate(form: { title: string; questions: string[] }) {
-    const payload = { ...form, replyTo: replyTarget ?? undefined };
-    onCreateForm(payload);
-    dispatch('createForm', payload);
-    showForm = false;
-  }
-
-  async function insertEmoji(symbol: string) {
-    if (!inputEl) return;
-    const start = inputEl.selectionStart ?? text.length;
-    const end = inputEl.selectionEnd ?? text.length;
-    const before = text.slice(0, start);
-    const after = text.slice(end);
-    text = `${before}${symbol}${after}`;
-    await tick();
-    const nextCaret = before.length + symbol.length;
-    inputEl.focus();
-    inputEl.setSelectionRange(nextCaret, nextCaret);
-    refreshMentionDraft();
-    handleSelectionChange();
-    queuePrediction();
-  }
-
-  function onEmojiPicked(symbol: string) {
-    void insertEmoji(`${symbol} `);
-    showEmoji = false;
-  }
-
-  function registerEmojiOutsideWatcher() {
-    if (typeof document === 'undefined') return null;
-    const handler = (event: MouseEvent) => {
-      const target = event.target as Node;
-      // Check if click is inside the trigger button or the picker
-      if (emojiTriggerEl?.contains(target)) return;
-      if (emojiPickerEl?.contains(target)) return;
-      // If picker hasn't mounted yet, don't close (prevents immediate close on open click)
-      if (!emojiPickerEl) return;
-      showEmoji = false;
-    };
-    // Delay adding listener to avoid catching the same click that opened the picker
-    const timeoutId = setTimeout(() => {
-      document.addEventListener('pointerdown', handler);
-    }, 0);
-    return () => {
-      clearTimeout(timeoutId);
-      document.removeEventListener('pointerdown', handler);
-    };
-  }
-
-  function registerPopoverOutsideWatcher() {
-    if (typeof document === 'undefined') return null;
-    const handler = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (popoverEl?.contains(target) || plusTriggerEl?.contains(target)) return;
-      popOpen = false;
-    };
-    document.addEventListener('pointerdown', handler);
-    return () => document.removeEventListener('pointerdown', handler);
-  }
-
-  function syncPopoverPosition() {
-    if (!popoverEl || !plusTriggerEl || typeof window === 'undefined') return;
-    const viewport = window.visualViewport;
-    const viewportWidth = viewport?.width ?? window.innerWidth;
-    const viewportHeight = viewport?.height ?? window.innerHeight;
-    const offsetTop = viewport?.offsetTop ?? 0;
-    const padding = 12;
-    const gap = 4;
-    const maxHeightCap = 400;
-    const comfortHeight = 220;
-    const triggerRect = plusTriggerEl.getBoundingClientRect();
-    
-    // Fixed small width
-    const width = platform === 'mobile' ? 288 : 320; // 18rem or 20rem
-    
-    // Position left edge aligned with the plus button
-    const desiredLeft = triggerRect.left;
-    const left = Math.max(padding, Math.min(desiredLeft, viewportWidth - width - padding));
-
-    // Find the chat-input-region wrapper to align popup bottom with its top
-    const regionEl = rootEl?.closest('.chat-input-region') ?? rootEl?.parentElement ?? rootEl;
-    const regionRect = regionEl?.getBoundingClientRect();
-    const regionTop = regionRect ? regionRect.top - offsetTop : triggerRect.top - offsetTop;
-    
-    // Bottom of popup should align with top of chat-input-region
-    let bottom = Math.max(padding, viewportHeight - regionTop + gap);
-    
-    // On mobile, ensure minimum bottom to account for nav bar
-    if (platform === 'mobile') {
-      bottom = Math.max(bottom, 80); // At least 80px from bottom
-    }
-    
-    let availableHeight = Math.max(0, viewportHeight - bottom - padding);
-    let maxHeight = Math.min(maxHeightCap, availableHeight);
-
-    if (maxHeight < comfortHeight) {
-      const fallbackHeight = clampValue(viewportHeight - padding * 2, 160, maxHeightCap);
-      bottom = Math.max(padding, viewportHeight - fallbackHeight - padding);
-      availableHeight = Math.max(0, viewportHeight - bottom - padding);
-      maxHeight = Math.min(maxHeightCap, availableHeight);
-    }
-
-    if (maxHeight <= 0) {
-      bottom = padding;
-      maxHeight = Math.min(maxHeightCap, Math.max(0, viewportHeight - bottom - padding));
-    }
-
-    popoverPlacement = {
-      left: `${left}px`,
-      bottom: `${bottom}px`,
-      width: `${width}px`,
-      maxHeight: `${maxHeight}px`
-    };
-  }
-
-  function syncMentionMenuPosition() {
-    if (!inputEl || typeof window === 'undefined') return;
-    const viewport = window.visualViewport;
-    const viewportWidth = viewport?.width ?? window.innerWidth;
-    const viewportHeight = viewport?.height ?? window.innerHeight;
-    const offsetTop = viewport?.offsetTop ?? 0;
-    const padding = 12;
-    const gap = 4;
-    const menuWidth = Math.min(352, viewportWidth - padding * 2); // 22rem = 352px
-    const menuMaxHeight = 256; // 16rem
-
-    const inputRect = inputEl.getBoundingClientRect();
-    const inputLeft = inputRect.left;
-    
-    // Find the chat-input-region wrapper to align menu bottom with its top
-    const regionEl = rootEl?.closest('.chat-input-region') ?? rootEl?.parentElement ?? rootEl;
-    const regionRect = regionEl?.getBoundingClientRect();
-    const regionTop = regionRect ? regionRect.top - offsetTop : inputRect.top - offsetTop;
-    
-    // Bottom of menu should align with top of chat-input-region
-    let bottom = Math.max(padding, viewportHeight - regionTop + gap);
-    
-    // Check if menu would go above viewport, if so limit maxHeight
-    const availableHeight = viewportHeight - bottom - padding;
-    const actualMaxHeight = Math.min(menuMaxHeight, Math.max(100, availableHeight));
-    
-    // Ensure left position keeps menu on screen
-    let left = Math.max(padding, inputLeft);
-    if (left + menuWidth > viewportWidth - padding) {
-      left = Math.max(padding, viewportWidth - menuWidth - padding);
-    }
-
-    mentionMenuPosition = {
-      left: `${left}px`,
-      bottom: `${bottom}px`,
-      maxHeight: `${actualMaxHeight}px`
-    };
-  }
-
-  function syncEmojiPickerPosition() {
-    if (!emojiTriggerEl || typeof window === 'undefined') return;
-    const viewport = window.visualViewport;
-    const viewportWidth = viewport?.width ?? window.innerWidth;
-    const viewportHeight = viewport?.height ?? window.innerHeight;
-    const offsetTop = viewport?.offsetTop ?? 0;
-    const padding = 12;
-    const gap = 4;
-    const pickerWidth = Math.min(420, viewportWidth * 0.8); // min(420px, 80vw)
-    const pickerMaxHeight = Math.min(440, viewportHeight * 0.65); // min(440px, 65vh)
-
-    const triggerRect = emojiTriggerEl.getBoundingClientRect();
-    const triggerTop = triggerRect.top - offsetTop;
-    const triggerRight = triggerRect.right;
-    
-    // Bottom of picker should align with top of the emoji button
-    const bottomValue = viewportHeight - triggerTop + gap;
-    
-    // Calculate available space above the button
-    const spaceAbove = triggerTop - padding;
-    const actualMaxHeight = Math.min(pickerMaxHeight, Math.max(200, spaceAbove - gap));
-    
-    // Position the picker so its right edge aligns with the button's right edge
-    let right = Math.max(padding, viewportWidth - triggerRight);
-    
-    // If picker would go off left edge, adjust
-    if (viewportWidth - right - pickerWidth < padding) {
-      right = Math.max(padding, viewportWidth - pickerWidth - padding);
-    }
-
-    emojiPickerPosition = {
-      left: 'auto',
-      right: `${right}px`,
-      bottom: `${bottomValue}px`,
-      top: 'auto',
-      maxHeight: `${actualMaxHeight}px`
-    };
-  }
-
-
-  onMount(() => {
-    if (typeof window === 'undefined') return;
-    // Enable emoji picker on desktop screens (min 768px width)
-    const mq = window.matchMedia('(min-width: 768px)');
-    const update = () => {
-      emojiSupported = mq.matches;
-      if (!emojiSupported) showEmoji = false;
-    };
-    update();
-    mq.addEventListener('change', update);
-    return () => {
-      mq.removeEventListener('change', update);
-      disposeEmojiOutside?.();
-    };
-  });
-
-  onMount(() => {
-    if (typeof window === 'undefined' || typeof document === 'undefined') return;
-    const viewport = window.visualViewport;
-    if (!viewport) return;
-    const root = document.documentElement;
-
-    const applyKeyboardInset = () => {
-      if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
-      keyboardInsetFrame = requestAnimationFrame(() => {
-        keyboardInsetFrame = null;
-        let offset = 0;
-        if (inputFocused && window.innerWidth <= KEYBOARD_MOBILE_MAX_WIDTH) {
-          const occupied = Math.round(window.innerHeight - (viewport.height + viewport.offsetTop));
-          const diff = Math.max(0, occupied);
-          offset = diff > KEYBOARD_ACTIVATION_THRESHOLD ? diff : 0;
-        }
-        root.style.setProperty(KEYBOARD_OFFSET_VAR, offset ? `${offset}px` : '0px');
-        root.style.setProperty(SAFE_AREA_VAR, offset ? '0px' : 'env(safe-area-inset-bottom, 0px)');
-      });
-    };
-
-    const handleViewportChange = () => applyKeyboardInset();
-    viewport.addEventListener('resize', handleViewportChange);
-    viewport.addEventListener('scroll', handleViewportChange);
-    window.addEventListener('orientationchange', handleViewportChange);
-    syncKeyboardInset = applyKeyboardInset;
-    applyKeyboardInset();
-
-    return () => {
-      viewport.removeEventListener('resize', handleViewportChange);
-      viewport.removeEventListener('scroll', handleViewportChange);
-      window.removeEventListener('orientationchange', handleViewportChange);
-      if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
-      root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
-      root.style.setProperty(SAFE_AREA_VAR, 'env(safe-area-inset-bottom, 0px)');
-      syncKeyboardInset = null;
-    };
-  });
-
-  onMount(() => {
-    if (typeof window === 'undefined') return;
-    const coarse = window.matchMedia('(pointer:coarse)');
-    const update = () => {
-      const prefersCoarse = coarse.matches;
-      const narrow = window.innerWidth <= 768;
-      const nextPlatform = prefersCoarse || narrow ? 'mobile' : 'desktop';
-      if (platform !== nextPlatform) {
-        platform = nextPlatform;
-        if (nextPlatform === 'desktop') {
-          releaseDockSuppression(true);
-        }
-      } else {
-        platform = nextPlatform;
-      }
-    };
-    update();
-    window.addEventListener('resize', update);
-    coarse.addEventListener('change', update);
-    return () => {
-      window.removeEventListener('resize', update);
-      coarse.removeEventListener('change', update);
-    };
-  });
-
-  onDestroy(() => {
-    clearAttachments();
-    cancelReplySuggestion();
-    cancelGeneralSuggestion();
-    clearPredictions();
-    clearRewriteState(true);
-    if (predictionTimer) {
-      clearTimeout(predictionTimer);
-      predictionTimer = null;
-    }
-    if (dockReleaseTimer) {
-      clearTimeout(dockReleaseTimer);
-      dockReleaseTimer = null;
-    }
-    if (dockSuppressionActive) {
-      dockSuppressionActive = false;
-      mobileDockSuppressed.release();
-    }
-    popoverOutsideCleanup?.();
-    popoverOutsideCleanup = null;
-  });
-
-  function onEsc(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
-    if (mentionActive) {
-      closeMentionMenu();
-      return;
-    }
-    if (showGif || showPoll || showForm || showEmoji) {
-      showGif = showPoll = showForm = showEmoji = false;
-    } else {
-      popOpen = false;
-    }
-  }
-  run(() => {
-    mentionLookup = new Map(
-      mentionOptions.map((option) => [option.handle.toLowerCase(), option])
-    );
-  });
-  run(() => {
-    mentionAliasLookup = new Map(
-      mentionOptions.flatMap((option) =>
-        option.aliases.map((alias) => [alias, option] as [string, MentionCandidate])
-      )
-    );
-  });
-  run(() => {
-    // Update text segments whenever text or mention lookups change
-    textSegments = parseTextSegments(text);
-  });
-  run(() => {
-    if (!mentionOptions.length) {
-      mentionDraft.clear();
-      closeMentionMenu();
-    }
-  });
-  run(() => {
-    disposeEmojiOutside?.();
-    disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
-  });
-
-  run(() => {
-    const sources = Array.isArray(conversationContext) ? conversationContext : [];
-    const normalized = sources
-      .map((entry) => buildMessagePayload(entry))
-      .filter((entry): entry is ReplyMessageContext => Boolean(entry));
-    aiContextWindow = normalized.slice(-MAX_AI_CONTEXT);
-  });
-
-  run(() => {
-    if (!aiAssistAllowed) {
-      rewriteMenuOpen = false;
-    }
-  });
-
-  run(() => {
-    if (!rewriteEligible) {
-      clearRewriteState(true);
-    }
-  });
-
-  run(() => {
-    if (!rewriteMode || rewriteLoading) return;
-    if (rewriteSeed && text.trim() !== rewriteSeed) {
-      rewriteOptions = [];
-      rewriteIndex = 0;
-      rewriteError = null;
-    }
-  });
-
-  run(() => {
-    if (showReplyCoach) {
-      void fetchReplyCoach();
-    } else {
-      cancelReplySuggestion();
-    }
-  });
-
-  run(() => {
-    if (showGeneralCoach) {
-      void fetchGeneralSuggestion();
-    } else {
-      cancelGeneralSuggestion();
-    }
-  });
-
-  run(() => {
-    if (!aiAssistAllowed) {
-      cancelReplySuggestion();
-      cancelGeneralSuggestion();
-      clearPredictions();
-      return;
-    }
-    if (!text.trim()) {
-      clearPredictions();
-      lastPredictionSeed = '';
-      return;
-    }
-    if (showInlinePrediction) {
-      queuePrediction();
-    }
-  });
+	import { run, preventDefault } from 'svelte/legacy';
+
+	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
+	import GifPicker from './GifPicker.svelte';
+	import EmojiPicker from './EmojiPicker.svelte';
+	import MentionMenu from './MentionMenu.svelte';
+	import ChatAddonsPopover from './ChatAddonsPopover.svelte';
+	import type {
+		MentionCandidate as MentionCandidateType,
+		MentionRecord as MentionRecordType
+	} from './MentionMenu.svelte';
+	import type { RewriteMode, PopoverPlacement } from './ChatAddonsPopover.svelte';
+	import PollBuilder from '$lib/components/forms/PollBuilder.svelte';
+	import FormBuilder from '$lib/components/forms/FormBuilder.svelte';
+	import type { ReplyReferenceInput } from '$lib/firestore/messages';
+	import { looksLikeImage, formatBytes } from '$lib/utils/fileType';
+	import {
+		requestReplySuggestion,
+		requestPredictions,
+		requestRewriteSuggestions
+	} from '$lib/api/ai';
+	import type { ReplyMessageContext } from '$lib/api/ai';
+	import { mobileDockSuppressed } from '$lib/stores/ui';
+	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
+	import { featureFlags } from '$lib/stores/featureFlags';
+	import { playSound } from '$lib/utils/sounds';
+
+	// Use types from the new separated components
+	type MentionCandidate = MentionCandidateType;
+	type MentionRecord = MentionRecordType;
+
+	type ReplyablePayload<T> = T & { replyTo?: ReplyReferenceInput | null };
+	type UploadRequest = { files: File[]; replyTo?: ReplyReferenceInput | null };
+	type AttachmentDraft = {
+		id: string;
+		file: File;
+		name: string;
+		size?: number;
+		contentType?: string | null;
+		isImage: boolean;
+		previewUrl: string | null;
+	};
+
+	type PopoverPlacement = {
+		left: string;
+		bottom: string;
+		width: string;
+		maxHeight: string;
+	};
+
+	const canonical = (value: string) =>
+		(value ?? '')
+			.normalize('NFKD')
+			.replace(/[\u0300-\u036f]/g, '')
+			.toLowerCase()
+			.replace(/[^a-z0-9]/g, '');
+
+	const clampValue = (value: number, min: number, max: number) =>
+		Math.min(Math.max(value, min), max);
+
+	const initialsFor = (value: string) => {
+		const words = (value ?? '').trim().split(/\s+/).filter(Boolean).slice(0, 2);
+		if (!words.length) return '?';
+		return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
+	};
+
+	const pickString = (value: unknown) => {
+		if (typeof value !== 'string') return '';
+		const trimmed = value.trim();
+		return trimmed.length ? trimmed : '';
+	};
+
+	type RewriteMode =
+		| 'rephrase'
+		| 'shorten'
+		| 'elaborate'
+		| 'formal'
+		| 'casual'
+		| 'bulletize'
+		| 'summarize';
+
+	const MAX_AI_CONTEXT = 10;
+	const MIN_REWRITE_LENGTH = 20;
+
+	const rewriteActions: Array<{
+		id: RewriteMode;
+		label: string;
+		icon: string;
+		description: string;
+	}> = [
+		{
+			id: 'rephrase',
+			label: 'Rephrase',
+			icon: 'bx-wand',
+			description: 'Same meaning, fresher wording.'
+		},
+		{
+			id: 'shorten',
+			label: 'Shorten',
+			icon: 'bx-cut',
+			description: 'Trim it down to the essentials.'
+		},
+		{
+			id: 'elaborate',
+			label: 'Elaborate',
+			icon: 'bx-expand',
+			description: 'Add a bit more helpful detail.'
+		},
+		{
+			id: 'formal',
+			label: 'More formal',
+			icon: 'bx-briefcase',
+			description: 'Polish it for announcements.'
+		},
+		{
+			id: 'casual',
+			label: 'More casual',
+			icon: 'bx-coffee',
+			description: 'Relaxed tone for friends.'
+		},
+		{
+			id: 'bulletize',
+			label: 'Bulletize',
+			icon: 'bx-list-ul',
+			description: 'Break it into quick bullets.'
+		},
+		{
+			id: 'summarize',
+			label: 'Summarize',
+			icon: 'bx-notepad',
+			description: 'Recap the draft in a blurb.'
+		}
+	];
+
+	const rewriteActionLookup = new Map<RewriteMode, (typeof rewriteActions)[number]>(
+		rewriteActions.map((action) => [action.id, action])
+	);
+
+	function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
+		if (!rawQuery) return 0;
+		const lower = rawQuery.toLowerCase();
+		let score = 0;
+		const handle = option.handle.toLowerCase();
+		if (handle.startsWith(lower)) score += 5;
+		else if (handle.includes(lower)) score += 2;
+		const label = option.label.toLowerCase();
+		if (label.startsWith(lower)) score += 4;
+		else if (label.includes(lower)) score += 1;
+		if (canonicalQuery) {
+			const aliasHit = option.aliases.some((alias) => alias.startsWith(canonicalQuery));
+			if (aliasHit) score += 3;
+		}
+		if (option.kind === 'member') score += 0.1;
+		if (option.kind === 'special') score += 12;
+		return score;
+	}
+
+	interface Props {
+		placeholder?: string;
+		disabled?: boolean;
+		mentionOptions?: MentionCandidate[];
+		replyTarget?: ReplyReferenceInput | null;
+		replySource?: any | null;
+		defaultSuggestionSource?: any | null;
+		conversationContext?: any[] | null;
+		aiAssistEnabled?: boolean;
+		threadLabel?: string | null;
+		onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
+		onUpload?: (payload: UploadRequest) => void;
+		onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
+		onCreatePoll?: (payload: ReplyablePayload<{ question: string; options: string[] }>) => void;
+		onCreateForm?: (payload: ReplyablePayload<{ title: string; questions: string[] }>) => void;
+	}
+
+	let {
+		placeholder = 'Message #channel',
+		disabled = false,
+		mentionOptions = [],
+		replyTarget = null,
+		replySource = null,
+		defaultSuggestionSource = null,
+		conversationContext = [],
+		aiAssistEnabled = false,
+		threadLabel = '',
+		onSend = () => {},
+		onUpload = () => {},
+		onSendGif = () => {},
+		onCreatePoll = () => {},
+		onCreateForm = () => {}
+	}: Props = $props();
+
+	const dispatch = createEventDispatcher();
+
+	let text = $state('');
+	let popOpen = $state(false);
+	let plusTriggerEl: HTMLButtonElement | null = $state(null);
+	let popoverEl: HTMLDivElement | null = $state(null);
+	let popoverPlacement: PopoverPlacement = $state({
+		left: '0.75rem',
+		bottom: '5rem',
+		width: 'min(20rem, 90vw)',
+		maxHeight: 'min(65vh, 26rem)'
+	});
+	let popoverOutsideCleanup: (() => void) | null = null;
+	let showGif = $state(false);
+	let showPoll = $state(false);
+	let showForm = $state(false);
+	let showEmoji = $state(false);
+	let emojiSupported = $state(false);
+	let emojiTriggerEl: HTMLDivElement | null = $state(null);
+	let emojiPickerEl: HTMLDivElement | null = $state(null);
+	let disposeEmojiOutside: (() => void) | null = $state(null);
+	let fileEl: HTMLInputElement | null = $state(null);
+	let inputEl: HTMLTextAreaElement | null = $state(null);
+	let rootEl: HTMLDivElement | null = $state(null);
+	let formEl: HTMLFormElement | null = $state(null);
+	let attachments: AttachmentDraft[] = $state([]);
+	let platform: 'desktop' | 'mobile' = $state('desktop');
+	const sendDisabled = $derived.by(() => disabled || (!text.trim() && attachments.length === 0));
+	const showMobileSend = $derived.by(() => platform === 'mobile' && text.trim().length > 0);
+	let inputFocused = false;
+	let keyboardInsetFrame: number | null = null;
+	let syncKeyboardInset: (() => void) | null = null;
+	let dockSuppressionActive = false;
+	let dockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	let mentionActive = $state(false);
+	let mentionFiltered: MentionCandidate[] = $state([]);
+	let mentionIndex = $state(0);
+	let mentionQuery = '';
+	let mentionStart = -1;
+	let mentionLookup = $state(new Map<string, MentionCandidate>());
+	let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
+	const mentionDraft = new Map<string, MentionRecord>();
+	let mentionMenuPosition = $state({ left: '0px', bottom: '5rem', maxHeight: '16rem' });
+	let emojiPickerPosition = $state({
+		left: 'auto',
+		right: '12px',
+		bottom: '5rem',
+		top: 'auto',
+		maxHeight: '440px'
+	});
+
+	type TextSegment =
+		| { type: 'text'; content: string }
+		| { type: 'mention'; content: string; record: MentionRecord };
+	let textSegments = $state<TextSegment[]>([]);
+
+	const featureFlagStore = featureFlags;
+	const aiPlatformEnabled = $derived(Boolean($featureFlagStore.enableAIFeatures));
+	const aiSuggestionsEnabled = $derived(Boolean($featureFlagStore.enableAISuggestedReplies));
+	const aiPredictionsEnabled = $derived(Boolean($featureFlagStore.enableAIPredictions));
+	let aiServiceAvailable = $state(true);
+	let aiReplySuggestion = $state<string | null>(null);
+	let aiReplyLoading = $state(false);
+	let aiReplyError: string | null = $state(null);
+	let replySuggestionAbort: AbortController | null = null;
+	let lastReplySuggestionId: string | null = null;
+
+	let aiGeneralSuggestion = $state<string | null>(null);
+	let aiGeneralLoading = $state(false);
+	let aiGeneralError: string | null = $state(null);
+	let generalSuggestionAbort: AbortController | null = null;
+	let lastGeneralSuggestionId: string | null = null;
+
+	let aiInlineSuggestion = $state('');
+	let predictionAbort: AbortController | null = null;
+	let predictionTimer: ReturnType<typeof setTimeout> | null = null;
+	let predictionScroll = $state(0);
+	let predictionBoxStyle = $state('');
+	let predictionContentEl: HTMLDivElement | null = $state(null);
+	let predictionVerticalPadding = 0;
+	let suggestedGhostEl: HTMLDivElement | null = $state(null);
+	let suggestedGhostHeight = $state(0);
+	let lastPredictionSeed = '';
+	let aiContextWindow: ReplyMessageContext[] = $state([]);
+	let rewriteMenuOpen = $state(false);
+	let rewriteMode: RewriteMode | null = $state(null);
+	let rewriteDefaultMode: RewriteMode = $state('rephrase');
+	let rewriteOptions: string[] = $state([]);
+	let rewriteIndex = $state(0);
+	let rewriteLoading = $state(false);
+	let rewriteError: string | null = $state(null);
+	let rewriteAbort: AbortController | null = null;
+	let rewriteSeed = '';
+	let suggestionTapPrimed = false;
+	let textareaExpanded = $state(false);
+
+	const aiAssistAllowed = $derived(
+		Boolean(aiAssistEnabled && aiServiceAvailable && aiPlatformEnabled)
+	);
+	const aiSuggestionCoachAllowed = $derived(Boolean(aiAssistAllowed && aiSuggestionsEnabled));
+	const isDesktop = $derived(platform === 'desktop');
+	const isReplying = $derived(Boolean(replyTarget?.messageId));
+	const mobileSuggestionContext = $derived(
+		replySource ?? replyTarget ?? defaultSuggestionSource ?? null
+	);
+	const showReplyCoach = $derived(Boolean(aiSuggestionCoachAllowed && isDesktop && isReplying));
+	const showGeneralCoach = $derived(
+		Boolean(
+			aiSuggestionCoachAllowed &&
+			!isDesktop &&
+			isReplying &&
+			mobileSuggestionContext &&
+			!text.trim()
+		)
+	);
+	const showReplyGhost = $derived(Boolean(showReplyCoach && !text.trim()));
+	const showSuggestionGhost = $derived(Boolean(showGeneralCoach || showReplyGhost));
+	const canUseReplySuggestion = $derived(Boolean(showReplyGhost && pickString(aiReplySuggestion)));
+	const showInlinePrediction = $derived(Boolean(aiAssistAllowed && aiPredictionsEnabled));
+	const hasInlinePrediction = $derived(Boolean(showInlinePrediction && aiInlineSuggestion));
+	const canUseGeneralSuggestion = $derived(
+		Boolean(showGeneralCoach && pickString(aiGeneralSuggestion))
+	);
+	const rewriteEligible = $derived(
+		Boolean(aiAssistAllowed && text.trim().length >= MIN_REWRITE_LENGTH)
+	);
+	const showRewriteCoach = $derived(
+		Boolean(
+			aiAssistAllowed && rewriteMode && (rewriteLoading || rewriteError || rewriteOptions.length)
+		)
+	);
+	const activeRewrite = $derived(
+		rewriteOptions.length
+			? (rewriteOptions[Math.min(rewriteIndex, rewriteOptions.length - 1)] ?? '')
+			: ''
+	);
+	const rewriteModeLabel = $derived(
+		rewriteMode
+			? (rewriteActionLookup.get(rewriteMode)?.label ?? 'Rewrite')
+			: (rewriteActionLookup.get(rewriteDefaultMode)?.label ?? 'Rewrite')
+	);
+	const rewriteModeIcon = $derived(
+		rewriteMode
+			? (rewriteActionLookup.get(rewriteMode)?.icon ?? 'bx-wand')
+			: (rewriteActionLookup.get(rewriteDefaultMode)?.icon ?? 'bx-wand')
+	);
+
+	const REPLY_PREVIEW_LIMIT = 160;
+	const KEYBOARD_OFFSET_VAR = '--chat-keyboard-offset';
+	const SAFE_AREA_VAR = '--chat-safe-area-bottom';
+	const KEYBOARD_MOBILE_MAX_WIDTH = 900;
+	const KEYBOARD_ACTIVATION_THRESHOLD = 80;
+	const createAttachmentId = () => {
+		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+			return crypto.randomUUID();
+		}
+		return `draft-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6)
+			.toString(36)
+			.padStart(4, '0')}`;
+	};
+
+	const buildAttachmentDraft = (file: File): AttachmentDraft => {
+		const isImage = looksLikeImage({ name: file?.name, type: file?.type });
+		const previewUrl =
+			isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+				? URL.createObjectURL(file)
+				: null;
+		return {
+			id: createAttachmentId(),
+			file,
+			name: file?.name || 'Attachment',
+			size: file?.size,
+			contentType: file?.type ?? null,
+			isImage,
+			previewUrl
+		};
+	};
+
+	const revokeAttachmentPreview = (entry: AttachmentDraft | null | undefined) => {
+		if (entry?.previewUrl) {
+			try {
+				URL.revokeObjectURL(entry.previewUrl);
+			} catch {
+				// ignore
+			}
+		}
+	};
+
+	function queueAttachments(files: File[]) {
+		const selection = files.filter((file): file is File => file instanceof File);
+		if (!selection.length) return;
+		const drafts = selection.map((file) => buildAttachmentDraft(file));
+		attachments = [...attachments, ...drafts];
+	}
+
+	const dedupeFiles = (list: File[]) => {
+		const result: File[] = [];
+		const seen = new Set<string>();
+		for (const file of list) {
+			if (!(file instanceof File)) continue;
+			const key = `${file.name ?? 'unknown'}|${file.size ?? 0}|${file.lastModified ?? 0}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			result.push(file);
+		}
+		return result;
+	};
+
+	function removeAttachment(id: string) {
+		const target = attachments.find((item) => item.id === id);
+		if (target) revokeAttachmentPreview(target);
+		attachments = attachments.filter((item) => item.id !== id);
+	}
+
+	function clearAttachments() {
+		attachments.forEach((entry) => revokeAttachmentPreview(entry));
+		attachments = [];
+	}
+
+	function clipReply(value: string | null | undefined, limit = REPLY_PREVIEW_LIMIT) {
+		if (!value) return '';
+		return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+	}
+
+	function replyRecipientLabel(target: ReplyReferenceInput | null) {
+		if (!target) return '';
+		return target.authorName || target.authorId || 'Member';
+	}
+
+	function replyPreviewText(target: ReplyReferenceInput | null) {
+		if (!target) return '';
+		const value = clipReply(target.preview ?? target.text ?? '');
+		if (value) return value;
+		switch (target.type) {
+			case 'gif':
+				return 'GIF';
+			case 'file':
+				return 'File';
+			case 'poll':
+				return 'Poll';
+			case 'form':
+				return 'Form';
+			default:
+				return 'Message';
+		}
+	}
+
+	async function cancelReply() {
+		dispatch('cancelReply');
+		await tick();
+		inputEl?.focus();
+	}
+
+	function submit(e?: Event) {
+		e?.preventDefault();
+		if (disabled) return;
+		const trimmed = text.trim();
+		const hasText = Boolean(trimmed);
+		const hasAttachments = attachments.length > 0;
+		if (!hasText && !hasAttachments) return;
+		const replyRef = replyTarget ?? null;
+
+		if (hasText) {
+			const mentions = collectMentions(text);
+			const payload = {
+				text: trimmed,
+				mentions,
+				replyTo: replyRef ?? undefined
+			};
+			onSend(payload);
+			dispatch('send', payload);
+			playSound('message-send');
+			text = '';
+			clearRewriteState(true);
+			clearPredictions();
+			lastPredictionSeed = '';
+			mentionDraft.clear();
+			closeMentionMenu();
+		}
+
+		if (hasAttachments) {
+			const payload: UploadRequest = {
+				files: attachments.map((item) => item.file),
+				replyTo: replyRef
+			};
+			onUpload(payload);
+			dispatch('upload', payload);
+			playSound('message-send');
+			clearAttachments();
+		}
+
+		if (typeof queueMicrotask === 'function') {
+			queueMicrotask(() => {
+				inputEl?.focus();
+			});
+		} else {
+			setTimeout(() => inputEl?.focus(), 0);
+		}
+	}
+
+	function onKeydown(e: KeyboardEvent) {
+		if (!mentionActive && e.key === 'Tab' && !e.shiftKey) {
+			if (showReplyGhost && canUseReplySuggestion) {
+				e.preventDefault();
+				applyReplySuggestion();
+				return;
+			}
+			if (canUseGeneralSuggestion) {
+				e.preventDefault();
+				applyGeneralSuggestion();
+				return;
+			}
+			if (showInlinePrediction && aiInlineSuggestion) {
+				e.preventDefault();
+				acceptInlineSuggestion();
+				return;
+			}
+		}
+
+		if (mentionActive) {
+			if (e.key === 'ArrowDown') {
+				e.preventDefault();
+				mentionIndex = (mentionIndex + 1) % mentionFiltered.length;
+				return;
+			}
+			if (e.key === 'ArrowUp') {
+				e.preventDefault();
+				mentionIndex = (mentionIndex - 1 + mentionFiltered.length) % mentionFiltered.length;
+				return;
+			}
+			if (e.key === 'Enter' || e.key === 'Tab') {
+				e.preventDefault();
+				const choice = mentionFiltered[mentionIndex] ?? mentionFiltered[0];
+				if (choice) void insertMention(choice);
+				return;
+			}
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				closeMentionMenu();
+				return;
+			}
+		}
+
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			submit();
+		}
+	}
+
+	function pickFiles() {
+		popOpen = false;
+		fileEl?.click();
+	}
+
+	function onFilesChange(e: Event) {
+		const input = e.target as HTMLInputElement | null;
+		const files = Array.from(input?.files ?? []);
+		if (!files.length) return;
+		if (disabled) {
+			if (input) input.value = '';
+			return;
+		}
+		queueAttachments(files);
+		if (input) {
+			input.value = '';
+		}
+	}
+
+	function handlePaste(event: ClipboardEvent) {
+		if (disabled) return;
+		const data = event.clipboardData;
+		if (!data) return;
+		const directFiles = Array.from(data.files ?? []);
+		const itemFiles = Array.from(data.items ?? [])
+			.map((item) => (item.kind === 'file' ? item.getAsFile() : null))
+			.filter((file): file is File => file instanceof File);
+		const merged = dedupeFiles([...directFiles, ...itemFiles]);
+		if (!merged.length) return;
+		queueAttachments(merged);
+	}
+
+	function handleInput() {
+		suggestionTapPrimed = false;
+		refreshMentionDraft();
+		if (mentionOptions.length) {
+			updateMentionState();
+		}
+		syncTextareaSize();
+		syncPredictionOverlay();
+	}
+
+	function syncTextareaSize() {
+		if (typeof window === 'undefined' || !inputEl) return;
+		const node = inputEl;
+		const computed = window.getComputedStyle(node);
+		const minHeight = parseFloat(computed.minHeight || '0') || 0;
+		const maxHeightValue = computed.maxHeight;
+		const maxHeight =
+			!maxHeightValue || maxHeightValue === 'none'
+				? Number.POSITIVE_INFINITY
+				: parseFloat(maxHeightValue);
+		node.style.height = 'auto';
+		const scrollHeight = node.scrollHeight;
+		const textHeight = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
+		const ghostHeight = showSuggestionGhost
+			? Math.max(minHeight, Math.min(suggestedGhostHeight || 0, maxHeight))
+			: 0;
+		const inlinePredictionHeight =
+			showInlinePrediction && aiInlineSuggestion && predictionContentEl
+				? Math.max(
+						minHeight,
+						Math.min((predictionContentEl.scrollHeight || 0) + predictionVerticalPadding, maxHeight)
+					)
+				: 0;
+		const nextHeight = Math.max(textHeight, ghostHeight || 0, inlinePredictionHeight || 0);
+		node.style.height = `${nextHeight}px`;
+		textareaExpanded = nextHeight > minHeight + 2;
+		if (scrollHeight > nextHeight) {
+			node.style.overflowY = 'auto';
+		} else {
+			node.style.overflowY = 'hidden';
+		}
+	}
+
+	function syncPredictionOverlay() {
+		if (!inputEl) {
+			predictionScroll = 0;
+			return;
+		}
+		predictionScroll = inputEl.scrollTop ?? 0;
+	}
+
+	function handleTextareaScroll() {
+		syncPredictionOverlay();
+	}
+
+	function schedulePredictionResize() {
+		if (typeof window === 'undefined') return;
+		void tick().then(() => {
+			syncTextareaSize();
+			syncPredictionOverlay();
+		});
+	}
+
+	function syncPredictionBoxStyle() {
+		if (typeof window === 'undefined' || !inputEl) {
+			predictionBoxStyle = '';
+			return;
+		}
+		const computed = window.getComputedStyle(inputEl);
+		const paddingTop = parseFloat(computed.paddingTop || '0') || 0;
+		const paddingBottom = parseFloat(computed.paddingBottom || '0') || 0;
+		predictionVerticalPadding = paddingTop + paddingBottom;
+		const padding = `${computed.paddingTop} ${computed.paddingRight} ${computed.paddingBottom} ${computed.paddingLeft}`;
+		predictionBoxStyle = [
+			`padding:${padding}`,
+			`font-family:${computed.fontFamily}`,
+			`font-size:${computed.fontSize}`,
+			`font-weight:${computed.fontWeight}`,
+			`font-style:${computed.fontStyle}`,
+			`line-height:${computed.lineHeight}`,
+			`letter-spacing:${computed.letterSpacing}`
+		].join(';');
+	}
+
+	function handleSelectionChange() {
+		if (!mentionOptions.length) return;
+		requestAnimationFrame(() => updateMentionState());
+	}
+
+	function syncSuggestedGhostHeight() {
+		if (!showSuggestionGhost) {
+			suggestedGhostHeight = 0;
+			return;
+		}
+		suggestedGhostHeight = suggestedGhostEl?.scrollHeight ?? 0;
+	}
+
+	onMount(() => {
+		if (typeof window === 'undefined') return;
+		const handleResize = () => {
+			syncTextareaSize();
+			syncPredictionBoxStyle();
+		};
+		handleResize();
+		window.addEventListener('resize', handleResize);
+		return () => window.removeEventListener('resize', handleResize);
+	});
+
+	$effect(() => {
+		text;
+		syncTextareaSize();
+		syncPredictionOverlay();
+	});
+
+	$effect(() => {
+		const node = inputEl;
+		if (!node) {
+			predictionBoxStyle = '';
+			return;
+		}
+		syncPredictionBoxStyle();
+		if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
+		const observer = new window.ResizeObserver(() => {
+			syncPredictionBoxStyle();
+			if (typeof requestAnimationFrame === 'function') {
+				requestAnimationFrame(() => syncTextareaSize());
+			} else {
+				syncTextareaSize();
+			}
+		});
+		observer.observe(node);
+		return () => observer.disconnect();
+	});
+
+	$effect(() => {
+		syncSuggestedGhostHeight();
+		syncTextareaSize();
+		if (!showSuggestionGhost) return;
+		if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return;
+		const target = suggestedGhostEl;
+		if (!target) return;
+		const observer = new window.ResizeObserver(() => {
+			syncSuggestedGhostHeight();
+			if (typeof requestAnimationFrame === 'function') {
+				requestAnimationFrame(() => syncTextareaSize());
+			} else {
+				syncTextareaSize();
+			}
+		});
+		observer.observe(target);
+		return () => observer.disconnect();
+	});
+
+	$effect(() => {
+		if (!showSuggestionGhost) {
+			suggestionTapPrimed = false;
+		}
+	});
+
+	$effect(() => {
+		popoverOutsideCleanup?.();
+		popoverOutsideCleanup = popOpen ? registerPopoverOutsideWatcher() : null;
+		if (!popOpen) {
+			closeRewriteMenu();
+		}
+	});
+
+	$effect(() => {
+		if (!popOpen && platform === 'mobile' && !inputFocused) {
+			releaseDockSuppression();
+		}
+	});
+
+	$effect(() => {
+		if (!popOpen) return;
+		platform;
+		attachments;
+		textareaExpanded;
+		void tick().then(() => syncPopoverPosition());
+	});
+
+	$effect(() => {
+		if (!popOpen) return;
+		syncPopoverPosition();
+		if (typeof window === 'undefined') return;
+		const handleReposition = () => syncPopoverPosition();
+		const viewport = window.visualViewport;
+		window.addEventListener('resize', handleReposition);
+		window.addEventListener('scroll', handleReposition, true);
+		viewport?.addEventListener('resize', handleReposition);
+		viewport?.addEventListener('scroll', handleReposition);
+		return () => {
+			window.removeEventListener('resize', handleReposition);
+			window.removeEventListener('scroll', handleReposition, true);
+			viewport?.removeEventListener('resize', handleReposition);
+			viewport?.removeEventListener('scroll', handleReposition);
+		};
+	});
+
+	$effect(() => {
+		if (!mentionActive) return;
+		syncMentionMenuPosition();
+		if (typeof window === 'undefined') return;
+		const handleReposition = () => syncMentionMenuPosition();
+		const viewport = window.visualViewport;
+		window.addEventListener('resize', handleReposition);
+		window.addEventListener('scroll', handleReposition, true);
+		viewport?.addEventListener('resize', handleReposition);
+		viewport?.addEventListener('scroll', handleReposition);
+		return () => {
+			window.removeEventListener('resize', handleReposition);
+			window.removeEventListener('scroll', handleReposition, true);
+			viewport?.removeEventListener('resize', handleReposition);
+			viewport?.removeEventListener('scroll', handleReposition);
+		};
+	});
+
+	$effect(() => {
+		if (!showEmoji) return;
+		syncEmojiPickerPosition();
+		if (typeof window === 'undefined') return;
+		const handleReposition = () => syncEmojiPickerPosition();
+		const viewport = window.visualViewport;
+		window.addEventListener('resize', handleReposition);
+		window.addEventListener('scroll', handleReposition, true);
+		viewport?.addEventListener('resize', handleReposition);
+		viewport?.addEventListener('scroll', handleReposition);
+		return () => {
+			window.removeEventListener('resize', handleReposition);
+			window.removeEventListener('scroll', handleReposition, true);
+			viewport?.removeEventListener('resize', handleReposition);
+			viewport?.removeEventListener('scroll', handleReposition);
+		};
+	});
+
+	function engageDockSuppression() {
+		if (platform !== 'mobile') return;
+		if (dockReleaseTimer) {
+			clearTimeout(dockReleaseTimer);
+			dockReleaseTimer = null;
+		}
+		if (dockSuppressionActive) return;
+		dockSuppressionActive = true;
+		mobileDockSuppressed.claim();
+	}
+
+	function releaseDockSuppression(immediate = false) {
+		if (!dockSuppressionActive) return;
+		const release = () => {
+			dockSuppressionActive = false;
+			mobileDockSuppressed.release();
+		};
+		if (dockReleaseTimer) {
+			clearTimeout(dockReleaseTimer);
+			dockReleaseTimer = null;
+		}
+		if (immediate || platform !== 'mobile') {
+			release();
+			return;
+		}
+		dockReleaseTimer = setTimeout(release, 140);
+	}
+
+	function handleTextareaFocus() {
+		inputFocused = true;
+		syncKeyboardInset?.();
+		engageDockSuppression();
+		dispatch('focusInput');
+	}
+
+	function handleTextareaBlur() {
+		inputFocused = false;
+		syncKeyboardInset?.();
+		releaseDockSuppression();
+		suggestionTapPrimed = false;
+		dispatch('blurInput');
+	}
+
+	function collectMentions(value: string): MentionRecord[] {
+		const collected = new Map<string, MentionRecord>();
+		mentionDraft.forEach((record) => {
+			if (value.includes(record.handle)) collected.set(record.uid, record);
+		});
+
+		const regex = /@([a-z0-9._-]{2,64})/gi;
+		let match: RegExpExecArray | null;
+		while ((match = regex.exec(value))) {
+			const raw = match[1] ?? '';
+			const byHandle = mentionLookup.get(raw.toLowerCase());
+			const byAlias = mentionAliasLookup.get(canonical(raw));
+			const candidate = byHandle ?? byAlias;
+			if (candidate) {
+				const record: MentionRecord = {
+					uid: candidate.uid,
+					handle: `@${candidate.handle}`,
+					label: candidate.label,
+					color: candidate.color ?? null,
+					kind: candidate.kind
+				};
+				collected.set(candidate.uid, record);
+			}
+		}
+
+		return Array.from(collected.values());
+	}
+
+	function parseTextSegments(value: string): TextSegment[] {
+		if (!value) return [];
+
+		// Collect all mentions for lookup
+		const mentionRecords = new Map<string, MentionRecord>();
+		mentionDraft.forEach((record) => {
+			if (value.includes(record.handle)) {
+				mentionRecords.set(record.handle.toLowerCase(), record);
+			}
+		});
+
+		// Also check for mentions that match by handle/alias
+		const regex = /@([a-z0-9._-]{2,64})/gi;
+		let match: RegExpExecArray | null;
+		const tempValue = value;
+		while ((match = regex.exec(tempValue))) {
+			const raw = match[1] ?? '';
+			const fullHandle = `@${raw}`;
+			if (mentionRecords.has(fullHandle.toLowerCase())) continue;
+
+			const byHandle = mentionLookup.get(raw.toLowerCase());
+			const byAlias = mentionAliasLookup.get(canonical(raw));
+			const candidate = byHandle ?? byAlias;
+			if (candidate) {
+				const record: MentionRecord = {
+					uid: candidate.uid,
+					handle: `@${candidate.handle}`,
+					label: candidate.label,
+					color: candidate.color ?? null,
+					kind: candidate.kind
+				};
+				mentionRecords.set(record.handle.toLowerCase(), record);
+			}
+		}
+
+		if (mentionRecords.size === 0) {
+			return [{ type: 'text', content: value }];
+		}
+
+		// Build segments by finding mentions in order
+		const segments: TextSegment[] = [];
+		let remaining = value;
+		let lastIndex = 0;
+
+		// Create a pattern that matches any of the mention handles
+		const handles = Array.from(mentionRecords.keys()).map((h) =>
+			h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+		);
+		const mentionPattern = new RegExp(`(${handles.join('|')})`, 'gi');
+
+		let segMatch: RegExpExecArray | null;
+		while ((segMatch = mentionPattern.exec(value))) {
+			const matchedHandle = segMatch[1];
+			const record = mentionRecords.get(matchedHandle.toLowerCase());
+
+			// Add text before this mention
+			if (segMatch.index > lastIndex) {
+				segments.push({ type: 'text', content: value.slice(lastIndex, segMatch.index) });
+			}
+
+			// Add the mention segment
+			if (record) {
+				segments.push({ type: 'mention', content: matchedHandle, record });
+			} else {
+				segments.push({ type: 'text', content: matchedHandle });
+			}
+
+			lastIndex = segMatch.index + matchedHandle.length;
+		}
+
+		// Add remaining text after last mention
+		if (lastIndex < value.length) {
+			segments.push({ type: 'text', content: value.slice(lastIndex) });
+		}
+
+		return segments;
+	}
+
+	function contextIdOf(source: any): string | null {
+		const raw = source?.id ?? source?.messageId ?? null;
+		if (typeof raw === 'string' && raw.trim().length) return raw.trim();
+		return null;
+	}
+
+	function buildMessagePayload(source: any): ReplyMessageContext | null {
+		if (!source) return null;
+		const text =
+			pickString(source?.text) ?? pickString(source?.content) ?? pickString(source?.preview ?? '');
+		const preview =
+			pickString(source?.preview ?? '') ??
+			pickString(source?.text ?? '') ??
+			pickString(source?.content ?? '') ??
+			'';
+		const type = pickString(source?.type ?? '');
+		const author =
+			pickString(source?.displayName) ??
+			pickString(source?.authorName) ??
+			pickString(source?.author?.displayName) ??
+			pickString(source?.name) ??
+			null;
+		if (!text && !preview && !type) return null;
+		return {
+			text: text || null,
+			preview: preview || null,
+			author,
+			type: type || null
+		};
+	}
+
+	function cancelReplySuggestion(clear = true) {
+		replySuggestionAbort?.abort();
+		replySuggestionAbort = null;
+		if (clear) {
+			aiReplyLoading = false;
+			aiReplySuggestion = null;
+			aiReplyError = null;
+			lastReplySuggestionId = null;
+		}
+	}
+
+	async function fetchReplyCoach(force = false) {
+		if (!showReplyCoach) return;
+		const contextSource = replySource ?? replyTarget ?? null;
+		const messageId = contextIdOf(contextSource);
+		if (!messageId) return;
+		if (!force && messageId === lastReplySuggestionId && aiReplySuggestion) return;
+		const payload = buildMessagePayload(contextSource);
+		if (!payload) return;
+		replySuggestionAbort?.abort();
+		const controller = new AbortController();
+		replySuggestionAbort = controller;
+		aiReplyLoading = true;
+		aiReplyError = null;
+		try {
+			const suggestion = await requestReplySuggestion(
+				{
+					message: payload,
+					threadLabel: pickString(threadLabel) || null,
+					context: aiContextWindow
+				},
+				controller.signal
+			);
+			if (replySuggestionAbort !== controller) return;
+			aiReplySuggestion = suggestion || null;
+			lastReplySuggestionId = messageId;
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') return;
+			const message = error instanceof Error ? error.message : String(error);
+			aiReplyError = message;
+			if (/openai api key missing/i.test(message)) {
+				aiServiceAvailable = false;
+			}
+		} finally {
+			if (replySuggestionAbort === controller) {
+				aiReplyLoading = false;
+			}
+		}
+	}
+
+	function cancelGeneralSuggestion(clear = true) {
+		generalSuggestionAbort?.abort();
+		generalSuggestionAbort = null;
+		if (clear) {
+			aiGeneralLoading = false;
+			aiGeneralSuggestion = null;
+			aiGeneralError = null;
+			lastGeneralSuggestionId = null;
+		}
+	}
+
+	async function fetchGeneralSuggestion(force = false) {
+		if (!showGeneralCoach) return;
+		const source = mobileSuggestionContext;
+		const messageId = contextIdOf(source);
+		if (!messageId) return;
+		if (!force && messageId === lastGeneralSuggestionId && aiGeneralSuggestion) return;
+		const payload = buildMessagePayload(source);
+		if (!payload) return;
+		generalSuggestionAbort?.abort();
+		const controller = new AbortController();
+		generalSuggestionAbort = controller;
+		aiGeneralLoading = true;
+		aiGeneralError = null;
+		try {
+			const suggestion = await requestReplySuggestion(
+				{
+					message: payload,
+					threadLabel: pickString(threadLabel) || null,
+					context: aiContextWindow
+				},
+				controller.signal
+			);
+			if (generalSuggestionAbort !== controller) return;
+			aiGeneralSuggestion = suggestion || null;
+			lastGeneralSuggestionId = messageId;
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') return;
+			const message = error instanceof Error ? error.message : String(error);
+			aiGeneralError = message;
+			if (/openai api key missing/i.test(message)) {
+				aiServiceAvailable = false;
+			}
+		} finally {
+			if (generalSuggestionAbort === controller) {
+				aiGeneralLoading = false;
+			}
+		}
+	}
+
+	function clearPredictions() {
+		predictionAbort?.abort();
+		predictionAbort = null;
+		aiInlineSuggestion = '';
+		schedulePredictionResize();
+	}
+
+	function queuePrediction() {
+		if (!showInlinePrediction) return;
+		if (predictionTimer) {
+			clearTimeout(predictionTimer);
+			predictionTimer = null;
+		}
+		if (!text.trim()) {
+			clearPredictions();
+			lastPredictionSeed = '';
+			return;
+		}
+		predictionTimer = setTimeout(() => {
+			predictionTimer = null;
+			void fetchPrediction();
+		}, 280);
+	}
+
+	async function fetchPrediction(force = false) {
+		if (!showInlinePrediction) return;
+		const seed = text;
+		if (!seed.trim()) {
+			clearPredictions();
+			lastPredictionSeed = '';
+			return;
+		}
+		if (!force && seed === lastPredictionSeed && aiInlineSuggestion) {
+			return;
+		}
+		predictionAbort?.abort();
+		const controller = new AbortController();
+		predictionAbort = controller;
+		try {
+			const suggestions = await requestPredictions(
+				{
+					text: seed,
+					platform
+				},
+				controller.signal
+			);
+			if (predictionAbort !== controller) return;
+			lastPredictionSeed = seed;
+			aiInlineSuggestion = showInlinePrediction ? (suggestions[0] ?? '') : '';
+			schedulePredictionResize();
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') return;
+			const message = error instanceof Error ? error.message : String(error);
+			if (/openai api key missing/i.test(message)) {
+				aiServiceAvailable = false;
+			}
+		}
+	}
+
+	function appendSuggestion(next: string) {
+		const value = pickString(next);
+		if (!value) return;
+		const needsSpace = text.length > 0 && !/\s$/.test(text);
+		const base = needsSpace ? `${text} ${value}` : `${text}${value}`;
+		text = `${base} `;
+		lastPredictionSeed = '';
+		queuePrediction();
+		requestAnimationFrame(() => inputEl?.focus());
+	}
+
+	function acceptInlineSuggestion() {
+		if (!aiInlineSuggestion) return;
+		appendSuggestion(aiInlineSuggestion);
+		aiInlineSuggestion = '';
+		schedulePredictionResize();
+	}
+
+	function insertSuggestionText(source: string | null) {
+		const suggestion = pickString(source);
+		if (!suggestion) return false;
+		if (!text.trim()) {
+			text = `${suggestion} `;
+		} else {
+			const needsBreak = !text.endsWith('\n\n');
+			text = `${text}${needsBreak ? '\n\n' : ''}${suggestion} `;
+		}
+		lastPredictionSeed = '';
+		queuePrediction();
+		requestAnimationFrame(() => inputEl?.focus());
+		suggestionTapPrimed = false;
+		return true;
+	}
+
+	function activeSuggestionText() {
+		if (!showSuggestionGhost) return null;
+		if (showReplyGhost) return pickString(aiReplySuggestion);
+		if (showGeneralCoach) return pickString(aiGeneralSuggestion);
+		return null;
+	}
+
+	function handleTextareaPointerDown(event: PointerEvent) {
+		if (platform !== 'mobile') return;
+		const suggestion = activeSuggestionText();
+		if (!suggestion || text.trim().length) {
+			suggestionTapPrimed = false;
+			return;
+		}
+		if (!suggestionTapPrimed) {
+			suggestionTapPrimed = true;
+			return;
+		}
+		event.preventDefault();
+		suggestionTapPrimed = false;
+		insertSuggestionText(suggestion);
+	}
+
+	function handlePredictionPointer(event: PointerEvent) {
+		if (platform !== 'mobile') return;
+		if (!aiInlineSuggestion) return;
+		event.preventDefault();
+		acceptInlineSuggestion();
+	}
+
+	function applyReplySuggestion() {
+		void insertSuggestionText(aiReplySuggestion);
+	}
+
+	function regenerateReplySuggestion() {
+		lastReplySuggestionId = null;
+		void fetchReplyCoach(true);
+	}
+
+	function applyGeneralSuggestion() {
+		void insertSuggestionText(aiGeneralSuggestion);
+	}
+
+	function regenerateGeneralSuggestion() {
+		lastGeneralSuggestionId = null;
+		void fetchGeneralSuggestion(true);
+	}
+
+	function closeRewriteMenu() {
+		rewriteMenuOpen = false;
+	}
+
+	function clearRewriteState(clearMode = false) {
+		rewriteAbort?.abort();
+		rewriteAbort = null;
+		rewriteLoading = false;
+		rewriteError = null;
+		rewriteOptions = [];
+		rewriteIndex = 0;
+		rewriteSeed = '';
+		if (clearMode) {
+			rewriteMode = null;
+		}
+	}
+
+	function handleRewriteAction(mode: RewriteMode) {
+		rewriteDefaultMode = mode;
+		rewriteMode = mode;
+		void runRewrite(mode, true);
+		closeRewriteMenu();
+	}
+
+	async function runRewrite(mode: RewriteMode, force = false) {
+		if (!aiAssistAllowed) {
+			rewriteError = 'AI currently unavailable.';
+			rewriteLoading = false;
+			return;
+		}
+		const trimmed = text.trim();
+		const minimum = mode === 'rephrase' ? 1 : MIN_REWRITE_LENGTH;
+		if (!trimmed || trimmed.length < minimum) {
+			rewriteError =
+				mode === 'rephrase' ? 'Draft is too short to rephrase.' : 'Type a bit more first.';
+			rewriteLoading = false;
+			return;
+		}
+		if (!force && rewriteSeed === trimmed && rewriteOptions.length) {
+			return;
+		}
+		rewriteAbort?.abort();
+		const controller = new AbortController();
+		rewriteAbort = controller;
+		rewriteLoading = true;
+		rewriteError = null;
+		rewriteSeed = trimmed;
+		rewriteOptions = [];
+		rewriteIndex = 0;
+		try {
+			const options = await requestRewriteSuggestions(
+				{
+					text: trimmed,
+					threadLabel: pickString(threadLabel) || null,
+					context: aiContextWindow,
+					mode
+				},
+				controller.signal
+			);
+			if (rewriteAbort !== controller) return;
+			rewriteOptions = options;
+			rewriteIndex = 0;
+			if (!options.length) {
+				rewriteError = 'No rewrite ready yet.';
+			}
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') return;
+			const message = error instanceof Error ? error.message : String(error);
+			rewriteError = message;
+			if (/openai api key missing/i.test(message)) {
+				aiServiceAvailable = false;
+			}
+		} finally {
+			if (rewriteAbort === controller) {
+				rewriteLoading = false;
+			}
+		}
+	}
+
+	function acceptRewrite() {
+		const proposal = pickString(activeRewrite);
+		if (!proposal) return;
+		text = proposal;
+		clearRewriteState(true);
+		lastPredictionSeed = '';
+		queuePrediction();
+		requestAnimationFrame(() => inputEl?.focus());
+	}
+
+	function dismissRewrite() {
+		clearRewriteState(true);
+	}
+
+	function cycleRewriteOption() {
+		if (rewriteOptions.length > 1) {
+			rewriteIndex = (rewriteIndex + 1) % rewriteOptions.length;
+		} else {
+			void runRewrite(rewriteDefaultMode, true);
+		}
+	}
+
+	function retryRewrite() {
+		rewriteOptions = [];
+		rewriteIndex = 0;
+		rewriteError = null;
+		rewriteSeed = '';
+		void runRewrite(rewriteDefaultMode, true);
+	}
+
+	function refreshMentionDraft() {
+		if (!mentionDraft.size) return;
+		for (const [uid, record] of mentionDraft) {
+			if (!text.includes(record.handle)) {
+				mentionDraft.delete(uid);
+			}
+		}
+	}
+
+	function updateMentionState() {
+		if (!inputEl || !mentionOptions.length || disabled) {
+			closeMentionMenu();
+			return;
+		}
+
+		const caret = inputEl.selectionStart ?? text.length;
+		const prefix = text.slice(0, caret);
+		const atIndex = prefix.lastIndexOf('@');
+
+		if (atIndex === -1) {
+			closeMentionMenu();
+			return;
+		}
+
+		const prevChar = atIndex > 0 ? prefix.charAt(atIndex - 1) : ' ';
+		if (/\S/.test(prevChar) && !/[\(\[\{]/.test(prevChar)) {
+			closeMentionMenu();
+			return;
+		}
+
+		const fragment = prefix.slice(atIndex + 1);
+		if (fragment.includes(' ') || fragment.includes('\n') || fragment.includes('\t')) {
+			closeMentionMenu();
+			return;
+		}
+
+		mentionStart = atIndex;
+		mentionQuery = fragment.toLowerCase();
+		const canonicalQuery = canonical(fragment);
+
+		let filtered: MentionCandidate[] = [];
+		if (!mentionOptions.length) {
+			filtered = [];
+		} else if (!mentionQuery) {
+			filtered = mentionOptions
+				.slice()
+				.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+				.slice(0, 3);
+		} else {
+			filtered = mentionOptions
+				.map((option) => ({
+					option,
+					score: mentionScore(option, mentionQuery, canonicalQuery)
+				}))
+				.filter((entry) => entry.score > 0)
+				.sort((a, b) =>
+					b.score !== a.score
+						? b.score - a.score
+						: a.option.label.localeCompare(b.option.label, undefined, { sensitivity: 'base' })
+				)
+				.slice(0, 3)
+				.map((entry) => entry.option);
+		}
+
+		mentionFiltered = filtered;
+		if (!mentionFiltered.length) {
+			closeMentionMenu();
+			return;
+		}
+
+		mentionActive = true;
+		mentionIndex = Math.min(mentionIndex, mentionFiltered.length - 1);
+		void tick().then(() => syncMentionMenuPosition());
+	}
+
+	async function insertMention(option: MentionCandidate) {
+		if (mentionStart < 0) return;
+		const caret = inputEl?.selectionStart ?? text.length;
+		const before = text.slice(0, mentionStart);
+		const after = text.slice(caret);
+		const displayName = option.label?.trim()?.length ? option.label.trim() : option.handle;
+		const handleText = `@${displayName}`;
+		const needsSpaceBeforeAfter = after.length > 0 && !/^\s/.test(after);
+		const suffix = after.length ? `${needsSpaceBeforeAfter ? ' ' : ''}${after}` : ' ';
+		text = `${before}${handleText}${suffix}`;
+		mentionDraft.set(option.uid, {
+			uid: option.uid,
+			handle: handleText,
+			label: option.label,
+			color: option.color ?? null,
+			kind: option.kind
+		});
+		await tick();
+		const insertedSpace = after.length === 0 || needsSpaceBeforeAfter ? 1 : 0;
+		const nextCaret = before.length + handleText.length + insertedSpace;
+		inputEl?.setSelectionRange(nextCaret, nextCaret);
+		closeMentionMenu();
+		refreshMentionDraft();
+	}
+
+	function closeMentionMenu() {
+		mentionActive = false;
+		mentionFiltered = [];
+		mentionIndex = 0;
+		mentionQuery = '';
+		mentionStart = -1;
+	}
+
+	const openGif = () => {
+		showGif = true;
+		popOpen = false;
+	};
+
+	const openEmoji = () => {
+		if (disabled || !emojiSupported) return;
+		showEmoji = !showEmoji;
+		if (showEmoji) {
+			popOpen = false;
+			void tick().then(() => syncEmojiPickerPosition());
+		}
+	};
+	const openPoll = () => {
+		showPoll = true;
+		popOpen = false;
+	};
+	const openForm = () => {
+		showForm = true;
+		popOpen = false;
+	};
+
+	function togglePopover(event?: Event) {
+		event?.preventDefault?.();
+		event?.stopPropagation?.();
+		if (disabled) return;
+		popOpen = !popOpen;
+		if (popOpen) {
+			showEmoji = false;
+			engageDockSuppression();
+			void tick().then(() => syncPopoverPosition());
+		} else if (!inputFocused) {
+			releaseDockSuppression();
+		}
+	}
+
+	function onGifPicked(url: string) {
+		const payload = { url, replyTo: replyTarget ?? undefined };
+		onSendGif(payload);
+		dispatch('sendGif', payload);
+		playSound('message-send');
+		showGif = false;
+	}
+	function onPollCreate(poll: { question: string; options: string[] }) {
+		const payload = { ...poll, replyTo: replyTarget ?? undefined };
+		onCreatePoll(payload);
+		dispatch('createPoll', payload);
+		showPoll = false;
+	}
+	function onFormCreate(form: { title: string; questions: string[] }) {
+		const payload = { ...form, replyTo: replyTarget ?? undefined };
+		onCreateForm(payload);
+		dispatch('createForm', payload);
+		showForm = false;
+	}
+
+	async function insertEmoji(symbol: string) {
+		if (!inputEl) return;
+		const start = inputEl.selectionStart ?? text.length;
+		const end = inputEl.selectionEnd ?? text.length;
+		const before = text.slice(0, start);
+		const after = text.slice(end);
+		text = `${before}${symbol}${after}`;
+		await tick();
+		const nextCaret = before.length + symbol.length;
+		inputEl.focus();
+		inputEl.setSelectionRange(nextCaret, nextCaret);
+		refreshMentionDraft();
+		handleSelectionChange();
+		queuePrediction();
+	}
+
+	function onEmojiPicked(symbol: string) {
+		void insertEmoji(`${symbol} `);
+		showEmoji = false;
+	}
+
+	function registerEmojiOutsideWatcher() {
+		if (typeof document === 'undefined') return null;
+		const handler = (event: MouseEvent) => {
+			const target = event.target as Node;
+			// Check if click is inside the trigger button or the picker
+			if (emojiTriggerEl?.contains(target)) return;
+			if (emojiPickerEl?.contains(target)) return;
+			// If picker hasn't mounted yet, don't close (prevents immediate close on open click)
+			if (!emojiPickerEl) return;
+			showEmoji = false;
+		};
+		// Delay adding listener to avoid catching the same click that opened the picker
+		const timeoutId = setTimeout(() => {
+			document.addEventListener('pointerdown', handler);
+		}, 0);
+		return () => {
+			clearTimeout(timeoutId);
+			document.removeEventListener('pointerdown', handler);
+		};
+	}
+
+	function registerPopoverOutsideWatcher() {
+		if (typeof document === 'undefined') return null;
+		const handler = (event: MouseEvent) => {
+			const target = event.target as Node;
+			if (popoverEl?.contains(target) || plusTriggerEl?.contains(target)) return;
+			popOpen = false;
+		};
+		document.addEventListener('pointerdown', handler);
+		return () => document.removeEventListener('pointerdown', handler);
+	}
+
+	/**
+	 * Position the plus menu popover.
+	 * CSS bottom = distance from viewport's bottom edge to the popup's bottom edge
+	 * We want the popup's bottom edge to be just above the chat input's top edge
+	 */
+	function syncPopoverPosition() {
+		if (typeof window === 'undefined') return;
+
+		const vh = window.innerHeight;
+		const vw = window.innerWidth;
+		const width = platform === 'mobile' ? 280 : 320;
+		const gap = 8;
+		const pad = 8;
+
+		const anchor = rootEl;
+		if (!anchor) {
+			popoverPlacement = {
+				left: `${pad}px`,
+				bottom: '70px',
+				width: `${width}px`,
+				maxHeight: '350px'
+			};
+			return;
+		}
+
+		const rect = anchor.getBoundingClientRect();
+
+		// The anchor's height from its top to the bottom of viewport
+		// We want to place popup ABOVE the anchor, so we need:
+		// bottom = height of anchor + gap (distance from viewport bottom to anchor bottom = vh - rect.bottom)
+		// Actually: popup bottom = (vh - rect.top) + gap
+		// rect.top = distance from viewport top to anchor top
+		// vh - rect.top = distance from anchor top to viewport bottom
+		// So setting popup's CSS bottom to (vh - rect.top + gap) places its bottom edge that far from viewport bottom
+		// This is ABOVE the anchor by gap pixels
+
+		const anchorHeight = rect.height;
+		const anchorDistanceFromBottom = vh - rect.bottom; // how far anchor's bottom is from viewport bottom
+		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap; // place popup above anchor's top
+
+		// Clamp so popup doesn't go off bottom of screen
+		const bottom = Math.max(pad, popupBottom);
+
+		// Calculate available height above (space from popup bottom to viewport top)
+		const spaceAbove = vh - bottom - pad;
+		const maxHeight = Math.min(400, Math.max(150, spaceAbove));
+
+		// Left aligned, clamped to viewport
+		let left = Math.max(pad, rect.left);
+		if (left + width > vw - pad) {
+			left = Math.max(pad, vw - width - pad);
+		}
+
+		popoverPlacement = {
+			left: `${Math.round(left)}px`,
+			bottom: `${Math.round(bottom)}px`,
+			width: `${width}px`,
+			maxHeight: `${Math.round(maxHeight)}px`
+		};
+	}
+
+	/**
+	 * Position the mention/tag menu.
+	 */
+	function syncMentionMenuPosition() {
+		if (typeof window === 'undefined') return;
+
+		const vh = window.innerHeight;
+		const vw = window.innerWidth;
+		const menuWidth = Math.min(320, vw - 16);
+		const gap = 8;
+		const pad = 8;
+
+		const anchor = rootEl;
+		if (!anchor) {
+			mentionMenuPosition = { left: `${pad}px`, bottom: '70px', maxHeight: '200px' };
+			return;
+		}
+
+		const rect = anchor.getBoundingClientRect();
+
+		// Place above anchor
+		const anchorHeight = rect.height;
+		const anchorDistanceFromBottom = vh - rect.bottom;
+		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap;
+		const bottom = Math.max(pad, popupBottom);
+
+		// Available height
+		const spaceAbove = vh - bottom - pad;
+		const maxHeight = Math.min(220, Math.max(100, spaceAbove));
+
+		// Left aligned, clamped
+		let left = Math.max(pad, rect.left);
+		if (left + menuWidth > vw - pad) {
+			left = Math.max(pad, vw - menuWidth - pad);
+		}
+
+		mentionMenuPosition = {
+			left: `${Math.round(left)}px`,
+			bottom: `${Math.round(bottom)}px`,
+			maxHeight: `${Math.round(maxHeight)}px`
+		};
+	}
+
+	/**
+	 * Position the emoji picker.
+	 */
+	function syncEmojiPickerPosition() {
+		if (typeof window === 'undefined') return;
+
+		const vh = window.innerHeight;
+		const vw = window.innerWidth;
+		const pickerWidth = Math.min(380, vw - 16);
+		const gap = 8;
+		const pad = 8;
+
+		const anchor = rootEl;
+		if (!anchor) {
+			emojiPickerPosition = {
+				left: 'auto',
+				right: `${pad}px`,
+				bottom: '70px',
+				top: 'auto',
+				maxHeight: '380px'
+			};
+			return;
+		}
+
+		const rect = anchor.getBoundingClientRect();
+
+		// Place above anchor
+		const anchorHeight = rect.height;
+		const anchorDistanceFromBottom = vh - rect.bottom;
+		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap;
+		const bottom = Math.max(pad, popupBottom);
+
+		// Available height
+		const spaceAbove = vh - bottom - pad;
+		const maxHeight = Math.min(400, Math.max(200, spaceAbove));
+
+		// Right-aligned by default
+		const right = Math.max(pad, vw - rect.right);
+
+		// Check if right-aligning would push left edge off screen
+		const leftEdgeIfRightAligned = vw - right - pickerWidth;
+
+		if (leftEdgeIfRightAligned < pad) {
+			emojiPickerPosition = {
+				left: `${pad}px`,
+				right: 'auto',
+				bottom: `${Math.round(bottom)}px`,
+				top: 'auto',
+				maxHeight: `${Math.round(maxHeight)}px`
+			};
+		} else {
+			emojiPickerPosition = {
+				left: 'auto',
+				right: `${Math.round(right)}px`,
+				bottom: `${Math.round(bottom)}px`,
+				top: 'auto',
+				maxHeight: `${Math.round(maxHeight)}px`
+			};
+		}
+	}
+
+	onMount(() => {
+		if (typeof window === 'undefined') return;
+		// Enable emoji picker on desktop screens (min 768px width)
+		const mq = window.matchMedia('(min-width: 768px)');
+		const update = () => {
+			emojiSupported = mq.matches;
+			if (!emojiSupported) showEmoji = false;
+		};
+		update();
+		mq.addEventListener('change', update);
+		return () => {
+			mq.removeEventListener('change', update);
+			disposeEmojiOutside?.();
+		};
+	});
+
+	onMount(() => {
+		if (typeof window === 'undefined' || typeof document === 'undefined') return;
+		const viewport = window.visualViewport;
+		if (!viewport) return;
+		const root = document.documentElement;
+
+		const applyKeyboardInset = () => {
+			if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
+			keyboardInsetFrame = requestAnimationFrame(() => {
+				keyboardInsetFrame = null;
+				let offset = 0;
+				if (inputFocused && window.innerWidth <= KEYBOARD_MOBILE_MAX_WIDTH) {
+					const occupied = Math.round(window.innerHeight - (viewport.height + viewport.offsetTop));
+					const diff = Math.max(0, occupied);
+					offset = diff > KEYBOARD_ACTIVATION_THRESHOLD ? diff : 0;
+				}
+				root.style.setProperty(KEYBOARD_OFFSET_VAR, offset ? `${offset}px` : '0px');
+				root.style.setProperty(SAFE_AREA_VAR, offset ? '0px' : 'env(safe-area-inset-bottom, 0px)');
+			});
+		};
+
+		const handleViewportChange = () => applyKeyboardInset();
+		viewport.addEventListener('resize', handleViewportChange);
+		viewport.addEventListener('scroll', handleViewportChange);
+		window.addEventListener('orientationchange', handleViewportChange);
+		syncKeyboardInset = applyKeyboardInset;
+		applyKeyboardInset();
+
+		return () => {
+			viewport.removeEventListener('resize', handleViewportChange);
+			viewport.removeEventListener('scroll', handleViewportChange);
+			window.removeEventListener('orientationchange', handleViewportChange);
+			if (keyboardInsetFrame) cancelAnimationFrame(keyboardInsetFrame);
+			root.style.setProperty(KEYBOARD_OFFSET_VAR, '0px');
+			root.style.setProperty(SAFE_AREA_VAR, 'env(safe-area-inset-bottom, 0px)');
+			syncKeyboardInset = null;
+		};
+	});
+
+	onMount(() => {
+		if (typeof window === 'undefined') return;
+		const coarse = window.matchMedia('(pointer:coarse)');
+		const update = () => {
+			const prefersCoarse = coarse.matches;
+			const narrow = window.innerWidth <= 768;
+			const nextPlatform = prefersCoarse || narrow ? 'mobile' : 'desktop';
+			if (platform !== nextPlatform) {
+				platform = nextPlatform;
+				if (nextPlatform === 'desktop') {
+					releaseDockSuppression(true);
+				}
+			} else {
+				platform = nextPlatform;
+			}
+		};
+		update();
+		window.addEventListener('resize', update);
+		coarse.addEventListener('change', update);
+		return () => {
+			window.removeEventListener('resize', update);
+			coarse.removeEventListener('change', update);
+		};
+	});
+
+	onDestroy(() => {
+		clearAttachments();
+		cancelReplySuggestion();
+		cancelGeneralSuggestion();
+		clearPredictions();
+		clearRewriteState(true);
+		if (predictionTimer) {
+			clearTimeout(predictionTimer);
+			predictionTimer = null;
+		}
+		if (dockReleaseTimer) {
+			clearTimeout(dockReleaseTimer);
+			dockReleaseTimer = null;
+		}
+		if (dockSuppressionActive) {
+			dockSuppressionActive = false;
+			mobileDockSuppressed.release();
+		}
+		popoverOutsideCleanup?.();
+		popoverOutsideCleanup = null;
+	});
+
+	function onEsc(e: KeyboardEvent) {
+		if (e.key !== 'Escape') return;
+		if (mentionActive) {
+			closeMentionMenu();
+			return;
+		}
+		if (showGif || showPoll || showForm || showEmoji) {
+			showGif = showPoll = showForm = showEmoji = false;
+		} else {
+			popOpen = false;
+		}
+	}
+	run(() => {
+		mentionLookup = new Map(mentionOptions.map((option) => [option.handle.toLowerCase(), option]));
+	});
+	run(() => {
+		mentionAliasLookup = new Map(
+			mentionOptions.flatMap((option) =>
+				option.aliases.map((alias) => [alias, option] as [string, MentionCandidate])
+			)
+		);
+	});
+	run(() => {
+		// Update text segments whenever text or mention lookups change
+		textSegments = parseTextSegments(text);
+	});
+	run(() => {
+		if (!mentionOptions.length) {
+			mentionDraft.clear();
+			closeMentionMenu();
+		}
+	});
+	run(() => {
+		disposeEmojiOutside?.();
+		disposeEmojiOutside = showEmoji ? registerEmojiOutsideWatcher() : null;
+	});
+
+	run(() => {
+		const sources = Array.isArray(conversationContext) ? conversationContext : [];
+		const normalized = sources
+			.map((entry) => buildMessagePayload(entry))
+			.filter((entry): entry is ReplyMessageContext => Boolean(entry));
+		aiContextWindow = normalized.slice(-MAX_AI_CONTEXT);
+	});
+
+	run(() => {
+		if (!aiAssistAllowed) {
+			rewriteMenuOpen = false;
+		}
+	});
+
+	run(() => {
+		if (!rewriteEligible) {
+			clearRewriteState(true);
+		}
+	});
+
+	run(() => {
+		if (!rewriteMode || rewriteLoading) return;
+		if (rewriteSeed && text.trim() !== rewriteSeed) {
+			rewriteOptions = [];
+			rewriteIndex = 0;
+			rewriteError = null;
+		}
+	});
+
+	run(() => {
+		if (showReplyCoach) {
+			void fetchReplyCoach();
+		} else {
+			cancelReplySuggestion();
+		}
+	});
+
+	run(() => {
+		if (showGeneralCoach) {
+			void fetchGeneralSuggestion();
+		} else {
+			cancelGeneralSuggestion();
+		}
+	});
+
+	run(() => {
+		if (!aiAssistAllowed) {
+			cancelReplySuggestion();
+			cancelGeneralSuggestion();
+			clearPredictions();
+			return;
+		}
+		if (!text.trim()) {
+			clearPredictions();
+			lastPredictionSeed = '';
+			return;
+		}
+		if (showInlinePrediction) {
+			queuePrediction();
+		}
+	});
 </script>
 
 <svelte:window onkeydown={onEsc} />
 
 <div class="chat-input-root" bind:this={rootEl}>
-  <div class="chat-input-overlays">
-    {#if showRewriteCoach}
-      <div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
-        <div class="ai-card__header">
-          <div class="ai-card__badge">
-            <i class="bx bx-wand" aria-hidden="true"></i>
-            <span>Rewrite &mdash; {rewriteModeLabel}</span>
-          </div>
-          {#if rewriteOptions.length > 1}
-            <div class="ai-card__meta">{rewriteIndex + 1}/{rewriteOptions.length}</div>
-          {/if}
-        </div>
-        <div class="ai-card__body">
-          {#if rewriteLoading && !activeRewrite}
-            <div class="ai-card__status">Polishing your draft...</div>
-          {:else if rewriteError}
-            <div class="ai-card__status ai-card__status--error">{rewriteError}</div>
-            <div class="ai-card__actions">
-              <button type="button" class="ai-card__button ai-card__button--primary" onclick={retryRewrite}>
-                Try again
-              </button>
-              <button type="button" class="ai-card__button" onclick={dismissRewrite}>
-                Dismiss
-              </button>
-            </div>
-          {:else if activeRewrite}
-            <p class="ai-card__text">{activeRewrite}</p>
-            <div class="ai-card__actions ai-card__actions--triple">
-              <button type="button" class="ai-card__button ai-card__button--primary" onclick={acceptRewrite}>
-                Replace draft
-              </button>
-              <button type="button" class="ai-card__button" onclick={dismissRewrite}>
-                Keep mine
-              </button>
-              <button type="button" class="ai-card__button" onclick={cycleRewriteOption}>
-                Another take
-              </button>
-            </div>
-          {:else}
-            <div class="ai-card__status">Hang tight while we polish that draft.</div>
-          {/if}
-        </div>
-      </div>
-    {/if}
+	<div class="chat-input-overlays">
+		{#if showRewriteCoach}
+			<div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
+				<div class="ai-card__header">
+					<div class="ai-card__badge">
+						<i class="bx bx-wand" aria-hidden="true"></i>
+						<span>Rewrite &mdash; {rewriteModeLabel}</span>
+					</div>
+					{#if rewriteOptions.length > 1}
+						<div class="ai-card__meta">{rewriteIndex + 1}/{rewriteOptions.length}</div>
+					{/if}
+				</div>
+				<div class="ai-card__body">
+					{#if rewriteLoading && !activeRewrite}
+						<div class="ai-card__status">Polishing your draft...</div>
+					{:else if rewriteError}
+						<div class="ai-card__status ai-card__status--error">{rewriteError}</div>
+						<div class="ai-card__actions">
+							<button
+								type="button"
+								class="ai-card__button ai-card__button--primary"
+								onclick={retryRewrite}
+							>
+								Try again
+							</button>
+							<button type="button" class="ai-card__button" onclick={dismissRewrite}>
+								Dismiss
+							</button>
+						</div>
+					{:else if activeRewrite}
+						<p class="ai-card__text">{activeRewrite}</p>
+						<div class="ai-card__actions ai-card__actions--triple">
+							<button
+								type="button"
+								class="ai-card__button ai-card__button--primary"
+								onclick={acceptRewrite}
+							>
+								Replace draft
+							</button>
+							<button type="button" class="ai-card__button" onclick={dismissRewrite}>
+								Keep mine
+							</button>
+							<button type="button" class="ai-card__button" onclick={cycleRewriteOption}>
+								Another take
+							</button>
+						</div>
+					{:else}
+						<div class="ai-card__status">Hang tight while we polish that draft.</div>
+					{/if}
+				</div>
+			</div>
+		{/if}
+	</div>
 
-  </div>
+	<div class="chat-input-stack">
+		{#if attachments.length}
+			<div class="chat-attachments" role="list">
+				{#each attachments as attachment}
+					{@const attachmentSize = formatBytes(attachment.size)}
+					<div class="chat-attachment" role="listitem">
+						{#if attachment.isImage && attachment.previewUrl}
+							<div class="chat-attachment__thumb">
+								<img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
+							</div>
+						{:else}
+							<div class="chat-attachment__icon" aria-hidden="true">
+								<i class="bx bx-paperclip"></i>
+							</div>
+						{/if}
+						<div class="chat-attachment__meta">
+							<div class="chat-attachment__name" title={attachment.name}>{attachment.name}</div>
+							<div class="chat-attachment__info">
+								<span>{attachment.contentType ?? (attachment.isImage ? 'Image' : 'File')}</span>
+								{#if attachmentSize}
+									<span aria-hidden="true">&bull;</span>
+									<span>{attachmentSize}</span>
+								{/if}
+							</div>
+						</div>
+						<button
+							type="button"
+							class="chat-attachment__remove"
+							aria-label={`Remove ${attachment.name}`}
+							onclick={() => removeAttachment(attachment.id)}
+						>
+							<i class="bx bx-x"></i>
+						</button>
+					</div>
+				{/each}
+			</div>
+		{/if}
 
-  <div class="chat-input-stack">
-  {#if attachments.length}
-    <div class="chat-attachments" role="list">
-      {#each attachments as attachment}
-        {@const attachmentSize = formatBytes(attachment.size)}
-        <div class="chat-attachment" role="listitem">
-          {#if attachment.isImage && attachment.previewUrl}
-            <div class="chat-attachment__thumb">
-              <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
-            </div>
-          {:else}
-            <div class="chat-attachment__icon" aria-hidden="true">
-              <i class="bx bx-paperclip"></i>
-            </div>
-          {/if}
-          <div class="chat-attachment__meta">
-            <div class="chat-attachment__name" title={attachment.name}>{attachment.name}</div>
-            <div class="chat-attachment__info">
-              <span>{attachment.contentType ?? (attachment.isImage ? 'Image' : 'File')}</span>
-              {#if attachmentSize}
-                <span aria-hidden="true">&bull;</span>
-                <span>{attachmentSize}</span>
-              {/if}
-            </div>
-          </div>
-          <button
-            type="button"
-            class="chat-attachment__remove"
-            aria-label={`Remove ${attachment.name}`}
-            onclick={() => removeAttachment(attachment.id)}
-          >
-            <i class="bx bx-x"></i>
-          </button>
-        </div>
-      {/each}
-    </div>
-  {/if}
+		<form
+			bind:this={formEl}
+			onsubmit={preventDefault(submit)}
+			class="relative flex items-center gap-2 chat-input__form"
+		>
+			<div
+				class="chat-input__action-column"
+				class:chat-input__action-column--mobile={platform === 'mobile'}
+				class:chat-input__action-column--mobile-anchored={platform === 'mobile' && textareaExpanded}
+			>
+				<div class="chat-input__primary-action">
+					<button
+						type="button"
+						class="chat-input__plus-button"
+						aria-haspopup="menu"
+						aria-expanded={popOpen}
+						aria-label="Add to message"
+						title="Add to message"
+						onclick={togglePopover}
+						{disabled}
+						bind:this={plusTriggerEl}
+					>
+						<i class="bx bx-plus" aria-hidden="true"></i>
+					</button>
 
-  <form onsubmit={preventDefault(submit)} class="relative flex items-center gap-2 chat-input__form">
-    <div
-      class="chat-input__action-column"
-      class:chat-input__action-column--mobile={platform === 'mobile'}
-      class:chat-input__action-column--mobile-anchored={platform === 'mobile' && textareaExpanded}
-    >
-      <div class="chat-input__primary-action">
-        <button
-          type="button"
-          class="chat-input__plus-button"
-          aria-haspopup="menu"
-          aria-expanded={popOpen}
-          aria-label="Add to message"
-          title="Add to message"
-          onclick={togglePopover}
-          disabled={disabled}
-          bind:this={plusTriggerEl}
-        >
-          <i class="bx bx-plus" aria-hidden="true"></i>
-        </button>
+					{#if popOpen}
+						<div
+							class="chat-input-popover__backdrop"
+							role="button"
+							tabindex="0"
+							aria-label="Close add menu"
+							onclick={() => (popOpen = false)}
+							onkeydown={(event) => {
+								if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+									event.preventDefault();
+									popOpen = false;
+								}
+							}}
+						></div>
+					{/if}
 
-        {#if popOpen}
-          <div
-            class="chat-input-popover__backdrop"
-            role="button"
-            tabindex="0"
-            aria-label="Close add menu"
-            onclick={() => (popOpen = false)}
-            onkeydown={(event) => {
-              if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                popOpen = false;
-              }
-            }}
-          ></div>
-        {/if}
+					<input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
+				</div>
+			</div>
 
-        <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
-      </div>
+			<div class="flex-1 relative chat-input__field">
+				{#if replyTarget}
+					<div class="reply-banner" role="status">
+						<div class="reply-banner__indicator" aria-hidden="true"></div>
+						<div class="reply-banner__body">
+							<div class="reply-banner__label">Replying to</div>
+							<div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
+							<div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
+						</div>
+						<button
+							type="button"
+							class="reply-banner__close"
+							onclick={cancelReply}
+							aria-label="Cancel reply"
+						>
+							<i class="bx bx-x"></i>
+						</button>
+					</div>
+				{/if}
 
-    </div>
+				<div class="chat-input__editor">
+					<div class="chat-input__textarea-wrapper">
+						<textarea
+							class="input textarea flex-1 rounded-full border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+							rows="1"
+							bind:this={inputEl}
+							bind:value={text}
+							placeholder={showSuggestionGhost ? '' : placeholder}
+							onpointerdown={handleTextareaPointerDown}
+							onkeydown={onKeydown}
+							oninput={handleInput}
+							onpaste={handlePaste}
+							onkeyup={handleSelectionChange}
+							onclick={handleSelectionChange}
+							onfocus={handleTextareaFocus}
+							onblur={handleTextareaBlur}
+							onscroll={handleTextareaScroll}
+							{disabled}
+							aria-label="Message input"
+						></textarea>
 
-    <div class="flex-1 relative chat-input__field">
-      {#if replyTarget}
-        <div class="reply-banner" role="status">
-          <div class="reply-banner__indicator" aria-hidden="true"></div>
-          <div class="reply-banner__body">
-            <div class="reply-banner__label">Replying to</div>
-            <div class="reply-banner__name">{replyRecipientLabel(replyTarget)}</div>
-            <div class="reply-banner__preview">{replyPreviewText(replyTarget)}</div>
-          </div>
-          <button
-            type="button"
-            class="reply-banner__close"
-            onclick={cancelReply}
-            aria-label="Cancel reply"
-          >
-            <i class="bx bx-x"></i>
-          </button>
-        </div>
-      {/if}
+						{#if textSegments.some((s) => s.type === 'mention')}
+							<div
+								class="chat-input__mention-overlay"
+								aria-hidden="true"
+								style={`transform: translateY(-${predictionScroll}px);`}
+							>
+								{#each textSegments as segment}
+									{#if segment.type === 'mention'}
+										<span
+											class="chat-input__mention-tag"
+											class:chat-input__mention-tag--role={segment.record.kind === 'role'}
+											class:chat-input__mention-tag--special={segment.record.kind === 'special'}
+											style={segment.record.kind === 'role' && segment.record.color
+												? `--mention-color: ${segment.record.color}`
+												: ''}>{segment.content}</span
+										>
+									{:else}
+										<span class="chat-input__mention-text">{segment.content}</span>
+									{/if}
+								{/each}
+							</div>
+						{/if}
 
-      <div class="chat-input__editor">
-        <div class="chat-input__textarea-wrapper">
-        <textarea
-          class="input textarea flex-1 rounded-full bg-[#383a40] border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-          rows="1"
-          bind:this={inputEl}
-          bind:value={text}
-        placeholder={showSuggestionGhost ? '' : placeholder}
-          onpointerdown={handleTextareaPointerDown}
-          onkeydown={onKeydown}
-          oninput={handleInput}
-          onpaste={handlePaste}
-          onkeyup={handleSelectionChange}
-          onclick={handleSelectionChange}
-          onfocus={handleTextareaFocus}
-          onblur={handleTextareaBlur}
-          onscroll={handleTextareaScroll}
-          {disabled}
-          aria-label="Message input"
-></textarea>
+						{#if showSuggestionGhost}
+							{@const isReplySuggestion = showReplyGhost}
+							<button
+								type="button"
+								class="chat-input__suggested-refresh"
+								onclick={isReplySuggestion
+									? regenerateReplySuggestion
+									: regenerateGeneralSuggestion}
+								aria-label="Refresh suggested reply"
+								title="Refresh suggested reply"
+								disabled={isReplySuggestion ? aiReplyLoading : aiGeneralLoading}
+							>
+								<i class="bx bx-refresh" aria-hidden="true"></i>
+							</button>
+							<div
+								class="chat-input__suggested-ghost"
+								aria-live="polite"
+								bind:this={suggestedGhostEl}
+								style={predictionBoxStyle}
+							>
+								<div class="chat-input__suggested-line">
+									<span class="chat-input__suggested-prefix">
+										{#if isReplySuggestion}
+											Reply to {replyRecipientLabel(replyTarget) || 'member'}
+										{:else}
+											{placeholder ?? 'Message'}
+										{/if}
+									</span>
+									{#if isReplySuggestion}
+										{#if aiReplyLoading}
+											<span class="chat-input__suggested-status">Drafting a suggestion...</span>
+										{:else if aiReplyError}
+											<span class="chat-input__suggested-status chat-input__suggested-status--error"
+												>{aiReplyError}</span
+											>
+										{:else if aiReplySuggestion}
+											<span class="chat-input__suggested-text">{aiReplySuggestion}</span>
+										{:else}
+											<span class="chat-input__suggested-status">Tap refresh to get a draft.</span>
+										{/if}
+									{:else if aiGeneralLoading}
+										<span class="chat-input__suggested-status">Drafting a reply...</span>
+									{:else if aiGeneralError}
+										<span class="chat-input__suggested-status chat-input__suggested-status--error"
+											>{aiGeneralError}</span
+										>
+									{:else if aiGeneralSuggestion}
+										<span class="chat-input__suggested-text">{aiGeneralSuggestion}</span>
+									{:else}
+										<span class="chat-input__suggested-status">Press refresh for a new idea.</span>
+									{/if}
+								</div>
+								{#if isReplySuggestion ? aiReplySuggestion : aiGeneralSuggestion}
+									<span class="chat-input__suggested-hint">
+										{platform === 'mobile' ? 'Tap again to use' : 'Press Tab to use'}
+									</span>
+								{/if}
+							</div>
+						{/if}
 
-        {#if textSegments.some(s => s.type === 'mention')}
-          <div 
-            class="chat-input__mention-overlay" 
-            aria-hidden="true"
-            style={`transform: translateY(-${predictionScroll}px);`}
-          >
-            {#each textSegments as segment}
-              {#if segment.type === 'mention'}
-                <span 
-                  class="chat-input__mention-tag"
-                  class:chat-input__mention-tag--role={segment.record.kind === 'role'}
-                  class:chat-input__mention-tag--special={segment.record.kind === 'special'}
-                  style={segment.record.kind === 'role' && segment.record.color ? `--mention-color: ${segment.record.color}` : ''}
-                >{segment.content}</span>
-              {:else}
-                <span class="chat-input__mention-text">{segment.content}</span>
-              {/if}
-            {/each}
-          </div>
-        {/if}
+						{#if hasInlinePrediction || showMobileSend}
+							<div
+								class="chat-input__prediction"
+								class:chat-input__prediction--touch={hasInlinePrediction && platform === 'mobile'}
+								aria-hidden={hasInlinePrediction && platform !== 'mobile' ? 'true' : undefined}
+								style={predictionBoxStyle}
+								onpointerdown={handlePredictionPointer}
+							>
+								{#if hasInlinePrediction}
+									{@const overlayText = text || '\u00a0'}
+									<div
+										class="chat-input__prediction-content"
+										bind:this={predictionContentEl}
+										style={`transform: translateY(-${predictionScroll}px);`}
+									>
+										<span class="chat-input__prediction-shadow">{overlayText}</span>
+										<span class="chat-input__prediction-hint">{aiInlineSuggestion}</span>
+									</div>
+								{/if}
 
-        {#if showSuggestionGhost}
-          {@const isReplySuggestion = showReplyGhost}
-          <button
-            type="button"
-            class="chat-input__suggested-refresh"
-            onclick={isReplySuggestion ? regenerateReplySuggestion : regenerateGeneralSuggestion}
-            aria-label="Refresh suggested reply"
-            title="Refresh suggested reply"
-            disabled={isReplySuggestion ? aiReplyLoading : aiGeneralLoading}
-          >
-            <i class="bx bx-refresh" aria-hidden="true"></i>
-          </button>
-          <div
-            class="chat-input__suggested-ghost"
-            aria-live="polite"
-            bind:this={suggestedGhostEl}
-            style={predictionBoxStyle}
-          >
-            <div class="chat-input__suggested-line">
-              <span class="chat-input__suggested-prefix">
-                {#if isReplySuggestion}
-                  Reply to {replyRecipientLabel(replyTarget) || 'member'}
-                {:else}
-                  {placeholder ?? 'Message'}
-                {/if}
-              </span>
-              {#if isReplySuggestion}
-                {#if aiReplyLoading}
-                  <span class="chat-input__suggested-status">Drafting a suggestion...</span>
-                {:else if aiReplyError}
-                  <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiReplyError}</span>
-                {:else if aiReplySuggestion}
-                  <span class="chat-input__suggested-text">{aiReplySuggestion}</span>
-                {:else}
-                  <span class="chat-input__suggested-status">Tap refresh to get a draft.</span>
-                {/if}
-              {:else}
-                {#if aiGeneralLoading}
-                  <span class="chat-input__suggested-status">Drafting a reply...</span>
-                {:else if aiGeneralError}
-                  <span class="chat-input__suggested-status chat-input__suggested-status--error">{aiGeneralError}</span>
-                {:else if aiGeneralSuggestion}
-                  <span class="chat-input__suggested-text">{aiGeneralSuggestion}</span>
-                {:else}
-                  <span class="chat-input__suggested-status">Press refresh for a new idea.</span>
-                {/if}
-              {/if}
-            </div>
-            {#if (isReplySuggestion ? aiReplySuggestion : aiGeneralSuggestion)}
-              <span class="chat-input__suggested-hint">
-                {platform === 'mobile' ? 'Tap again to use' : 'Press Tab to use'}
-              </span>
-            {/if}
-          </div>
-        {/if}
+								{#if showMobileSend}
+									<button
+										type="submit"
+										class="chat-input__mobile-send"
+										class:chat-input__mobile-send--expanded={textareaExpanded}
+										disabled={sendDisabled}
+										aria-label="Send message"
+										title="Send message"
+										onpointerdown={(event) => event.stopPropagation()}
+									>
+										<i class="bx bx-up-arrow-alt" aria-hidden="true"></i>
+									</button>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				</div>
 
-        {#if hasInlinePrediction || showMobileSend}
-          <div
-            class="chat-input__prediction"
-            class:chat-input__prediction--touch={hasInlinePrediction && platform === 'mobile'}
-            aria-hidden={hasInlinePrediction && platform !== 'mobile' ? 'true' : undefined}
-            style={predictionBoxStyle}
-            onpointerdown={handlePredictionPointer}
-          >
-            {#if hasInlinePrediction}
-              {@const overlayText = text || '\u00a0'}
-              <div
-                class="chat-input__prediction-content"
-                bind:this={predictionContentEl}
-                style={`transform: translateY(-${predictionScroll}px);`}
-              >
-                <span class="chat-input__prediction-shadow">{overlayText}</span>
-                <span class="chat-input__prediction-hint">{aiInlineSuggestion}</span>
-              </div>
-            {/if}
+				<MentionMenu
+					active={mentionActive}
+					options={mentionFiltered}
+					selectedIndex={mentionIndex}
+					position={mentionMenuPosition}
+					specialMentionIds={SPECIAL_MENTION_IDS}
+					onSelect={insertMention}
+					onHover={(idx) => (mentionIndex = idx)}
+				/>
+			</div>
 
-            {#if showMobileSend}
-              <button
-                type="submit"
-                class="chat-input__mobile-send"
-                class:chat-input__mobile-send--expanded={textareaExpanded}
-                disabled={sendDisabled}
-                aria-label="Send message"
-                title="Send message"
-                onpointerdown={(event) => event.stopPropagation()}
-              >
-                <i class="bx bx-up-arrow-alt" aria-hidden="true"></i>
-              </button>
-            {/if}
-          </div>
-        {/if}
+			<div class="chat-input__actions" class:chat-input__actions--anchored={textareaExpanded}>
+				{#if emojiSupported}
+					<div class="emoji-trigger" bind:this={emojiTriggerEl}>
+						<button
+							type="button"
+							class="emoji-button"
+							onclick={openEmoji}
+							{disabled}
+							aria-label="Insert emoji"
+							title="Insert emoji"
+						>
+							<i class="bx bx-smile text-xl leading-none"></i>
+						</button>
+					</div>
+				{/if}
 
-      </div>
-    </div>
-
-      {#if mentionActive}
-        <div 
-          class="mention-menu" 
-          role="listbox"
-          style:left={mentionMenuPosition.left}
-          style:bottom={mentionMenuPosition.bottom}
-          style:max-height={mentionMenuPosition.maxHeight}
-        >
-          <div class="mention-menu__header">Tag someone or a role</div>
-          <div class="mention-menu__list">
-            {#each mentionFiltered as option, idx}
-              <button
-                type="button"
-                class={`mention-menu__item ${option.kind === 'role' ? 'mention-menu__item--role' : ''} ${option.kind === 'special' ? 'mention-menu__item--special' : ''} ${idx === mentionIndex ? 'is-active' : ''}`}
-                role="option"
-                aria-selected={idx === mentionIndex}
-                onmousedown={preventDefault(() => insertMention(option))}
-                onmouseenter={() => (mentionIndex = idx)}
-              >
-                <span class={`mention-menu__avatar ${option.kind === 'role' ? 'mention-menu__avatar--role' : ''} ${option.kind === 'special' ? 'mention-menu__avatar--special' : ''}`}>
-                  {#if option.kind === 'role'}
-                    <span
-                      class="mention-menu__role-swatch"
-                      style={`background:${option.color ?? 'var(--color-accent)'}`}
-                    ></span>
-                  {:else if option.kind === 'special'}
-                    <span class="mention-menu__avatar-special">@</span>
-                  {:else if option.avatar}
-                    <img src={option.avatar} alt={option.label} loading="lazy" />
-                  {:else}
-                    <span>{initialsFor(option.label)}</span>
-                  {/if}
-                </span>
-                <span class="mention-menu__meta">
-                  <span class="mention-menu__label">
-                    {option.label}
-                    {#if option.kind === 'role'}
-                      <span
-                        class="mention-menu__pill"
-                        style={`color:${option.color ?? 'var(--color-accent)'}`}
-                      >
-                        Role
-                      </span>
-                    {:else if option.kind === 'special'}
-                      <span class="mention-menu__pill mention-menu__pill--special">Broadcast</span>
-                    {/if}
-                  </span>
-                  {#if option.kind === 'special'}
-                    <span class="mention-menu__hint">
-                      {option.uid === SPECIAL_MENTION_IDS.EVERYONE
-                        ? 'Alerts everyone and adds them to the thread.'
-                        : 'Alerts everyone without enrolling them in the thread.'}
-                    </span>
-                  {/if}
-                </span>
-              </button>
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-    </div>
-
-    <div
-      class="chat-input__actions"
-      class:chat-input__actions--anchored={textareaExpanded}
-    >
-      {#if emojiSupported}
-        <div class="emoji-trigger" bind:this={emojiTriggerEl}>
-          <button
-            type="button"
-            class="emoji-button"
-            onclick={openEmoji}
-            disabled={disabled}
-            aria-label="Insert emoji"
-            title="Insert emoji"
-          >
-            <i class="bx bx-smile text-xl leading-none"></i>
-          </button>
-        </div>
-      {/if}
-
-      <button
-        class="chat-send-button"
-        class:chat-send-button--anchored={textareaExpanded}
-        type="submit"
-        disabled={sendDisabled}
-        aria-label="Send message"
-        title="Send"
-      >
-        Send
-      </button>
-    </div>
-  </form>
-</div>
+				<button
+					class="chat-send-button"
+					class:chat-send-button--anchored={textareaExpanded}
+					type="submit"
+					disabled={sendDisabled}
+					aria-label="Send message"
+					title="Send"
+				>
+					Send
+				</button>
+			</div>
+		</form>
+	</div>
 </div>
 
 {#if showEmoji}
-  <div 
-    class="emoji-picker-wrapper"
-    bind:this={emojiPickerEl}
-    style:left={emojiPickerPosition.left}
-    style:right={emojiPickerPosition.right}
-    style:bottom={emojiPickerPosition.bottom}
-    style:top={emojiPickerPosition.top}
-    style:max-height={emojiPickerPosition.maxHeight}
-  >
-    <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
-  </div>
+	<div
+		class="emoji-picker-wrapper"
+		bind:this={emojiPickerEl}
+		style:left={emojiPickerPosition.left}
+		style:right={emojiPickerPosition.right}
+		style:bottom={emojiPickerPosition.bottom}
+		style:top={emojiPickerPosition.top}
+		style:max-height={emojiPickerPosition.maxHeight}
+	>
+		<EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
+	</div>
 {/if}
 
 {#if showGif}
-  <GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
+	<GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
 {/if}
 {#if showPoll}
-  <PollBuilder on:close={() => (showPoll = false)} on:create={(e) => onPollCreate(e.detail)} />
+	<PollBuilder on:close={() => (showPoll = false)} on:create={(e) => onPollCreate(e.detail)} />
 {/if}
 {#if showForm}
-  <FormBuilder on:close={() => (showForm = false)} on:create={(e) => onFormCreate(e.detail)} />
+	<FormBuilder on:close={() => (showForm = false)} on:create={(e) => onFormCreate(e.detail)} />
 {/if}
 
-{#if popOpen}
-  <div
-    class="chat-input-popover"
-    class:chat-input-popover--mobile={platform === 'mobile'}
-    bind:this={popoverEl}
-    role="menu"
-    style:left={popoverPlacement.left}
-    style:bottom={popoverPlacement.bottom}
-    style:width={popoverPlacement.width}
-    style:max-height={popoverPlacement.maxHeight}
-  >
-    <div class="chat-input-popover__header">Add to message</div>
-    <div class="chat-input-menu">
-      <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
-        <span class="chat-input-menu__icon">
-          <i class="bx bx-film" aria-hidden="true"></i>
-        </span>
-        <div class="chat-input-menu__content">
-          <span class="chat-input-menu__title">Add GIF</span>
-          <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
-        </div>
-      </button>
-      <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
-        <span class="chat-input-menu__icon">
-          <i class="bx bx-paperclip" aria-hidden="true"></i>
-        </span>
-        <div class="chat-input-menu__content">
-          <span class="chat-input-menu__title">Upload files</span>
-          <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
-        </div>
-      </button>
-      <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
-        <span class="chat-input-menu__icon">
-          <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
-        </span>
-        <div class="chat-input-menu__content">
-          <span class="chat-input-menu__title">Create poll</span>
-          <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
-        </div>
-      </button>
-      <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
-        <span class="chat-input-menu__icon">
-          <i class="bx bx-detail" aria-hidden="true"></i>
-        </span>
-        <div class="chat-input-menu__content">
-          <span class="chat-input-menu__title">Create form</span>
-          <span class="chat-input-menu__subtitle">Collect structured responses.</span>
-        </div>
-      </button>
-      <div class="chat-input-menu__section">
-        <button
-          type="button"
-          class="chat-input-menu__section-toggle"
-          aria-expanded={rewriteMenuOpen}
-          onclick={() => (rewriteMenuOpen = !rewriteMenuOpen)}
-        >
-          <span class="chat-input-menu__section-label">
-            <span class="chat-input-menu__section-icon">
-              <i class="bx bx-pencil" aria-hidden="true"></i>
-            </span>
-            <span class="chat-input-menu__section-title">Sound-check message</span>
-          </span>
-          <i class={`bx ${rewriteMenuOpen ? 'bx-chevron-up' : 'bx-chevron-down'}`} aria-hidden="true"></i>
-        </button>
-        {#if rewriteMenuOpen}
-          {#if !aiAssistAllowed}
-            <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
-          {:else if !rewriteEligible}
-            <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
-          {:else}
-            <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
-          {/if}
-          <div class="chat-input-menu__rewrite">
-            {#each rewriteActions as action}
-              {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-              <button
-                type="button"
-                role="menuitem"
-                class="rewrite-menu__item chat-input-menu__rewrite-item"
-                onclick={() => handleRewriteAction(action.id)}
-                disabled={!rewriteEligible || actionBusy}
-              >
-                <span class="rewrite-menu__icon">
-                  <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                </span>
-                <span class="rewrite-menu__content">
-                  <span class="rewrite-menu__title">{action.label}</span>
-                  <span class="rewrite-menu__description">{action.description}</span>
-                </span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    </div>
-  </div>
-{/if}
+<ChatAddonsPopover
+	open={popOpen}
+	{platform}
+	placement={popoverPlacement}
+	{aiAssistAllowed}
+	{rewriteEligible}
+	{rewriteLoading}
+	{rewriteMode}
+	{rewriteActions}
+	onOpenGif={openGif}
+	onPickFiles={pickFiles}
+	onOpenPoll={openPoll}
+	onOpenForm={openForm}
+	onRewriteAction={handleRewriteAction}
+	onClose={() => (popOpen = false)}
+	bind:popoverEl
+/>
 
+<!-- svelte-ignore css_unused_selector -->
 <style>
-  .chat-attachments {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.75rem;
-    border-radius: var(--radius-xl);
-    border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-  }
-
-  .chat-attachment {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    max-width: 15rem;
-    padding: 0.35rem 0.5rem 0.35rem 0.35rem;
-    border-radius: var(--radius-lg);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
-  }
-
-  .chat-attachment__thumb,
-  .chat-attachment__icon {
-    width: 3rem;
-    height: 3rem;
-    border-radius: var(--radius-md);
-    overflow: hidden;
-    flex-shrink: 0;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-    display: grid;
-    place-items: center;
-  }
-
-  .chat-attachment__thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .chat-attachment__icon i {
-    font-size: 1.3rem;
-    color: var(--text-70);
-  }
-
-  .chat-attachment__meta {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .chat-attachment__name {
-    font-size: 0.85rem;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .chat-attachment__info {
-    font-size: 0.75rem;
-    color: var(--text-60);
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    flex-wrap: wrap;
-  }
-
-  .chat-attachment__remove {
-    border: none;
-    background: transparent;
-    color: var(--text-60);
-    border-radius: 999px;
-    width: 1.75rem;
-    height: 1.75rem;
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    transition: color 120ms ease, background 120ms ease;
-  }
-
-  .chat-attachment__remove:hover,
-  .chat-attachment__remove:focus-visible {
-    color: var(--color-text-primary);
-    background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
-    outline: none;
-  }
-
-  .chat-input-popover {
-    position: fixed;
-    width: 20rem;
-    max-width: calc(100vw - 2rem);
-    max-height: min(50vh, 24rem);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    z-index: 999999;
-    border-radius: 1.25rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-    background: var(--color-panel);
-    backdrop-filter: blur(24px);
-    box-shadow: 
-      0 -10px 40px rgba(0, 0, 0, 0.5),
-      0 0 0 1px rgba(255, 255, 255, 0.05) inset;
-    padding: 0.85rem 0.75rem;
-    color: var(--color-text-primary);
-  }
-
-  .chat-input-popover--mobile {
-    width: 18rem;
-    max-width: calc(100vw - 2rem);
-    max-height: min(50vh, 22rem);
-  }
-
-  .chat-input-popover__backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    z-index: 999998;
-  }
-
-  .chat-input-popover__header {
-    font-size: 0.7rem;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--text-60);
-    padding: 0 0.35rem 0.5rem;
-  }
-
-  .chat-input-menu {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .chat-input-menu__item {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    border-radius: var(--radius-md);
-    border: 1px solid transparent;
-    padding: 0.55rem 0.6rem;
-    background: color-mix(in srgb, var(--color-panel) 88%, transparent);
-    color: inherit;
-    text-align: left;
-    transition: transform 120ms ease, border 120ms ease, background 120ms ease;
-  }
-
-  .chat-input-menu__item:hover {
-    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel) 88%);
-    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  }
-
-  .chat-input-menu__item:active {
-    transform: translateY(0);
-  }
-
-  .chat-input-menu__icon {
-    width: 2.5rem;
-    height: 2.5rem;
-    border-radius: var(--radius-md);
-    display: grid;
-    place-items: center;
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-    color: var(--color-accent);
-    font-size: 1.15rem;
-    transition: all 150ms ease;
-  }
-
-  .chat-input-menu__item:hover .chat-input-menu__icon {
-    background: color-mix(in srgb, var(--color-accent) 28%, transparent);
-    transform: scale(1.05);
-  }
-
-  .chat-input-menu__content {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .chat-input-menu__title {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: var(--color-text-primary);
-  }
-
-  .chat-input-menu__subtitle {
-    font-size: 0.72rem;
-    color: var(--text-60);
-  }
-
-  :global(:root[data-theme-tone='light']) .chat-input-popover {
-    background: color-mix(in srgb, var(--color-panel) 98%, transparent);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    box-shadow: 0 18px 32px rgba(25, 34, 42, 0.18);
-  }
-
-  :global(:root[data-theme-tone='light']) .chat-input-menu__item {
-    background: color-mix(in srgb, var(--color-panel) 96%, transparent);
-  }
-
-  :global(:root[data-theme-tone='light']) .chat-input-menu__item:hover {
-    background: color-mix(in srgb, var(--color-panel) 100%, transparent);
-  }
-
-  :global(:root[data-theme-tone='light']) .chat-input-menu__icon {
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-  }
-
-  .chat-input-root {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    z-index: 50;
-  }
-
-  .chat-input-overlays {
-    position: absolute;
-    left: 0;
-    right: auto;
-    bottom: calc(100% + 0.6rem);
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-    width: min(420px, 100%);
-    pointer-events: none;
-    align-items: flex-start;
-  }
-
-  .chat-input-overlays > * {
-    pointer-events: auto;
-  }
-
-  .chat-input-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    position: relative;
-    z-index: 10;
-  }
-
-  .chat-input__action-column {
-    position: relative;
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-    transition: align-self 120ms ease, transform 120ms ease;
-    z-index: 20;
-  }
-
-  .chat-input__primary-action {
-    position: relative;
-    display: flex;
-    z-index: 25;
-  }
-
-  .chat-input__plus-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2.5rem;
-    height: 2.5rem;
-    border-radius: var(--radius-pill);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
-    color: var(--color-text-primary);
-    font-size: 1.25rem;
-    transition: all 150ms ease;
-    position: relative;
-    z-index: 15;
-    flex-shrink: 0;
-  }
-
-  .chat-input__plus-button:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-accent) 20%, var(--color-panel) 80%);
-    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
-    color: var(--color-accent);
-    transform: scale(1.05);
-  }
-
-  .chat-input__plus-button:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 50%, transparent);
-    border-color: var(--color-accent);
-  }
-
-  .chat-input__plus-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .chat-input__plus-button i {
-    line-height: 1;
-    transition: transform 150ms ease;
-  }
-
-  .chat-input__plus-button:hover:not(:disabled) i {
-    transform: rotate(90deg);
-  }
-
-  .reply-banner {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.8rem;
-    border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 50%);
-    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel) 90%);
-    box-shadow: none;
-    margin-bottom: 0.4rem;
-  }
-
-  .reply-banner__indicator {
-    width: 3px;
-    align-self: stretch;
-    border-radius: 999px;
-    background: var(--color-accent);
-  }
-
-  .reply-banner__body {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-
-  .reply-banner__label {
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: color-mix(in srgb, var(--color-accent) 70%, var(--text-60) 30%);
-    font-weight: 600;
-  }
-
-  .reply-banner__name {
-    font-weight: 600;
-    color: var(--text-90);
-    font-size: 0.8rem;
-  }
-
-  .reply-banner__preview {
-    font-size: 0.78rem;
-    color: var(--text-60);
-    font-style: normal;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .ai-card {
-    border-radius: 1.1rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 18px 32px rgba(5, 8, 18, 0.32);
-    padding: 0.9rem 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-
-  .ai-card--inline {
-    margin-top: 0.65rem;
-  }
-
-  .ai-card--standalone {
-    margin-bottom: 0.65rem;
-  }
-
-  .ai-card--rewrite {
-    background: linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--color-panel) 85%, var(--color-accent) 18%),
-      color-mix(in srgb, var(--color-panel-muted) 90%, transparent)
-    );
-    border-color: color-mix(in srgb, var(--color-border-subtle) 45%, var(--color-accent) 20%);
-  }
-
-  .ai-card--suggested {
-    padding: 0.4rem 0.6rem;
-    background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
-    box-shadow: none;
-  }
-
-  .ai-card__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-
-  .ai-card__badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    border-radius: 999px;
-    padding: 0.22rem 0.75rem;
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: color-mix(in srgb, var(--color-accent) 80%, white);
-    background: color-mix(in srgb, var(--color-accent) 25%, transparent);
-  }
-
-  .ai-card__badge i {
-    font-size: 1rem;
-  }
-
-  .ai-card__pill {
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: transparent;
-    color: var(--text-65);
-    font-size: 0.65rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 0.22rem 0.9rem;
-    font-weight: 650;
-  }
-
-  .ai-card__meta {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--text-55);
-  }
-
-  .ai-card__body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-  }
-
-  .ai-card__text {
-    margin: 0;
-    font-size: 0.95rem;
-    line-height: 1.5;
-    color: var(--color-text-primary);
-  }
-
-  .ai-card__status {
-    font-size: 0.82rem;
-    color: var(--text-65);
-  }
-
-  .ai-card__status--error {
-    color: var(--color-danger, #ff9a9a);
-  }
-
-  .ai-card__actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-
-  .ai-card__button {
-    border-radius: var(--radius-pill);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-    background: transparent;
-    color: var(--text-70);
-    font-size: 0.8rem;
-    font-weight: 600;
-    padding: 0.42rem 1rem;
-    transition: background 150ms ease, border 150ms ease, color 150ms ease;
-  }
-
-  .ai-card__button:hover,
-  .ai-card__button:focus-visible {
-    background: color-mix(in srgb, var(--color-panel) 98%, transparent);
-    outline: none;
-  }
-
-  .ai-card__button--primary {
-    border-color: transparent;
-    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
-    color: color-mix(in srgb, var(--color-panel-muted) 96%, white);
-  }
-
-
-  .reply-banner__close {
-    border: 0;
-    background: transparent;
-    color: var(--text-50);
-    padding: 0.2rem;
-    border-radius: 0.35rem;
-    line-height: 1;
-    display: grid;
-    place-items: center;
-    font-size: 1.1rem;
-    transition: color 100ms ease, background 100ms ease;
-  }
-
-  .reply-banner__close:hover,
-  .reply-banner__close:focus-visible {
-    color: var(--text-90);
-    background: color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
-    outline: none;
-  }
-
-  .textarea {
-    width: 100%;
-    min-height: 2.6rem;
-    max-height: min(60vh, 32rem);
-    resize: none;
-    line-height: 1.4;
-    font-family: inherit;
-    overflow-y: hidden;
-  }
-
-  .mention-menu {
-    position: fixed;
-    z-index: 999998;
-    width: min(22rem, calc(100vw - 2rem));
-    border-radius: var(--radius-lg);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 95%, transparent);
-    box-shadow: var(--shadow-elevated);
-    overflow: hidden;
-    backdrop-filter: blur(18px);
-    display: flex;
-    flex-direction: column;
-  }
-
-  .mention-menu__header {
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-55);
-    padding: 0.45rem 0.85rem 0.35rem;
-    flex-shrink: 0;
-  }
-
-  .mention-menu__list {
-    display: grid;
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .mention-menu__item {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    padding: 0.55rem 0.85rem;
-    background: transparent;
-    border: 0;
-    text-align: left;
-    transition: background 140ms ease, color 140ms ease;
-    color: inherit;
-    cursor: pointer;
-  }
-
-  .mention-menu__item.is-active,
-  .mention-menu__item:hover {
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-    color: var(--color-text-primary);
-  }
-
-  .mention-menu__avatar {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
-    overflow: hidden;
-    display: grid;
-    place-items: center;
-    font-size: 0.75rem;
-    font-weight: 600;
-  }
-
-  .mention-menu__avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .mention-menu__avatar--role {
-    padding: 0.2rem;
-  }
-
-  .mention-menu__avatar--special {
-    background: linear-gradient(140deg, rgba(56, 189, 248, 0.18), rgba(249, 115, 22, 0.28));
-    border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
-  }
-
-  .mention-menu__avatar-special {
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: color-mix(in srgb, var(--color-accent) 90%, #fff);
-  }
-
-  .mention-menu__role-swatch {
-    width: 100%;
-    height: 100%;
-    border-radius: inherit;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
-  }
-
-  .mention-menu__item--special {
-    background: color-mix(in srgb, var(--color-accent) 6%, transparent);
-  }
-
-  .mention-menu__meta {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    min-width: 0;
-  }
-
-  .mention-menu__label {
-    font-size: 0.85rem;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .mention-menu__pill {
-    font-size: 0.65rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    margin-left: 0.35rem;
-    padding: 0.05rem 0.4rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-  }
-
-  .mention-menu__pill--special {
-    color: #fff;
-    background: color-mix(in srgb, var(--color-accent) 35%, transparent);
-    border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
-  }
-
-  .mention-menu__hint {
-    font-size: 0.7rem;
-    color: var(--text-60);
-    line-height: 1.2;
-  }
-
-  .chat-input__field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .chat-input__editor {
-    position: relative;
-  }
-
-  .chat-input__textarea-wrapper {
-    position: relative;
-    width: 100%;
-  }
-
-  .chat-input__textarea-wrapper textarea {
-    position: relative;
-    z-index: 1;
-    width: 100%;
-    padding: 0.55rem 1rem;
-    min-height: 2.8rem;
-    line-height: 1.4;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, rgba(56, 59, 64, 0.9), rgba(12, 16, 20, 0.8)),
-      color-mix(in srgb, var(--color-panel) 75%, rgba(5, 5, 7, 0.95))
-    );
-    color: var(--text-100);
-    box-shadow: inset 0 1px 8px rgba(0, 0, 0, 0.35), 0 12px 30px rgba(0, 0, 0, 0.45);
-  }
-
-  .chat-input__textarea-wrapper textarea::placeholder {
-    line-height: 1.4;
-    color: var(--text-50);
-  }
-
-  .chat-input__mention-overlay {
-    position: absolute;
-    inset: 0;
-    padding: 0.55rem 1rem;
-    pointer-events: none;
-    font-family: inherit;
-    font-size: inherit;
-    line-height: 1.4;
-    overflow: hidden;
-    z-index: 3;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: transparent;
-  }
-
-  .chat-input__mention-text {
-    color: transparent;
-  }
-
-  .chat-input__mention-tag {
-    display: inline;
-    font-weight: 600;
-    color: #2fd8c8;
-    text-shadow: 0 0 12px rgba(47, 216, 200, 0.9), 0 0 20px rgba(47, 216, 200, 0.5);
-    background: transparent;
-    padding: 0;
-    border-radius: 0;
-    mix-blend-mode: screen;
-  }
-
-  .chat-input__mention-tag--role {
-    color: var(--mention-color, #2fd8c8);
-    text-shadow: 0 0 12px color-mix(in srgb, var(--mention-color, #2fd8c8) 90%, transparent), 
-                 0 0 20px color-mix(in srgb, var(--mention-color, #2fd8c8) 50%, transparent);
-    font-weight: 700;
-  }
-
-  .chat-input__mention-tag--special {
-    color: #38bdf8;
-    text-shadow: 0 0 12px rgba(56, 189, 248, 0.9), 0 0 20px rgba(56, 189, 248, 0.5);
-    font-weight: 700;
-  }
-
-  .chat-input__prediction {
-    position: absolute;
-    inset: 0;
-    padding: 0.5rem 1rem;
-    pointer-events: none;
-    font-family: inherit;
-    font-size: inherit;
-    line-height: 1.4;
-    overflow: hidden;
-    z-index: 2;
-  }
-
-  .chat-input__prediction--touch {
-    pointer-events: auto;
-    cursor: pointer;
-  }
-
-  .chat-input__prediction-content {
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .chat-input__prediction-shadow {
-    color: transparent;
-  }
-
-  .chat-input__prediction-hint {
-    color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
-  }
-
-  .chat-input__suggested-ghost {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    pointer-events: none;
-    font-size: 0.95rem;
-    line-height: 1.4;
-    color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
-    z-index: 3;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    padding-bottom: 0.3rem;
-  }
-
-  .chat-input__suggested-line {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    align-items: baseline;
-  }
-
-  .chat-input__suggested-prefix {
-    color: var(--text-55);
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .chat-input__suggested-text {
-    color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
-  }
-
-  .chat-input__suggested-hint {
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-50);
-  }
-
-  .chat-input__suggested-status {
-    color: var(--text-55);
-  }
-
-  .chat-input__suggested-status--error {
-    color: var(--color-danger, #ff9999);
-  }
-
-  .chat-input__suggested-refresh {
-    position: absolute;
-    top: 0.35rem;
-    right: 0.65rem;
-    width: 1.5rem;
-    height: 1.5rem;
-    border: none;
-    background: transparent;
-    color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
-    display: grid;
-    place-items: center;
-    z-index: 6;
-    padding: 0;
-  }
-
-  .chat-input__suggested-refresh:hover,
-  .chat-input__suggested-refresh:focus-visible {
-    color: var(--color-accent);
-    outline: none;
-  }
-
-  .chat-input__suggested-refresh:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .chat-input__suggested-refresh i {
-    font-size: 0.95rem;
-  }
-
-  @media (max-width: 640px) {
-    .chat-input__field {
-      gap: 0.45rem;
-    }
-
-    .chat-input__textarea-wrapper textarea {
-      border-radius: 1.2rem;
-      padding-inline: 1rem;
-    }
-
-    .chat-input__suggested-ghost {
-      padding-right: 2.5rem;
-    }
-
-    .chat-input__suggested-hint {
-      font-size: 0.7rem;
-    }
-
-    .ai-card {
-      border-radius: 1rem;
-      padding: 0.85rem;
-      gap: 0.5rem;
-    }
-
-    .ai-card__body {
-      gap: 0.4rem;
-    }
-
-    .rewrite-menu__item {
-      gap: 0.45rem;
-      padding: 0.35rem 0.4rem;
-    }
-
-    .rewrite-menu__icon {
-      width: 1.9rem;
-      height: 1.9rem;
-    }
-  }
-
-
-
-  .chat-input__actions {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    align-self: center;
-    transition: align-self 120ms ease, padding-bottom 120ms ease;
-    position: relative;
-    z-index: 20;
-  }
-
-  .chat-input__actions--anchored {
-    align-self: flex-end;
-    align-items: flex-end;
-    padding-bottom: 0.2rem;
-  }
-
-  .rewrite-menu__item {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    width: 100%;
-    border-radius: 0.85rem;
-    border: 1px solid transparent;
-    background: transparent;
-    padding: 0.45rem 0.55rem;
-    text-align: left;
-    transition: background 140ms ease, border 140ms ease;
-  }
-
-  .rewrite-menu__item:not(:disabled):hover,
-  .rewrite-menu__item:not(:disabled):focus-visible {
-    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    outline: none;
-  }
-
-  .rewrite-menu__item:disabled,
-  .rewrite-menu__item.is-disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .rewrite-menu__icon {
-    width: 2.4rem;
-    height: 2.4rem;
-    border-radius: 0.9rem;
-    background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
-    display: grid;
-    place-items: center;
-    color: var(--color-accent);
-  }
-
-  .rewrite-menu__content {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    color: var(--color-text-primary);
-  }
-
-  .rewrite-menu__title {
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-
-  .rewrite-menu__description {
-    font-size: 0.77rem;
-    color: var(--text-60);
-  }
-
-  .emoji-trigger {
-    position: relative;
-    z-index: 100;
-  }
-
-  .emoji-picker-wrapper {
-    position: fixed;
-    z-index: 999997;
-    overflow: hidden;
-    border-radius: 1rem;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .emoji-picker-wrapper :global(.emoji-panel) {
-    max-height: 100% !important;
-    height: 100% !important;
-  }
-
-  .emoji-button {
-    width: 2.75rem;
-    height: 2.75rem;
-    border-radius: 999px;
-    border: 1px solid var(--button-ghost-border);
-    background: var(--button-ghost-bg);
-    color: var(--button-ghost-text);
-    display: grid;
-    place-items: center;
-    transition: background 150ms ease, border 150ms ease, transform 120ms ease;
-  }
-
-  .emoji-button:hover:not(:disabled),
-  .emoji-button:focus-visible:not(:disabled) {
-    background: var(--button-ghost-hover);
-    border-color: color-mix(in srgb, var(--button-ghost-border) 65%, transparent);
-    outline: none;
-  }
-
-  .emoji-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .chat-send-button {
-    border-radius: var(--radius-pill);
-    background: var(--button-primary-bg);
-    color: var(--button-primary-text);
-    font-weight: 600;
-    padding: 0.55rem 1.4rem;
-    transition:
-      background 150ms ease,
-      transform 120ms ease,
-      margin 120ms ease;
-    align-self: center;
-    transform: translateY(-0.15rem);
-  }
-
-  .chat-send-button--anchored {
-    align-self: flex-end;
-    transform: translateY(0);
-    margin-bottom: 0.12rem;
-  }
-
-  .chat-send-button:hover:not(:disabled),
-  .chat-send-button:focus-visible:not(:disabled) {
-    background: var(--button-primary-hover);
-    transform: translateY(-1px);
-    outline: none;
-  }
-
-  .chat-send-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    transform: none;
-  }
-
-  .chat-input__mobile-send {
-    position: absolute;
-    top: 50%;
-    right: 0.4rem;
-    bottom: auto;
-    width: 1.65rem;
-    height: 1.65rem;
-    border-radius: 999px;
-    border: none;
-    background: var(--color-accent);
-    color: var(--color-app-bg, #030712);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.95rem;
-    box-shadow:
-      0 10px 20px rgba(6, 10, 20, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.25);
-    transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
-    z-index: 3;
-    pointer-events: auto;
-    transform: translateY(calc(-50% - 0.08rem));
-  }
-
-  .chat-input__mobile-send:disabled {
-    opacity: 0.45;
-    box-shadow: none;
-    cursor: not-allowed;
-  }
-
-  .chat-input__mobile-send--expanded {
-    top: auto;
-    bottom: 0.6rem;
-    transform: translateY(calc(0.25rem - 0.08rem));
-  }
-
-  .chat-input__mobile-send:not(:disabled):active {
-    transform: translateY(calc(-50% - 0.08rem)) scale(0.95);
-  }
-
-  .chat-input__mobile-send--expanded:not(:disabled):active {
-    transform: translateY(calc(0.25rem - 0.08rem)) scale(0.95);
-  }
-
-  .chat-input__mobile-send i {
-    line-height: 1;
-  }
-
-  @media (max-width: 767px) {
-    .chat-send-button {
-      display: none;
-    }
-
-    .chat-input__action-column--mobile {
-      position: static;
-      align-self: center;
-      display: flex;
-      align-items: center;
-      padding-right: 0.15rem;
-      z-index: 5;
-      transition: align-self 120ms ease, padding-bottom 120ms ease, transform 120ms ease;
-      transform: translateY(-0.15rem);
-    }
-
-    .chat-input__action-column--mobile-anchored {
-      align-self: flex-end;
-      padding-bottom: 0.15rem;
-      transform: translateY(0);
-    }
-
-    .chat-input__action-column--mobile .chat-input__primary-action {
-      width: auto;
-      height: auto;
-    }
-
-    .chat-input__action-column--mobile .chat-input__plus-button {
-      width: 2.75rem;
-      height: 2.75rem;
-      font-size: 1.35rem;
-      border-width: 1.5px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-    }
-
-    .chat-input__textarea-wrapper textarea {
-      padding-top: 0.35rem;
-      padding-bottom: 0.35rem;
-      padding-right: 3.5rem;
-      min-height: 2.25rem;
-      line-height: 1.35;
-    }
-  }
-
-  @media (min-width: 768px) {
-    .chat-input__mobile-send {
-      display: none;
-    }
-  }
+	.chat-attachments {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		padding: 0.75rem 1rem;
+		margin-bottom: 0.75rem;
+		border-radius: var(--radius-xl);
+		border: 1px dashed color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+	}
+
+	.chat-attachment {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		max-width: 15rem;
+		padding: 0.35rem 0.5rem 0.35rem 0.35rem;
+		border-radius: var(--radius-lg);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+	}
+
+	.chat-attachment__thumb,
+	.chat-attachment__icon {
+		width: 3rem;
+		height: 3rem;
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		flex-shrink: 0;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+		display: grid;
+		place-items: center;
+	}
+
+	.chat-attachment__thumb img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.chat-attachment__icon i {
+		font-size: 1.3rem;
+		color: var(--text-70);
+	}
+
+	.chat-attachment__meta {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.chat-attachment__name {
+		font-size: 0.85rem;
+		font-weight: 600;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.chat-attachment__info {
+		font-size: 0.75rem;
+		color: var(--text-60);
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		flex-wrap: wrap;
+	}
+
+	.chat-attachment__remove {
+		border: none;
+		background: transparent;
+		color: var(--text-60);
+		border-radius: 999px;
+		width: 1.75rem;
+		height: 1.75rem;
+		display: grid;
+		place-items: center;
+		flex-shrink: 0;
+		transition:
+			color 120ms ease,
+			background 120ms ease;
+	}
+
+	.chat-attachment__remove:hover,
+	.chat-attachment__remove:focus-visible {
+		color: var(--color-text-primary);
+		background: color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
+		outline: none;
+	}
+
+	.chat-input-popover {
+		position: fixed;
+		width: 20rem;
+		max-width: calc(100vw - 2rem);
+		max-height: min(50vh, 24rem);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		z-index: 999999;
+		border-radius: 1.25rem;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+		background: var(--color-panel);
+		backdrop-filter: blur(24px);
+		box-shadow:
+			0 -10px 40px rgba(0, 0, 0, 0.5),
+			0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+		padding: 0.85rem 0.75rem;
+		color: var(--color-text-primary);
+	}
+
+	.chat-input-popover--mobile {
+		width: 18rem;
+		max-width: calc(100vw - 2rem);
+		max-height: min(50vh, 22rem);
+	}
+
+	.chat-input-popover__backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		z-index: 999998;
+	}
+
+	.chat-input-popover__header {
+		font-size: 0.7rem;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: var(--text-60);
+		padding: 0 0.35rem 0.5rem;
+	}
+
+	.chat-input-menu {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.chat-input-menu__item {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		border-radius: var(--radius-md);
+		border: 1px solid transparent;
+		padding: 0.55rem 0.6rem;
+		background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+		color: inherit;
+		text-align: left;
+		transition:
+			transform 120ms ease,
+			border 120ms ease,
+			background 120ms ease;
+	}
+
+	.chat-input-menu__item:hover {
+		background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel) 88%);
+		border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+		transform: translateY(-2px);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+	}
+
+	.chat-input-menu__item:active {
+		transform: translateY(0);
+	}
+
+	.chat-input-menu__icon {
+		width: 2.5rem;
+		height: 2.5rem;
+		border-radius: var(--radius-md);
+		display: grid;
+		place-items: center;
+		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+		color: var(--color-accent);
+		font-size: 1.15rem;
+		transition: all 150ms ease;
+	}
+
+	.chat-input-menu__item:hover .chat-input-menu__icon {
+		background: color-mix(in srgb, var(--color-accent) 28%, transparent);
+		transform: scale(1.05);
+	}
+
+	.chat-input-menu__content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.chat-input-menu__title {
+		font-weight: 600;
+		font-size: 0.9rem;
+		color: var(--color-text-primary);
+	}
+
+	.chat-input-menu__subtitle {
+		font-size: 0.72rem;
+		color: var(--text-60);
+	}
+
+	:global(:root[data-theme-tone='light']) .chat-input-popover {
+		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+		border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		box-shadow: 0 18px 32px rgba(25, 34, 42, 0.18);
+	}
+
+	:global(:root[data-theme-tone='light']) .chat-input-menu__item {
+		background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+	}
+
+	:global(:root[data-theme-tone='light']) .chat-input-menu__item:hover {
+		background: color-mix(in srgb, var(--color-panel) 100%, transparent);
+	}
+
+	:global(:root[data-theme-tone='light']) .chat-input-menu__icon {
+		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+	}
+
+	.chat-input-root {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		z-index: 10;
+	}
+
+	.chat-input-overlays {
+		position: absolute;
+		left: 0;
+		right: auto;
+		bottom: calc(100% + 0.6rem);
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+		width: min(420px, 100%);
+		pointer-events: none;
+		align-items: flex-start;
+	}
+
+	.chat-input-overlays > * {
+		pointer-events: auto;
+	}
+
+	.chat-input-stack {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		position: relative;
+		z-index: 10;
+	}
+
+	.chat-input__action-column {
+		position: relative;
+		display: flex;
+		align-items: center;
+		flex-shrink: 0;
+		transition:
+			align-self 120ms ease,
+			transform 120ms ease;
+		z-index: 20;
+	}
+
+	.chat-input__primary-action {
+		position: relative;
+		display: flex;
+		z-index: 25;
+	}
+
+	.chat-input__plus-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.5rem;
+		height: 2.5rem;
+		border-radius: var(--radius-pill);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+		color: var(--color-text-primary);
+		font-size: 1.25rem;
+		transition: all 150ms ease;
+		position: relative;
+		z-index: 15;
+		flex-shrink: 0;
+	}
+
+	.chat-input__plus-button:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--color-accent) 20%, var(--color-panel) 80%);
+		border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+		color: var(--color-accent);
+		transform: scale(1.05);
+	}
+
+	.chat-input__plus-button:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 50%, transparent);
+		border-color: var(--color-accent);
+	}
+
+	.chat-input__plus-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.chat-input__plus-button i {
+		line-height: 1;
+		transition: transform 150ms ease;
+	}
+
+	.chat-input__plus-button:hover:not(:disabled) i {
+		transform: rotate(90deg);
+	}
+
+	.reply-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: 0.8rem;
+		border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 50%);
+		background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel) 90%);
+		box-shadow: none;
+		margin-bottom: 0.4rem;
+	}
+
+	.reply-banner__indicator {
+		width: 3px;
+		align-self: stretch;
+		border-radius: 999px;
+		background: var(--color-accent);
+	}
+
+	.reply-banner__body {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+
+	.reply-banner__label {
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: color-mix(in srgb, var(--color-accent) 70%, var(--text-60) 30%);
+		font-weight: 600;
+	}
+
+	.reply-banner__name {
+		font-weight: 600;
+		color: var(--text-90);
+		font-size: 0.8rem;
+	}
+
+	.reply-banner__preview {
+		font-size: 0.78rem;
+		color: var(--text-60);
+		font-style: normal;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ai-card {
+		border-radius: 1.1rem;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.06),
+			0 18px 32px rgba(5, 8, 18, 0.32);
+		padding: 0.9rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+
+	.ai-card--inline {
+		margin-top: 0.65rem;
+	}
+
+	.ai-card--standalone {
+		margin-bottom: 0.65rem;
+	}
+
+	.ai-card--rewrite {
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--color-panel) 85%, var(--color-accent) 18%),
+			color-mix(in srgb, var(--color-panel-muted) 90%, transparent)
+		);
+		border-color: color-mix(in srgb, var(--color-border-subtle) 45%, var(--color-accent) 20%);
+	}
+
+	.ai-card--suggested {
+		padding: 0.4rem 0.6rem;
+		background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+		box-shadow: none;
+	}
+
+	.ai-card__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.ai-card__badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		border-radius: 999px;
+		padding: 0.22rem 0.75rem;
+		font-size: 0.68rem;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: color-mix(in srgb, var(--color-accent) 80%, white);
+		background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+	}
+
+	.ai-card__badge i {
+		font-size: 1rem;
+	}
+
+	.ai-card__pill {
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		background: transparent;
+		color: var(--text-65);
+		font-size: 0.65rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		padding: 0.22rem 0.9rem;
+		font-weight: 650;
+	}
+
+	.ai-card__meta {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: var(--text-55);
+	}
+
+	.ai-card__body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+	}
+
+	.ai-card__text {
+		margin: 0;
+		font-size: 0.95rem;
+		line-height: 1.5;
+		color: var(--color-text-primary);
+	}
+
+	.ai-card__status {
+		font-size: 0.82rem;
+		color: var(--text-65);
+	}
+
+	.ai-card__status--error {
+		color: var(--color-danger, #ff9a9a);
+	}
+
+	.ai-card__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.ai-card__button {
+		border-radius: var(--radius-pill);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+		background: transparent;
+		color: var(--text-70);
+		font-size: 0.8rem;
+		font-weight: 600;
+		padding: 0.42rem 1rem;
+		transition:
+			background 150ms ease,
+			border 150ms ease,
+			color 150ms ease;
+	}
+
+	.ai-card__button:hover,
+	.ai-card__button:focus-visible {
+		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+		outline: none;
+	}
+
+	.ai-card__button--primary {
+		border-color: transparent;
+		background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+		color: color-mix(in srgb, var(--color-panel-muted) 96%, white);
+	}
+
+	.reply-banner__close {
+		border: 0;
+		background: transparent;
+		color: var(--text-50);
+		padding: 0.2rem;
+		border-radius: 0.35rem;
+		line-height: 1;
+		display: grid;
+		place-items: center;
+		font-size: 1.1rem;
+		transition:
+			color 100ms ease,
+			background 100ms ease;
+	}
+
+	.reply-banner__close:hover,
+	.reply-banner__close:focus-visible {
+		color: var(--text-90);
+		background: color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+		outline: none;
+	}
+
+	.textarea {
+		width: 100%;
+		min-height: 2.6rem;
+		max-height: min(60vh, 32rem);
+		resize: none;
+		line-height: 1.4;
+		font-family: inherit;
+		overflow-y: hidden;
+	}
+
+	.mention-menu {
+		position: fixed;
+		z-index: 999998;
+		width: min(22rem, calc(100vw - 2rem));
+		border-radius: var(--radius-lg);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+		box-shadow: var(--shadow-elevated);
+		overflow: hidden;
+		backdrop-filter: blur(18px);
+		display: flex;
+		flex-direction: column;
+	}
+
+	.mention-menu__header {
+		font-size: 0.7rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-55);
+		padding: 0.45rem 0.85rem 0.35rem;
+		flex-shrink: 0;
+	}
+
+	.mention-menu__list {
+		display: grid;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
+
+	.mention-menu__item {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.55rem 0.85rem;
+		background: transparent;
+		border: 0;
+		text-align: left;
+		transition:
+			background 140ms ease,
+			color 140ms ease;
+		color: inherit;
+		cursor: pointer;
+	}
+
+	.mention-menu__item.is-active,
+	.mention-menu__item:hover {
+		background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+		color: var(--color-text-primary);
+	}
+
+	.mention-menu__avatar {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+		overflow: hidden;
+		display: grid;
+		place-items: center;
+		font-size: 0.75rem;
+		font-weight: 600;
+	}
+
+	.mention-menu__avatar img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.mention-menu__avatar--role {
+		padding: 0.2rem;
+	}
+
+	.mention-menu__avatar--special {
+		background: linear-gradient(140deg, rgba(56, 189, 248, 0.18), rgba(249, 115, 22, 0.28));
+		border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+	}
+
+	.mention-menu__avatar-special {
+		font-size: 1.05rem;
+		font-weight: 700;
+		color: color-mix(in srgb, var(--color-accent) 90%, #fff);
+	}
+
+	.mention-menu__role-swatch {
+		width: 100%;
+		height: 100%;
+		border-radius: inherit;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+	}
+
+	.mention-menu__item--special {
+		background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+	}
+
+	.mention-menu__meta {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		min-width: 0;
+	}
+
+	.mention-menu__label {
+		font-size: 0.85rem;
+		font-weight: 600;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.mention-menu__pill {
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		margin-left: 0.35rem;
+		padding: 0.05rem 0.4rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+	}
+
+	.mention-menu__pill--special {
+		color: #fff;
+		background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+	}
+
+	.mention-menu__hint {
+		font-size: 0.7rem;
+		color: var(--text-60);
+		line-height: 1.2;
+	}
+
+	.chat-input__field {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.chat-input__editor {
+		position: relative;
+	}
+
+	.chat-input__textarea-wrapper {
+		position: relative;
+		width: 100%;
+	}
+
+	.chat-input__textarea-wrapper textarea {
+		position: relative;
+		z-index: 1;
+		width: 100%;
+		padding: 0.55rem 1rem;
+		min-height: 2.8rem;
+		line-height: 1.4;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 80%, #1a1d21);
+		color: var(--text-100);
+		box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.25);
+	}
+
+	.chat-input__textarea-wrapper textarea::placeholder {
+		line-height: 1.4;
+		color: var(--text-50);
+	}
+
+	.chat-input__mention-overlay {
+		position: absolute;
+		inset: 0;
+		padding: 0.55rem 1rem;
+		pointer-events: none;
+		font-family: inherit;
+		font-size: inherit;
+		line-height: 1.4;
+		overflow: hidden;
+		z-index: 3;
+		white-space: pre-wrap;
+		word-break: break-word;
+		color: transparent;
+	}
+
+	.chat-input__mention-text {
+		color: transparent;
+	}
+
+	.chat-input__mention-tag {
+		display: inline;
+		font-weight: 600;
+		color: #2fd8c8;
+		text-shadow:
+			0 0 12px rgba(47, 216, 200, 0.9),
+			0 0 20px rgba(47, 216, 200, 0.5);
+		background: transparent;
+		padding: 0;
+		border-radius: 0;
+		mix-blend-mode: screen;
+	}
+
+	.chat-input__mention-tag--role {
+		color: var(--mention-color, #2fd8c8);
+		text-shadow:
+			0 0 12px color-mix(in srgb, var(--mention-color, #2fd8c8) 90%, transparent),
+			0 0 20px color-mix(in srgb, var(--mention-color, #2fd8c8) 50%, transparent);
+		font-weight: 700;
+	}
+
+	.chat-input__mention-tag--special {
+		color: #38bdf8;
+		text-shadow:
+			0 0 12px rgba(56, 189, 248, 0.9),
+			0 0 20px rgba(56, 189, 248, 0.5);
+		font-weight: 700;
+	}
+
+	.chat-input__prediction {
+		position: absolute;
+		inset: 0;
+		padding: 0.5rem 1rem;
+		pointer-events: none;
+		font-family: inherit;
+		font-size: inherit;
+		line-height: 1.4;
+		overflow: hidden;
+		z-index: 2;
+	}
+
+	.chat-input__prediction--touch {
+		pointer-events: auto;
+		cursor: pointer;
+	}
+
+	.chat-input__prediction-content {
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.chat-input__prediction-shadow {
+		color: transparent;
+	}
+
+	.chat-input__prediction-hint {
+		color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+	}
+
+	.chat-input__suggested-ghost {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		pointer-events: none;
+		font-size: 0.95rem;
+		line-height: 1.4;
+		color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
+		z-index: 3;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		padding-bottom: 0.3rem;
+	}
+
+	.chat-input__suggested-line {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		align-items: baseline;
+	}
+
+	.chat-input__suggested-prefix {
+		color: var(--text-55);
+		font-weight: 500;
+		white-space: nowrap;
+	}
+
+	.chat-input__suggested-text {
+		color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
+	}
+
+	.chat-input__suggested-hint {
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-50);
+	}
+
+	.chat-input__suggested-status {
+		color: var(--text-55);
+	}
+
+	.chat-input__suggested-status--error {
+		color: var(--color-danger, #ff9999);
+	}
+
+	.chat-input__suggested-refresh {
+		position: absolute;
+		top: 0.35rem;
+		right: 0.65rem;
+		width: 1.5rem;
+		height: 1.5rem;
+		border: none;
+		background: transparent;
+		color: color-mix(in srgb, var(--color-text-primary) 65%, transparent);
+		display: grid;
+		place-items: center;
+		z-index: 6;
+		padding: 0;
+	}
+
+	.chat-input__suggested-refresh:hover,
+	.chat-input__suggested-refresh:focus-visible {
+		color: var(--color-accent);
+		outline: none;
+	}
+
+	.chat-input__suggested-refresh:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.chat-input__suggested-refresh i {
+		font-size: 0.95rem;
+	}
+
+	@media (max-width: 640px) {
+		.chat-input__field {
+			gap: 0.45rem;
+		}
+
+		.chat-input__textarea-wrapper textarea {
+			border-radius: 1.2rem;
+			padding-inline: 1rem;
+		}
+
+		.chat-input__suggested-ghost {
+			padding-right: 2.5rem;
+		}
+
+		.chat-input__suggested-hint {
+			font-size: 0.7rem;
+		}
+
+		.ai-card {
+			border-radius: 1rem;
+			padding: 0.85rem;
+			gap: 0.5rem;
+		}
+
+		.ai-card__body {
+			gap: 0.4rem;
+		}
+
+		.rewrite-menu__item {
+			gap: 0.45rem;
+			padding: 0.35rem 0.4rem;
+		}
+
+		.rewrite-menu__icon {
+			width: 1.9rem;
+			height: 1.9rem;
+		}
+	}
+
+	.chat-input__actions {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		align-self: center;
+		transition:
+			align-self 120ms ease,
+			padding-bottom 120ms ease;
+		position: relative;
+		z-index: 20;
+	}
+
+	.chat-input__actions--anchored {
+		align-self: flex-end;
+		align-items: flex-end;
+		padding-bottom: 0.2rem;
+	}
+
+	.rewrite-menu__item {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		width: 100%;
+		border-radius: 0.85rem;
+		border: 1px solid transparent;
+		background: transparent;
+		padding: 0.45rem 0.55rem;
+		text-align: left;
+		transition:
+			background 140ms ease,
+			border 140ms ease;
+	}
+
+	.rewrite-menu__item:not(:disabled):hover,
+	.rewrite-menu__item:not(:disabled):focus-visible {
+		background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+		border-color: color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		outline: none;
+	}
+
+	.rewrite-menu__item:disabled,
+	.rewrite-menu__item.is-disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.rewrite-menu__icon {
+		width: 2.4rem;
+		height: 2.4rem;
+		border-radius: 0.9rem;
+		background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+		display: grid;
+		place-items: center;
+		color: var(--color-accent);
+	}
+
+	.rewrite-menu__content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		color: var(--color-text-primary);
+	}
+
+	.rewrite-menu__title {
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+
+	.rewrite-menu__description {
+		font-size: 0.77rem;
+		color: var(--text-60);
+	}
+
+	.emoji-trigger {
+		position: relative;
+		z-index: 100;
+	}
+
+	.emoji-picker-wrapper {
+		position: fixed;
+		z-index: 999997;
+		overflow: hidden;
+		border-radius: 1rem;
+		display: flex;
+		flex-direction: column;
+		width: 380px;
+		max-width: calc(100vw - 1rem);
+		max-height: calc(100vh - 5rem);
+		max-height: calc(100dvh - 5rem);
+	}
+
+	.emoji-picker-wrapper :global(.emoji-panel) {
+		max-height: 100% !important;
+		height: 100% !important;
+	}
+
+	.emoji-button {
+		width: 2.75rem;
+		height: 2.75rem;
+		border-radius: 999px;
+		border: 1px solid var(--button-ghost-border);
+		background: var(--button-ghost-bg);
+		color: var(--button-ghost-text);
+		display: grid;
+		place-items: center;
+		transition:
+			background 150ms ease,
+			border 150ms ease,
+			transform 120ms ease;
+	}
+
+	.emoji-button:hover:not(:disabled),
+	.emoji-button:focus-visible:not(:disabled) {
+		background: var(--button-ghost-hover);
+		border-color: color-mix(in srgb, var(--button-ghost-border) 65%, transparent);
+		outline: none;
+	}
+
+	.emoji-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.chat-send-button {
+		border-radius: var(--radius-pill);
+		background: var(--button-primary-bg);
+		color: var(--button-primary-text);
+		font-weight: 600;
+		padding: 0.55rem 1.4rem;
+		transition:
+			background 150ms ease,
+			transform 120ms ease,
+			margin 120ms ease;
+		align-self: center;
+		transform: translateY(-0.15rem);
+	}
+
+	.chat-send-button--anchored {
+		align-self: flex-end;
+		transform: translateY(0);
+		margin-bottom: 0.12rem;
+	}
+
+	.chat-send-button:hover:not(:disabled),
+	.chat-send-button:focus-visible:not(:disabled) {
+		background: var(--button-primary-hover);
+		transform: translateY(-1px);
+		outline: none;
+	}
+
+	.chat-send-button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+		transform: none;
+	}
+
+	.chat-input__mobile-send {
+		position: absolute;
+		top: 50%;
+		right: 0.4rem;
+		bottom: auto;
+		width: 1.65rem;
+		height: 1.65rem;
+		border-radius: 999px;
+		border: none;
+		background: var(--color-accent);
+		color: var(--color-app-bg, #030712);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.95rem;
+		box-shadow:
+			0 10px 20px rgba(6, 10, 20, 0.35),
+			inset 0 1px 0 rgba(255, 255, 255, 0.25);
+		transition:
+			transform 140ms ease,
+			box-shadow 140ms ease,
+			opacity 140ms ease;
+		z-index: 3;
+		pointer-events: auto;
+		transform: translateY(calc(-50% - 0.08rem));
+	}
+
+	.chat-input__mobile-send:disabled {
+		opacity: 0.45;
+		box-shadow: none;
+		cursor: not-allowed;
+	}
+
+	.chat-input__mobile-send--expanded {
+		top: auto;
+		bottom: 0.6rem;
+		transform: translateY(calc(0.25rem - 0.08rem));
+	}
+
+	.chat-input__mobile-send:not(:disabled):active {
+		transform: translateY(calc(-50% - 0.08rem)) scale(0.95);
+	}
+
+	.chat-input__mobile-send--expanded:not(:disabled):active {
+		transform: translateY(calc(0.25rem - 0.08rem)) scale(0.95);
+	}
+
+	.chat-input__mobile-send i {
+		line-height: 1;
+	}
+
+	@media (max-width: 767px) {
+		.chat-send-button {
+			display: none;
+		}
+
+		.chat-input__action-column--mobile {
+			position: static;
+			align-self: center;
+			display: flex;
+			align-items: center;
+			padding-right: 0.15rem;
+			z-index: 5;
+			transition:
+				align-self 120ms ease,
+				padding-bottom 120ms ease,
+				transform 120ms ease;
+			transform: translateY(-0.15rem);
+		}
+
+		.chat-input__action-column--mobile-anchored {
+			align-self: flex-end;
+			padding-bottom: 0.15rem;
+			transform: translateY(0);
+		}
+
+		.chat-input__action-column--mobile .chat-input__primary-action {
+			width: auto;
+			height: auto;
+		}
+
+		.chat-input__action-column--mobile .chat-input__plus-button {
+			width: 2.75rem;
+			height: 2.75rem;
+			font-size: 1.35rem;
+			border-width: 1.5px;
+			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+		}
+
+		.chat-input__textarea-wrapper textarea {
+			padding-top: 0.35rem;
+			padding-bottom: 0.35rem;
+			padding-right: 3.5rem;
+			min-height: 2.25rem;
+			line-height: 1.35;
+		}
+	}
+
+	@media (min-width: 768px) {
+		.chat-input__mobile-send {
+			display: none;
+		}
+	}
 </style>
