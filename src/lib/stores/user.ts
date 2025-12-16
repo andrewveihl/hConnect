@@ -13,6 +13,10 @@ export type UserProfile = {
 	cachedPhotoURL: string | null;
 	authPhotoURL: string | null;
 	email: string | null;
+	settings?: {
+		theme?: string;
+		customThemeId?: string;
+	};
 } | null;
 
 export const userProfile = writable<UserProfile>(null);
@@ -55,6 +59,7 @@ export async function startProfileListener() {
 				}
 
 				const data = snap.data() as Record<string, any>;
+				const settings = data.settings as Record<string, any> | undefined;
 				userProfile.set({
 					uid: u.uid,
 					displayName: data.displayName ?? data.name ?? null,
@@ -62,7 +67,11 @@ export async function startProfileListener() {
 					customPhotoURL: data.customPhotoURL ?? null,
 					cachedPhotoURL: data.cachedPhotoURL ?? null,
 					authPhotoURL: data.authPhotoURL ?? null,
-					email: data.email ?? null
+					email: data.email ?? null,
+					settings: settings ? {
+						theme: settings.theme ?? undefined,
+						customThemeId: settings.customThemeId ?? undefined
+					} : undefined
 				});
 			});
 		} catch (e) {

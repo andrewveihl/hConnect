@@ -301,67 +301,94 @@
 		if (!value) return [{ type: 'text', value: '' }];
 		const mentionList = buildMentionList(value, mentions);
 		if (!mentionList.length) return [{ type: 'text', value }];
-		const lookup = new Map<string, MentionView>();
 
-		const register = (raw: string | null | undefined, mention: MentionView) => {
-			if (!raw) return;
-			const trimmed = raw.trim();
-			if (!trimmed) return;
-			const base = trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
-			const compact = base.replace(/\s+/g, '');
-			const canonical = `@${canonicalMentionToken(base)}`;
-			lookup.set(base.toLowerCase(), mention);
-			lookup.set(compact.toLowerCase(), mention);
-			lookup.set(canonical, mention);
-		};
-
+		// Build patterns to search for, sorted by length (longest first to avoid partial matches)
+		const patterns: Array<{ pattern: string; mention: MentionView }> = [];
+		
 		mentionList.forEach((mention) => {
-			register(mention.handle ?? null, mention);
 			if (mention.label) {
-				register(mention.label, mention);
-				register(mention.label.replace(/\s+/g, ''), mention);
-				const first = mention.label.split(/\s+/).filter(Boolean)[0];
-				if (first) register(first, mention);
+				// Full name with @
+				patterns.push({ pattern: `@${mention.label}`, mention });
+				// Without spaces
+				patterns.push({ pattern: `@${mention.label.replace(/\s+/g, '')}`, mention });
+				// First name only
+				const firstName = mention.label.split(/\s+/).filter(Boolean)[0];
+				if (firstName && firstName !== mention.label) {
+					patterns.push({ pattern: `@${firstName}`, mention });
+				}
+			}
+			if (mention.handle) {
+				const handle = mention.handle.startsWith('@') ? mention.handle : `@${mention.handle}`;
+				patterns.push({ pattern: handle, mention });
 			}
 		});
 
-		const segments: Array<MentionSegment | TextSegment> = [];
-		const regex = /@[\p{L}\p{N}._-]+(?:[ \t]+[\p{L}\p{N}._-]+)*/gu;
-		let lastIndex = 0;
-		let match: RegExpExecArray | null;
-		while ((match = regex.exec(value))) {
-			const start = match.index;
-			if (start > lastIndex) {
-				segments.push({ type: 'text', value: value.slice(lastIndex, start) });
-			}
-			const token = match[0];
-			const canonicalKey = `@${canonicalMentionToken(token)}`;
-			const lowered = token.toLowerCase();
-			let mention = lookup.get(lowered) ?? lookup.get(token) ?? lookup.get(canonicalKey);
-			if (!mention) {
-				const special = SPECIAL_MENTION_LOOKUP.get(lowered);
-				if (special) {
-					mention = {
-						uid: special.uid,
-						handle: `@${special.handle}`,
-						label: special.label,
-						color: special.color ?? null,
-						kind: 'special'
-					};
+		// Add special mentions
+		SPECIAL_MENTIONS.forEach((entry) => {
+			patterns.push({
+				pattern: `@${entry.handle}`,
+				mention: {
+					uid: entry.uid,
+					handle: `@${entry.handle}`,
+					label: entry.label,
+					color: entry.color ?? null,
+					kind: 'special'
 				}
+			});
+		});
+
+		// Sort by pattern length descending (match longer patterns first)
+		patterns.sort((a, b) => b.pattern.length - a.pattern.length);
+
+		// Find all mention occurrences in the text
+		const occurrences: Array<{ start: number; end: number; mention: MentionView; pattern: string }> = [];
+		const valueLower = value.toLowerCase();
+		
+		for (const { pattern, mention } of patterns) {
+			const patternLower = pattern.toLowerCase();
+			let searchStart = 0;
+			while (true) {
+				const idx = valueLower.indexOf(patternLower, searchStart);
+				if (idx === -1) break;
+				
+				// Check if this position is already covered by a longer match
+				const alreadyCovered = occurrences.some(
+					(o) => idx >= o.start && idx < o.end
+				);
+				
+				if (!alreadyCovered) {
+					occurrences.push({
+						start: idx,
+						end: idx + pattern.length,
+						mention,
+						pattern: value.slice(idx, idx + pattern.length) // preserve original case
+					});
+				}
+				searchStart = idx + 1;
 			}
-			if (mention) {
-				const display = mention.label ? `@${mention.label}` : (mention.handle ?? token);
-				segments.push({ type: 'mention', value: display, data: mention });
-			} else {
-				segments.push({ type: 'text', value: token });
-			}
-			lastIndex = regex.lastIndex;
 		}
+
+		// Sort occurrences by position
+		occurrences.sort((a, b) => a.start - b.start);
+
+		// Build segments
+		const segments: Array<MentionSegment | TextSegment> = [];
+		let lastIndex = 0;
+
+		for (const occ of occurrences) {
+			if (occ.start > lastIndex) {
+				segments.push({ type: 'text', value: value.slice(lastIndex, occ.start) });
+			}
+			const display = occ.mention.label ? `@${occ.mention.label}` : occ.pattern;
+			segments.push({ type: 'mention', value: display, data: occ.mention });
+			lastIndex = occ.end;
+		}
+
 		if (lastIndex < value.length) {
 			segments.push({ type: 'text', value: value.slice(lastIndex) });
 		}
-		return segments;
+
+		return segments.length ? segments : [{ type: 'text', value }];
 	}
 
 	function buildMentionList(value: string, mentions?: MentionView[]) {
@@ -1361,39 +1388,7 @@
 												{@const compactBubble = shouldCenterBubble(m)}
 												<div
 													class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${compactBubble ? 'message-bubble--compact' : ''}`}
-												>
-													{#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}
-														{#if isMentionSegment(segment)}
-															{@const baseLabel =
-																segment.data?.label ?? segment.value.replace(/^@/, '')}
-															{@const label =
-																segment.data?.kind === 'special' ? `@${baseLabel}` : baseLabel}
-															<span
-																class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''} ${mentionHighlightClass(segment.data)}`}
-																style={segment.data?.kind === 'role' && segment.data?.color
-																	? `color:${segment.data.color};background:color-mix(in srgb, ${segment.data.color} 20%, transparent);border-color:color-mix(in srgb, ${segment.data.color} 35%, transparent);`
-																	: undefined}
-															>
-																{label}
-															</span>
-														{:else}
-															{#each linkifyText(segment.value) as chunk, chunkIdx (chunkIdx)}
-																{#if chunk.type === 'link'}
-																	<a
-																		class="chat-link"
-																		href={chunk.href}
-																		target="_blank"
-																		rel="noreferrer noopener nofollow"
-																	>
-																		{chunk.value}
-																	</a>
-																{:else}
-																	{chunk.value}
-																{/if}
-															{/each}
-														{/if}
-													{/each}
-												</div>
+												>{#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}{#if isMentionSegment(segment)}<span class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}>@{segment.data?.label ?? segment.value.replace(/^@/, '')}</span>{:else}{#each linkifyText(segment.value) as chunk}{#if chunk.type === 'link'}<a class="chat-link" href={chunk.href} target="_blank" rel="noreferrer noopener nofollow">{chunk.value}</a>{:else}{chunk.value}{/if}{/each}{/if}{/each}</div>
 											{:else if m.type === 'gif' && (m as any).url}
 												<img
 													class={`chat-gif ${mine ? 'mine' : ''}`}
@@ -2485,8 +2480,7 @@
 
 	.message-bubble {
 		position: relative;
-		display: inline-flex;
-		flex-direction: column;
+		display: inline-block;
 		width: auto;
 		max-width: min(46rem, 100%);
 		padding: 0.9rem 1.05rem;
@@ -2664,10 +2658,8 @@
 		}
 
 		.message-bubble--mine .chat-mention {
-			color: var(--chat-bubble-self-text) !important;
-			background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, transparent) !important;
-			border-color: color-mix(in srgb, var(--chat-bubble-self-border) 50%, transparent) !important;
-			text-shadow: none !important;
+			color: #fff !important;
+			background: rgba(255, 255, 255, 0.25) !important;
 		}
 
 		.message-bubble--other {
@@ -2950,40 +2942,26 @@
 	}
 
 	.chat-mention {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.15rem;
+		display: inline;
 		font-weight: 600;
-		border-radius: 999px;
-		padding: 0.05rem 0.5rem;
-		line-height: 1.2;
-		border: 1px solid transparent;
-		transition:
-			color 150ms ease,
-			background 150ms ease,
-			text-shadow 150ms ease,
-			border-color 150ms ease;
+		border-radius: 3px;
+		padding: 1px 4px;
+		background: rgba(47, 216, 200, 0.25);
+		color: #2fd8c8;
 	}
 
 	.chat-mention--mine {
 		color: #fff;
-		background: color-mix(in srgb, var(--color-accent) 35%, transparent);
-		border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
-		text-shadow: 0 0 6px rgba(45, 212, 191, 0.9);
+		background: rgba(255, 255, 255, 0.3);
 	}
 
 	.chat-mention--other {
 		color: #2fd8c8;
-		background: transparent;
-		border: 0;
-		box-shadow: none;
-		text-shadow: 0 0 9px rgba(47, 216, 200, 0.7);
-		padding: 0.1rem 0.3rem;
+		background: rgba(47, 216, 200, 0.25);
 	}
 
 	.chat-mention--role {
 		font-weight: 700;
-		text-shadow: none;
 	}
 
 	.chat-link {
