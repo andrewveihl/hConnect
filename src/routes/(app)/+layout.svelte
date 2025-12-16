@@ -33,7 +33,7 @@
 	import ServerSettingsModal from '$lib/components/servers/ServerSettingsModal.svelte';
 	import { voiceSession } from '$lib/stores/voice';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
-	import { user, startProfileListener } from '$lib/stores/user';
+	import { user, startProfileListener, userProfile } from '$lib/stores/user';
 	import {
 		acceptInvite,
 		declineInvite,
@@ -45,6 +45,12 @@
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
 	import { primeSoundPlayback } from '$lib/utils/sounds';
+	import { setTheme, type ThemeMode } from '$lib/stores/theme';
+	import {
+		customizationConfigStore,
+		applyThemeOverrides,
+		type CustomizationConfig
+	} from '$lib/admin/customization';
 	interface Props {
 		children?: import('svelte').Snippet;
 	}
@@ -61,6 +67,49 @@
 	let activeVoice: VoiceSession | null = $state(null);
 	const stopVoice = voiceSession.subscribe((value) => {
 		activeVoice = value;
+	});
+
+	// Sync theme from user profile on initial load
+	let themeInitialized = false;
+	const customization = customizationConfigStore();
+	const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
+		if (!browser || !profile || themeInitialized) return;
+		
+		const themePref = profile.settings?.theme;
+		const customThemeId = profile.settings?.customThemeId;
+		
+		// Handle custom themes
+		if (customThemeId && customThemeId.startsWith('custom-')) {
+			themeInitialized = true;
+			// Apply custom theme after customization config loads
+			const waitForConfig = () => {
+				const config = customization ? $customization : null;
+				if (config?.customThemes?.length) {
+					const customTheme = config.customThemes.find((t) => t.id === customThemeId);
+					if (customTheme) {
+						setTheme('dark', { persist: true });
+						const customConfig: CustomizationConfig = {
+							themeOverrides: { dark: customTheme.colors },
+							customThemes: [],
+							splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+							splashGifs: [],
+							sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
+						};
+						applyThemeOverrides(customConfig, 'dark');
+					}
+				} else {
+					// Config not loaded yet, wait a bit
+					setTimeout(waitForConfig, 100);
+				}
+			};
+			waitForConfig();
+		} else if (themePref === 'seasonal' || themePref === 'holiday') {
+			themeInitialized = true;
+			setTheme('holiday', { persist: true });
+		} else if (themePref === 'light' || themePref === 'dark' || themePref === 'midnight') {
+			themeInitialized = true;
+			setTheme(themePref as ThemeMode, { persist: true });
+		}
 	});
 
 	let hasAttemptedRestore = false;
@@ -458,6 +507,7 @@
 
 	onDestroy(() => {
 		stopVoice?.();
+		stopUserProfileThemeSync?.();
 		domainInviteInboxStop?.();
 		detachDomainInviteTestListener?.();
 	});

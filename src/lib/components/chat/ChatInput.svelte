@@ -140,19 +140,39 @@
 	function mentionScore(option: MentionCandidate, rawQuery: string, canonicalQuery: string) {
 		if (!rawQuery) return 0;
 		const lower = rawQuery.toLowerCase();
+		
+		const handle = (option.handle ?? '').toLowerCase();
+		const label = (option.label ?? '').toLowerCase();
+		
+		// For special mentions (@everyone, @here), only match if the query matches the handle/label directly
+		// Check for special kind OR special uid pattern
+		const isSpecial = option.kind === 'special' || (option.uid ?? '').startsWith('special:');
+		if (isSpecial) {
+			// Must start with the query - "e" matches "everyone", "a" does not
+			if (handle.startsWith(lower) || label.startsWith(lower)) {
+				return 10;
+			}
+			return 0; // Don't show special mentions if query doesn't match handle/label
+		}
+		
+		// For regular members/roles
 		let score = 0;
-		const handle = option.handle.toLowerCase();
+		
 		if (handle.startsWith(lower)) score += 5;
 		else if (handle.includes(lower)) score += 2;
-		const label = option.label.toLowerCase();
+		
 		if (label.startsWith(lower)) score += 4;
 		else if (label.includes(lower)) score += 1;
-		if (canonicalQuery) {
+		
+		// Only check aliases for non-special mentions
+		if (canonicalQuery && Array.isArray(option.aliases)) {
 			const aliasHit = option.aliases.some((alias) => alias.startsWith(canonicalQuery));
 			if (aliasHit) score += 3;
 		}
+		
 		if (option.kind === 'member') score += 0.1;
-		if (option.kind === 'special') score += 12;
+		if (option.kind === 'role') score += 0.05;
+		
 		return score;
 	}
 
@@ -246,6 +266,7 @@
 		| { type: 'text'; content: string }
 		| { type: 'mention'; content: string; record: MentionRecord };
 	let textSegments = $state<TextSegment[]>([]);
+	const hasMentions = $derived(textSegments.some((s) => s.type === 'mention'));
 
 	const featureFlagStore = featureFlags;
 	const aiPlatformEnabled = $derived(Boolean($featureFlagStore.enableAIFeatures));
@@ -1386,7 +1407,9 @@
 		if (!mentionOptions.length) {
 			filtered = [];
 		} else if (!mentionQuery) {
+			// When no query, only show members (not special mentions like @everyone/@here)
 			filtered = mentionOptions
+				.filter((opt) => opt.kind !== 'special')
 				.slice()
 				.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
 				.slice(0, 3);
@@ -2089,7 +2112,7 @@
 				<div class="chat-input__editor">
 					<div class="chat-input__textarea-wrapper">
 						<textarea
-							class="input textarea flex-1 rounded-full border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+							class="input textarea flex-1 rounded-full border border-black/40 px-4 py-2 placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] {hasMentions ? 'has-mentions' : ''}"
 							rows="1"
 							bind:this={inputEl}
 							bind:value={text}
@@ -3006,6 +3029,12 @@
 		color: var(--text-50);
 	}
 
+	.chat-input__textarea-wrapper textarea.has-mentions {
+		color: transparent;
+		caret-color: var(--text-100);
+		background: transparent;
+	}
+
 	.chat-input__mention-overlay {
 		position: absolute;
 		inset: 0;
@@ -3015,42 +3044,38 @@
 		font-size: inherit;
 		line-height: 1.4;
 		overflow: hidden;
-		z-index: 3;
+		z-index: 2;
 		white-space: pre-wrap;
 		word-break: break-word;
-		color: transparent;
+		color: var(--text-100);
+		background: color-mix(in srgb, var(--color-panel) 80%, #1a1d21);
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
 	}
 
 	.chat-input__mention-text {
-		color: transparent;
+		color: var(--text-100);
 	}
 
 	.chat-input__mention-tag {
 		display: inline;
 		font-weight: 600;
 		color: #2fd8c8;
-		text-shadow:
-			0 0 12px rgba(47, 216, 200, 0.9),
-			0 0 20px rgba(47, 216, 200, 0.5);
-		background: transparent;
-		padding: 0;
-		border-radius: 0;
-		mix-blend-mode: screen;
+		background: color-mix(in srgb, #2fd8c8 18%, transparent);
+		border-radius: 4px;
+		padding: 0.05rem 0.25rem;
+		margin: 0 0.05rem;
 	}
 
 	.chat-input__mention-tag--role {
 		color: var(--mention-color, #2fd8c8);
-		text-shadow:
-			0 0 12px color-mix(in srgb, var(--mention-color, #2fd8c8) 90%, transparent),
-			0 0 20px color-mix(in srgb, var(--mention-color, #2fd8c8) 50%, transparent);
+		background: color-mix(in srgb, var(--mention-color, #2fd8c8) 18%, transparent);
 		font-weight: 700;
 	}
 
 	.chat-input__mention-tag--special {
 		color: #38bdf8;
-		text-shadow:
-			0 0 12px rgba(56, 189, 248, 0.9),
-			0 0 20px rgba(56, 189, 248, 0.5);
+		background: color-mix(in srgb, #38bdf8 18%, transparent);
 		font-weight: 700;
 	}
 

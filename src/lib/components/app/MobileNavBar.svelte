@@ -65,7 +65,32 @@
 	let stopServers: (() => void) | null = $state(null);
 	let stopUser: (() => void) | null = null;
 	let serverChannelMemory: ChannelMemory = $state({});
-	const shortcut = $derived(lastServerShortcut as ServerShortcut | null);
+	
+	// Extract active server ID from current path
+	const activeServerIdFromPath = $derived.by(() => {
+		const match = /^\/servers\/([^/]+)/.exec(currentPath ?? '');
+		return match ? match[1] : null;
+	});
+	
+	// When on a server page, prefer fresh data from serverRows over cached lastServerShortcut
+	const shortcut = $derived.by(() => {
+		if (activeServerIdFromPath) {
+			// We're on a server page - try to get fresh data from serverRows
+			const freshMatch = serverRows.find((row) => row.id === activeServerIdFromPath);
+			if (freshMatch) {
+				return freshMatch;
+			}
+			// Server not found in rows yet, only show if lastServerShortcut matches this server
+			if (lastServerShortcut?.id === activeServerIdFromPath) {
+				return lastServerShortcut;
+			}
+			// Don't show stale data from a different server - show placeholder
+			return { id: activeServerIdFromPath, name: null, icon: null };
+		}
+		// Not on a server page - use lastServerShortcut as the "go back to server" shortcut
+		return lastServerShortcut;
+	});
+	
 	const serverActive = $derived(
 		shortcut ? (currentPath?.startsWith(`/servers/${shortcut.id}`) ?? false) : false
 	);
@@ -148,10 +173,12 @@
 
 	function setLastServerShortcut(info: ServerShortcut) {
 		if (!info?.id) return;
+		// Only use old values as fallbacks if we're updating the same server
+		const isSameServer = lastServerShortcut?.id === info.id;
 		const normalized: ServerShortcut = {
 			id: info.id,
-			name: info.name ?? lastServerShortcut?.name ?? null,
-			icon: info.icon ?? lastServerShortcut?.icon ?? null
+			name: info.name ?? (isSameServer ? lastServerShortcut?.name : null) ?? null,
+			icon: info.icon ?? (isSameServer ? lastServerShortcut?.icon : null) ?? null
 		};
 		if (
 			lastServerShortcut &&
