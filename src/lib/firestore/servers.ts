@@ -338,80 +338,124 @@ export async function removeUserMembership(serverId: string, uid: string) {
 export async function addMemberToServer(
 	serverId: string,
 	uid: string,
-	extra: { role?: RoleName; roleIds?: string[] } = {}
+	extra: { role?: RoleName; roleIds?: string[]; skipEnsureRoles?: boolean } = {}
 ) {
 	const db = getDb();
 	const memRef = doc(db, 'servers', serverId, 'members', uid);
-	const [memberSnap, serverSnap] = await Promise.all([
-		getDoc(memRef),
-		getDoc(doc(db, 'servers', serverId))
-	]);
-	if (!serverSnap.exists()) {
-		throw new Error('Server not found');
+	console.log('[servers.ts] addMemberToServer: START', { serverId, uid, memRefPath: memRef.path });
+	
+	try {
+		// Read server doc first
+		console.log('[servers.ts] addMemberToServer: reading server doc');
+		const serverSnap = await getDoc(doc(db, 'servers', serverId));
+		console.log('[servers.ts] addMemberToServer: server doc read OK', { exists: serverSnap.exists() });
+		
+		if (!serverSnap.exists()) {
+			throw new Error('Server not found');
+		}
+
+		// Now try to read member doc (may not exist yet)
+		console.log('[servers.ts] addMemberToServer: reading member doc at', memRef.path);
+		let memberSnap;
+		try {
+			memberSnap = await getDoc(memRef);
+			console.log('[servers.ts] addMemberToServer: member doc read OK', { exists: memberSnap.exists() });
+		} catch (memErr: any) {
+			console.error('[servers.ts] addMemberToServer: member doc read FAILED', memErr?.code, memErr?.message);
+			// If we can't read the member doc, assume it doesn't exist
+			memberSnap = null;
+		}
+
+		const serverData = serverSnap.data() as ServerDoc;
+		// Only call ensureSystemRoles for admins - regular users joining via invite
+		// won't have permission to create/update roles or server doc
+		const ensured = extra.skipEnsureRoles ? null : await ensureSystemRoles(serverId).catch(() => null);
+		const everyoneRoleId =
+			ensured?.everyoneRoleId ?? serverData.everyoneRoleId ?? serverData.defaultRoleId ?? null;
+		const ownerRoleId = ensured?.ownerRoleId ?? serverData.ownerRoleId ?? null;
+		const existingRoles =
+			memberSnap?.exists() && Array.isArray((memberSnap.data() as any)?.roleIds)
+				? ((memberSnap.data() as any).roleIds as string[])
+				: [];
+		const roleIds = normalizedRoleIds([
+			...existingRoles,
+			...(extra.roleIds ?? []),
+			everyoneRoleId,
+			extra.role === 'owner' || serverData.owner === uid ? ownerRoleId : null
+		]);
+		console.log('[servers.ts] addMemberToServer: loading roles map');
+		const rolesById = ensured?.rolesById ?? (await loadRolesMap(db, serverId));
+		console.log('[servers.ts] addMemberToServer: roles map loaded, roleIds:', roleIds);
+		
+		const snapshot = permissionSnapshot({
+			rolesById,
+			memberRoleIds: roleIds,
+			isServerOwner: serverData.owner === uid,
+			ownerRoleIds: ownerRoleId ? [ownerRoleId] : null
+		});
+
+		dlog('addMemberToServer', { serverId, uid, roleIds, roleTag: snapshot.roleTag });
+
+		const payload: Record<string, unknown> = {
+			uid,
+			role: snapshot.roleTag,
+			roleIds,
+			permissions: snapshot.permissions,
+			permissionBits: snapshot.permissionBits,
+			perms: snapshot.legacyPerms,
+			topRolePosition: snapshot.topRolePosition
+		};
+
+		if (!memberSnap?.exists()) {
+			payload.nickname = null;
+			payload.joinedAt = serverTimestamp();
+			payload.muted = false;
+			payload.deafened = false;
+		}
+
+		console.log('[servers.ts] addMemberToServer: writing member doc to', memRef.path);
+		await setDoc(memRef, payload, { merge: true });
+		console.log('[servers.ts] addMemberToServer: SUCCESS - member doc written');
+	} catch (err: any) {
+		console.error('[servers.ts] addMemberToServer: FAILED', err?.code, err?.message, err);
+		throw err;
 	}
-
-	const serverData = serverSnap.data() as ServerDoc;
-	const ensured = await ensureSystemRoles(serverId);
-	const everyoneRoleId =
-		ensured?.everyoneRoleId ?? serverData.everyoneRoleId ?? serverData.defaultRoleId ?? null;
-	const ownerRoleId = ensured?.ownerRoleId ?? serverData.ownerRoleId ?? null;
-	const existingRoles =
-		memberSnap.exists() && Array.isArray((memberSnap.data() as any)?.roleIds)
-			? ((memberSnap.data() as any).roleIds as string[])
-			: [];
-	const roleIds = normalizedRoleIds([
-		...existingRoles,
-		...(extra.roleIds ?? []),
-		everyoneRoleId,
-		extra.role === 'owner' || serverData.owner === uid ? ownerRoleId : null
-	]);
-	const rolesById = ensured?.rolesById ?? (await loadRolesMap(db, serverId));
-	const snapshot = permissionSnapshot({
-		rolesById,
-		memberRoleIds: roleIds,
-		isServerOwner: serverData.owner === uid,
-		ownerRoleIds: ownerRoleId ? [ownerRoleId] : null
-	});
-
-	dlog('addMemberToServer', { serverId, uid, roleIds, roleTag: snapshot.roleTag });
-
-	const payload: Record<string, unknown> = {
-		uid,
-		role: snapshot.roleTag,
-		roleIds,
-		permissions: snapshot.permissions,
-		permissionBits: snapshot.permissionBits,
-		perms: snapshot.legacyPerms,
-		topRolePosition: snapshot.topRolePosition
-	};
-
-	if (!memberSnap.exists()) {
-		payload.nickname = null;
-		payload.joinedAt = serverTimestamp();
-		payload.muted = false;
-		payload.deafened = false;
-	}
-
-	await setDoc(memRef, payload, { merge: true });
 }
 
 /**
  * Convenience wrapper to add the member AND rail-map them.
+ * Used when a user joins a server via invite - skips admin-level role operations.
  */
 export async function joinServer(serverId: string, uid: string) {
-	const db = getDb();
-	const serverRef = doc(db, 'servers', serverId);
-	const serverSnap = await getDoc(serverRef);
-	if (!serverSnap.exists()) throw new Error('Server not found');
+	console.log('[servers.ts] joinServer: START', { serverId, uid });
+	try {
+		const db = getDb();
+		const serverRef = doc(db, 'servers', serverId);
+		console.log('[servers.ts] joinServer: reading server doc at', serverRef.path);
+		const serverSnap = await getDoc(serverRef);
+		if (!serverSnap.exists()) throw new Error('Server not found');
+		console.log('[servers.ts] joinServer: server doc read SUCCESS');
 
-	const data = serverSnap.data() as ServerDoc;
-	dlog('joinServer', { serverId, uid, serverName: data.name });
+		const data = serverSnap.data() as ServerDoc;
+		console.log('[servers.ts] joinServer: server data', { name: data.name, defaultRoleId: data.defaultRoleId });
+		dlog('joinServer', { serverId, uid, serverName: data.name });
 
-	await addMemberToServer(serverId, uid, {
-		role: 'member',
-		roleIds: data.defaultRoleId ? [data.defaultRoleId] : []
-	});
-	await upsertUserMembership(serverId, uid, { name: data.name, icon: (data as any).icon ?? null });
+		// skipEnsureRoles: true because regular users don't have permission to create/update roles
+		console.log('[servers.ts] joinServer: calling addMemberToServer');
+		await addMemberToServer(serverId, uid, {
+			role: 'member',
+			roleIds: data.defaultRoleId ? [data.defaultRoleId] : [],
+			skipEnsureRoles: true
+		});
+		console.log('[servers.ts] joinServer: addMemberToServer complete');
+		
+		console.log('[servers.ts] joinServer: calling upsertUserMembership');
+		await upsertUserMembership(serverId, uid, { name: data.name, icon: (data as any).icon ?? null });
+		console.log('[servers.ts] joinServer: SUCCESS - complete');
+	} catch (err: any) {
+		console.error('[servers.ts] joinServer: FAILED', err?.code, err?.message, err);
+		throw err;
+	}
 }
 
 export async function recomputeMemberPermissions(serverId: string, uid: string) {
