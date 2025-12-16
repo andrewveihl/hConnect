@@ -1,211 +1,218 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  import { presenceLabels, type PresenceState } from '$lib/presence/state';
-  import Avatar from '$lib/components/app/Avatar.svelte';
+	import { createEventDispatcher } from 'svelte';
+	import { presenceLabels, type PresenceState } from '$lib/presence/state';
+	import Avatar from '$lib/components/app/Avatar.svelte';
 
-  type RoleDoc = {
-    id: string;
-    name: string;
-    color?: string | null;
-  };
+	type RoleDoc = {
+		id: string;
+		name: string;
+		color?: string | null;
+	};
 
-  type MemberRow = {
-    uid: string;
-    label: string;
-    avatar: string | null;
-    status: PresenceState;
-    baseRole: 'owner' | 'admin' | 'member' | null;
-    roles: RoleDoc[];
-  };
+	type MemberRow = {
+		uid: string;
+		label: string;
+		avatar: string | null;
+		status: PresenceState;
+		baseRole: 'owner' | 'admin' | 'member' | null;
+		roles: RoleDoc[];
+	};
 
-  type ProfileDoc = {
-    displayName?: string | null;
-    name?: string | null;
-    email?: string | null;
-    bio?: string | null;
-    about?: string | null;
-  };
+	type ProfileDoc = {
+		displayName?: string | null;
+		name?: string | null;
+		email?: string | null;
+		bio?: string | null;
+		about?: string | null;
+	};
 
-  interface Props {
-    open?: boolean;
-    member?: MemberRow | null;
-    profile?: ProfileDoc | null;
-    statusClassName?: string;
-    isMobile?: boolean;
-    anchorTop?: number;
-    anchorLeft?: number;
-    loading?: boolean;
-    canMessage?: boolean;
-    error?: string | null;
-  }
+	interface Props {
+		open?: boolean;
+		member?: MemberRow | null;
+		profile?: ProfileDoc | null;
+		statusClassName?: string;
+		isMobile?: boolean;
+		anchorTop?: number;
+		anchorLeft?: number;
+		loading?: boolean;
+		canMessage?: boolean;
+		error?: string | null;
+	}
 
-  let {
-    open = false,
-    member = null,
-    profile = null,
-    statusClassName = 'presence-dot--offline',
-    isMobile = false,
-    anchorTop = 0,
-    anchorLeft = 0,
-    loading = false,
-    canMessage = true,
-    error = null
-  }: Props = $props();
+	let {
+		open = false,
+		member = null,
+		profile = null,
+		statusClassName = 'presence-dot--offline',
+		isMobile = false,
+		anchorTop = 0,
+		anchorLeft = 0,
+		loading = false,
+		canMessage = true,
+		error = null
+	}: Props = $props();
 
-  const dispatch = createEventDispatcher<{ close: void; dm: void }>();
+	const dispatch = createEventDispatcher<{ close: void; dm: void }>();
 
-  let touchStartX: number | null = null;
-  let swipeOffset = 0;
-  let isSwiping = false;
+	let touchStartX: number | null = null;
+	let swipeOffset = 0;
+	let isSwiping = false;
 
-  const statusText = () => {
-    if (!member) return 'Offline';
-    return presenceLabels[member.status] ?? 'Offline';
-  };
+	const statusText = () => {
+		if (!member) return 'Offline';
+		return presenceLabels[member.status] ?? 'Offline';
+	};
 
-  const preferredIdentifier = () =>
-    profile?.displayName ?? profile?.name ?? profile?.email ?? member?.label ?? 'Member';
+	const preferredIdentifier = () =>
+		profile?.displayName ?? profile?.name ?? profile?.email ?? member?.label ?? 'Member';
 
-  const summaryLine = () => profile?.email ?? null;
-  const aboutText = () => profile?.bio ?? profile?.about ?? null;
+	const summaryLine = () => profile?.email ?? null;
+	const aboutText = () => profile?.bio ?? profile?.about ?? null;
 
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
-      dispatch('close');
-    }
-  }
+	function handleBackdropClick(event: MouseEvent) {
+		if (event.target === event.currentTarget) {
+			dispatch('close');
+		}
+	}
 
-  function handleTouchStart(event: TouchEvent) {
-    if (!isMobile) return;
-    touchStartX = event.touches?.[0]?.clientX ?? null;
-    swipeOffset = 0;
-    isSwiping = true;
-  }
+	function handleTouchStart(event: TouchEvent) {
+		if (!isMobile) return;
+		touchStartX = event.touches?.[0]?.clientX ?? null;
+		swipeOffset = 0;
+		isSwiping = true;
+	}
 
-  function handleTouchMove(event: TouchEvent) {
-    if (!isMobile || touchStartX === null) return;
-    const delta = event.touches?.[0]?.clientX ?? touchStartX;
-    const diff = delta - touchStartX;
-    if (diff > 0) {
-      swipeOffset = diff;
-    } else {
-      swipeOffset = 0;
-    }
-    if (diff > 120) {
-      touchStartX = null;
-      swipeOffset = 0;
-      isSwiping = false;
-      dispatch('close');
-    }
-    event.preventDefault();
-  }
+	function handleTouchMove(event: TouchEvent) {
+		if (!isMobile || touchStartX === null) return;
+		const delta = event.touches?.[0]?.clientX ?? touchStartX;
+		const diff = delta - touchStartX;
+		if (diff > 0) {
+			swipeOffset = diff;
+		} else {
+			swipeOffset = 0;
+		}
+		if (diff > 120) {
+			touchStartX = null;
+			swipeOffset = 0;
+			isSwiping = false;
+			dispatch('close');
+		}
+		event.preventDefault();
+	}
 
-  const resetTouch = () => {
-    touchStartX = null;
-    if (isMobile && isSwiping) {
-      swipeOffset = 0;
-    }
-    isSwiping = false;
-  };
+	const resetTouch = () => {
+		touchStartX = null;
+		if (isMobile && isSwiping) {
+			swipeOffset = 0;
+		}
+		isSwiping = false;
+	};
 
-  const inlineStyle = () => {
-    if (isMobile) {
-      return `transform: translateX(${swipeOffset}px);`;
-    }
-    return `--member-popover-top: ${anchorTop}px; --member-popover-left: ${anchorLeft}px;`;
-  };
+	const inlineStyle = () => {
+		if (isMobile) {
+			return `transform: translateX(${swipeOffset}px);`;
+		}
+		return `--member-popover-top: ${anchorTop}px; --member-popover-left: ${anchorLeft}px;`;
+	};
 </script>
 
 {#if open && member}
-  <div
-    class={`member-profile-overlay ${isMobile ? 'member-profile-overlay--mobile' : 'member-profile-overlay--popover'}`}
-    role="presentation"
-    onclick={handleBackdropClick}
-    ontouchstart={handleTouchStart}
-    ontouchmove={handleTouchMove}
-    ontouchend={resetTouch}
-    ontouchcancel={resetTouch}
-  >
-    <div
-      class={`member-profile ${isMobile ? 'member-profile--mobile' : 'member-profile--popover'}`}
-      role="dialog"
-      aria-modal="true"
-      aria-label={`${member.label} profile`}
-      style={inlineStyle()}
-    >
-      <button class="member-profile__close" aria-label="Close profile" onclick={() => dispatch('close')}>
-        <i class="bx bx-x"></i>
-      </button>
-      <div class="member-profile__header">
-        <div class="member-profile__avatar">
-          <Avatar
-            src={member.avatar}
-            user={profile}
-            name={member.label}
-            size="lg"
-            showPresence={true}
-            presence={member.status}
-          />
-        </div>
-        <div class="member-profile__summary">
-          <h3>{preferredIdentifier()}</h3>
-          {#if summaryLine()}
-            <p>{summaryLine()}</p>
-          {/if}
-          <span class="member-profile__status">{statusText()}</span>
-        </div>
-      </div>
-      <div class="member-profile__body">
-        <div>
-          <p class="member-profile__label">Server role</p>
-          {#if member.baseRole && member.baseRole !== 'member'}
-            <span class="member-role member-role--large" data-tone={member.baseRole}>
-              {member.baseRole === 'owner' ? 'Owner' : 'Admin'}
-            </span>
-          {:else}
-            <span class="member-role member-role--large">Member</span>
-          {/if}
-          {#if canMessage && isMobile}
-            <button
-              type="button"
-              class="profile-card__dm-btn"
-              onclick={() => dispatch('dm')}
-              aria-label="Direct message"
-            >
-              <i class="bx bx-message-dots"></i>
-              <span>Message</span>
-            </button>
-          {/if}
-        </div>
-        {#if aboutText()}
-          <div>
-            <p class="member-profile__label">About</p>
-            <p class="member-profile__about">{aboutText()}</p>
-          </div>
-        {/if}
-      </div>
-      <div class="member-profile__actions">
-        <button
-          class="member-profile__action member-profile__action--primary"
-          onclick={() => dispatch('dm')}
-          disabled={!canMessage || loading}
-        >
-          {#if loading}
-            Starting…
-          {:else}
-            Start DM
-          {/if}
-        </button>
-        <button class="member-profile__action member-profile__action--secondary" onclick={() => dispatch('close')}>
-          Close
-        </button>
-        {#if !canMessage}
-          <p class="member-profile__hint">You can’t message yourself.</p>
-        {/if}
-        {#if error}
-          <p class="member-profile__error">{error}</p>
-        {/if}
-      </div>
-    </div>
-  </div>
+	<div
+		class={`member-profile-overlay ${isMobile ? 'member-profile-overlay--mobile' : 'member-profile-overlay--popover'}`}
+		role="presentation"
+		onclick={handleBackdropClick}
+		ontouchstart={handleTouchStart}
+		ontouchmove={handleTouchMove}
+		ontouchend={resetTouch}
+		ontouchcancel={resetTouch}
+	>
+		<div
+			class={`member-profile ${isMobile ? 'member-profile--mobile' : 'member-profile--popover'}`}
+			role="dialog"
+			aria-modal="true"
+			aria-label={`${member.label} profile`}
+			style={inlineStyle()}
+		>
+			<button
+				class="member-profile__close"
+				aria-label="Close profile"
+				onclick={() => dispatch('close')}
+			>
+				<i class="bx bx-x"></i>
+			</button>
+			<div class="member-profile__header">
+				<div class="member-profile__avatar">
+					<Avatar
+						src={member.avatar}
+						user={profile}
+						name={member.label}
+						size="lg"
+						showPresence={true}
+						presence={member.status}
+					/>
+				</div>
+				<div class="member-profile__summary">
+					<h3>{preferredIdentifier()}</h3>
+					{#if summaryLine()}
+						<p>{summaryLine()}</p>
+					{/if}
+					<span class="member-profile__status">{statusText()}</span>
+				</div>
+			</div>
+			<div class="member-profile__body">
+				<div>
+					<p class="member-profile__label">Server role</p>
+					{#if member.baseRole && member.baseRole !== 'member'}
+						<span class="member-role member-role--large" data-tone={member.baseRole}>
+							{member.baseRole === 'owner' ? 'Owner' : 'Admin'}
+						</span>
+					{:else}
+						<span class="member-role member-role--large">Member</span>
+					{/if}
+					{#if canMessage && isMobile}
+						<button
+							type="button"
+							class="profile-card__dm-btn"
+							onclick={() => dispatch('dm')}
+							aria-label="Direct message"
+						>
+							<i class="bx bx-message-dots"></i>
+							<span>Message</span>
+						</button>
+					{/if}
+				</div>
+				{#if aboutText()}
+					<div>
+						<p class="member-profile__label">About</p>
+						<p class="member-profile__about">{aboutText()}</p>
+					</div>
+				{/if}
+			</div>
+			<div class="member-profile__actions">
+				<button
+					class="member-profile__action member-profile__action--primary"
+					onclick={() => dispatch('dm')}
+					disabled={!canMessage || loading}
+				>
+					{#if loading}
+						Starting…
+					{:else}
+						Start DM
+					{/if}
+				</button>
+				<button
+					class="member-profile__action member-profile__action--secondary"
+					onclick={() => dispatch('close')}
+				>
+					Close
+				</button>
+				{#if !canMessage}
+					<p class="member-profile__hint">You can’t message yourself.</p>
+				{/if}
+				{#if error}
+					<p class="member-profile__error">{error}</p>
+				{/if}
+			</div>
+		</div>
+	</div>
 {/if}

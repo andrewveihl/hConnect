@@ -17,17 +17,14 @@ export const channelUnreadCounts = writable<Record<string, number>>({});
 
 // Message state
 export const messages = writable<Message[]>([]);
-export const messagesByChannelId = derived(
-  messages,
-  ($messages) => {
-    const grouped: Record<string, Message[]> = {};
-    $messages.forEach((msg) => {
-      if (!grouped[msg.channelId]) grouped[msg.channelId] = [];
-      grouped[msg.channelId].push(msg);
-    });
-    return grouped;
-  }
-);
+export const messagesByChannelId = derived(messages, ($messages) => {
+	const grouped: Record<string, Message[]> = {};
+	$messages.forEach((msg) => {
+		if (!grouped[msg.channelId]) grouped[msg.channelId] = [];
+		grouped[msg.channelId].push(msg);
+	});
+	return grouped;
+});
 
 // Members state
 export const channelMembers = writable<(User & { role: string; status: string })[]>([]);
@@ -43,10 +40,10 @@ export const showServerSettings = writable(false);
 // Derived stores
 export const isAuthenticated = derived(authUser, ($user) => $user !== null);
 export const currentServer = derived(
-  [currentServerId, servers],
-  ([$id, $servers]) => $servers.find((s) => s.id === $id) || null
+	[currentServerId, servers],
+	([$id, $servers]) => $servers.find((s) => s.id === $id) || null
 );
 export const currentChannel = derived(
-  [currentChannelId, channels],
-  ([$id, $channls]) => $channls.find((c) => c.id === $id) || null
+	[currentChannelId, channels],
+	([$id, $channls]) => $channls.find((c) => c.id === $id) || null
 );

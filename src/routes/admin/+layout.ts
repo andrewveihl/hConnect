@@ -4,20 +4,20 @@ import { fetchSuperAdminEmails, getCurrentUser, isSuperAdmin } from '$lib/admin/
 import { redirect } from '@sveltejs/kit';
 
 export const load: LayoutLoad = async () => {
-  const user = await getCurrentUser();
-  if (!user || !(await isSuperAdmin(user))) {
-    throw redirect(303, '/');
-  }
+	const user = await getCurrentUser();
+	if (!user || !(await isSuperAdmin(user))) {
+		throw redirect(303, '/');
+	}
 
-  const [featureFlags, superAdminEmails] = await Promise.all([
-    fetchFeatureFlags(),
-    fetchSuperAdminEmails()
-  ]);
+	const [featureFlags, superAdminEmails] = await Promise.all([
+		fetchFeatureFlags(),
+		fetchSuperAdminEmails()
+	]);
 
-  return {
-    user,
-    userEmail: user.email ?? '',
-    superAdminEmails,
-    featureFlags
-  };
+	return {
+		user,
+		userEmail: user.email ?? '',
+		superAdminEmails,
+		featureFlags
+	};
 };
