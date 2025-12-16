@@ -211,11 +211,15 @@
 			alert('You need to be signed in to accept invites.');
 			return;
 		}
+		console.log('[InvitePanel] onAccept called', { inviteId: inv.id, serverId: inv.serverId, me });
 		const res = await acceptInvite(inv.id!, me);
 		if (!res.ok) {
-			alert(`Accept failed: ${res.error ?? 'Unknown'}`);
+			const errorMsg = `Accept failed: ${res.error ?? 'Unknown'}${res.code ? ` (code: ${res.code})` : ''}`;
+			console.error('[InvitePanel] acceptInvite failed', { inv, res });
+			alert(errorMsg);
 			dlog('acceptInvite failed', inv, res);
 		} else {
+			console.log('[InvitePanel] acceptInvite succeeded');
 			dlog('acceptInvite ok', inv);
 		}
 	}

@@ -498,11 +498,19 @@ service cloud.firestore {
       }
     }
 
+    // Check if user has a pending invite to the server (global invites collection)
+    // Invite ID format: serverId__toUid
+    function hasPendingInviteToServer(serverId, uid) {
+      let inviteDocId = serverId + '__' + uid;
+      let invitePath = /databases/$(database)/documents/invites/$(inviteDocId);
+      return exists(invitePath) && get(invitePath).data.status == 'pending';
+    }
+
     /* ---------------- Servers tree ---------------- */
     match /servers/{serverId} {
-      // Allow members/admins plus any signed-in user when the server is public.
-      allow read: if canViewServerMeta(serverId)
-                  || (isSignedIn() && exists(/databases/$(database)/documents/profiles/$(request.auth.uid)/servers/$(serverId)));
+      // Server metadata is readable by any signed-in user.
+      // Sensitive operations (channels, members, messages) have their own permission rules.
+      allow read: if isSignedIn();
       allow create: if isSuperAdminUser()
         || (isSignedIn()
         && (request.resource.data.ownerId == request.auth.uid || request.resource.data.owner == request.auth.uid));
@@ -520,10 +528,11 @@ service cloud.firestore {
       }
 
       match /members/{uid} {
-        // Let server members (and public servers) read member list; still requires auth.
-        allow read: if canViewMembers(serverId) || (isSignedIn() && request.auth.uid == uid);
-        allow create: if isServerAdmin(serverId) || (isSignedIn() && request.auth.uid == uid);
-        allow update: if isServerAdmin(serverId) || (isSignedIn() && request.auth.uid == uid);
+        // Read: members can see other members, users can always read their own doc (even if it doesn't exist)
+        allow read: if isSignedIn() && (request.auth.uid == uid || canViewMembers(serverId));
+        // Create/Update own membership: user can join a server if they're signed in
+        allow create: if isSignedIn() && request.auth.uid == uid;
+        allow update: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId));
         allow delete: if isServerAdmin(serverId);
       }
 
@@ -747,11 +756,13 @@ service cloud.firestore {
         && (isServerOwner(request.resource.data.serverId) || isServerAdmin(request.resource.data.serverId))
         && !exists(/databases/$(database)/documents/invites/$(inviteId));
 
+      // Allow recipient to accept/decline their invite (may include acceptedAt timestamp)
       allow update: if isSignedIn()
         && resource.data.toUid == request.auth.uid
         && request.resource.data.serverId == resource.data.serverId
         && request.resource.data.toUid == resource.data.toUid
-        && request.resource.data.status in ['accepted','declined'];
+        && request.resource.data.status in ['accepted','declined']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt']);
 
       allow update: if isSignedIn()
         && (isServerOwner(resource.data.serverId) || isServerAdmin(resource.data.serverId))

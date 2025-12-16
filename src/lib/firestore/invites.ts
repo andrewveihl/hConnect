@@ -164,21 +164,38 @@ export async function acceptInvite(inviteId: string, actingUid: string) {
 	if (inv.status !== 'pending') return { ok: false, error: `Invite is ${inv.status}` };
 
 	try {
+		console.log('[invites.ts] acceptInvite: starting joinServer', { serverId: inv.serverId, actingUid });
 		await joinServer(inv.serverId, actingUid);
+		console.log('[invites.ts] acceptInvite: joinServer complete');
+	} catch (err: any) {
+		console.error('[invites.ts] acceptInvite: joinServer failed', err);
+		return { ok: false, error: err?.message ?? 'Failed to join server', code: err?.code };
+	}
+	
+	try {
 		// extra safety: in case joinServer is modified later
+		console.log('[invites.ts] acceptInvite: starting upsertUserMembership');
 		await upsertUserMembership(inv.serverId, actingUid, {
 			name: inv.serverName ?? inv.serverId,
 			icon: inv.serverIcon ?? null
 		});
-
-		await updateDoc(ref, { status: 'accepted' as InviteStatus, acceptedAt: serverTimestamp() });
-		await deleteDoc(ref).catch(() => {});
-		dlog('acceptInvite ok', inviteId);
-		return { ok: true };
+		console.log('[invites.ts] acceptInvite: upsertUserMembership complete');
 	} catch (err: any) {
-		console.error('[invites.ts] acceptInvite error', err);
-		return { ok: false, error: err?.message ?? 'Failed to accept invite', code: err?.code };
+		console.error('[invites.ts] acceptInvite: upsertUserMembership failed', err);
+		// Don't fail here - the member was created, just rail map might have failed
 	}
+
+	try {
+		console.log('[invites.ts] acceptInvite: deleting invite');
+		await deleteDoc(ref);
+		console.log('[invites.ts] acceptInvite: invite deleted');
+	} catch (err: any) {
+		console.error('[invites.ts] acceptInvite: delete invite failed', err);
+		// Don't fail - the join succeeded
+	}
+
+	dlog('acceptInvite ok', inviteId);
+	return { ok: true };
 }
 
 /** Decline invite */
