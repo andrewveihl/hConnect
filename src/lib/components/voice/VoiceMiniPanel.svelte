@@ -182,6 +182,10 @@
     invokeVoiceClientControl('toggleDeafen');
   }
 
+  function toggleVideo() {
+    invokeVoiceClientControl('toggleVideo');
+  }
+
   let connectedElsewhere = $derived(!!session && !!serverId && session.serverId !== serverId);
   run(() => {
     if (browser) {
@@ -256,6 +260,15 @@
             onclick={toggleMute}
           >
             <i class={`bx ${callState.muted ? 'bx-microphone-off' : 'bx-microphone'} text-sm`}></i>
+          </button>
+          <button
+            class={`inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-text-primary)] transition hover:bg-[color:var(--color-panel-muted)] ${!callState.videoEnabled ? 'text-rose-400' : ''}`}
+            type="button"
+            title={callState.videoEnabled ? 'Turn camera off' : 'Turn camera on'}
+            aria-pressed={callState.videoEnabled}
+            onclick={toggleVideo}
+          >
+            <i class={`bx ${callState.videoEnabled ? 'bx-video' : 'bx-video-off'} text-sm`}></i>
           </button>
           <button
             class={`inline-flex h-7 w-7 items-center justify-center rounded-lg text-[color:var(--color-text-primary)] transition hover:bg-[color:var(--color-panel-muted)] ${callState.deafened ? 'text-rose-400' : ''}`}

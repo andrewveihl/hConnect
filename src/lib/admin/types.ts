@@ -96,6 +96,7 @@ export type FeatureFlagKey =
   | 'enableAISuggestedReplies'
   | 'enableAIPredictions'
   | 'enableAISummaries'
+  | 'enableTicketAI'
   | 'enableTypingIndicators'
   | 'enableReadReceipts'
   | 'enableMessageEditing'
@@ -188,6 +189,11 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
     description: 'Enable AI-powered recap panels in threads.'
   },
   {
+    key: 'enableTicketAI',
+    label: 'Ticket AI',
+    description: 'Allow servers to enable AI-powered ticket analytics.'
+  },
+  {
     key: 'enableTypingIndicators',
     label: 'Typing Indicators',
     description: 'Broadcast typing states.'
@@ -235,6 +241,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
   enableAISuggestedReplies: true,
   enableAIPredictions: true,
   enableAISummaries: true,
+  enableTicketAI: true,
   enableTypingIndicators: true,
   enableReadReceipts: true,
   enableMessageEditing: true,

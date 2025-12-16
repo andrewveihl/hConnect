@@ -1,8 +1,14 @@
 import { logger } from 'firebase-functions';
 import { Timestamp } from 'firebase-admin/firestore';
 import type { FirestoreEvent, QueryDocumentSnapshot } from 'firebase-functions/v2/firestore';
+import OpenAI from 'openai';
 
 import { auth, db } from './firebase';
+
+// OpenAI client for ticket classification
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || ''
+});
 
 type IssueStatus = 'opened' | 'in_progress' | 'closed';
 
@@ -48,6 +54,8 @@ type IssueDoc = {
   channelId: string;
   threadId: string;
   parentMessageId?: string | null;
+  authorId?: string | null;
+  authorName?: string | null;
   createdAt: Timestamp;
   rootCreatedAt: Timestamp;
   status: IssueStatus;
@@ -91,6 +99,78 @@ const DEFAULT_SETTINGS: TicketAiSettings = {
     targetChannelId: null
   }
 };
+
+/**
+ * Use AI to determine if a message is a genuine IT support ticket.
+ * Returns true if it's a support issue, false if it's casual/non-issue.
+ */
+async function isITSupportIssue(messageText: string): Promise<boolean> {
+  if (!messageText || messageText.length < 3) return false;
+  
+  // Skip if no API key configured
+  if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
+    logger.warn('[ticketAi] No OpenAI API key - skipping AI classification');
+    return true; // Default to creating ticket if no AI
+  }
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 10,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a classifier for an MSP (Managed Service Provider) IT support channel. 
+Determine if the message is a genuine IT support request or issue that needs attention.
+
+Reply ONLY with "YES" or "NO".
+
+Say YES for:
+- Computer/laptop/device problems
+- Software issues or errors
+- Network/internet/connectivity issues
+- Printer problems
+- Password/login/account issues
+- Email problems
+- Hardware malfunctions
+- Security concerns
+- Requests for IT help or assistance
+- System errors or crashes
+- Slow performance complaints
+- Questions about IT policies or procedures
+
+Say NO for:
+- Casual greetings (hi, hello, good morning)
+- Thank you messages
+- Social chat unrelated to IT
+- Random comments or jokes
+- Single words or emojis without context
+- Off-topic discussions
+- Personal messages not about IT issues`
+        },
+        {
+          role: 'user',
+          content: messageText.slice(0, 500) // Limit to 500 chars
+        }
+      ]
+    });
+
+    const answer = response.choices[0]?.message?.content?.trim().toUpperCase() ?? '';
+    const isIssue = answer.startsWith('YES');
+    
+    logger.debug('[ticketAi] AI classification', { 
+      messagePreview: messageText.slice(0, 100), 
+      answer, 
+      isIssue 
+    });
+    
+    return isIssue;
+  } catch (err) {
+    logger.error('[ticketAi] AI classification failed', { err });
+    return true; // Default to creating ticket on error
+  }
+}
 
 const normalizeList = (input: unknown): string[] => {
   if (!Array.isArray(input)) return [];
@@ -284,9 +364,27 @@ export async function handleTicketAiThreadMessage(
     isStaffEmail(email, settings.staffDomains);
   const closeSignal = shouldCloseFromText(messageText) || hasCheckmark(message.reactions ?? null);
 
-  const issueRef = db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
-  const issueSnap = await issueRef.get();
-  const existing = issueSnap.exists ? ((issueSnap.data() as IssueDoc) ?? null) : null;
+  // Check if there's an existing channel message ticket we should update instead
+  const parentMessageId = thread.createdFromMessageId ?? null;
+  let channelMessageTicketRef: FirebaseFirestore.DocumentReference | null = null;
+  let channelMessageTicket: IssueDoc | null = null;
+  
+  if (parentMessageId) {
+    channelMessageTicketRef = db.doc(`servers/${serverId}/ticketAiIssues/${parentMessageId}`);
+    const channelTicketSnap = await channelMessageTicketRef.get();
+    if (channelTicketSnap.exists) {
+      channelMessageTicket = channelTicketSnap.data() as IssueDoc;
+    }
+  }
+
+  // Use channel message ticket if it exists, otherwise use/create thread ticket
+  const issueRef = channelMessageTicketRef && channelMessageTicket 
+    ? channelMessageTicketRef 
+    : db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
+  const existing = channelMessageTicket ?? (await (async () => {
+    const snap = await db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`).get();
+    return snap.exists ? (snap.data() as IssueDoc) : null;
+  })());
 
   const createdAt = existing?.createdAt ?? Timestamp.fromDate(rootCreated);
   const rootTimestamp = existing?.rootCreatedAt ?? Timestamp.fromDate(rootCreated);
@@ -305,6 +403,10 @@ export async function handleTicketAiThreadMessage(
   let closedAt = existing?.closedAt ?? null;
   let timeToFirstResponseMs = existing?.timeToFirstResponseMs ?? null;
   let timeToResolutionMs = existing?.timeToResolutionMs ?? null;
+  
+  // Track which staff members have responded to this ticket
+  const ticketStaffMemberIds = new Set<string>(existing?.staffMemberIds ?? []);
+  const responderId = message.uid ?? message.authorId ?? null;
 
   if (status === 'closed') {
     reopenedAfterClose = true;
@@ -313,6 +415,11 @@ export async function handleTicketAiThreadMessage(
     firstStaffResponseAt = firstStaffResponseAt ?? Timestamp.fromDate(msgDate);
     timeToFirstResponseMs = timeToFirstResponseMs ?? msDiff(rootCreated, msgDate);
     timelineWith(statusTimeline, 'in_progress', Timestamp.fromDate(msgDate));
+  }
+  
+  // Add staff member to the ticket's assigned staff list
+  if (isStaff && responderId) {
+    ticketStaffMemberIds.add(responderId);
   }
 
   if (closeSignal) {
@@ -345,9 +452,9 @@ export async function handleTicketAiThreadMessage(
     staffMessageCount: (existing?.staffMessageCount ?? 0) + (isStaff ? 1 : 0),
     clientMessageCount: (existing?.clientMessageCount ?? 0) + (isStaff ? 0 : 1),
     lastMessageAt: Timestamp.fromDate(msgDate),
-    lastMessageText: messageText || existing?.lastMessageText ?? null,
+    lastMessageText: messageText || (existing?.lastMessageText ?? null),
     staffDomains: settings.staffDomains,
-    staffMemberIds: settings.staffMemberIds,
+    staffMemberIds: Array.from(ticketStaffMemberIds),
     retention: settings.retention
   };
 
@@ -365,6 +472,117 @@ export async function handleTicketAiThreadMessage(
       serverId,
       channelId,
       threadId,
+      messageId,
+      err
+    });
+  }
+}
+
+/**
+ * Handle channel messages (not in threads) for Ticket AI.
+ * Creates tickets directly from channel messages in monitored channels.
+ */
+export async function handleTicketAiChannelMessage(
+  event: FirestoreEvent<QueryDocumentSnapshot>
+): Promise<void> {
+  const { serverId, channelId, messageId } = event.params as Record<string, string>;
+  const snap = event.data;
+  if (!snap || !serverId || !channelId || !messageId) return;
+
+  const message = snap.data() as MessageMeta;
+  if (!message || message.systemKind || message.type === 'system') return;
+
+  const settings = await fetchSettings(serverId);
+  if (!settings?.enabled) return;
+  if (!settings.monitoredChannelIds.includes(channelId)) return;
+
+  const msgDate = toDate(message.createdAt) ?? new Date(event.time?.valueOf() ?? Date.now());
+  const cutoff = retentionCutoff(settings.retention);
+  if (cutoff && msgDate.getTime() < cutoff) {
+    logger.debug('[ticketAi] skipping channel message outside retention window', { serverId, channelId, messageId });
+    return;
+  }
+
+  // Check if sender is staff - skip creating ticket if staff member
+  const email = await resolveUserEmail(message.uid ?? message.authorId ?? null);
+  const isStaff =
+    isStaffMember(message.uid ?? message.authorId ?? null, settings.staffMemberIds) ||
+    isStaffEmail(email, settings.staffDomains);
+
+  // Don't create tickets for staff messages
+  if (isStaff) {
+    logger.debug('[ticketAi] skipping channel message from staff', { serverId, channelId, messageId });
+    return;
+  }
+
+  const messageText = normalizeText(
+    message.text ?? message.content ?? message.plainTextContent ?? ''
+  );
+
+  // Use AI to determine if this is a genuine IT support issue
+  const isSupport = await isITSupportIssue(messageText);
+  if (!isSupport) {
+    logger.info('[ticketAi] AI classified as non-issue, skipping', { 
+      serverId, channelId, messageId, 
+      messagePreview: messageText.slice(0, 100) 
+    });
+    return;
+  }
+
+  // Use messageId as the issue ID for channel messages
+  const issueRef = db.doc(`servers/${serverId}/ticketAiIssues/${messageId}`);
+  const issueSnap = await issueRef.get();
+  
+  // Skip if already exists
+  if (issueSnap.exists) return;
+
+  const createdAt = Timestamp.fromDate(msgDate);
+  const typeTag = inferTypeTag([messageText]);
+  const statusTimeline: IssueTimelineEntry[] = [{ status: 'opened', at: createdAt }];
+
+  // Get author info from message
+  const authorId = message.uid ?? message.authorId ?? null;
+  const authorName = (message as any).displayName ?? (message as any).authorName ?? (message as any).name ?? null;
+
+  const payload: IssueDoc = {
+    serverId,
+    channelId,
+    threadId: null as any, // Channel message, no thread
+    parentMessageId: messageId,
+    authorId,
+    authorName,
+    createdAt,
+    rootCreatedAt: createdAt,
+    status: 'opened',
+    statusTimeline,
+    summary: messageText.slice(0, 160) || 'Channel message',
+    typeTag,
+    reopenedAfterClose: false,
+    firstStaffResponseAt: null,
+    closedAt: null,
+    timeToFirstResponseMs: null,
+    timeToResolutionMs: null,
+    messageCount: 1,
+    staffMessageCount: 0,
+    clientMessageCount: 1,
+    lastMessageAt: createdAt,
+    lastMessageText: messageText || null,
+    staffDomains: settings.staffDomains,
+    staffMemberIds: [], // Empty until a staff member creates a thread (responds)
+    retention: settings.retention
+  };
+
+  try {
+    await issueRef.set({
+      ...payload,
+      updatedAt: Timestamp.now(),
+      lastEmailUsed: email ?? null
+    });
+    logger.info('[ticketAi] created ticket from channel message', { serverId, channelId, messageId });
+  } catch (err) {
+    logger.error('[ticketAi] failed to create issue from channel message', {
+      serverId,
+      channelId,
       messageId,
       err
     });

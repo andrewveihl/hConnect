@@ -48,6 +48,7 @@
     onUploadFiles?: (payload: { files: File[]; replyTo?: ReplyReferenceInput | null }) => void;
     pendingUploads?: PendingUploadPreview[];
     scrollToBottomSignal?: number;
+    scrollToMessageId?: string | null;
     replyTarget?: ReplyReferenceInput | null;
     scrollContextKey?: string | number;
     empty?: import('svelte').Snippet;
@@ -81,6 +82,7 @@
     onUploadFiles = () => {},
     pendingUploads = [],
     scrollToBottomSignal = 0,
+    scrollToMessageId = null,
     replyTarget = null,
     scrollContextKey = 'channel-pane',
     empty
@@ -145,6 +147,7 @@
         threadStats={threadStats}
         {pendingUploads}
         scrollToBottomSignal={combinedScrollSignal}
+        {scrollToMessageId}
         on:vote={onVote}
         on:submitForm={onSubmitForm}
         on:react={onReact}

@@ -14,6 +14,7 @@ import { createEventDispatcher, onDestroy, untrack } from 'svelte';
     streamThreadMeta
   } from '$lib/firestore/dms';
   import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
+  import Avatar from '$lib/components/app/Avatar.svelte';
 
   const dispatch = createEventDispatcher();
   let me: any = $state(null);
@@ -849,26 +850,14 @@ let {
                   onclick={(event) => handleThreadClick(event, t.id)}
                 >
                   <div class="dm-thread__avatar">
-                    <div class="dm-thread__avatar-img">
-                      <img
-                        class="w-full h-full object-cover"
-                        src={otherPhoto}
-                        alt=""
-                        onerror={(e) => {
-                          const img = e.currentTarget as HTMLImageElement | null;
-                          if (!img) return;
-                          img.onerror = null;
-                          img.src = '/default-avatar.svg';
-                        }}
-                      />
-                    </div>
-                    {#if otherUid}
-                      <span
-                        class={`presence-dot ${presenceClassFromState(presenceState)}`}
-                        aria-label={presenceLabels[presenceState]}
-                        title={presenceLabels[presenceState]}
-                      ></span>
-                    {/if}
+                    <Avatar
+                      src={otherPhoto}
+                      user={peopleMap[otherUid ?? ''] ?? t.profile ?? t}
+                      name={otherOf(t)}
+                      size="sm"
+                      showPresence={Boolean(otherUid)}
+                      presence={presenceState}
+                    />
                   </div>
                   <div class="dm-thread__content">
                     <div class="dm-thread__header-line">
@@ -950,7 +939,11 @@ let {
                     class="people-picker__option"
                     onclick={() => openOrStartDM(u.uid)}
                   >
-                    <img class="w-8 h-8 rounded-full object-cover" src={u.photoURL || u.authPhotoURL || '/static/demo-cursor.png'} alt="" />
+                    <Avatar
+                      user={u}
+                      name={u.displayName || u.email || u.uid}
+                      size="sm"
+                    />
                     <div class="text-sm text-left">
                       <div class="font-medium leading-5">{u.displayName || u.email || u.uid}</div>
                       {#if u.email}<div class="people-picker__muted">{u.email}</div>{/if}
@@ -998,7 +991,11 @@ let {
                     class="people-picker__option"
                     onclick={() => openOrStartDM(p.uid)}
                   >
-                    <img class="w-8 h-8 rounded-full object-cover" src={p.photoURL || p.authPhotoURL || '/static/demo-cursor.png'} alt="" />
+                    <Avatar
+                      user={p}
+                      name={p.displayName || p.email || 'User'}
+                      size="sm"
+                    />
                     <div class="text-sm text-left">
                       <div class="font-medium leading-5">{p.displayName || p.email || 'User'}</div>
                       {#if p.email}<div class="people-picker__muted">{p.email}</div>{/if}
@@ -1245,18 +1242,6 @@ let {
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--color-panel) 70%, rgba(255, 255, 255, 0.08));
-  }
-
-  .dm-thread__avatar-img img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .dm-thread__avatar .presence-dot {
-    pointer-events: none;
-    z-index: 1;
-    transform: translate(15%, 15%);
   }
 
   .people-picker {

@@ -81,6 +81,7 @@ const dispatch = createEventDispatcher();
     >;
     hideReplyPreview?: boolean;
     replyTargetId?: string | null;
+    scrollToMessageId?: string | null;
   }
 
   let {
@@ -91,7 +92,8 @@ const dispatch = createEventDispatcher();
     pendingUploads = [],
     threadStats = {},
     hideReplyPreview = false,
-    replyTargetId = null
+    replyTargetId = null,
+    scrollToMessageId = null
   }: Props = $props();
 
 let scroller = $state<HTMLDivElement | null>(null);
@@ -102,9 +104,24 @@ let lastScrollSignal = $state(0);
 let shouldStickToBottom = true;
 let pendingPrependAdjustment: { height: number; top: number } | null = null;
 let lastFirstMessageId: string | null = null;
+let highlightedMessageId = $state<string | null>(null);
+let lastScrollToMessageId: string | null = null;
 
 const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
   scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
+};
+
+const scrollToMessage = (messageId: string) => {
+  if (!scroller) return;
+  const messageEl = scroller.querySelector(`[data-message-id="${messageId}"]`);
+  if (messageEl) {
+    messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    highlightedMessageId = messageId;
+    // Clear highlight after animation
+    setTimeout(() => {
+      highlightedMessageId = null;
+    }, 2000);
+  }
 };
 
 // Re-scroll when images load to ensure full content is visible
@@ -554,6 +571,15 @@ let isMobileViewport = $state(false);
   });
 
   run(() => {
+    // Scroll to specific message when scrollToMessageId changes
+    if (scrollToMessageId && scrollToMessageId !== lastScrollToMessageId) {
+      lastScrollToMessageId = scrollToMessageId;
+      // Wait for messages to render then scroll
+      tick().then(() => scrollToMessage(scrollToMessageId));
+    }
+  });
+
+  run(() => {
     const prev = lastPendingLen;
     const next = pendingUploads.length;
     if (next !== prev) {
@@ -693,6 +719,14 @@ onMount(() => {
 
     list.sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
     return list;
+  }
+
+  function reactionUsersTooltip(userIds: string[]): string {
+    if (!userIds.length) return '';
+    return userIds.map((uid) => {
+      if (uid === currentUserId) return 'You';
+      return displayNameForUid(uid) || uid;
+    }).join(', ');
   }
 
   function toggleReaction(messageId: string, emoji: string) {
@@ -1061,6 +1095,21 @@ onMount(() => {
 
   .message-row {
     width: 100%;
+    transition: background-color 0.3s ease;
+  }
+
+  .message-row--highlighted {
+    background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.25);
+    animation: highlight-pulse 2s ease-out;
+  }
+
+  @keyframes highlight-pulse {
+    0% {
+      background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.4);
+    }
+    100% {
+      background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.1);
+    }
   }
 
   .message-row--mine {
@@ -1266,13 +1315,18 @@ onMount(() => {
     position: absolute;
     top: 0;
     display: inline-flex;
-    gap: 0.3rem;
+    gap: 0.2rem;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 120ms ease, transform 120ms ease;
+    transition: opacity 100ms ease, transform 100ms ease;
     direction: ltr;
-    transform: translateY(calc(-100% - 0.35rem));
-    padding-bottom: 0.35rem;
+    transform: translateY(calc(-100% - 0.25rem));
+    padding-bottom: 0.25rem;
+    background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+    border-radius: 0.5rem;
+    padding: 0.2rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+    backdrop-filter: blur(8px);
   }
 
   .message-action-bar--other {
@@ -1293,28 +1347,27 @@ onMount(() => {
   }
 
   .message-action {
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
-    color: var(--text-65);
+    width: 28px;
+    height: 28px;
+    border-radius: 0.4rem;
+    border: none;
+    background: transparent;
+    color: var(--text-60);
     display: grid;
     place-items: center;
-    font-size: 1rem;
-    transition: border 120ms ease, color 120ms ease, background 120ms ease;
+    font-size: 0.95rem;
+    transition: color 100ms ease, background 100ms ease;
   }
 
   .message-action:not(:disabled):hover,
   .message-action:not(:disabled):focus-visible {
-    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
     color: var(--color-accent);
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 15%, transparent);
     outline: none;
   }
 
   .message-action:disabled {
-    opacity: 0.2;
+    opacity: 0.25;
     pointer-events: none;
   }
 
@@ -1392,10 +1445,10 @@ onMount(() => {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.3rem;
+    gap: 0.25rem;
     position: relative;
     padding: 0;
-    margin: 0 0 0.5rem 0;
+    margin: 0 0 0.35rem 0;
     width: 100%;
   }
 
@@ -1418,35 +1471,58 @@ onMount(() => {
   .reply-inline {
     display: inline-flex;
     align-items: center;
-    gap: 0.45rem;
+    gap: 0.4rem;
     min-width: 0;
-    color: var(--text-80);
-    font-size: 0.9rem;
-    padding: 0.5rem 0.65rem;
+    color: var(--text-75);
+    font-size: 0.82rem;
+    padding: 0.35rem 0.6rem;
     margin: 0;
     position: relative;
-    background: color-mix(in srgb, var(--color-panel) 80%, transparent);
-    border-radius: 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
-    max-width: min(36rem, 100%);
+    background: color-mix(in srgb, var(--color-panel-muted) 65%, transparent);
+    border-radius: 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    box-shadow: none;
+    max-width: min(32rem, 100%);
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .reply-inline:hover {
+    background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+    border-color: color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
   }
 
   .reply-thread--mine .reply-inline {
-    background: color-mix(in srgb, var(--chat-bubble-self-bg) 18%, var(--color-panel) 70%);
-    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 75%, transparent);
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, transparent);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 15%, var(--color-panel-muted) 70%);
+    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 40%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 80%, var(--text-75) 20%);
+  }
+
+  .reply-thread--mine .reply-inline:hover {
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 25%, var(--color-panel-muted) 75%);
+  }
+
+  .reply-inline__icon {
+    font-size: 0.85rem;
+    color: var(--text-45);
+    transform: scaleX(-1);
+    flex-shrink: 0;
+  }
+
+  .reply-thread--mine .reply-inline__icon {
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 50%, var(--text-45) 50%);
   }
 
   .reply-inline__avatar {
-    width: 1.35rem;
-    height: 1.35rem;
+    width: 1.15rem;
+    height: 1.15rem;
     border-radius: 999px;
     overflow: hidden;
     display: grid;
     place-items: center;
-    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-    background: color-mix(in srgb, currentColor 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: color-mix(in srgb, var(--color-panel-muted) 50%, transparent);
+    flex-shrink: 0;
   }
 
   .reply-inline__avatar img {
@@ -1456,46 +1532,49 @@ onMount(() => {
   }
 
   .reply-inline__avatar span {
-    font-weight: 700;
-    font-size: 0.8rem;
-    color: inherit;
+    font-weight: 600;
+    font-size: 0.55rem;
+    color: var(--text-60);
   }
 
   .reply-inline__text {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.3rem;
     min-width: 0;
     flex-wrap: nowrap;
   }
 
   .reply-inline__author {
-    font-weight: 700;
-    color: var(--text-90);
+    font-weight: 600;
+    font-size: 0.78rem;
+    color: var(--text-80);
     white-space: nowrap;
   }
 
   .reply-inline__snippet {
-    color: var(--text-60);
+    color: var(--text-55);
+    font-size: 0.78rem;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    max-width: 18ch;
   }
 
   .reply-thread--mine .reply-inline__author {
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 92%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, var(--text-80) 15%);
   }
 
   .reply-thread--mine .reply-inline__snippet {
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 78%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 65%, var(--text-55) 35%);
   }
 
 @media (max-width: 640px) {
   .reply-thread {
     padding: 0;
-    margin: 0 0 0.35rem 0;
-    gap: 0.25rem;
+    margin: 0 0 0.25rem 0;
+    gap: 0.2rem;
     position: relative;
   }
 
@@ -1505,25 +1584,33 @@ onMount(() => {
   }
 
   .reply-inline {
-    padding: 0.45rem 0.65rem;
+    padding: 0.3rem 0.55rem;
     margin: 0;
-    font-size: 0.88rem;
-    background: color-mix(in srgb, var(--color-panel) 70%, var(--chat-bubble-other-bg) 30%);
-    border-radius: 0.95rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
-    max-width: 100%;
-    color: color-mix(in srgb, var(--text-100) 92%, var(--text-80) 8%);
+    font-size: 0.78rem;
+    background: color-mix(in srgb, var(--color-panel) 60%, var(--chat-bubble-other-bg) 20%);
+    border-radius: 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 45%, transparent);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    max-width: calc(100% - 1rem);
+    color: color-mix(in srgb, var(--text-100) 85%, var(--text-70) 15%);
+  }
+
+  .reply-inline:active {
+    background: color-mix(in srgb, var(--color-panel) 75%, var(--chat-bubble-other-bg) 25%);
   }
 
   .reply-thread:not(.reply-thread--mine) .reply-inline {
-    color: color-mix(in srgb, var(--text-100) 92%, var(--text-80) 8%);
+    color: color-mix(in srgb, var(--text-100) 85%, var(--text-70) 15%);
   }
 
   .reply-thread--mine .reply-inline {
-    background: color-mix(in srgb, var(--chat-bubble-self-bg) 70%, var(--color-panel) 30%);
-    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 70%, transparent);
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 92%, var(--text-100) 8%);
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, var(--color-panel) 50%);
+    border-color: color-mix(in srgb, var(--chat-bubble-self-border) 35%, transparent);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 85%, var(--text-100) 15%);
+  }
+
+  .reply-thread--mine .reply-inline:active {
+    background: color-mix(in srgb, var(--chat-bubble-self-bg) 50%, var(--color-panel) 50%);
   }
 
   .reply-elbow {
@@ -1538,36 +1625,52 @@ onMount(() => {
     display: none;
   }
 
+  .reply-inline__icon {
+    font-size: 0.75rem;
+  }
+
+  .reply-thread--mine .reply-inline__icon {
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 60%, var(--text-50) 40%);
+  }
+
+  .reply-thread:not(.reply-thread--mine) .reply-inline__icon {
+    color: var(--text-50);
+  }
+
   .reply-thread--mine .reply-inline__author {
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 94%, var(--text-100) 6%);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%);
+    font-size: 0.75rem;
   }
 
   .reply-thread--mine .reply-inline__snippet {
-    color: color-mix(in srgb, var(--chat-bubble-self-text) 90%, var(--text-100) 10%);
+    color: color-mix(in srgb, var(--chat-bubble-self-text) 75%, var(--text-100) 25%);
+    max-width: 14ch;
   }
 
   .reply-thread:not(.reply-thread--mine) .reply-inline__author {
-    color: color-mix(in srgb, var(--text-100) 94%, var(--text-80) 6%);
+    color: color-mix(in srgb, var(--text-100) 90%, var(--text-80) 10%);
+    font-size: 0.75rem;
   }
 
   .reply-thread:not(.reply-thread--mine) .reply-inline__snippet {
-    color: color-mix(in srgb, var(--text-100) 88%, var(--text-70) 12%);
+    color: color-mix(in srgb, var(--text-100) 70%, var(--text-60) 30%);
+    max-width: 14ch;
   }
 
   .reply-inline__avatar {
-    width: 1.1rem;
-    height: 1.1rem;
+    width: 1rem;
+    height: 1rem;
   }
 
-    .reply-inline__avatar span {
-      font-size: 0.65rem;
-    }
-
-    .reply-inline__text {
-      flex-wrap: wrap;
-      gap: 0.25rem;
-    }
+  .reply-inline__avatar span {
+    font-size: 0.5rem;
   }
+
+  .reply-inline__text {
+    flex-wrap: nowrap;
+    gap: 0.2rem;
+  }
+}
 
   .message-bubble {
     position: relative;
@@ -2006,15 +2109,20 @@ onMount(() => {
       margin-right: 0;
     }
 
+    .message-action-bar {
+      background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+      border-color: color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    }
+
     .message-action {
-      background: color-mix(in srgb, var(--color-panel-muted) 40%, transparent);
-      border-color: color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
-      box-shadow: none;
+      background: transparent;
+      border: none;
     }
 
     .message-action:not(:disabled):hover,
     .message-action:not(:disabled):focus-visible {
-      background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
+      background: color-mix(in srgb, var(--color-accent) 12%, transparent);
     }
   }
 
@@ -2528,43 +2636,43 @@ onMount(() => {
 
 .thread-preview {
   position: relative;
-  margin-top: 0.2rem;
-  border-radius: 1rem;
-  background: color-mix(in srgb, var(--color-panel-muted) 96%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+  margin-top: 0.3rem;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
   cursor: pointer;
-  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
-  padding: 0.95rem 1.1rem 1rem calc(1.1rem + 16px);
-  max-width: min(520px, 100%);
+  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease, box-shadow 150ms ease;
+  padding: 0.65rem 0.9rem 0.7rem calc(0.9rem + 14px);
+  max-width: min(420px, 100%);
 }
 
 .thread-preview--mine {
   align-self: flex-end;
-  padding-left: 1.1rem;
-  padding-right: calc(1.1rem + 16px);
+  padding-left: 0.9rem;
+  padding-right: calc(0.9rem + 14px);
 }
 
 .thread-preview::after {
   content: '';
   position: absolute;
-  top: 0.9rem;
-  bottom: 0.9rem;
-  left: 1.1rem;
-  width: 3px;
+  top: 0.65rem;
+  bottom: 0.65rem;
+  left: 0.9rem;
+  width: 2.5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 40%, var(--color-border-subtle) 60%);
 }
 
 .thread-preview::before {
   content: '';
   position: absolute;
-  width: 26px;
-  height: 18px;
-  top: -16px;
-  left: 1.1rem;
-  border-left: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-  border-bottom: 2px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-  border-bottom-left-radius: 14px;
+  width: 20px;
+  height: 14px;
+  top: -12px;
+  left: 0.9rem;
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-border-subtle) 70%);
+  border-bottom: 2px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-border-subtle) 70%);
+  border-bottom-left-radius: 10px;
 }
 
 .thread-preview--mine::after,
@@ -2572,10 +2680,12 @@ onMount(() => {
   display: none;
 }
 
-.thread-preview--unread::after,
+.thread-preview--unread::after {
+  background: var(--color-accent);
+}
+
 .thread-preview--unread::before {
-  background: color-mix(in srgb, var(--color-accent) 75%, var(--color-panel) 25%);
-  border-color: transparent;
+  border-color: var(--color-accent);
 }
 
 @media (min-width: 768px) {
@@ -2616,36 +2726,36 @@ onMount(() => {
 .thread-preview__content {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  padding-left: 0.5rem;
+  gap: 0.25rem;
+  padding-left: 0.4rem;
 }
 
 .thread-preview--mine .thread-preview__content {
   padding-left: 0;
-  padding-right: 0.5rem;
+  padding-right: 0.4rem;
 }
 
 .thread-preview__header {
   display: flex;
   align-items: baseline;
-  gap: 0.45rem;
-  font-size: 0.85rem;
+  gap: 0.35rem;
+  font-size: 0.78rem;
 }
 
 .thread-preview__author {
   font-weight: 600;
-  color: var(--color-text-primary);
+  color: var(--text-85);
 }
 
 .thread-preview__time {
-  font-size: 0.78rem;
-  color: var(--text-60);
+  font-size: 0.72rem;
+  color: var(--text-50);
 }
 
 .thread-preview__snippet {
-  color: var(--color-text-primary);
-  font-size: 0.95rem;
-  line-height: 1.4;
+  color: var(--text-70);
+  font-size: 0.85rem;
+  line-height: 1.35;
   line-clamp: 2;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -2657,28 +2767,34 @@ onMount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  font-size: 0.8rem;
-  color: var(--text-65);
+  gap: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--text-55);
+  margin-top: 0.15rem;
 }
 
 .thread-preview__avatars {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: -0.25rem;
 }
 
 .thread-preview__avatar {
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1.5px solid var(--color-panel);
+  background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
   display: grid;
   place-items: center;
-  font-size: 0.78rem;
+  font-size: 0.68rem;
   font-weight: 600;
   overflow: hidden;
+  margin-left: -0.35rem;
+}
+
+.thread-preview__avatar:first-child {
+  margin-left: 0;
 }
 
 .thread-preview__avatar img {
@@ -2688,21 +2804,29 @@ onMount(() => {
 }
 
 .thread-preview__avatar--ghost {
-  background: rgba(255, 255, 255, 0.05);
+  background: color-mix(in srgb, var(--color-panel-muted) 50%, transparent);
   border-style: dashed;
-  color: var(--text-60);
+  border-color: color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+  color: var(--text-50);
+  font-size: 0.65rem;
 }
 
 .thread-preview__count {
   text-transform: lowercase;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-accent) 70%, var(--text-60) 30%);
 }
 
 .thread-preview:hover,
 .thread-preview:focus-visible {
-  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
-  background: color-mix(in srgb, var(--color-panel) 94%, transparent);
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
   outline: none;
+}
+
+.thread-preview:active {
+  transform: scale(0.99);
 }
 
 .image-preview-overlay {
@@ -2915,6 +3039,7 @@ onMount(() => {
       {@const hasReactions = reactions.length > 0}
       {@const minuteKey = isSystem ? null : minuteKeyFor(m)}
       {@const minuteHovered = minuteKey && hoveredMinuteKey === minuteKey}
+      {@const isHighlighted = highlightedMessageId === m.id}
       {@const showAdd = !isSystem && Boolean(
         currentUserId &&
         (
@@ -2926,7 +3051,7 @@ onMount(() => {
       {@const replyRef = (m as any).replyTo ?? null}
       {@const threadMeta = threadStats?.[m.id]}
       {#if isSystem}
-        <div class="message-row message-row--system flex w-full justify-center" data-message-id={m.id}>
+        <div class="message-row message-row--system flex w-full justify-center {isHighlighted ? 'message-row--highlighted' : ''}" data-message-id={m.id}>
           <div
             class={`message-block w-full max-w-3xl message-block--system ${minuteHovered ? 'is-minute-hovered' : ''}`}
             style={`margin-top: ${(continued ? 0 : 0.15)}rem;`}
@@ -2938,7 +3063,7 @@ onMount(() => {
         </div>
       {:else}
       <div
-        class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''}`}
+        class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''} ${isHighlighted ? 'message-row--highlighted' : ''}`}
         data-message-id={m.id}
         onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
         onpointerleave={() => { onMessagePointerLeave(m.id, minuteKey); handlePointerUp(); }}
@@ -2977,7 +3102,8 @@ onMount(() => {
                           {#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
                             {@const entryAvatar = replyAvatar(entry)}
                             {@const entryAuthor = replyAuthorLabel(entry)}
-                            <div class="reply-inline">
+                            <div class="reply-inline" title="Jump to message">
+                              <i class="bx bx-reply reply-inline__icon" aria-hidden="true"></i>
                               <div class="reply-inline__avatar">
                             {#if entryAvatar}
                               <img src={entryAvatar} alt={entryAuthor} loading="lazy" />
@@ -3254,7 +3380,7 @@ onMount(() => {
                             class={`reaction-chip ${reaction.mine ? 'active' : ''}`}
                             onclick={() => toggleReaction(m.id, reaction.emoji)}
                             disabled={!currentUserId}
-                            title={reaction.users.join(', ')}
+                            title={reactionUsersTooltip(reaction.users)}
                           >
                             <span>{reaction.emoji}</span>
                             <span class="count">{reaction.count}</span>

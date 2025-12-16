@@ -1,6 +1,7 @@
 <!-- src/routes/(app)/+layout.svelte -->
 <script lang="ts">
   import '$lib/stores/theme';
+  import '$lib/stores/notifications'; // Ensure notification watchers start early
   import { onDestroy, onMount } from 'svelte';
   import { run } from 'svelte/legacy';
   import { startAuthListener } from '$lib/firebase';
@@ -492,6 +493,7 @@
         open={serverSettingsState.open}
         activeSection={serverSettingsState.activeSection}
         serverId={serverSettingsState.serverId}
+        featureModal={serverSettingsState.featureModal}
         startInSection={serverSettingsState.source === 'route'}
         on:close={handleServerSettingsClose}
         on:section={handleServerSettingsSection}
@@ -501,6 +503,7 @@
         open={serverSettingsState.open}
         activeSection={serverSettingsState.activeSection}
         serverId={serverSettingsState.serverId}
+        featureModal={serverSettingsState.featureModal}
         on:close={handleServerSettingsClose}
         on:section={handleServerSettingsSection}
       />
@@ -509,10 +512,14 @@
 
   {#if activeVoice && !activeVoice.visible}
     <div
-      class="voice-mini-fab pointer-events-none fixed left-0 right-0 z-40 flex justify-center px-4"
-      style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem)"
+      class="voice-mini-fab pointer-events-none fixed inset-0 z-[9999]"
     >
-      <div class="pointer-events-auto">
+      <div 
+        class="pointer-events-auto absolute"
+        style:bottom="calc(var(--mobile-dock-height, 0px) + 1rem)"
+        style:left="50%"
+        style:transform="translateX(-50%)"
+      >
         <VoiceMiniPanel serverId={activeVoice.serverId} session={activeVoice} draggable={true} />
       </div>
     </div>

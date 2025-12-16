@@ -202,12 +202,14 @@
     --emoji-cell-size: clamp(44px, 10vw, 54px);
     width: min(420px, 80vw);
     max-height: min(440px, 65vh);
-    height: min(440px, 65vh);
+    height: 100%;
     background: color-mix(in srgb, var(--color-panel) 98%, transparent);
     border-radius: 1rem;
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     box-shadow: 0 18px 52px rgba(4, 8, 16, 0.25);
     color: var(--color-text-primary);
+    display: flex;
+    flex-direction: column;
   }
 
   .emoji-layout {

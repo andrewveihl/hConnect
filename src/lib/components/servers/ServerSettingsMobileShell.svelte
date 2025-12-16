@@ -15,9 +15,10 @@
     activeSection: ServerSettingsSectionId;
     serverId?: string | null;
     startInSection?: boolean;
+    featureModal?: 'ticketAi' | null;
   }
 
-  let { open, activeSection, serverId = null, startInSection = false }: Props = $props();
+  let { open, activeSection, serverId = null, startInSection = false, featureModal = null }: Props = $props();
   const dispatch = createEventDispatcher<{ close: void; section: ServerSettingsSectionId }>();
 
   const tabs: string[] = $derived(Array.from(new Set(serverSettingsSections.map((section) => section.group))));
@@ -296,7 +297,7 @@
             </div>
           </header>
           <div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] p-4">
-            <ServerSettingsPanel serverId={serverId} section={mapServerSectionToPanel(detailSection)} bare />
+            <ServerSettingsPanel serverId={serverId} section={mapServerSectionToPanel(detailSection)} {featureModal} bare />
           </div>
         </div>
       {/if}

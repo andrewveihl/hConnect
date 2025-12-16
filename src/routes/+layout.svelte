@@ -5,6 +5,7 @@
   import SplashScreen from '$lib/components/app/SplashScreen.svelte';
   import { initMobileNavigation } from '$lib/stores/mobileNav';
   import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
+  import TicketFab from '$lib/components/app/TicketFab.svelte';
   import { initClientErrorReporting, teardownClientErrorReporting } from '$lib/telemetry/clientErrors';
   import { customizationConfigStore, applyThemeOverrides, type CustomizationConfig } from '$lib/admin/customization';
   import { theme } from '$lib/stores/theme';
@@ -177,6 +178,7 @@
   </div>
   {#if !hideFloatingDock}
     <FloatingActionDock />
+    <TicketFab />
   {/if}
 </div>
 

@@ -101,21 +101,11 @@
     const dockRect = dockEl.getBoundingClientRect();
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const defaultRight = 16;
-    const gapAboveInput = 12;
-    let bottomSpacing = 96;
-
-    const chatInput = document.querySelector('.chat-input-region');
-    if (chatInput instanceof HTMLElement) {
-      const rect = chatInput.getBoundingClientRect();
-      bottomSpacing = Math.max(gapAboveInput, viewportHeight - rect.top + gapAboveInput);
-      syncChatObserver(chatInput);
-    } else {
-      syncChatObserver(null);
-    }
-
-    const x = viewportWidth - dockRect.width - defaultRight;
-    const y = viewportHeight - dockRect.height - bottomSpacing;
+    
+    // First time: center the dock for discoverability
+    // Subsequent times (after user moves it): use the saved position
+    const x = Math.round((viewportWidth - dockRect.width) / 2);
+    const y = Math.round((viewportHeight - dockRect.height) / 2);
     position = clampToViewport({ x, y });
     ready = true;
   }

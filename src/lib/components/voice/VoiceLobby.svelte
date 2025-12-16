@@ -5,6 +5,7 @@
   import { getDb } from '$lib/firebase';
   import { collection, doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import CallTile from './CallTile.svelte';
 
   const CALL_DOC_ID = 'live';
   const THUMBNAIL_REFRESH_INTERVAL = 2000; // How often to check for new thumbnails
@@ -71,13 +72,6 @@
     unsub?.();
     thumbnailUnsub?.();
   });
-
-  function avatarInitial(name?: string) {
-    if (!name) return '?';
-    const trimmed = name.trim();
-    if (!trimmed.length) return '?';
-    return trimmed.charAt(0).toUpperCase();
-  }
 
   function handleJoin() {
     dispatch('joinVoice', { muted: muteOnJoin, videoOff: videoOffOnJoin });
@@ -232,70 +226,23 @@
 
   <!-- The call grid - fixed size cards -->
   <div class="call-stage">
-    <div class="call-grid">
-      <!-- Empty state card (always shown when no participants) -->
+    <div class="call-grid" class:call-grid--single={participantCount <= 1}>
+      <!-- Empty state card (uses shared CallTile for consistent styling) -->
       {#if participantCount === 0}
-        <article class="call-tile call-tile--empty">
-          <div class="call-tile__media">
-            <div class="call-tile__empty-content">
-              <div class="call-tile__empty-icon">
-                <i class="bx bx-video-off"></i>
-              </div>
-              <span class="call-tile__empty-text">No one in call</span>
-            </div>
-          </div>
-        </article>
+        <CallTile isEmpty={true} isSingle={true} />
       {/if}
 
-      <!-- Participant cards -->
+      <!-- Participant cards (uses shared CallTile for consistent styling) -->
       {#each displayedParticipants as participant (participant.uid)}
-        <article
-          class="call-tile"
-          class:call-tile--video-on={participant.hasVideo}
-          class:call-tile--sharing={participant.screenSharing}
-        >
-          <div class="call-tile__media">
-            <!-- Thumbnail image (shows when we have a thumbnail from the call) -->
-            {#if participant.thumbnailUrl && participant.hasVideo}
-              <img
-                src={participant.thumbnailUrl}
-                alt={`${participant.displayName}'s video`}
-                class="call-tile__thumbnail"
-              />
-            {:else}
-              <!-- Avatar fallback -->
-              <div class="call-tile__avatar-container">
-                <div class="call-tile__avatar" class:call-tile__avatar--video-on={participant.hasVideo}>
-                  {#if participant.photoURL}
-                    <img src={participant.photoURL} alt={participant.displayName} loading="lazy" />
-                  {:else}
-                    <span>{avatarInitial(participant.displayName)}</span>
-                  {/if}
-                </div>
-                {#if participant.hasVideo && !participant.thumbnailUrl}
-                  <div class="call-tile__video-indicator">
-                    <i class="bx bx-video"></i>
-                    <span>Live</span>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-            
-            <!-- Bottom info bar -->
-            <div class="call-tile__info-bar">
-              <span class="call-tile__name" title={participant.displayName}>
-                {participant.displayName}
-              </span>
-              <div class="call-tile__status-icons">
-                {#if participant.screenSharing}
-                  <span class="call-tile__live-badge">Screen</span>
-                {/if}
-                <i class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off call-tile__icon--muted'}`}></i>
-                <i class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off call-tile__icon--muted'}`}></i>
-              </div>
-            </div>
-          </div>
-        </article>
+        <CallTile
+          displayName={participant.displayName}
+          photoURL={participant.photoURL}
+          hasAudio={participant.hasAudio ?? true}
+          hasVideo={participant.hasVideo ?? false}
+          screenSharing={participant.screenSharing ?? false}
+          thumbnailUrl={participant.thumbnailUrl}
+          isSingle={participantCount === 1}
+        />
       {/each}
       
       <!-- Overflow card -->
@@ -459,8 +406,12 @@
     max-width: 100%;
   }
 
-  /* Tile - Discord 16:9 rectangular style */
-  .call-tile {
+  .call-grid--single {
+    max-width: 800px;
+  }
+
+  /* Overflow tile - keeps local styles since it's not using CallTile */
+  .call-tile--overflow {
     position: relative;
     width: 360px;
     height: 202px;
@@ -468,195 +419,18 @@
     background: #2b2d31;
     overflow: hidden;
     flex-shrink: 0;
-    transition: box-shadow 200ms ease;
   }
 
-  .call-tile:hover {
+  .call-tile--overflow:hover {
     background: #32353b;
   }
 
-  .call-tile--sharing {
-    box-shadow: 0 0 0 2px #23a559,
-                0 0 12px rgba(35, 165, 89, 0.3);
-  }
-
-  .call-tile--video-on {
-    box-shadow: 0 0 0 2px #23a559;
-  }
-
-  .call-tile--video-on.call-tile--sharing {
-    box-shadow: 0 0 0 2px #23a559,
-                0 0 12px rgba(35, 165, 89, 0.3);
-  }
-
-  /* Empty tile - same size as regular tiles */
-  .call-tile--empty {
-    background: #2b2d31;
-  }
-
-  .call-tile--empty:hover {
-    background: #32353b;
-  }
-
-  .call-tile__empty-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    height: 100%;
-    color: #6d6f78;
-  }
-
-  .call-tile__empty-icon {
-    width: 64px;
-    height: 64px;
-    border-radius: 50%;
-    background: #1e1f22;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-  }
-
-  .call-tile__empty-text {
-    font-size: 13px;
-    font-weight: 500;
-    text-align: center;
-    color: #b5bac1;
-  }
-
-  /* Tile media container */
-  .call-tile__media {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    background: #2b2d31;
-  }
-
-  /* Thumbnail image */
-  .call-tile__thumbnail {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    z-index: 1;
-  }
-
-  /* Avatar container */
-  .call-tile__avatar-container {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    width: 100%;
-    padding-bottom: 32px;
-  }
-
-  /* Avatar - Discord circular style */
-  .call-tile__avatar {
-    width: 64px;
-    height: 64px;
-    border-radius: 50%;
-    overflow: hidden;
-    background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-strong) 100%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: white;
-    transition: box-shadow 200ms ease;
-  }
-
-  .call-tile__avatar--video-on {
-    box-shadow: 0 0 0 3px #23a559,
-                0 0 12px rgba(35, 165, 89, 0.4);
-  }
-
-  .call-tile__avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  /* Video indicator badge */
-  .call-tile__video-indicator {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    background: #23a559;
-    color: white;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
-  .call-tile__video-indicator i {
-    font-size: 11px;
-  }
-
-  /* Bottom info bar */
-  .call-tile__info-bar {
-    position: absolute;
-    inset-inline: 0;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.4) 70%, transparent 100%);
-    padding: 10px 8px 6px;
-    z-index: 2;
-  }
-
-  .call-tile__name {
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #f2f3f5;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .call-tile__status-icons {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: #b5bac1;
-    font-size: 13px;
-    flex-shrink: 0;
-  }
-
-  .call-tile__icon--muted {
-    color: #f23f43;
-  }
-
-  .call-tile__live-badge {
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: #23a559;
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: white;
-  }
-
-  /* Overflow tile */
   .call-tile--overflow .call-tile__media {
+    display: flex;
+    align-items: center;
     justify-content: center;
+    width: 100%;
+    height: 100%;
   }
 
   .call-tile__overflow {

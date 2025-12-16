@@ -275,6 +275,12 @@ export function startAuthListener() {
         const hasCustom = !!existing?.customPhotoURL;
         const hasCached = !!existing?.cachedPhotoURL;
         
+        // Always store authPhotoURL if user has a provider photo (e.g., Google)
+        // This ensures we can fall back to it if other avatar sources fail
+        if (u.photoURL && existing?.authPhotoURL !== u.photoURL) {
+          await setDoc(ref, { authPhotoURL: u.photoURL, updatedAt: serverTimestamp() }, { merge: true });
+        }
+        
         // If user has a Google photo but no cached version, cache it now
         if (!hasCustom && !hasCached && u.photoURL) {
           try {

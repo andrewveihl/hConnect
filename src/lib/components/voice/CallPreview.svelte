@@ -4,7 +4,7 @@
    * 
    * Displays the same grid view that participants in the call see.
    * - If people are in the call, shows their video cards exactly as they'd appear
-   * - If no one is in the call, shows a single centered "No one in call" card
+   * - If no one is in the call, shows a "No one in call" placeholder card
    * - On hover, shows only a Join button (no other controls)
    */
   import { createEventDispatcher, onDestroy } from 'svelte';
@@ -53,8 +53,6 @@
   // State
   // ─────────────────────────────────────────────────────────────────────────
 
-  let participants: Participant[] = $state([]);
-  let thumbnails = $state(new Map<string, string>());
   let isHovering = $state(false);
   let isJoining = $state(false);
 
@@ -70,11 +68,23 @@
   // Data Fetching
   // ─────────────────────────────────────────────────────────────────────────
 
+  // Raw data from Firestore
+  let rawParticipants: Participant[] = $state([]);
+  let thumbnailsMap = $state(new Map<string, string>());
+
+  // Derived: participants with thumbnails merged in
+  const participants = $derived(
+    rawParticipants.map((p) => ({
+      ...p,
+      thumbnailUrl: thumbnailsMap.get(p.uid) ?? null
+    }))
+  );
+
   run(() => {
     untrack(() => unsub)?.();
     untrack(() => thumbnailUnsub)?.();
-    participants = [];
-    thumbnails = new Map();
+    rawParticipants = [];
+    thumbnailsMap = new Map();
 
     if (!serverId || !channelId) {
       unsub = null;
@@ -91,7 +101,7 @@
     unsub = onSnapshot(
       participantsRef,
       (snap) => {
-        participants = snap.docs
+        rawParticipants = snap.docs
           .map((entry) => {
             const data = entry.data() as Record<string, unknown>;
             const uid = (data.uid as string) ?? entry.id;
@@ -103,14 +113,14 @@
               hasVideo: (data.hasVideo as boolean) ?? false,
               screenSharing: (data.screenSharing as boolean) ?? false,
               isSpeaking: (data.isSpeaking as boolean) ?? false,
-              thumbnailUrl: thumbnails.get(uid) ?? null
+              thumbnailUrl: null
             };
           })
           .filter((p) => (p as Record<string, unknown>).status !== 'left');
       },
       (err) => {
         console.error('[CallPreview] Error fetching participants:', err);
-        participants = [];
+        rawParticipants = [];
       }
     );
 
@@ -125,13 +135,7 @@
             newThumbnails.set(entry.id, data.imageData as string);
           }
         });
-        thumbnails = newThumbnails;
-
-        // Update participants with new thumbnails
-        participants = participants.map((p) => ({
-          ...p,
-          thumbnailUrl: newThumbnails.get(p.uid) ?? null
-        }));
+        thumbnailsMap = newThumbnails;
       },
       (err) => {
         console.warn('[CallPreview] Error fetching thumbnails:', err);
@@ -159,15 +163,17 @@
     dispatch('returnToSession');
   }
 
-  function getInitial(name: string): string {
-    return name?.trim().charAt(0).toUpperCase() || '?';
-  }
-
   // ─────────────────────────────────────────────────────────────────────────
   // Derived
   // ─────────────────────────────────────────────────────────────────────────
 
   const hasParticipants = $derived(participants.length > 0);
+  const isSingleTile = $derived(participants.length <= 1);
+  const isDuoTile = $derived(participants.length === 2);
+
+  function getInitial(name: string): string {
+    return name?.trim().charAt(0).toUpperCase() || '?';
+  }
 </script>
 
 <div
@@ -190,74 +196,75 @@
   {/if}
 
   <!-- Call Stage (matches VideoChat exactly) -->
-  <section class="call-stage">
-    <div class="call-grid" class:call-grid--single={participants.length <= 1}>
-      {#if !hasParticipants}
-        <!-- Empty state: identical to a single participant tile -->
-        <article class="call-tile">
-          <div class="call-tile__media">
-            <div class="call-avatar">
-              <div class="call-avatar__image call-avatar__image--empty">
-                <i class="bx bx-video-off"></i>
-              </div>
-            </div>
-          </div>
-          <div class="call-tile__footer">
-            <div class="call-tile__footer-name">
-              <span class="call-tile__footer-text">No one in call</span>
-            </div>
-            <div class="call-tile__footer-icons">
-              <i class="bx bx-microphone-off is-off"></i>
-              <i class="bx bx-video-off is-off"></i>
-            </div>
-          </div>
-        </article>
-      {:else}
-        <!-- Participant tiles -->
-        {#each participants as participant (participant.uid)}
-          <article
-            class="call-tile"
-            class:call-tile--speaking={participant.isSpeaking}
-            class:call-tile--sharing={participant.screenSharing}
-          >
+  <section class="call-stage" role="group" aria-label="Call stage">
+    <div class="media-stage media-stage--video">
+      <div class="call-grid" class:call-grid--single={isSingleTile} class:call-grid--duo={isDuoTile}>
+        {#if !hasParticipants}
+          <!-- No one in call placeholder -->
+          <article class="call-tile">
             <div class="call-tile__media">
-              {#if participant.thumbnailUrl && participant.hasVideo}
-                <!-- Live video thumbnail -->
-                <img
-                  src={participant.thumbnailUrl}
-                  alt="{participant.displayName}'s video"
-                  class="call-tile__thumbnail"
-                />
-              {:else}
-                <!-- Avatar fallback -->
-                <div class="call-avatar">
-                  <div class="call-avatar__image">
-                    {#if participant.photoURL}
-                      <img src={participant.photoURL} alt={participant.displayName} loading="lazy" />
-                    {:else}
-                      <span>{getInitial(participant.displayName)}</span>
-                    {/if}
-                  </div>
+              <div class="call-avatar">
+                <div class="call-avatar__image call-avatar__image--empty">
+                  <i class="bx bx-user"></i>
                 </div>
-              {/if}
+              </div>
             </div>
             <div class="call-tile__footer">
               <div class="call-tile__footer-name">
-                <span class="call-tile__footer-text" title={participant.displayName}>
-                  {participant.displayName}
-                </span>
-                {#if participant.screenSharing}
-                  <span class="call-tile__footer-pill call-tile__footer-pill--share">LIVE</span>
-                {/if}
+                <span class="call-tile__footer-text">No one in call</span>
               </div>
               <div class="call-tile__footer-icons">
-                <i class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off is-off'}`}></i>
-                <i class={`bx ${participant.hasVideo ? 'bx-video' : 'bx-video-off is-off'}`}></i>
+                <i class="bx bx-microphone-off is-off"></i>
+                <i class="bx bx-video-off is-off"></i>
               </div>
             </div>
           </article>
-        {/each}
-      {/if}
+        {:else}
+          <!-- Participant tiles - show who's in the call -->
+          {#each participants as participant (participant.uid)}
+            <article
+              class="call-tile"
+              class:call-tile--speaking={participant.isSpeaking}
+              class:call-tile--sharing={participant.screenSharing}
+            >
+              <div class="call-tile__media">
+                {#if participant.thumbnailUrl}
+                  <img
+                    src={participant.thumbnailUrl}
+                    alt="{participant.displayName}'s video"
+                    class="call-tile__thumbnail"
+                    decoding="async"
+                  />
+                {:else}
+                  <div class="call-avatar">
+                    <div class="call-avatar__image">
+                      {#if participant.photoURL}
+                        <img src={participant.photoURL} alt={participant.displayName} loading="lazy" />
+                      {:else}
+                        <span>{getInitial(participant.displayName)}</span>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+              <div class="call-tile__footer">
+                <div class="call-tile__footer-name">
+                  <span class="call-tile__footer-text" title={participant.displayName}>
+                    {participant.displayName}
+                  </span>
+                  {#if participant.screenSharing}
+                    <span class="call-tile__footer-pill call-tile__footer-pill--share">LIVE</span>
+                  {/if}
+                </div>
+                <div class="call-tile__footer-icons">
+                  <i class={`bx ${participant.hasAudio ? 'bx-microphone' : 'bx-microphone-off is-off'}`}></i>
+                  <i class={`bx ${participant.hasVideo || participant.thumbnailUrl ? 'bx-video' : 'bx-video-off is-off'}`}></i>
+                </div>
+              </div>
+            </article>
+          {/each}
+        {/if}
+      </div>
     </div>
   </section>
 
@@ -296,7 +303,9 @@
   .call-preview {
     position: relative;
     width: 100%;
-    background: #1e1f22;
+    height: 100%;
+    flex: 1;
+    min-height: 0;
     border-radius: 8px;
     overflow: hidden;
     display: flex;
@@ -304,63 +313,33 @@
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
-     CALL STAGE - Matches VideoChat exactly
+     CALL STAGE - Matches VideoChat embedded style exactly
      ══════════════════════════════════════════════════════════════════════════ */
 
   .call-stage {
     flex: 1;
-    min-height: clamp(280px, 50vh, 600px);
+    min-height: 0;
     display: flex;
     position: relative;
     overflow: hidden;
     background: #1e1f22;
     border-radius: 8px;
     padding: 8px;
-    padding-bottom: 16px;
     justify-content: center;
     align-items: center;
   }
 
-  /* Connected elsewhere alert */
-  .preview-alert {
+  /* ══════════════════════════════════════════════════════════════════════════
+     MEDIA STAGE - Wrapper for grid, matches VideoChat structure
+     ══════════════════════════════════════════════════════════════════════════ */
+
+  .media-stage {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background: rgba(250, 168, 26, 0.1);
-    border-bottom: 1px solid rgba(250, 168, 26, 0.2);
-    color: #faa81a;
-    font-size: 13px;
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  .preview-alert i {
-    font-size: 16px;
-  }
-
-  .preview-alert span {
     flex: 1;
-    color: #f2f3f5;
-  }
-
-  .preview-alert__btn {
-    display: flex;
+    width: 100%;
+    height: 100%;
     align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-radius: 4px;
-    background: #2b2d31;
-    border: none;
-    color: #f2f3f5;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 150ms ease;
-  }
-
-  .preview-alert__btn:hover {
-    background: #404249;
+    justify-content: center;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -371,10 +350,10 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    width: 100%;
-    height: 100%;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0;
     padding: 8px;
-    box-sizing: border-box;
     align-items: center;
     justify-content: center;
     align-content: center;
@@ -382,7 +361,12 @@
 
   .call-grid--single {
     max-width: 800px;
-    margin: 0 auto;
+    justify-content: center;
+  }
+
+  .call-grid--duo {
+    max-width: 1100px;
+    justify-content: center;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -398,19 +382,28 @@
     background: #2b2d31;
     display: flex;
     flex-direction: column;
+    transition: box-shadow 200ms ease;
+    box-shadow: none;
+    outline: none;
     flex-shrink: 0;
   }
 
-  /* Double size when alone in call */
+  .call-tile:hover {
+    background: #32353b;
+  }
+
+  /* Double size when alone - matches VideoChat */
   .call-grid--single .call-tile {
     width: 720px;
     height: 404px;
+    max-width: calc(100% - 16px);
   }
 
-  /* Speaking glow */
-  .call-tile--speaking {
-    box-shadow: 0 0 0 2px #23a559,
-                0 0 16px rgba(35, 165, 89, 0.4);
+  /* Larger tiles for duo (1.5x) - matches VideoChat */
+  .call-grid--duo .call-tile {
+    width: 540px;
+    height: 303px;
+    max-width: calc(50% - 12px);
   }
 
   /* Screen sharing glow */
@@ -418,8 +411,20 @@
     box-shadow: 0 0 0 2px #23a559;
   }
 
+  /* Self tile accent border */
+  .call-tile--self {
+    box-shadow: 0 0 0 2px var(--color-accent, #5865f2);
+  }
+
+  /* Speaking glow */
+  .call-tile--speaking {
+    box-shadow: 
+      0 0 0 2px #23a559,
+      0 0 16px rgba(35, 165, 89, 0.4);
+  }
+
   /* ══════════════════════════════════════════════════════════════════════════
-     TILE MEDIA - Matches VideoChat .call-tile__media
+     TILE MEDIA - Matches VideoChat
      ══════════════════════════════════════════════════════════════════════════ */
 
   .call-tile__media {
@@ -439,10 +444,19 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+    z-index: 1;
+    /* GPU acceleration for smoother updates */
+    will-change: auto;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    /* Prevent image decoding stutter */
+    content-visibility: auto;
+    /* Smooth fade between frames */
+    transition: opacity 0.15s ease-out;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
-     AVATAR - Matches VideoChat .call-avatar
+     AVATAR - Matches VideoChat .call-avatar exactly
      ══════════════════════════════════════════════════════════════════════════ */
 
   .call-avatar {
@@ -482,73 +496,116 @@
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
-     FOOTER - Matches VideoChat .call-tile__footer
+     TILE FOOTER - Matches VideoChat .call-tile__footer exactly
      ══════════════════════════════════════════════════════════════════════════ */
 
   .call-tile__footer {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 1;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 12px;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.4) 60%, transparent 100%);
+    padding: 8px 10px;
+    background: linear-gradient(0deg, rgba(0,0,0,0.65) 0%, rgba(0,0,0,0.35) 60%, transparent 100%);
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 2;
   }
 
   .call-tile__footer-name {
-    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    font-weight: 500;
-    color: #f2f3f5;
-    font-size: 13px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
   }
 
   .call-tile__footer-text {
+    font-size: 13px;
     font-weight: 500;
     color: #f2f3f5;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .call-tile__footer-pill {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-shrink: 0;
     padding: 2px 6px;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
     border-radius: 4px;
-    color: #f2f3f5;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-accent, #5865f2);
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
+    color: white;
+    letter-spacing: 0.02em;
   }
 
   .call-tile__footer-pill--share {
     background: #23a559;
-    color: white;
   }
 
   .call-tile__footer-icons {
     display: flex;
     align-items: center;
     gap: 6px;
-    color: #b5bac1;
-    font-size: 14px;
+    flex-shrink: 0;
   }
 
-  .call-tile__footer-icons .is-off {
-    color: #f23f43;
+  .call-tile__footer-icons i {
+    font-size: 14px;
+    color: #f2f3f5;
+  }
+
+  .call-tile__footer-icons i.is-off {
+    color: #ed4245;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     CONNECTED ELSEWHERE ALERT
+     ══════════════════════════════════════════════════════════════════════════ */
+
+  .preview-alert {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: rgba(250, 168, 26, 0.1);
+    border-bottom: 1px solid rgba(250, 168, 26, 0.2);
+    color: #faa81a;
+    font-size: 13px;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .preview-alert i {
+    font-size: 16px;
+  }
+
+  .preview-alert span {
+    flex: 1;
+    color: #f2f3f5;
+  }
+
+  .preview-alert__btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    background: #2b2d31;
+    border: none;
+    color: #f2f3f5;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 150ms ease;
+  }
+
+  .preview-alert__btn:hover {
+    background: #404249;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -663,15 +720,6 @@
      RESPONSIVE
      ══════════════════════════════════════════════════════════════════════════ */
 
-  @media (max-width: 800px) {
-    /* Scale down single tile on smaller screens */
-    .call-grid--single .call-tile {
-      width: min(90%, 720px);
-      height: auto;
-      aspect-ratio: 16 / 9;
-    }
-  }
-
   @media (max-width: 640px) {
     .call-grid {
       padding: 4px;
@@ -679,28 +727,16 @@
     }
 
     .call-tile {
-      width: 280px;
-      height: 157px;
+      width: 100%;
+      max-width: 360px;
+      height: 202px;
     }
 
     .call-grid--single .call-tile {
-      width: min(95%, 560px);
+      width: 100%;
+      max-width: 100%;
       height: auto;
       aspect-ratio: 16 / 9;
-    }
-
-    .call-avatar__image {
-      width: 56px;
-      height: 56px;
-      font-size: 1.5rem;
-    }
-
-    .call-tile__footer {
-      padding: 6px 8px;
-    }
-
-    .call-tile__footer-text {
-      font-size: 11px;
     }
 
     .preview-join-btn {

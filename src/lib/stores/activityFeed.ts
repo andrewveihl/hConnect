@@ -192,6 +192,51 @@ export async function markActivityEntry(
   await updateDoc(doc(db, 'profiles', activeUid, 'activity', entryId), payload);
 }
 
+/**
+ * Mark all activity entries for a specific channel as read
+ */
+export async function markChannelActivityRead(serverId: string, channelId: string) {
+  if (!browser || !activeUid) return;
+  let currentEntries: ActivityEntry[] = [];
+  const unsub = entriesInternal.subscribe((val) => {
+    currentEntries = val;
+  });
+  unsub();
+  
+  const toMark = currentEntries.filter(
+    (entry) =>
+      entry.status.unread &&
+      entry.context.serverId === serverId &&
+      entry.context.channelId === channelId
+  );
+  
+  await Promise.all(
+    toMark.map((entry) => markActivityEntry(entry.id, { unread: false }))
+  );
+}
+
+/**
+ * Mark all activity entries for a specific DM as read
+ */
+export async function markDMActivityRead(dmId: string) {
+  if (!browser || !activeUid) return;
+  let currentEntries: ActivityEntry[] = [];
+  const unsub = entriesInternal.subscribe((val) => {
+    currentEntries = val;
+  });
+  unsub();
+  
+  const toMark = currentEntries.filter(
+    (entry) =>
+      entry.status.unread &&
+      entry.context.dmId === dmId
+  );
+  
+  await Promise.all(
+    toMark.map((entry) => markActivityEntry(entry.id, { unread: false }))
+  );
+}
+
 export function deepLinkFromActivity(entry: ActivityEntry) {
   return buildDeepLink(entry.context, entry.messageInfo.messageId);
 }

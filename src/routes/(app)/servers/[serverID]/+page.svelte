@@ -39,6 +39,7 @@ import {
     type ThreadMessage
   } from '$lib/firestore/threads';
 import { markChannelRead } from '$lib/firebase/unread';
+import { markChannelActivityRead } from '$lib/stores/activityFeed';
 import { uploadChannelFile } from '$lib/firebase/storage';
 import { looksLikeImage } from '$lib/utils/fileType';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
@@ -98,6 +99,7 @@ import type { PendingUploadPreview } from '$lib/components/chat/types';
 let channels: Channel[] = $state([]);
 let activeChannel: Channel | null = $state(null);
 let requestedChannelId: string | null = $state(null);
+let requestedMessageId: string | null = $state(null);
   let handledRequestedChannelId: string | null = null;
   let channelListServerId: string | null = null;
   let routerReady = false;
@@ -1185,6 +1187,10 @@ const blockedChannels = new Set<string>();
         // Ignore membership bootstrap failures; Firestore will surface permissions if still unauthorized.
       }
     }
+    // Guard: if context changed while awaiting membership, abort
+    if (serverId !== currServerId || activeChannel?.id !== channelId) {
+      return;
+    }
     const database = db();
     const q = query(
       collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
@@ -1239,6 +1245,7 @@ const blockedChannels = new Set<string>();
             const at = last?.createdAt ?? null;
             const lastId = last?.id ?? null;
             void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
+            void markChannelActivityRead(currServerId, channelId);
           }
         } catch {}
       },
@@ -1448,8 +1455,12 @@ const blockedChannels = new Set<string>();
       {
         onError: (err) => {
           console.error('Failed to load threads', err);
+          // Don't kick user out of channel for thread permission issues - they might still be able to view messages
+          // The threads simply won't be displayed if they don't have permission
           if ((err as any)?.code === 'permission-denied') {
-            handleChannelDenied(channelId);
+            // Just clear threads silently instead of blocking the whole channel
+            channelThreads = [];
+            clearThreadsUnsub();
           }
         }
       }
@@ -1585,8 +1596,7 @@ function sidebarThreadList() {
 
   function pickChannel(id: string) {
     if (!serverId) return;
-    const allowedChannel = channels.find((c) => c.id === id);
-    if (!allowedChannel) {
+    if (blockedChannels.has(id)) {
       messagesLoadError = 'You do not have permission to view messages in this channel.';
       activeChannel = null;
       showChannels = true;
@@ -1594,7 +1604,17 @@ function sidebarThreadList() {
       clearRequestedChannel(id);
       return;
     }
-    if (blockedChannels.has(id)) {
+    // First check current channels array
+    let allowedChannel = channels.find((c) => c.id === id);
+    // Also check lastSidebarChannels which might be more up-to-date when called from sidebar
+    if (!allowedChannel && lastSidebarChannels?.channels) {
+      allowedChannel = lastSidebarChannels.channels.find((c) => c.id === id);
+      // Sync channels array if we found it in the sidebar's list
+      if (allowedChannel) {
+        channels = lastSidebarChannels.channels;
+      }
+    }
+    if (!allowedChannel) {
       messagesLoadError = 'You do not have permission to view messages in this channel.';
       activeChannel = null;
       showChannels = true;
@@ -1628,6 +1648,7 @@ function sidebarThreadList() {
         const at = last?.createdAt ?? null;
         const lastId = last?.id ?? null;
         void markChannelRead($user.uid, serverId, id, { at, lastMessageId: lastId });
+        void markChannelActivityRead(serverId, id);
       }
     }
 
@@ -2750,6 +2771,7 @@ function sidebarThreadList() {
         const at = last?.createdAt ?? null;
         const lastId = last?.id ?? null;
         void markChannelRead($user.uid, serverId, activeChannel.id, { at, lastMessageId: lastId });
+        void markChannelActivityRead(serverId, activeChannel.id);
       }
     };
     window.addEventListener('visibilitychange', onVis);
@@ -3836,6 +3858,20 @@ function sidebarThreadList() {
   });
   run(() => {
     requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
+    requestedMessageId = $page?.url?.searchParams?.get('msg') ?? null;
+  });
+  // Clear msg param from URL after a delay (gives time for scroll animation)
+  run(() => {
+    if (requestedMessageId && browser) {
+      const timeout = setTimeout(() => {
+        const currentUrl = new URL($page.url);
+        if (currentUrl.searchParams.has('msg')) {
+          currentUrl.searchParams.delete('msg');
+          goto(currentUrl.toString(), { replaceState: true, keepFocus: true });
+        }
+      }, 2500);
+      return () => clearTimeout(timeout);
+    }
   });
   run(() => {
     const prevServerForChannels = untrack(() => channelListServerId);
@@ -3855,10 +3891,22 @@ function sidebarThreadList() {
       void ensureServerMembership(serverId, $user.uid);
     }
   });
+  // Sync channels from sidebar cache when dependencies change, using a separate tracking variable
+  // to avoid recursion warnings
+  let lastSyncedServer: string | null = null;
+  let lastSyncedUser: string | null = null;
   run(() => {
+    const currentServer = serverId ?? null;
+    const currentUser = $user?.uid ?? null;
     const cachedChannels = untrack(() => lastSidebarChannels);
-    if (serverId && $user?.uid && cachedChannels) {
-      syncVisibleChannels(cachedChannels, false);
+    // Only sync when the combination of server/user actually changes, not on every reactive run
+    if (currentServer && currentUser && cachedChannels) {
+      const needsSync = currentServer !== lastSyncedServer || currentUser !== lastSyncedUser;
+      if (needsSync || (cachedChannels.serverId === currentServer && !channels.length && cachedChannels.channels?.length)) {
+        lastSyncedServer = currentServer;
+        lastSyncedUser = currentUser;
+        syncVisibleChannels(cachedChannels, false);
+      }
     }
   });
   run(() => {
@@ -4150,16 +4198,20 @@ function sidebarThreadList() {
   });
   run(() => {
     const requested = requestedChannelId;
+    const prevHandled = untrack(() => handledRequestedChannelId);
     if (!requested) {
-      handledRequestedChannelId = null;
+      if (prevHandled !== null) {
+        handledRequestedChannelId = null;
+      }
       return;
     }
-    if (handledRequestedChannelId === requested) return;
+    if (prevHandled === requested) return;
     if (blockedChannels.has(requested)) {
       handledRequestedChannelId = requested;
       return;
     }
-    if (requested !== activeChannel?.id && channels.some((c) => c.id === requested)) {
+    const currentActiveId = untrack(() => activeChannel?.id);
+    if (requested !== currentActiveId && channels.some((c) => c.id === requested)) {
       handledRequestedChannelId = requested;
       pickChannel(requested);
     }
@@ -4286,6 +4338,7 @@ function sidebarThreadList() {
                   threadLabel={activeChannel?.name ?? ''}
                   {pendingUploads}
                   {scrollToBottomSignal}
+                  scrollToMessageId={requestedMessageId}
                   scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
                   listClass="message-scroll-region flex-1 overflow-y-auto p-3"
                   inputWrapperClass="chat-input-region border-t border-subtle panel-muted"
@@ -4312,7 +4365,7 @@ function sidebarThreadList() {
           </div>
       {:else}
         {#if showVoiceLobby && !(isMobile && showChannels)}
-          <div class="px-3 pt-1 md:px-5 md:pt-0 mb-3">
+          <div class="px-3 pt-1 md:px-5 md:pt-0 mb-3 flex-1 flex flex-col min-h-0">
             <CallPreview
               serverId={serverId}
               channelId={activeChannel?.id ?? null}
@@ -4486,6 +4539,7 @@ function sidebarThreadList() {
               threadLabel={activeChannel?.name ?? ''}
               {pendingUploads}
               {scrollToBottomSignal}
+              scrollToMessageId={requestedMessageId}
               scrollContextKey={`${serverId ?? 'server'}:${activeChannel?.id ?? 'none'}`}
               emptyMessage={!serverId ? 'Pick a server to start chatting.' : 'Pick a channel to start chatting.'}
               onVote={handleVote}
@@ -4785,6 +4839,7 @@ function sidebarThreadList() {
 {/if}
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
+
 <style>
   .mobile-panel__body {
     flex: 1;

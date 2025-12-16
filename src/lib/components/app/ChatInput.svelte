@@ -1,6 +1,7 @@
 <script lang="ts">
   import { sendMessage } from '$lib/firestore';
   import { currentServerId, currentChannelId, messages } from '$lib/stores/index';
+  import { playSound } from '$lib/utils/sounds';
 
   let input = $state('');
   let loading = $state(false);
@@ -21,6 +22,7 @@
     try {
       const msg = await sendMessage($currentServerId, $currentChannelId, content);
       messages.update((msgs) => [...msgs, msg]);
+      playSound('message-send');
       input = '';
       if (textareaElement) {
         textareaElement.style.height = '40px';

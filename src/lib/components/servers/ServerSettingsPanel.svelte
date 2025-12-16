@@ -4,6 +4,8 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { user } from '$lib/stores/user';
+  import { featureFlags } from '$lib/stores/featureFlags';
+  import { clearFeatureModal } from '$lib/stores/serverSettingsUI';
   import { getDb } from '$lib/firebase';
   import { createChannel } from '$lib/firestore/channels';
   import { ensureSystemRoles, removeUserMembership, recomputeAllMemberPermissions, recomputeMemberPermissions } from '$lib/firestore/servers';
@@ -11,6 +13,7 @@
 import { subscribeServerDirectory, type MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 import LeftPane from '$lib/components/app/LeftPane.svelte';
 import TicketAIModal from '$lib/components/servers/TicketAIModal.svelte';
+import TicketAIEnablePopup from '$lib/components/servers/TicketAIEnablePopup.svelte';
 import { subscribeTicketAiSettings } from '$lib/firestore/ticketAi';
 import { bitsAsNumber, PERMISSION_KEYS, toPermissionBits } from '$lib/permissions/permissions';
 
@@ -34,9 +37,10 @@ const DEFAULT_MENTION = '#f97316';
     serverId?: string | null;
     section?: string | null;
     bare?: boolean;
+    featureModal?: 'ticketAi' | null;
   }
 
-  let { serverId = null, section = null, bare = false }: Props = $props();
+  let { serverId = null, section = null, bare = false, featureModal = null }: Props = $props();
 
   // routing
   let routedServerId: string | null = $state(null);
@@ -77,6 +81,7 @@ const DEFAULT_MENTION = '#f97316';
   let chatSlowModeSeconds = $state(0);
   let inviteAutomationEnabled = $state(false);
   let ticketAiEnabled = $state(false);
+  const ticketAiGloballyEnabled = $derived($featureFlags.enableTicketAI !== false);
   let inviteDomains: string[] = $state([]);
   let inviteDomainInput = $state('');
   let inviteDefaultRoleId: string | null = $state(null);
@@ -144,6 +149,14 @@ let overviewSaveTimer: ReturnType<typeof setTimeout> | null = null;
     }
   });
 
+  // Open TicketAI modal directly when featureModal is set
+  $effect(() => {
+    if (featureModal === 'ticketAi' && serverId) {
+      tab = 'integrations';
+      ticketAiModalOpen = true;
+    }
+  });
+
   $effect(() => {
     if (tab !== 'members') {
       memberMenuOpenFor = null;
@@ -185,6 +198,7 @@ let roleAssignTarget: EnrichedMember | null = $state(null);
 let roleAssignModalOpen = $state(false);
 let domainModalOpen = $state(false);
 let ticketAiModalOpen = $state(false);
+let ticketAiEnablePopupOpen = $state(false);
 let banSearch = $state('');
 let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
 let channels: Array<{ id: string; name: string; type: 'text' | 'voice'; position?: number; allowedRoleIds?: string[]; isPrivate?: boolean }> = $state([]);
@@ -3082,45 +3096,111 @@ async function clearPendingInvites() {
       {/if}
 
       {#if tab === 'integrations'}
-        <div class="grid gap-4 lg:grid-cols-2">
-          <div class="settings-card settings-card--muted">
-            <div class="settings-card__title">Webhooks</div>
-            <p class="settings-card__subtitle">Automate updates from your tools. Coming soon.</p>
-          </div>
-          <div class="settings-card settings-card--muted">
-            <div class="settings-card__title">Bots</div>
-            <p class="settings-card__subtitle">Bring assistants and helpers into channels. Coming soon.</p>
-          </div>
-          <button
-            type="button"
-            class="settings-card settings-card--muted text-left hover:border-[color:var(--color-accent)] transition"
-            onclick={() => (ticketAiModalOpen = true)}
-          >
-            <div class="flex items-center justify-between">
-              <div>
-                <div class="settings-card__title">Ticket AI (Issue analytics)</div>
-                <p class="settings-card__subtitle">Monitor issue threads and export response metrics.</p>
-              </div>
-              <span class={`text-sm ${ticketAiEnabled ? 'text-emerald-400' : 'text-white/60'}`}>
-                {ticketAiEnabled ? 'Enabled' : 'Disabled'}
-              </span>
+        <div class="integrations-page">
+          <!-- Main Integrations -->
+          <div class="integrations-section">
+            <div class="section-header-row">
+              <h3 class="section-title">Integrations</h3>
+              <p class="section-subtitle">Connect tools and automate workflows</p>
             </div>
-          </button>
-          <button
-            type="button"
-            class="settings-card settings-card--muted text-left hover:border-[color:var(--color-accent)] transition"
-            onclick={() => (domainModalOpen = true)}
-          >
-            <div class="flex items-center justify-between">
-              <div>
-                <div class="settings-card__title">Domain auto invites</div>
-                <p class="settings-card__subtitle">Automatically welcome matching emails.</p>
-              </div>
-              <span class={`text-sm ${inviteAutomationEnabled ? 'text-emerald-400' : 'text-white/60'}`}>
-                {inviteAutomationEnabled ? 'Enabled' : 'Disabled'}
-              </span>
+            
+            <div class="integrations-grid">
+              <!-- Ticket AI Card - Featured -->
+              <button
+                type="button"
+                class="integration-card integration-card--featured"
+                class:integration-card--disabled={!ticketAiGloballyEnabled}
+                onclick={() => ticketAiGloballyEnabled && (ticketAiEnablePopupOpen = true)}
+                disabled={!ticketAiGloballyEnabled}
+              >
+                <div class="integration-card__icon integration-card__icon--accent">
+                  <i class="bx bx-bot"></i>
+                </div>
+                <div class="integration-card__content">
+                  <div class="integration-card__header">
+                    <span class="integration-card__title">Ticket AI</span>
+                    <span class={`integration-card__status ${!ticketAiGloballyEnabled ? 'integration-card__status--off' : ticketAiEnabled ? 'integration-card__status--on' : ''}`}>
+                      {#if !ticketAiGloballyEnabled}
+                        Disabled
+                      {:else}
+                        {ticketAiEnabled ? 'Active' : 'Inactive'}
+                      {/if}
+                    </span>
+                  </div>
+                  <p class="integration-card__description">
+                    {#if !ticketAiGloballyEnabled}
+                      Disabled by global admin. Contact support to enable.
+                    {:else}
+                      Track support issues, response times, and team performance with AI-powered analytics.
+                    {/if}
+                  </p>
+                  <div class="integration-card__features">
+                    <span><i class="bx bx-time-five"></i> Response times</span>
+                    <span><i class="bx bx-check-double"></i> Resolution tracking</span>
+                    <span><i class="bx bx-bar-chart-alt-2"></i> Team metrics</span>
+                  </div>
+                </div>
+                <div class="integration-card__arrow">
+                  <i class="bx bx-chevron-right"></i>
+                </div>
+              </button>
+
+              <!-- Domain Auto Invites -->
+              <button
+                type="button"
+                class="integration-card"
+                onclick={() => (domainModalOpen = true)}
+              >
+                <div class="integration-card__icon">
+                  <i class="bx bx-envelope"></i>
+                </div>
+                <div class="integration-card__content">
+                  <div class="integration-card__header">
+                    <span class="integration-card__title">Domain Auto Invites</span>
+                    <span class={`integration-card__status ${inviteAutomationEnabled ? 'integration-card__status--on' : ''}`}>
+                      {inviteAutomationEnabled ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p class="integration-card__description">
+                    Automatically invite users with matching email domains to join your server.
+                  </p>
+                </div>
+                <div class="integration-card__arrow">
+                  <i class="bx bx-chevron-right"></i>
+                </div>
+              </button>
             </div>
-          </button>
+          </div>
+
+          <!-- Coming Soon Section -->
+          <div class="integrations-section integrations-section--muted">
+            <div class="section-header-row">
+              <h3 class="section-title">Coming Soon</h3>
+              <p class="section-subtitle">More integrations on the way</p>
+            </div>
+            
+            <div class="integrations-grid integrations-grid--compact">
+              <div class="integration-card integration-card--soon">
+                <div class="integration-card__icon integration-card__icon--muted">
+                  <i class="bx bx-link-alt"></i>
+                </div>
+                <div class="integration-card__content">
+                  <span class="integration-card__title">Webhooks</span>
+                  <p class="integration-card__description">Send and receive data from external services.</p>
+                </div>
+              </div>
+              
+              <div class="integration-card integration-card--soon">
+                <div class="integration-card__icon integration-card__icon--muted">
+                  <i class="bx bx-bot"></i>
+                </div>
+                <div class="integration-card__content">
+                  <span class="integration-card__title">Custom Bots</span>
+                  <p class="integration-card__description">Add assistants and automation to your channels.</p>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -3213,6 +3293,194 @@ async function clearPendingInvites() {
 {/if}
 
 <style>
+  /* Integration Page Styles */
+  .integrations-page {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+  }
+
+  .integrations-section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .integrations-section--muted {
+    opacity: 0.7;
+  }
+
+  .section-header-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .section-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .section-subtitle {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--text-70, rgba(255, 255, 255, 0.6));
+  }
+
+  .integrations-grid {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .integrations-grid--compact {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+
+  .integration-card {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem;
+    border-radius: 16px;
+    border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.08));
+    background: color-mix(in srgb, var(--color-panel, #0f141c) 80%, transparent);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+    width: 100%;
+  }
+
+  .integration-card:hover:not(.integration-card--disabled):not(.integration-card--soon) {
+    border-color: color-mix(in srgb, var(--color-accent, #33c8bf) 40%, transparent);
+    background: color-mix(in srgb, var(--color-panel, #0f141c) 95%, transparent);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+
+  .integration-card--featured {
+    background: linear-gradient(135deg, 
+      color-mix(in srgb, var(--color-accent, #33c8bf) 8%, var(--color-panel, #0f141c)) 0%,
+      var(--color-panel, #0f141c) 100%
+    );
+    border-color: color-mix(in srgb, var(--color-accent, #33c8bf) 20%, transparent);
+  }
+
+  .integration-card--disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .integration-card--soon {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  .integration-card__icon {
+    flex-shrink: 0;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    display: grid;
+    place-items: center;
+    font-size: 22px;
+    color: var(--color-text-secondary);
+  }
+
+  .integration-card__icon--accent {
+    background: linear-gradient(135deg, var(--color-accent, #33c8bf) 0%, #1a9990 100%);
+    color: #0b0f16;
+    box-shadow: 0 4px 16px rgba(51, 200, 191, 0.25);
+  }
+
+  .integration-card__icon--muted {
+    background: rgba(255, 255, 255, 0.03);
+    color: rgba(255, 255, 255, 0.4);
+  }
+
+  .integration-card__content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .integration-card__header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .integration-card__title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .integration-card__status {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.5);
+    font-weight: 500;
+  }
+
+  .integration-card__status--on {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+  }
+
+  .integration-card__status--off {
+    background: rgba(239, 68, 68, 0.12);
+    color: #f87171;
+  }
+
+  .integration-card__description {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-70, rgba(255, 255, 255, 0.6));
+  }
+
+  .integration-card__features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .integration-card__features span {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.7rem;
+    color: var(--text-70, rgba(255, 255, 255, 0.5));
+  }
+
+  .integration-card__features i {
+    font-size: 0.85rem;
+    color: var(--color-accent, #33c8bf);
+    opacity: 0.7;
+  }
+
+  .integration-card__arrow {
+    flex-shrink: 0;
+    font-size: 20px;
+    color: rgba(255, 255, 255, 0.3);
+    transition: transform 0.2s ease;
+  }
+
+  .integration-card:hover:not(.integration-card--disabled):not(.integration-card--soon) .integration-card__arrow {
+    transform: translateX(4px);
+    color: var(--color-accent, #33c8bf);
+  }
+
   .settings-shell {
     min-height: 100dvh;
     height: 100dvh;
@@ -4400,7 +4668,7 @@ async function clearPendingInvites() {
   }
   .role-modal--mid {
     width: min(460px, 92vw);
-    max-height: min(80vh, 720px);
+    max-height: min(65vh, 550px);
     overflow-y: auto;
   }
 
@@ -4807,7 +5075,18 @@ async function clearPendingInvites() {
     roles={roles}
     currentUserId={$user?.uid ?? null}
     members={membersWithProfiles}
-    on:close={() => (ticketAiModalOpen = false)}
+    on:close={() => { ticketAiModalOpen = false; clearFeatureModal(); }}
+  />
+{/if}
+
+{#if ticketAiEnablePopupOpen && serverId}
+  <TicketAIEnablePopup
+    open={ticketAiEnablePopupOpen}
+    serverId={serverId}
+    currentUserId={$user?.uid ?? null}
+    on:close={() => (ticketAiEnablePopupOpen = false)}
+    on:toggle={(e) => { ticketAiEnabled = e.detail.enabled; }}
+    on:configure={() => { ticketAiEnablePopupOpen = false; ticketAiModalOpen = true; }}
   />
 {/if}
 
@@ -4821,7 +5100,15 @@ async function clearPendingInvites() {
       if (event.target === event.currentTarget) channelModalOpen = false;
     }}
     onkeydown={(e) => {
-      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          channelModalOpen = false;
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
         e.preventDefault();
         channelModalOpen = false;
       }
@@ -5328,7 +5615,15 @@ async function clearPendingInvites() {
     aria-modal="true"
     tabindex="0"
     onkeydown={(e) => {
-      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          if (!roleCreateBusy) closeRoleModal();
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
         e.preventDefault();
         if (!roleCreateBusy) closeRoleModal();
       }

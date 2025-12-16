@@ -5,14 +5,15 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
-  import { collection, doc, onSnapshot, query, orderBy, type Unsubscribe } from 'firebase/firestore';
+  import { collection, doc, onSnapshot, query, orderBy, setDoc, serverTimestamp, type Unsubscribe } from 'firebase/firestore';
   import { db } from '$lib/firestore/client';
   import { getOrCreateDMThread } from '$lib/firestore/dms';
-  import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import { resolveProfilePhotoURL, needsPhotoCaching } from '$lib/utils/profile';
   import { user } from '$lib/stores/user';
   import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
   import InvitePanel from '$lib/components/app/InvitePanel.svelte';
   import MemberProfileCard from './MemberProfileCard.svelte';
+  import Avatar from '$lib/components/app/Avatar.svelte';
 
   interface Props {
     serverId: string;
@@ -103,12 +104,12 @@ type RoleDoc = {
       : null
   );
   const canInviteMembers = $derived.by(() => myBaseRole === 'owner');
+  
   const INITIAL_MEMBER_BATCH = 60;
   const MEMBER_BATCH_SIZE = 40;
   const LAZY_LOAD_THRESHOLD = 20;
   let visibleMemberCount = $state(INITIAL_MEMBER_BATCH);
   let shouldLazyLoad = $state(false);
-  let brokenAvatars: Set<string> = $state(new Set());
   let hideScrollbarForWheel = $state(false);
   let wheelHideTimer: ReturnType<typeof setTimeout> | null = null;
   let statusBuckets: Record<PresenceState, MemberRow[]> = $state({
@@ -133,16 +134,60 @@ type RoleDoc = {
   let rolesUnsub: Unsubscribe | null = null;
   const profileUnsubs: Record<string, Unsubscribe> = {};
   const presenceUnsubs: Record<string, Unsubscribe> = {};
+  const photoCachingInProgress = new Set<string>(); // Track UIDs being cached
   const statusOrder: PresenceState[] = ['online', 'busy', 'idle', 'offline'];
   const statusLabels: Record<PresenceState, string> = presenceLabels;
   const MAX_VISIBLE_MEMBER_ROLES = 2;
   const WHEEL_SCROLLBAR_HIDE_MS = 700;
   // derived above
 
+  /**
+   * Cache a user's Google photo to Firebase Storage if needed.
+   * This runs in the background and updates the profile document when done.
+   * Note: Due to storage rules, we can only cache the current user's own photo.
+   */
+  async function maybeCacheGooglePhoto(uid: string, profileData: Record<string, unknown>) {
+    // Only cache the current user's photo (storage rules prevent writing to others' paths)
+    const currentUid = $user?.uid;
+    if (!currentUid || uid !== currentUid) return;
+    
+    // Don't cache if already in progress or if not a Google photo
+    if (photoCachingInProgress.has(uid)) return;
+    
+    const googleUrl = needsPhotoCaching(profileData);
+    if (!googleUrl) return;
+    
+    // Mark as in progress
+    photoCachingInProgress.add(uid);
+    
+    try {
+      // Dynamically import to avoid circular dependencies
+      const { cacheExternalPhoto } = await import('$lib/firebase/storage');
+      const { db: getDb } = await import('$lib/firestore/client');
+      
+      const cachedUrl = await cacheExternalPhoto({ url: googleUrl, uid });
+      if (cachedUrl) {
+        // Update the profile with the cached URL
+        const database = getDb();
+        await setDoc(doc(database, 'profiles', uid), {
+          cachedPhotoURL: cachedUrl,
+          photoURL: cachedUrl,
+          authPhotoURL: googleUrl,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+        console.log(`[MembersPane] Cached Google photo for ${uid}`);
+      }
+    } catch (error) {
+      console.warn(`[MembersPane] Failed to cache photo for ${uid}:`, error);
+    } finally {
+      photoCachingInProgress.delete(uid);
+    }
+  }
+
   function clearRolesIfAny() {
     const hasRoles = Object.keys(roles).length > 0;
     if (hasRoles) {
-      roles = {};
+      roles = {};;
     }
   }
 
@@ -199,15 +244,6 @@ type RoleDoc = {
     // Pass the full profile object which may contain cachedPhotoURL, customPhotoURL, authPhotoURL
     return resolveProfilePhotoURL({ ...member, ...profile }, fallback);
   };
-
-  function handleAvatarError(uid: string) {
-    brokenAvatars = new Set([...brokenAvatars, uid]);
-  }
-
-  function getDisplayAvatar(member: MemberRow): string | null {
-    if (brokenAvatars.has(member.uid)) return null;
-    return member.avatar;
-  }
 
   function presenceState(uid: string): PresenceState {
     return presenceFromSources([presenceDocs[uid], profiles[uid], members[uid]]);
@@ -562,8 +598,12 @@ type RoleDoc = {
         uids.forEach((uid) => {
           if (!profileUnsubs[uid]) {
             profileUnsubs[uid] = onSnapshot(doc(database, 'profiles', uid), (ps) => {
-              profiles = { ...profiles, [uid]: ps.data() ?? {} };
+              const profileData = ps.data() ?? {};
+              profiles = { ...profiles, [uid]: profileData };
               updateRows();
+              
+              // Cache Google photos in the background
+              maybeCacheGooglePhoto(uid, profileData as Record<string, unknown>);
             });
           }
           subscribePresence(database, uid);
@@ -641,7 +681,12 @@ type RoleDoc = {
               <ul class="member-group__list">
                 {#if groupMembers.length}
                   {#each groupMembers as member (member.uid)}
-                    {@const displayAvatar = getDisplayAvatar(member)}
+                    {@const isSelfMember = member.uid === me?.uid}
+                    {@const memberProfile = profiles[member.uid]}
+                    {@const memberUserObj = isSelfMember 
+                      ? { ...members[member.uid], ...memberProfile, authPhotoURL: me?.photoURL }
+                      : { ...members[member.uid], ...memberProfile }}
+                    {@const _debug = console.log('[MembersPane] Member:', member.label, 'profile:', memberProfile, 'avatar:', member.avatar)}
                     <li>
                       <button
                         type="button"
@@ -649,23 +694,15 @@ type RoleDoc = {
                         onclick={(event) => openMemberProfile(member.uid, event.currentTarget as HTMLElement)}
                       >
                         <div class="member-row__avatar">
-                          <div class="member-row__avatar-inner">
-                            {#if displayAvatar}
-                              <img
-                                src={displayAvatar}
-                                alt={member.label}
-                                class="h-full w-full object-cover"
-                                loading="lazy"
-                                onerror={() => handleAvatarError(member.uid)}
-                              />
-                            {:else}
-                              <i class="bx bx-user text-soft"></i>
-                            {/if}
-                          </div>
-                          <span
-                            class={`presence-dot ${statusClass(member.status)}`}
-                            aria-label={member.status}
-                          ></span>
+                          <Avatar
+                            src={member.avatar}
+                            name={member.label}
+                            user={memberUserObj}
+                            size="sm"
+                            showPresence={true}
+                            presence={member.status}
+                            isSelf={isSelfMember}
+                          />
                         </div>
                         <div class="member-row__body">
                           <div class="member-row__top">
@@ -774,7 +811,26 @@ type RoleDoc = {
 
 <style>
   .members-pane__scroll {
-    scrollbar-gutter: stable both-edges;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--color-text-primary) 15%, transparent) transparent;
+  }
+
+  .members-pane__scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .members-pane__scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .members-pane__scroll::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--color-text-primary) 15%, transparent);
+    border-radius: 4px;
+  }
+
+  .members-pane__scroll::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
   }
 
   :global(.members-pane__scroll--wheel) {

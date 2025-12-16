@@ -138,6 +138,7 @@ const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>({});
 let lastBadgeValue: number | null = null;
 let lastNotificationSoundTotal: number | null = null;
+let notificationSoundEnabled = false; // Delay sound until after initial load
 
 export const notifications: Readable<NotificationItem[]> = {
   subscribe: notificationsInternal.subscribe
@@ -753,6 +754,7 @@ function cleanupAll() {
   channelIndicatorsInternal.set({});
   readyInternal.set(false);
   lastNotificationSoundTotal = null;
+  notificationSoundEnabled = false; // Reset on cleanup
   if (browser) {
     const nav = navigator as any;
     const clearer: (() => Promise<void> | void) | undefined =
@@ -780,10 +782,15 @@ function maybePlayNotificationSound(total: number) {
     return;
   }
   if (lastNotificationSoundTotal === null) {
+    // First load - set baseline but don't play sound
     lastNotificationSoundTotal = total;
+    // Enable sound after a short delay to skip initial load
+    setTimeout(() => {
+      notificationSoundEnabled = true;
+    }, 3000);
     return;
   }
-  if (total > lastNotificationSoundTotal) {
+  if (notificationSoundEnabled && total > lastNotificationSoundTotal) {
     playSound('notification');
   }
   lastNotificationSoundTotal = total;
