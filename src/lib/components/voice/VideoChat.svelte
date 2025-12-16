@@ -18,6 +18,7 @@
 	import { voiceSession } from '$lib/stores/voice';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { voiceActivity } from '$lib/stores/voiceActivity';
+	import Avatar from '$lib/components/app/Avatar.svelte';
 	import {
 		loadVoicePreferences,
 		voicePreferences,
@@ -6405,11 +6406,7 @@
 									{#if !streamHasLiveVideo(tile.stream)}
 										<div class="call-avatar">
 											<div class="call-avatar__image">
-												{#if tile.photoURL}
-													<img src={tile.photoURL} alt={tile.displayName} loading="lazy" />
-												{:else}
-													<span>{avatarInitial(tile.displayName)}</span>
-												{/if}
+												<Avatar src={tile.photoURL} name={tile.displayName} size="xl" isSelf={tile.isSelf} class="w-full h-full" />
 											</div>
 										</div>
 									{/if}
@@ -6620,14 +6617,11 @@
 					</button>
 				</div>
 			{:else}
+				{@const selfPhotoUrl = resolveProfilePhotoURL($userProfile ?? $user)}
 				<div class="call-empty" aria-label="Call preview">
 					<div class="call-empty__tile">
 						<div class="call-empty__avatar">
-							{#if $user?.photoURL || $userProfile}
-								<img src={resolveProfilePhotoURL($userProfile ?? $user)} alt="Your avatar" />
-							{:else}
-								<i class="bx bx-user"></i>
-							{/if}
+							<Avatar src={selfPhotoUrl} user={$userProfile ?? $user} name="Your avatar" size="2xl" isSelf={true} class="w-full h-full" />
 						</div>
 						<div class="call-empty__label">
 							{sessionChannelName || 'Voice channel'}

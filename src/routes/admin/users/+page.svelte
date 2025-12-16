@@ -1,10 +1,11 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import AdminCard from '$lib/admin/components/AdminCard.svelte';
-	import { addSuperAdminEmail, removeSuperAdminEmail } from '$lib/admin/superAdmin';
+	import Avatar from '$lib/components/app/Avatar.svelte';
+	import { addSuperAdminEmail, removeSuperAdminEmail, refreshAllGooglePhotos, refreshUserGooglePhoto } from '$lib/admin/superAdmin';
 	import { showAdminToast } from '$lib/admin/stores/toast';
 	import { adminNav } from '$lib/admin/stores/adminNav';
-	import { ensureFirebaseReady, getDb } from '$lib/firebase';
+	import { ensureFirebaseReady, getDb, reauthenticateWithGoogleForPhoto } from '$lib/firebase';
 	import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 	import { logAdminAction } from '$lib/admin/logs';
 	import { goto } from '$app/navigation';
@@ -21,6 +22,8 @@
 	let onlyBanned = $state(false);
 	let selectedUser: (typeof data.users)[number] | null = $state(null);
 	let actionLoading = $state(false);
+	let refreshingPhotos = $state(false);
+	let refreshingUserPhoto = $state<string | null>(null);
 
 	const mobileViewport = $derived($isMobileViewport);
 
@@ -113,6 +116,158 @@
 		value ? value.toLocaleString() : '--';
 
 	const isSuperAdmin = (email: string) => superAdminSet.has(email.toLowerCase());
+
+	const handleRefreshGooglePhotos = async () => {
+		if (refreshingPhotos) return;
+		
+		if (!confirm('This will refresh Google profile photos for ALL users.\n\nUsers with custom uploaded photos will NOT be affected.\n\nThis may take a few minutes. Continue?')) {
+			return;
+		}
+		
+		refreshingPhotos = true;
+		showAdminToast({ type: 'info', message: 'Refreshing Google photos... This may take a few minutes.' });
+		
+		try {
+			const result = await refreshAllGooglePhotos();
+			
+			if (result.ok) {
+				showAdminToast({ 
+					type: 'success', 
+					message: result.message 
+				});
+				
+				await logAdminAction({
+					type: 'adminAction',
+					level: 'info',
+					message: `Refreshed Google profile photos for ${result.synced} users`,
+					data: {
+						action: 'photos:refreshAll',
+						result: {
+							total: result.total,
+							synced: result.synced,
+							skipped: result.skipped,
+							failed: result.failed,
+							noAuthPhoto: result.noAuthPhoto
+						}
+					},
+					userId: data.user.uid
+				});
+			} else {
+				showAdminToast({ type: 'error', message: 'Failed to refresh photos.' });
+			}
+		} catch (err) {
+			console.error('Error refreshing Google photos:', err);
+			showAdminToast({ 
+				type: 'error', 
+				message: (err as Error)?.message ?? 'Failed to refresh Google photos.' 
+			});
+		} finally {
+			refreshingPhotos = false;
+		}
+	};
+
+	const handleRefreshUserPhoto = async (uid: string, force = false) => {
+		if (refreshingUserPhoto) return;
+		
+		refreshingUserPhoto = uid;
+		
+		try {
+			const result = await refreshUserGooglePhoto(uid, force);
+			console.log('[handleRefreshUserPhoto] Result:', result);
+			
+			if (result.ok && result.photoURL) {
+				// Test if the image is actually loadable
+				const testImg = new Image();
+				testImg.onload = () => {
+					console.log('[handleRefreshUserPhoto] Image test PASSED - URL is loadable:', result.photoURL?.substring(0, 80));
+				};
+				testImg.onerror = () => {
+					console.error('[handleRefreshUserPhoto] Image test FAILED - URL not loadable:', result.photoURL);
+				};
+				testImg.src = result.photoURL;
+				
+				// Copy URL to clipboard
+				try {
+					await navigator.clipboard.writeText(result.photoURL);
+					showAdminToast({ type: 'success', message: `Photo refreshed! URL copied to clipboard.` });
+				} catch {
+					showAdminToast({ type: 'success', message: `Photo refreshed!` });
+				}
+				
+				// Log full URL for debugging - use prompt() so user can copy
+				console.log('[handleRefreshUserPhoto] Full photo URL:', result.photoURL);
+				console.log('[handleRefreshUserPhoto] Original Google URL:', result.googleURL);
+				const debugInfo = `Cached URL (in Storage):\n${result.photoURL}\n\nOriginal Google URL:\n${result.googleURL || 'N/A'}`;
+				prompt('Cached Photo URL (Ctrl+C to copy):', result.photoURL);
+				alert(debugInfo);
+				
+				// Update local state with new photo URL
+				const newPhotoURL = result.photoURL;
+				users = users.map(u => u.uid === uid ? { ...u, photoURL: newPhotoURL } : u);
+				if (selectedUser?.uid === uid) {
+					selectedUser = { ...selectedUser, photoURL: newPhotoURL };
+				}
+				console.log('[handleRefreshUserPhoto] Updated local state with:', newPhotoURL);
+			} else if (result.ok) {
+				// ok but no photoURL returned - shouldn't happen but handle it
+				showAdminToast({ type: 'warning', message: result.message || 'Photo updated but no URL returned.' });
+			} else {
+				// Check if this is a default avatar issue and it's the current user
+				if (result.reason === 'default_avatar' && uid === data.user.uid) {
+					const doReauth = confirm(
+						'This user has a default Google avatar. Since this is YOUR account, would you like to re-sign in with Google to fetch fresh profile data?\n\nThis will open a Google sign-in popup.'
+					);
+					if (doReauth) {
+						await handleReauthWithGoogle();
+						return;
+					}
+				}
+				
+				showAdminToast({ 
+					type: result.reason === 'has_custom_photo' ? 'warning' : 'error', 
+					message: result.message 
+				});
+			}
+		} catch (err) {
+			console.error('Error refreshing user photo:', err);
+			showAdminToast({ 
+				type: 'error', 
+				message: (err as Error)?.message ?? 'Failed to refresh photo.' 
+			});
+		} finally {
+			refreshingUserPhoto = null;
+		}
+	};
+	
+	const handleReauthWithGoogle = async () => {
+		refreshingUserPhoto = data.user.uid;
+		
+		try {
+			showAdminToast({ type: 'info', message: 'Opening Google sign-in...' });
+			const result = await reauthenticateWithGoogleForPhoto();
+			
+			if (result.success && result.photoURL) {
+				showAdminToast({ type: 'success', message: 'Photo refreshed from Google!' });
+				
+				// Update local state
+				users = users.map(u => u.uid === data.user.uid ? { ...u, photoURL: result.photoURL! } : u);
+				if (selectedUser?.uid === data.user.uid) {
+					selectedUser = { ...selectedUser, photoURL: result.photoURL! };
+				}
+				
+				prompt('New Photo URL:', result.photoURL);
+			} else if (result.success) {
+				showAdminToast({ type: 'warning', message: 'Re-authenticated but no photo found in Google account.' });
+			} else {
+				showAdminToast({ type: 'error', message: result.error || 'Re-authentication failed.' });
+			}
+		} catch (err) {
+			console.error('Error re-authenticating:', err);
+			showAdminToast({ type: 'error', message: (err as Error)?.message ?? 'Failed to re-authenticate.' });
+		} finally {
+			refreshingUserPhoto = null;
+		}
+	};
 </script>
 
 <div class="admin-page">
@@ -181,14 +336,11 @@
 											user.uid}
 										onclick={() => selectUser(user)}
 									>
-										<div
-											class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white"
-											style="background: linear-gradient(135deg, #6366f1, #8b5cf6);"
-										>
-											<span class="text-sm font-bold">
-												{(user.displayName || user.email || '?').charAt(0).toUpperCase()}
-											</span>
-										</div>
+									<Avatar
+										name={user.displayName || user.email || '?'}
+										src={user.photoURL}
+										size="md"
+									/>
 										<div class="min-w-0 flex-1">
 											<div class="flex items-center gap-2">
 												<p class="truncate font-semibold text-[color:var(--color-text-primary)]">
@@ -223,7 +375,7 @@
 
 					<!-- Quick Actions -->
 					<div
-						class="border-t border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-4"
+						class="border-t border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-4 space-y-2"
 					>
 						<button
 							type="button"
@@ -232,6 +384,20 @@
 						>
 							<i class="bx bx-shield-quarter"></i>
 							Manage Super Admins
+						</button>
+						<button
+							type="button"
+							class="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+							onclick={handleRefreshGooglePhotos}
+							disabled={refreshingPhotos}
+						>
+							{#if refreshingPhotos}
+								<i class="bx bx-loader-alt animate-spin"></i>
+								Refreshing Photos...
+							{:else}
+								<i class="bx bx-refresh"></i>
+								Refresh Google Photos
+							{/if}
 						</button>
 					</div>
 				</div>
@@ -245,14 +411,11 @@
 					<div class="space-y-6">
 						<!-- User Header -->
 						<div class="flex items-center gap-4">
-							<div
-								class="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl text-white"
-								style="background: linear-gradient(135deg, #6366f1, #8b5cf6);"
-							>
-								<span class="text-2xl font-bold">
-									{(selectedUser.displayName || selectedUser.email || '?').charAt(0).toUpperCase()}
-								</span>
-							</div>
+							<Avatar
+								name={selectedUser.displayName || selectedUser.email || '?'}
+								src={selectedUser.photoURL}
+								size="xl"
+							/>
 							<div class="min-w-0 flex-1">
 								<div class="flex flex-wrap items-center gap-2">
 									<h3 class="text-lg font-bold text-[color:var(--color-text-primary)]">
@@ -414,6 +577,72 @@
 										</div>
 									</div>
 									{#if actionLoading}
+										<i
+											class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
+										></i>
+									{:else}
+										<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+									{/if}
+								</button>
+							{/if}
+
+							<!-- Refresh Google Photo -->
+							<button
+								type="button"
+								class="flex w-full items-center justify-between rounded-xl border border-blue-500/30 p-4 transition hover:bg-blue-500/5"
+								onclick={() => handleRefreshUserPhoto(selectedUser!.uid, selectedUser!.hasCustomPhoto)}
+								disabled={refreshingUserPhoto === selectedUser.uid}
+							>
+								<div class="flex items-center gap-3">
+									<div
+										class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/20"
+									>
+										<i class="bx bx-refresh text-lg text-blue-500"></i>
+									</div>
+									<div>
+										<p class="font-medium text-[color:var(--color-text-primary)]">
+											Refresh Google Photo
+										</p>
+										<p class="text-xs text-[color:var(--text-60,#6b7280)]">
+											{selectedUser.hasCustomPhoto 
+												? 'Has custom photo - will force refresh' 
+												: 'Pull latest photo from Google account'}
+										</p>
+									</div>
+								</div>
+								{#if refreshingUserPhoto === selectedUser.uid}
+									<i
+										class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
+									></i>
+								{:else}
+									<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+								{/if}
+							</button>
+							
+							<!-- Re-authenticate with Google (only for current user) -->
+							{#if selectedUser.uid === data.user.uid}
+								<button
+									type="button"
+									class="flex w-full items-center justify-between rounded-xl border border-green-500/30 p-4 transition hover:bg-green-500/5"
+									onclick={() => handleReauthWithGoogle()}
+									disabled={!!refreshingUserPhoto}
+								>
+									<div class="flex items-center gap-3">
+										<div
+											class="flex h-10 w-10 items-center justify-center rounded-lg bg-green-500/20"
+										>
+											<i class="bx bxl-google text-lg text-green-500"></i>
+										</div>
+										<div>
+											<p class="font-medium text-[color:var(--color-text-primary)]">
+												Re-sign in with Google
+											</p>
+											<p class="text-xs text-[color:var(--text-60,#6b7280)]">
+												Fetch fresh profile data directly from Google
+											</p>
+										</div>
+									</div>
+									{#if refreshingUserPhoto === data.user.uid}
 										<i
 											class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
 										></i>

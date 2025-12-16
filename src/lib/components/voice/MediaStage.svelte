@@ -1,4 +1,6 @@
 <script lang="ts">
+	import Avatar from '$lib/components/app/Avatar.svelte';
+
 	export type MediaStageMode = 'video' | 'voice';
 
 	export type MediaTile = {
@@ -185,11 +187,7 @@
 			{#each tiles as tile (tile.uid)}
 				<article class={`voice-card ${tile.isSpeaking ? 'is-speaking' : ''}`}>
 					<div class="voice-card__avatar" aria-hidden="true">
-						{#if tile.photoURL}
-							<img src={tile.photoURL} alt={tile.displayName} loading="lazy" />
-						{:else}
-							<span>{initial(tile.displayName)}</span>
-						{/if}
+						<Avatar src={tile.photoURL} name={tile.displayName} size="xl" isSelf={tile.isSelf} class="w-full h-full" />
 						<span class="voice-card__halo"></span>
 					</div>
 					<div class="voice-card__body">

@@ -4,9 +4,11 @@
 	import { createEventDispatcher, onMount, tick, untrack } from 'svelte';
 	import type { PendingUploadPreview } from './types';
 	import EmojiPicker from './EmojiPicker.svelte';
+	import Avatar from '$lib/components/app/Avatar.svelte';
 	import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
 	import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
+	import { createTicketFromMessage } from '$lib/firestore/ticketAi';
 
 	const dispatch = createEventDispatcher();
 
@@ -86,6 +88,16 @@
 		hideReplyPreview?: boolean;
 		replyTargetId?: string | null;
 		scrollToMessageId?: string | null;
+		/** Whether the current user is a Ticket AI staff member */
+		isTicketAiStaff?: boolean;
+		/** Server ID for ticket creation */
+		serverId?: string | null;
+		/** Channel ID for ticket creation */
+		channelId?: string | null;
+		/** Thread ID for ticket creation (if in a thread) */
+		threadId?: string | null;
+		/** Set of message IDs that already have tickets */
+		ticketedMessageIds?: Set<string>;
 	}
 
 	let {
@@ -97,7 +109,12 @@
 		threadStats = {},
 		hideReplyPreview = false,
 		replyTargetId = null,
-		scrollToMessageId = null
+		scrollToMessageId = null,
+		isTicketAiStaff = false,
+		serverId = null,
+		channelId = null,
+		threadId = null,
+		ticketedMessageIds = new Set<string>()
 	}: Props = $props();
 
 	let scroller = $state<HTMLDivElement | null>(null);
@@ -110,6 +127,34 @@
 	let lastFirstMessageId: string | null = null;
 	let highlightedMessageId = $state<string | null>(null);
 	let lastScrollToMessageId: string | null = null;
+	let creatingTicketForMessageId = $state<string | null>(null);
+
+	// Handle creating a ticket from a message
+	async function handleCreateTicket(messageId: string) {
+		if (!serverId || !channelId || creatingTicketForMessageId) return;
+		
+		creatingTicketForMessageId = messageId;
+		try {
+			const result = await createTicketFromMessage({
+				serverId,
+				channelId,
+				messageId,
+				threadId
+			});
+			
+			if (result.ok) {
+				dispatch('ticketCreated', { messageId, ticketId: result.ticketId });
+			} else {
+				console.error('[MessageList] Failed to create ticket:', result.error);
+				dispatch('ticketError', { messageId, error: result.error });
+			}
+		} catch (err) {
+			console.error('[MessageList] Error creating ticket:', err);
+			dispatch('ticketError', { messageId, error: 'Failed to create ticket' });
+		} finally {
+			creatingTicketForMessageId = null;
+		}
+	}
 
 	const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
 		scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
@@ -182,22 +227,26 @@
 		if (uid === currentUserId) return 'You';
 		return fromMap.username || fromMap.handle || uid || 'Unknown';
 	}
-
+	
 	function avatarUrlFor(m: any) {
 		const uid = m.uid ?? 'unknown';
 		const user = users[uid];
+		const author = m.author ?? {};
 
 		// Try all possible photo fields in priority order
-		// Prefer live/auth photos over cached ones
+		// Check message fields, nested author object, and user profile
 		const candidates = [
 			m.photoURL,
 			m.avatarUrl,
 			m.avatar,
+			author?.photoURL,
+			author?.avatarUrl,
+			author?.avatar,
 			user?.avatar,
 			user?.avatarUrl,
 			user?.avatarURL,
 			user?.customPhotoURL,
-			user?.authPhotoURL, // Live auth photo before cached
+			user?.authPhotoURL, // Live auth photo from Google
 			user?.photoURL,
 			user?.photoUrl,
 			user?.photo,
@@ -210,12 +259,17 @@
 				url &&
 				typeof url === 'string' &&
 				url.trim() &&
-				!['undefined', 'null', 'none'].includes(url.toLowerCase())
+				!['undefined', 'null', 'none', '/default-avatar.svg'].includes(url.toLowerCase())
 			) {
+				// Skip unauthenticated Firebase Storage URLs
+				if (url.includes('storage.googleapis.com/') && !url.includes('token=')) {
+					continue;
+				}
 				return url;
 			}
 		}
 
+		// Return null - Avatar component will handle fallback
 		return null;
 	}
 
@@ -1162,11 +1216,13 @@
 							class={`message-layout ${mine ? 'message-layout--mine' : ''} ${continued ? 'message-layout--continued' : ''} ${replyRef ? 'message-layout--has-reply' : ''}`}
 						>
 							<div class="message-avatar">
-								{#if avatarUrlFor(m)}
-									<img src={avatarUrlFor(m)} alt={nameFor(m)} />
-								{:else}
-									<span>{initialsFor(nameFor(m))}</span>
-								{/if}
+								<Avatar 
+									user={users[m.uid ?? (m as any).authorId ?? 'unknown']} 
+									src={avatarUrlFor(m)}
+									name={nameFor(m)} 
+									size="md"
+									class="w-full h-full"
+								/>
 							</div>
 
 							<div class={`message-content ${mine ? 'message-content--mine' : ''}`}>
@@ -1184,14 +1240,14 @@
 										}}
 									>
 										<div class="message-header">
+											<span class={`message-author ${mine ? 'message-author--mine' : ''}`}
+												>{mine ? 'You' : nameFor(m)}</span
+											>
 											{#if (m as any).createdAt}
 												<span class="message-timestamp-inline"
 													>{formatTime((m as any).createdAt)}</span
 												>
 											{/if}
-											<span class={`message-author ${mine ? 'message-author--mine' : ''}`}
-												>{mine ? 'You' : nameFor(m)}</span
-											>
 										</div>
 										{#if replyRef && !hideReplyPreview}
 											{@const replyChain = flattenReplyChain(replyRef)}
@@ -1200,14 +1256,17 @@
 													{#each replyChain as entry, chainIndex (entry.messageId ?? `chain-${chainIndex}`)}
 														{@const entryAvatar = replyAvatar(entry)}
 														{@const entryAuthor = replyAuthorLabel(entry)}
+														{@const entryUid = entry.authorId ?? `reply-${chainIndex}`}
 														<div class="reply-inline" title="Jump to message">
 															<i class="bx bx-reply reply-inline__icon" aria-hidden="true"></i>
 															<div class="reply-inline__avatar">
-																{#if entryAvatar}
-																	<img src={entryAvatar} alt={entryAuthor} />
-																{:else}
-																	<span>{initialsFor(entryAuthor)}</span>
-																{/if}
+																<Avatar 
+																	user={users[entryUid]} 
+																	src={entryAvatar}
+																	name={entryAuthor} 
+																	size="xs"
+																	class="w-full h-full"
+																/>
 															</div>
 															<div class="reply-inline__text">
 																<span class="reply-inline__author">{entryAuthor}</span>
@@ -1267,6 +1326,30 @@
 												>
 													<i class="bx bx-smile" aria-hidden="true"></i>
 												</button>
+												{#if isTicketAiStaff && serverId && channelId && !mine}
+													{@const hasTicket = ticketedMessageIds.has(m.id)}
+													<button
+														type="button"
+														class="message-action {hasTicket ? 'message-action--ticket-exists' : 'message-action--ticket'}"
+														aria-label={hasTicket ? 'Ticket exists' : 'Create ticket'}
+														title={hasTicket ? 'Ticket already exists' : 'Create ticket'}
+														disabled={hasTicket || creatingTicketForMessageId === m.id}
+														onclick={(event) => {
+															event.stopPropagation();
+															event.preventDefault();
+															if (!hasTicket) handleCreateTicket(m.id);
+														}}
+														onpointerdown={(event) => event.stopPropagation()}
+													>
+														{#if creatingTicketForMessageId === m.id}
+															<i class="bx bx-loader-alt bx-spin" aria-hidden="true"></i>
+														{:else if hasTicket}
+															<i class="bx bx-check-circle" aria-hidden="true"></i>
+														{:else}
+															<i class="bx bx-support" aria-hidden="true"></i>
+														{/if}
+													</button>
+												{/if}
 											</div>
 										{/if}
 										<div
@@ -1438,6 +1521,7 @@
 													threadMeta.lastAt ?? (m as any).createdAt ?? null
 												)}
 												{@const previewAvatar = avatarUrlFor(m)}
+												{@const previewUid = m.uid ?? (m as any).authorId ?? 'thread-preview'}
 												<div
 													class={`thread-preview ${threadMeta.unread ? 'thread-preview--unread' : ''} ${mine ? 'thread-preview--mine' : ''} thread-preview--indented`}
 													role="button"
@@ -1466,11 +1550,13 @@
 														<div class="thread-preview__footer">
 															<div class="thread-preview__avatars" aria-hidden="true">
 																<div class="thread-preview__avatar">
-																	{#if previewAvatar}
-																		<img src={previewAvatar} alt={previewAuthor} />
-																	{:else}
-																		<span>{initialsFor(previewAuthor)}</span>
-																	{/if}
+																	<Avatar 
+																		user={users[previewUid]} 
+																		src={previewAvatar}
+																		name={previewAuthor} 
+																		size="xs"
+																		class="w-full h-full"
+																	/>
 																</div>
 																<div class="thread-preview__avatar thread-preview__avatar--ghost">
 																	<i class="bx bx-message-detail" aria-hidden="true"></i>
@@ -1521,6 +1607,7 @@
 			{@const uploadAvatar = avatarUrlFor(uploadMessage)}
 			{@const uploadName = nameFor(uploadMessage)}
 			{@const uploadPercent = Math.round((upload.progress ?? 0) * 100)}
+			{@const uploadUid = upload.uid ?? currentUserId ?? 'upload'}
 			<div class="flex w-full justify-end" data-message-id={`pending-${upload.id}`}>
 				<div class="message-block w-full max-w-3xl message-block--mine message-block--pending">
 					<div class="message-heading-row message-heading-row--mine">
@@ -1528,11 +1615,13 @@
 					</div>
 					<div class="message-layout message-layout--mine">
 						<div class="message-avatar">
-							{#if uploadAvatar}
-								<img src={uploadAvatar} alt={uploadName} />
-							{:else}
-								<span>{initialsFor(uploadName)}</span>
-							{/if}
+							<Avatar 
+								user={users[uploadUid]} 
+								src={uploadAvatar}
+								name={uploadName} 
+								size="md"
+								class="w-full h-full"
+							/>
 						</div>
 						<div class="message-content message-content--mine">
 							<div class="message-body">
@@ -2070,8 +2159,24 @@
 		outline: none;
 	}
 
+	.message-action--ticket:not(:disabled):hover,
+	.message-action--ticket:not(:disabled):focus-visible {
+		color: #4ade80;
+		background: color-mix(in srgb, #4ade80 15%, transparent);
+	}
+
+	.message-action--ticket-exists {
+		color: #4ade80;
+		opacity: 0.7;
+	}
+
 	.message-action:disabled {
 		opacity: 0.25;
+		pointer-events: none;
+	}
+
+	.message-action--ticket-exists:disabled {
+		opacity: 0.7;
 		pointer-events: none;
 	}
 

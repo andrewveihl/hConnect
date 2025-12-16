@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { preventDefault } from 'svelte/legacy';
+	import Avatar from '$lib/components/app/Avatar.svelte';
 
 	export type MentionCandidate = {
 		uid: string;
@@ -39,12 +40,6 @@
 		onSelect = () => {},
 		onHover = () => {}
 	}: Props = $props();
-
-	const initialsFor = (value: string) => {
-		const words = (value ?? '').trim().split(/\s+/).filter(Boolean).slice(0, 2);
-		if (!words.length) return '?';
-		return words.map((word) => word[0]?.toUpperCase() ?? '').join('') || '?';
-	};
 </script>
 
 {#if active && options.length > 0}
@@ -76,10 +71,8 @@
 							></span>
 						{:else if option.kind === 'special'}
 							<span class="mention-menu__avatar-special">@</span>
-						{:else if option.avatar}
-							<img src={option.avatar} alt={option.label} loading="lazy" />
 						{:else}
-							<span>{initialsFor(option.label)}</span>
+							<Avatar src={option.avatar} name={option.label} size="sm" class="w-full h-full" />
 						{/if}
 					</span>
 					<span class="mention-menu__meta">

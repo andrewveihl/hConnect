@@ -7,6 +7,12 @@ function cleanUrl(value: unknown): string | null {
 	if (['undefined', 'null', 'none', 'false', '0'].includes(lowered)) return null;
 	// Filter out placeholder/invalid URLs
 	if (str.startsWith('blob:') && str.includes('undefined')) return null;
+	
+	// Filter out Firebase Storage URLs without auth token (cached format that doesn't work)
+	if (str.includes('storage.googleapis.com/') && !str.includes('token=')) {
+		return null;
+	}
+	
 	return str;
 }
 

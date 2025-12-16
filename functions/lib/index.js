@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendTestPush = exports.syncServerMemberPhotos = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
+exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.sendTestPush = exports.syncServerMemberPhotos = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
@@ -246,5 +246,284 @@ exports.sendTestPush = (0, https_1.onCall)({
         return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
     return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
+});
+/**
+ * Callable function to manually create a ticket from a message.
+ * Staff members can use this to create tickets for messages that weren't auto-detected.
+ */
+exports.createTicketFromMessage = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    secrets: [openaiApiKey],
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    const { serverId, channelId, messageId, threadId } = request.data ?? {};
+    if (!serverId || typeof serverId !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'Server ID required.');
+    }
+    if (!channelId || typeof channelId !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'Channel ID required.');
+    }
+    if (!messageId || typeof messageId !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'Message ID required.');
+    }
+    firebase_functions_1.logger.info('[createTicketFromMessage] Creating manual ticket', {
+        serverId, channelId, messageId, threadId, callerUid
+    });
+    const result = await (0, ticketAi_1.createManualTicket)({
+        serverId,
+        channelId,
+        messageId,
+        threadId: typeof threadId === 'string' ? threadId : null,
+        callerUid
+    });
+    if (!result.ok) {
+        throw new https_1.HttpsError('failed-precondition', result.error ?? 'Failed to create ticket');
+    }
+    return { ok: true, ticketId: result.ticketId };
+});
+/**
+ * Super Admin callable function to refresh Google profile photos for ALL users.
+ * This reads the authPhotoURL from Firebase Auth and updates the profile.
+ * DOES NOT override users who have customPhotoURL set (user-uploaded photos).
+ */
+exports.refreshAllGooglePhotos = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173'],
+    timeoutSeconds: 540 // 9 minutes - this could take a while
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    // Verify caller is a super admin
+    const callerEmail = request.auth?.token?.email;
+    if (!callerEmail) {
+        throw new https_1.HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true ||
+        callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    firebase_functions_1.logger.info('[refreshAllGooglePhotos] Starting refresh', { callerUid, callerEmail });
+    // Get all profiles
+    const profilesSnap = await firebase_1.db.collection('profiles').get();
+    const totalProfiles = profilesSnap.size;
+    let synced = 0;
+    let skipped = 0;
+    let failed = 0;
+    let noAuthPhoto = 0;
+    // Import auth
+    const { auth } = await Promise.resolve().then(() => __importStar(require('./firebase')));
+    for (const profileDoc of profilesSnap.docs) {
+        const uid = profileDoc.id;
+        const profileData = profileDoc.data();
+        try {
+            // Skip if user has a custom uploaded photo - don't override their choice
+            if (profileData?.customPhotoURL) {
+                firebase_functions_1.logger.info('[refreshAllGooglePhotos] Skipping user with custom photo', { uid });
+                skipped++;
+                continue;
+            }
+            // Get user from Firebase Auth to get their provider photo
+            let authPhotoURL = null;
+            try {
+                const authUser = await auth.getUser(uid);
+                authPhotoURL = authUser.photoURL || null;
+            }
+            catch (e) {
+                // User might not exist in Auth (old/deleted users)
+                firebase_functions_1.logger.warn('[refreshAllGooglePhotos] Could not get auth user', { uid });
+                skipped++;
+                continue;
+            }
+            if (!authPhotoURL) {
+                noAuthPhoto++;
+                continue;
+            }
+            // Update profile with the Google photo URL
+            // Clear cachedPhotoURL since it might be stale
+            await firebase_1.db.doc(`profiles/${uid}`).set({
+                authPhotoURL: authPhotoURL,
+                photoURL: authPhotoURL, // Set main photoURL to Google photo
+                cachedPhotoURL: null, // Clear stale cached URL
+                updatedAt: firestore_2.FieldValue.serverTimestamp()
+            }, { merge: true });
+            synced++;
+            firebase_functions_1.logger.info('[refreshAllGooglePhotos] Updated photo', {
+                uid,
+                authPhotoURL: authPhotoURL.substring(0, 60) + '...'
+            });
+        }
+        catch (error) {
+            firebase_functions_1.logger.error('[refreshAllGooglePhotos] Error processing user', { uid, error });
+            failed++;
+        }
+    }
+    firebase_functions_1.logger.info('[refreshAllGooglePhotos] Complete', {
+        total: totalProfiles,
+        synced,
+        skipped,
+        failed,
+        noAuthPhoto
+    });
+    return {
+        ok: true,
+        total: totalProfiles,
+        synced,
+        skipped,
+        failed,
+        noAuthPhoto,
+        message: `Refreshed ${synced} photos. Skipped ${skipped} (custom photos or no auth). ${noAuthPhoto} users have no Google photo.`
+    };
+});
+/**
+ * Super Admin callable function to refresh a SINGLE user's Google profile photo.
+ * This reads the authPhotoURL from Firebase Auth and updates the profile.
+ * Can optionally force refresh even if user has customPhotoURL.
+ */
+exports.refreshUserGooglePhoto = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    // Verify caller is a super admin
+    const callerEmail = request.auth?.token?.email;
+    if (!callerEmail) {
+        throw new https_1.HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true ||
+        callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    const { uid, force } = request.data ?? {};
+    if (!uid || typeof uid !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'User ID required.');
+    }
+    firebase_functions_1.logger.info('[refreshUserGooglePhoto] Starting refresh for user', { uid, callerUid, force });
+    // Get current profile
+    const profileDoc = await firebase_1.db.doc(`profiles/${uid}`).get();
+    const profileData = profileDoc.data();
+    // Check if user has custom photo and force is not set
+    if (profileData?.customPhotoURL && !force) {
+        return {
+            ok: false,
+            reason: 'has_custom_photo',
+            message: 'User has a custom photo. Use force=true to override.'
+        };
+    }
+    // Get user from Firebase Auth
+    const { auth } = await Promise.resolve().then(() => __importStar(require('./firebase')));
+    let authPhotoURL = null;
+    try {
+        const authUser = await auth.getUser(uid);
+        authPhotoURL = authUser.photoURL || null;
+    }
+    catch (e) {
+        firebase_functions_1.logger.warn('[refreshUserGooglePhoto] Could not get auth user', { uid });
+        throw new https_1.HttpsError('not-found', 'User not found in Firebase Auth.');
+    }
+    if (!authPhotoURL) {
+        return {
+            ok: false,
+            reason: 'no_google_photo',
+            message: 'User does not have a Google profile photo.'
+        };
+    }
+    // Download the Google photo and upload to Firebase Storage to avoid CORS issues
+    let cachedPhotoURL = null;
+    try {
+        // Request a larger size image from Google (change =s96-c to =s400)
+        let fetchUrl = authPhotoURL;
+        if (fetchUrl.includes('=s96-c')) {
+            fetchUrl = fetchUrl.replace('=s96-c', '=s400');
+        }
+        else if (!fetchUrl.includes('=s')) {
+            fetchUrl = fetchUrl + '=s400';
+        }
+        firebase_functions_1.logger.info('[refreshUserGooglePhoto] Downloading Google photo...', {
+            originalUrl: authPhotoURL.substring(0, 80),
+            fetchUrl: fetchUrl.substring(0, 80)
+        });
+        // Fetch the image from Google
+        const response = await fetch(fetchUrl);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch image: ${response.status}`);
+        }
+        const imageBuffer = Buffer.from(await response.arrayBuffer());
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
+        const imageSize = imageBuffer.length;
+        firebase_functions_1.logger.info('[refreshUserGooglePhoto] Downloaded image', {
+            size: imageSize,
+            contentType
+        });
+        // Check if image is too small (likely a default avatar)
+        if (imageSize < 3000) {
+            firebase_functions_1.logger.warn('[refreshUserGooglePhoto] Image too small, likely a default avatar', { size: imageSize });
+            return {
+                ok: false,
+                reason: 'default_avatar',
+                googleURL: authPhotoURL,
+                imageSize,
+                message: `User appears to have a default Google avatar (${imageSize} bytes). They may need to set a profile photo in Google or re-sign in.`
+            };
+        }
+        // Upload to Firebase Storage
+        const bucket = (0, storage_1.getStorage)().bucket();
+        const fileName = `avatars/${uid}/google-photo.jpg`;
+        const file = bucket.file(fileName);
+        await file.save(imageBuffer, {
+            metadata: {
+                contentType,
+                cacheControl: 'no-cache, max-age=0', // Don't cache - always fetch fresh
+            },
+        });
+        // Make the file publicly accessible
+        await file.makePublic();
+        // Get the public URL with cache-busting timestamp
+        cachedPhotoURL = `https://storage.googleapis.com/${bucket.name}/${fileName}?t=${Date.now()}`;
+        firebase_functions_1.logger.info('[refreshUserGooglePhoto] Photo cached to Storage', { cachedPhotoURL: cachedPhotoURL.substring(0, 80) });
+    }
+    catch (fetchError) {
+        firebase_functions_1.logger.warn('[refreshUserGooglePhoto] Failed to cache photo, using original URL', { error: String(fetchError) });
+        // Fall back to original URL if caching fails
+    }
+    // Update profile with cached URL (or original if caching failed)
+    const photoURLToUse = cachedPhotoURL || authPhotoURL;
+    await firebase_1.db.doc(`profiles/${uid}`).set({
+        authPhotoURL: authPhotoURL,
+        photoURL: photoURLToUse,
+        cachedPhotoURL: cachedPhotoURL,
+        updatedAt: firestore_2.FieldValue.serverTimestamp()
+    }, { merge: true });
+    firebase_functions_1.logger.info('[refreshUserGooglePhoto] Updated photo', {
+        uid,
+        photoURL: photoURLToUse.substring(0, 60) + '...',
+        cached: !!cachedPhotoURL
+    });
+    return {
+        ok: true,
+        photoURL: photoURLToUse,
+        googleURL: authPhotoURL, // Original Google URL for debugging
+        cached: !!cachedPhotoURL,
+        message: cachedPhotoURL ? 'Profile photo refreshed and cached.' : 'Profile photo refreshed (not cached).'
+    };
 });
 //# sourceMappingURL=index.js.map

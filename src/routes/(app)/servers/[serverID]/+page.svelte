@@ -61,6 +61,7 @@
 		type ChannelThread,
 		type ThreadMessage
 	} from '$lib/firestore/threads';
+	import { subscribeTicketAiSettings, subscribeToTicketedMessageIds, type TicketAiSettings } from '$lib/firestore/ticketAi';
 	import { markChannelRead } from '$lib/firebase/unread';
 	import { markChannelActivityRead } from '$lib/stores/activityFeed';
 	import { uploadChannelFile } from '$lib/firebase/storage';
@@ -163,6 +164,30 @@
 	let lastThreadStreamChannel: string | null = null;
 	let lastThreadStreamId: string | null = null;
 	let threadReadTimer: number | null = null;
+	// Ticket AI staff detection
+	let ticketAiSettings: TicketAiSettings | null = $state(null);
+	let ticketAiSettingsUnsub: Unsubscribe | null = null;
+	let ticketAiSettingsServerId: string | null = null;
+	// Track message IDs that already have tickets
+	let ticketedMessageIds = $state<Set<string>>(new Set());
+	let ticketedMsgUnsub: Unsubscribe | null = null;
+	let ticketedMsgChannelId: string | null = null;
+	const isTicketAiStaff = $derived.by(() => {
+		if (!ticketAiSettings?.enabled) return false;
+		const uid = $user?.uid;
+		const email = $user?.email;
+		if (!uid && !email) return false;
+		// Check if user is in staffMemberIds
+		if (uid && ticketAiSettings.staffMemberIds?.includes(uid)) return true;
+		// Check if user email matches staffDomains
+		if (email && ticketAiSettings.staffDomains?.length) {
+			const lowerEmail = email.toLowerCase();
+			for (const domain of ticketAiSettings.staffDomains) {
+				if (lowerEmail.endsWith(domain.toLowerCase())) return true;
+			}
+		}
+		return false;
+	});
 	const THREAD_PANE_MIN = 320;
 	const THREAD_PANE_MAX = 1600;
 	let threadPaneWidth = $state(360);
@@ -2855,6 +2880,14 @@
 		stopThreadResize();
 		stopCallPanelResize();
 		stopFloatingCallChatResize();
+		ticketAiSettingsUnsub?.();
+		ticketAiSettingsUnsub = null;
+		ticketAiSettings = null;
+		ticketAiSettingsServerId = null;
+		ticketedMsgUnsub?.();
+		ticketedMsgUnsub = null;
+		ticketedMsgChannelId = null;
+		ticketedMessageIds = new Set();
 	});
 
 	// Persist read state when tab is hidden
@@ -4505,6 +4538,37 @@
 			serverDisplayName = 'Server';
 		}
 	});
+	// Subscribe to Ticket AI settings for staff detection
+	run(() => {
+		if (serverId && ticketAiSettingsServerId !== serverId) {
+			ticketAiSettingsUnsub?.();
+			ticketAiSettingsServerId = serverId;
+			ticketAiSettingsUnsub = subscribeTicketAiSettings(serverId, (settings) => {
+				ticketAiSettings = settings;
+			});
+		} else if (!serverId && ticketAiSettingsUnsub) {
+			ticketAiSettingsUnsub();
+			ticketAiSettingsUnsub = null;
+			ticketAiSettings = null;
+			ticketAiSettingsServerId = null;
+		}
+	});
+	// Subscribe to ticketed message IDs for the active channel
+	run(() => {
+		const currentChannelId = activeChannel?.id;
+		if (serverId && currentChannelId && ticketedMsgChannelId !== currentChannelId) {
+			ticketedMsgUnsub?.();
+			ticketedMsgChannelId = currentChannelId;
+			ticketedMsgUnsub = subscribeToTicketedMessageIds(serverId, currentChannelId, (ids) => {
+				ticketedMessageIds = ids;
+			});
+		} else if ((!serverId || !currentChannelId) && ticketedMsgUnsub) {
+			ticketedMsgUnsub();
+			ticketedMsgUnsub = null;
+			ticketedMsgChannelId = null;
+			ticketedMessageIds = new Set();
+		}
+	});
 	run(() => {
 		const requested = requestedChannelId;
 		const prevHandled = untrack(() => handledRequestedChannelId);
@@ -4670,6 +4734,10 @@
 											emptyMessage={!serverId
 												? 'Pick a server to start chatting.'
 												: 'Pick a channel to start chatting.'}
+											{isTicketAiStaff}
+											{serverId}
+											channelId={activeChannel?.id ?? null}
+											{ticketedMessageIds}
 											onVote={handleVote}
 											onSubmitForm={handleFormSubmit}
 											onReact={handleReaction}
@@ -4828,6 +4896,10 @@
 												emptyMessage={!serverId
 													? 'Pick a server to start chatting.'
 													: 'Pick a channel to start chatting.'}
+												{isTicketAiStaff}
+												{serverId}
+												channelId={channelMessagesPopoutChannelId}
+												{ticketedMessageIds}
 												onVote={handlePopoutVote}
 												onSubmitForm={handlePopoutFormSubmit}
 												onReact={handlePopoutReaction}
@@ -4884,6 +4956,10 @@
 										emptyMessage={!serverId
 											? 'Pick a server to start chatting.'
 											: 'Pick a channel to start chatting.'}
+										{isTicketAiStaff}
+										{serverId}
+										channelId={activeChannel?.id ?? null}
+										{ticketedMessageIds}
 										onVote={handleVote}
 										onSubmitForm={handleFormSubmit}
 										onReact={handleReaction}
