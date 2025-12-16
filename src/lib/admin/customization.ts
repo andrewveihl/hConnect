@@ -244,12 +244,13 @@ export async function resetSplashToDefault(user: User | null): Promise<void> {
 
 // === Sounds (notification / call tones) ===
 
-export type SoundKind = 'notification' | 'callJoin' | 'callLeave';
+export type SoundKind = 'notification' | 'callJoin' | 'callLeave' | 'messageSend';
 
 const SOUND_STORAGE_PREFIX: Record<SoundKind, string> = {
   notification: 'notification',
   callJoin: 'call-join',
-  callLeave: 'call-leave'
+  callLeave: 'call-leave',
+  messageSend: 'message-send'
 };
 
 export async function saveSoundConfig(

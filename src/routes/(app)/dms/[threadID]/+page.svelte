@@ -8,10 +8,12 @@ import { onMount, onDestroy } from 'svelte';
   import { getDb } from '$lib/firebase';
   import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
   import { mobileDockSuppressed } from '$lib/stores/ui';
+  import { playSound } from '$lib/utils/sounds';
 
 import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
+import Avatar from '$lib/components/app/Avatar.svelte';
 import { openOverlay, closeOverlay, registerOverlayHandler, clearAllOverlays, type MobileOverlayId } from '$lib/stores/mobileNav';
 
 import { sendDMMessage, streamDMMessages, markThreadRead, voteOnDMPoll, submitDMForm, toggleDMReaction } from '$lib/firestore/dms';
@@ -1082,6 +1084,7 @@ run(() => {
         mentions: mentionList.length ? mentionList : undefined,
         replyTo: replyRef ?? undefined
       });
+      playSound('message-send');
       markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
@@ -1103,6 +1106,7 @@ run(() => {
         photoURL: deriveMePhotoURL(),
         replyTo: replyRef ?? undefined
       });
+      playSound('message-send');
       markThreadAsSeen();
     } catch (err) {
       restoreReply(replyRef);
@@ -1338,13 +1342,12 @@ run(() => {
           aria-label="View participant profile"
           onclick={() => syncInfoVisibility(true)}
         >
-          <div class="w-9 h-9 rounded-full bg-white/10 grid place-items-center overflow-hidden border border-white/10 shrink-0">
-            {#if otherProfile?.photoURL}
-              <img class="w-9 h-9 object-cover" src={otherProfile.photoURL} alt="" />
-            {:else}
-              <i class="bx bx-user text-lg text-white/80"></i>
-            {/if}
-          </div>
+          <Avatar
+            user={otherProfile}
+            name={displayName}
+            size="sm"
+            class="shrink-0"
+          />
           <div class="min-w-0">
             <div class="font-semibold leading-5 truncate">{displayName}</div>
             {#if otherProfile?.email}<div class="text-xs text-white/60 truncate">{otherProfile.email}</div>{/if}
@@ -1431,15 +1434,11 @@ run(() => {
           <div class="animate-pulse text-white/50">Loading profile...</div>
         {:else if otherProfile}
           <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
-            <div class="w-20 h-20 rounded-full overflow-hidden bg-white/10 border border-white/10">
-              {#if otherProfile.photoURL}
-                <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
-              {:else}
-                <div class="w-full h-full grid place-items-center text-3xl text-white/70">
-                  <i class="bx bx-user"></i>
-                </div>
-              {/if}
-            </div>
+            <Avatar
+              user={otherProfile}
+              name={displayName}
+              size="xl"
+            />
             <div class="text-lg font-semibold">{displayName}</div>
             {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
           </div>
@@ -1521,15 +1520,11 @@ run(() => {
         <div class="animate-pulse text-soft">Loading profile...</div>
       {:else if otherProfile}
         <div class="flex flex-col items-center gap-3 text-center py-6 border-b border-white/10">
-          <div class="w-24 h-24 rounded-full overflow-hidden bg-white/10 border border-white/10">
-            {#if otherProfile.photoURL}
-              <img class="w-full h-full object-cover" src={otherProfile.photoURL} alt="" />
-            {:else}
-              <div class="w-full h-full grid place-items-center text-3xl text-white/70">
-                <i class="bx bx-user"></i>
-              </div>
-            {/if}
-          </div>
+          <Avatar
+            user={otherProfile}
+            name={displayName}
+            size="2xl"
+          />
           <div class="text-lg font-semibold">{displayName}</div>
           {#if otherProfile.email}<div class="text-sm text-white/60">{otherProfile.email}</div>{/if}
         </div>

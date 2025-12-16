@@ -246,6 +246,8 @@ import {
   });
   let isMicMuted = $state(initialVoicePrefs.muteOnJoin);
   let isCameraOff = $state(initialVoicePrefs.videoOffOnJoin);
+  let isMicToggling = $state(false);
+  let isCameraToggling = $state(false);
   let remoteConnected = $state(false);
   let screenStream: MediaStream | null = null;
   let isScreenSharing = $state(false);
@@ -256,9 +258,9 @@ let audioNeedsUnlock = $state(false);
   let inactivityTimer: number | null = null;
   let inactivityHeartbeat: ReturnType<typeof setInterval> | null = null;
   let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
-  const THUMBNAIL_INTERVAL_MS = 2000; // Capture thumbnail every 2 seconds
-  const THUMBNAIL_QUALITY = 0.6; // JPEG quality
-  const THUMBNAIL_MAX_SIZE = 160; // Max width/height in pixels
+  const THUMBNAIL_INTERVAL_MS = 2500; // Capture thumbnail every 2.5 seconds
+  const THUMBNAIL_QUALITY = 0.55; // JPEG quality
+  const THUMBNAIL_MAX_SIZE = 140; // Max width/height in pixels
   let voiceActivityUnsub: (() => void) | null = null;
   let visibilityUnsub: (() => void) | null = null;
   interface Props {
@@ -284,9 +286,9 @@ let audioNeedsUnlock = $state(false);
   let gridMode = $state<VoiceUiPrefs['gridMode']>('equal');
   let showSelfInGrid = $state(true);
   let lastActiveSpeaker = $state<string | null>(null);
-  let controlsVisible = $state(false);
+  let controlsVisible = $state(true);
   let controlHideTimer: ReturnType<typeof setTimeout> | null = null;
-  const CONTROL_HIDE_DELAY_MS = 1800;
+  const CONTROL_HIDE_DELAY_MS = 2500;
   let callShellEl = $state<HTMLElement | null>(null);
   let callStageEl = $state<HTMLElement | null>(null);
   let isFullscreen = $state(false);
@@ -437,7 +439,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   let connectionFailureCount = 0;
   let lastIceErrorTimestamp = 0;
   let lastTurnConfigSignature: string | null = null;
-  let debugLoggingEnabled = $state(true);
+  let debugLoggingEnabled = $state(false);
   let isOfferer = $state(false);
   let lastOfferRevision = 0;
   let lastAnswerRevision = 0;
@@ -1941,8 +1943,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       }
       if (storedDebug) {
         debugLoggingEnabled = true;
-      } else {
-        setVoiceDebug(true);
       }
       if (storedPanelOpen) {
         setDebugPanelVisibility(true);
@@ -2564,12 +2564,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
           }
         : { session: null, activeSessionKey }
     );
-    console.log('[VoiceDebug] handleSessionChange called', {
-      next: next ? { serverId: next.serverId, channelId: next.channelId, visible: next.visible } : null,
-      activeSessionKey,
-      isJoined,
-      isConnecting
-    });
     voiceDebug('handleSessionChange called', {
       next: next ? { serverId: next.serverId, channelId: next.channelId, visible: next.visible } : null,
       activeSessionKey,
@@ -2604,13 +2598,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const nextKey = `${next.serverId}:${next.channelId}`;
     const sameSession = activeSessionKey === nextKey;
 
-    console.log('[VoiceDebug] handleSessionChange session check', {
-      activeSessionKey,
-      nextKey,
-      sameSession,
-      isJoined,
-      isConnecting
-    });
     voiceDebug('handleSessionChange session check', {
       activeSessionKey,
       nextKey,
@@ -2630,9 +2617,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
     if (sameSession) {
       // Same session, just visibility or metadata changed - no need to rejoin
-      console.log('[VoiceDebug] sameSession=true, isJoined=', isJoined, 'isConnecting=', isConnecting);
       if (!isJoined && !isConnecting) {
-        console.log('[VoiceDebug] sameSession but NOT joined, calling joinChannel');
+        voiceDebug('sameSession but NOT joined, calling joinChannel');
         await joinChannel();
       }
       return;
@@ -2645,11 +2631,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     const preservedCameraOff = wasInCall ? isCameraOff : (next.joinVideoOff ?? currentPrefs.videoOffOnJoin);
     const preservedScreenSharing = wasInCall ? isScreenSharing : false;
     
-    console.log('[VoiceDebug] CHANNEL SWITCH DETECTED', {
-      wasInCall,
-      previousKey: activeSessionKey,
-      nextKey
-    });
     voiceDebug('handleSessionChange channel switch', {
       wasInCall,
       preservedMicMuted,
@@ -4697,7 +4678,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
 
 
   async function hangUp(options: { cleanupDoc?: boolean; resetError?: boolean; preserveMediaState?: boolean } = {}) {
-    console.log('[VoiceDebug] hangUp called', options, new Error().stack);
     voiceDebug('hangUp start', options);
     reconnectAttemptCount = 0;
     connectionFailureCount = 0;
@@ -4911,92 +4891,104 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   async function toggleMic() {
-    voiceDebug('toggleMic invoked', { isMicMuted, hasAudioTrack });
-    const enabling = isMicMuted;
-    if (enabling) {
-      const previous = isMicMuted;
-      isMicMuted = false;
+    if (isMicToggling) return; // Prevent concurrent toggles
+    isMicToggling = true;
+    try {
+      voiceDebug('toggleMic invoked', { isMicMuted, hasAudioTrack });
+      const enabling = isMicMuted;
+      if (enabling) {
+        const previous = isMicMuted;
+        isMicMuted = false;
 
-      if (!hasAudioTrack) {
-        const ok = await acquireTrack('audio');
-        if (!ok) {
-          isMicMuted = previous;
-          return;
+        if (!hasAudioTrack) {
+          const ok = await acquireTrack('audio');
+          if (!ok) {
+            isMicMuted = previous;
+            // Don't return early - let finally release the lock
+            return;
+          }
+        } else {
+          localStream?.getAudioTracks().forEach((track) => (track.enabled = true));
+          syncLocalTracksToPeer();
         }
-      } else {
-        localStream?.getAudioTracks().forEach((track) => (track.enabled = true));
-        syncLocalTracksToPeer();
-      }
 
-      applyTrackStates();
-      statusMessage = 'Microphone on.';
-    } else {
-      removeLocalTrack('audio');
-      isMicMuted = true;
-      applyTrackStates();
-      statusMessage = 'Microphone muted.';
-    }
-    await updateParticipantPresence();
-    scheduleRenegotiation(enabling ? 'mic-unmuted' : 'mic-muted', { requireOfferer: true });
-    const currentUid = $user?.uid ?? null;
-    if (currentUid) {
-      const nextAudio = hasAudioTrack && !isMicMuted;
-      participants = participants.map((p) =>
-        p.uid === currentUid ? { ...p, hasAudio: nextAudio, status: 'active' } : p
-      );
+        applyTrackStates();
+        statusMessage = 'Microphone on.';
+      } else {
+        removeLocalTrack('audio');
+        isMicMuted = true;
+        applyTrackStates();
+        statusMessage = 'Microphone muted.';
+      }
+      await updateParticipantPresence();
+      scheduleRenegotiation(enabling ? 'mic-unmuted' : 'mic-muted', { requireOfferer: true });
+      const currentUid = $user?.uid ?? null;
+      if (currentUid) {
+        const nextAudio = hasAudioTrack && !isMicMuted;
+        participants = participants.map((p) =>
+          p.uid === currentUid ? { ...p, hasAudio: nextAudio, status: 'active' } : p
+        );
+      }
+    } finally {
+      isMicToggling = false;
     }
   }
 
   async function toggleCamera() {
-    if (isScreenSharePending) return;
-    voiceDebug('toggleCamera invoked', { isCameraOff, isScreenSharing });
+    if (isCameraToggling || isScreenSharePending) return; // Prevent concurrent toggles
+    isCameraToggling = true;
+    try {
+      voiceDebug('toggleCamera invoked', { isCameraOff, isScreenSharing });
 
-    if (isScreenSharing) {
-      await stopScreenShare();
-      return;
-    }
-
-    const enabling = isCameraOff;
-    if (enabling) {
-      const previous = isCameraOff;
-      isCameraOff = false;
-
-      if (!hasVideoTrack) {
-        const ok = await acquireTrack('video');
-        if (!ok) {
-          isCameraOff = previous;
-          return;
-        }
+      if (isScreenSharing) {
+        await stopScreenShare();
+        // Don't return early - let finally run to release the lock
       } else {
-        localStream?.getVideoTracks().forEach((track) => (track.enabled = true));
-        syncLocalTracksToPeer();
+        const enabling = isCameraOff;
+        if (enabling) {
+          const previous = isCameraOff;
+          isCameraOff = false;
+
+          if (!hasVideoTrack) {
+            const ok = await acquireTrack('video');
+            if (!ok) {
+              isCameraOff = previous;
+              return;
+            }
+          } else {
+            localStream?.getVideoTracks().forEach((track) => (track.enabled = true));
+            syncLocalTracksToPeer();
+          }
+
+          applyTrackStates();
+          statusMessage = 'Camera on.';
+          // Start publishing thumbnails when camera turns on
+          startThumbnailPublishing();
+        } else {
+          removeLocalTrack('video');
+          isCameraOff = true;
+          isScreenSharing = false;
+          shouldRestoreCameraOnShareEnd = false;
+          applyTrackStates();
+          statusMessage = 'Camera off.';
+          // Stop publishing thumbnails when camera turns off
+          stopThumbnailPublishing();
+        }
+
+        await updateParticipantPresence();
+        scheduleRenegotiation(enabling ? 'camera-on' : 'camera-off', { requireOfferer: true });
+        const currentUid = $user?.uid ?? null;
+        if (currentUid) {
+          const nextVideo = hasVideoTrack && (!isCameraOff || isScreenSharing);
+          participants = participants.map((p) =>
+            p.uid === currentUid
+              ? { ...p, hasVideo: nextVideo, screenSharing: isScreenSharing, status: 'active' }
+              : p
+          );
+        }
       }
-
-      applyTrackStates();
-      statusMessage = 'Camera on.';
-      // Start publishing thumbnails when camera turns on
-      startThumbnailPublishing();
-    } else {
-      removeLocalTrack('video');
-      isCameraOff = true;
-      isScreenSharing = false;
-      shouldRestoreCameraOnShareEnd = false;
-      applyTrackStates();
-      statusMessage = 'Camera off.';
-      // Stop publishing thumbnails when camera turns off
-      stopThumbnailPublishing();
-    }
-
-    await updateParticipantPresence();
-    scheduleRenegotiation(enabling ? 'camera-on' : 'camera-off', { requireOfferer: true });
-    const currentUid = $user?.uid ?? null;
-    if (currentUid) {
-      const nextVideo = hasVideoTrack && (!isCameraOff || isScreenSharing);
-      participants = participants.map((p) =>
-        p.uid === currentUid
-          ? { ...p, hasVideo: nextVideo, screenSharing: isScreenSharing, status: 'active' }
-          : p
-      );
+    } finally {
+      isCameraToggling = false;
     }
   }
 
@@ -5534,6 +5526,8 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   }
 
   function scheduleControlsHide(immediate = false) {
+    // In embedded mode, don't auto-hide controls
+    if (isEmbedded) return;
     if (compactMatch) return;
     if (controlHideTimer) {
       clearTimeout(controlHideTimer);
@@ -6143,15 +6137,6 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     class:call-shell--minimal={stageOnly}
     bind:this={callShellEl}
   >
-    {#if debugLoggingEnabled && !isCompact && showChrome}
-      <div class="call-debug-banner">
-        <i class="bx bx-bug"></i>
-        Debug logging active - open the browser console to view `[voice]` events.
-        <button type="button" onclick={() => setVoiceDebug(false)}>
-          Disable
-        </button>
-      </div>
-    {/if}
     {#if !stageOnly}
       {#if !isCompact}
         <header class="call-header">
@@ -6296,7 +6281,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
         >
           <div
             slot="video"
-            class={`call-grid ${gridMode === 'focus' && focusedTile ? 'call-grid--focus' : ''} ${gridTiles.length === 1 ? 'call-grid--single' : ''}`}
+            class={`call-grid ${gridMode === 'focus' && focusedTile ? 'call-grid--focus' : ''} ${gridTiles.length === 1 ? 'call-grid--single' : ''} ${gridTiles.length === 2 ? 'call-grid--duo' : ''}`}
           >
             {#each gridTiles as tile (tile.uid)}
               <article
@@ -6542,7 +6527,7 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     <footer
       class="call-controls"
       class:call-controls--embedded={isEmbedded}
-      class:call-controls--visible={controlsVisible}
+      class:call-controls--visible={isEmbedded || controlsVisible}
       style:padding-bottom="calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 1.4rem)"
       onpointerenter={showControlsBar}
       onpointerleave={() => scheduleControlsHide()}
@@ -8575,6 +8560,12 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
   height: 404px;
 }
 
+/* Larger tiles when only 2 people in call (1.5x) */
+.call-grid--duo .call-tile {
+  width: 540px;
+  height: 303px;
+}
+
 /* Discord green speaking glow */
 .call-tile--speaking {
   box-shadow: 
@@ -9420,6 +9411,12 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
       height: 315px;
     }
 
+    /* Larger tiles for duo - tablet */
+    .call-grid--duo .call-tile {
+      width: 440px;
+      height: 247px;
+    }
+
     .call-controls__row--connected {
       flex-direction: column;
       gap: 8px;
@@ -9476,6 +9473,14 @@ const allowTurnFallback = parseBooleanFlag(PUBLIC_ENABLE_TURN_FALLBACK, true);
     .call-grid--single .call-tile {
       width: 100%;
       max-width: 480px;
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+
+    /* Larger tiles for duo - mobile */
+    .call-grid--duo .call-tile {
+      width: 100%;
+      max-width: 380px;
       height: auto;
       aspect-ratio: 16 / 9;
     }

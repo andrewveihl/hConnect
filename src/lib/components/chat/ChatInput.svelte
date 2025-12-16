@@ -13,6 +13,7 @@
   import { mobileDockSuppressed } from '$lib/stores/ui';
   import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
   import { featureFlags } from '$lib/stores/featureFlags';
+  import { playSound } from '$lib/utils/sounds';
 
   type MentionCandidate = {
     uid: string;
@@ -165,7 +166,7 @@
   let popoverEl: HTMLDivElement | null = $state(null);
   let popoverPlacement: PopoverPlacement = $state({
     left: '0.75rem',
-    bottom: '3.5rem',
+    bottom: '5rem',
     width: 'min(20rem, 90vw)',
     maxHeight: 'min(65vh, 26rem)'
   });
@@ -176,9 +177,11 @@
   let showEmoji = $state(false);
   let emojiSupported = $state(false);
   let emojiTriggerEl: HTMLDivElement | null = $state(null);
+  let emojiPickerEl: HTMLDivElement | null = $state(null);
   let disposeEmojiOutside: (() => void) | null = $state(null);
   let fileEl: HTMLInputElement | null = $state(null);
   let inputEl: HTMLTextAreaElement | null = $state(null);
+  let rootEl: HTMLDivElement | null = $state(null);
   let attachments: AttachmentDraft[] = $state([]);
   let platform: 'desktop' | 'mobile' = $state('desktop');
   const sendDisabled = $derived.by(() => disabled || (!text.trim() && attachments.length === 0));
@@ -197,6 +200,11 @@
   let mentionLookup = $state(new Map<string, MentionCandidate>());
   let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
   const mentionDraft = new Map<string, MentionRecord>();
+  let mentionMenuPosition = $state({ left: '0px', bottom: '5rem', maxHeight: '16rem' });
+  let emojiPickerPosition = $state({ left: 'auto', right: '12px', bottom: '5rem', top: 'auto', maxHeight: '440px' });
+
+  type TextSegment = { type: 'text'; content: string } | { type: 'mention'; content: string; record: MentionRecord };
+  let textSegments = $state<TextSegment[]>([]);
 
   const featureFlagStore = featureFlags;
   const aiPlatformEnabled = $derived(Boolean($featureFlagStore.enableAIFeatures));
@@ -396,6 +404,7 @@
       };
       onSend(payload);
       dispatch('send', payload);
+      playSound('message-send');
       text = '';
       clearRewriteState(true);
       clearPredictions();
@@ -411,6 +420,7 @@
       };
       onUpload(payload);
       dispatch('upload', payload);
+      playSound('message-send');
       clearAttachments();
     }
 
@@ -704,6 +714,42 @@
     };
   });
 
+  $effect(() => {
+    if (!mentionActive) return;
+    syncMentionMenuPosition();
+    if (typeof window === 'undefined') return;
+    const handleReposition = () => syncMentionMenuPosition();
+    const viewport = window.visualViewport;
+    window.addEventListener('resize', handleReposition);
+    window.addEventListener('scroll', handleReposition, true);
+    viewport?.addEventListener('resize', handleReposition);
+    viewport?.addEventListener('scroll', handleReposition);
+    return () => {
+      window.removeEventListener('resize', handleReposition);
+      window.removeEventListener('scroll', handleReposition, true);
+      viewport?.removeEventListener('resize', handleReposition);
+      viewport?.removeEventListener('scroll', handleReposition);
+    };
+  });
+
+  $effect(() => {
+    if (!showEmoji) return;
+    syncEmojiPickerPosition();
+    if (typeof window === 'undefined') return;
+    const handleReposition = () => syncEmojiPickerPosition();
+    const viewport = window.visualViewport;
+    window.addEventListener('resize', handleReposition);
+    window.addEventListener('scroll', handleReposition, true);
+    viewport?.addEventListener('resize', handleReposition);
+    viewport?.addEventListener('scroll', handleReposition);
+    return () => {
+      window.removeEventListener('resize', handleReposition);
+      window.removeEventListener('scroll', handleReposition, true);
+      viewport?.removeEventListener('resize', handleReposition);
+      viewport?.removeEventListener('scroll', handleReposition);
+    };
+  });
+
   function engageDockSuppression() {
     if (platform !== 'mobile') return;
     if (dockReleaseTimer) {
@@ -773,6 +819,82 @@
     }
 
     return Array.from(collected.values());
+  }
+
+  function parseTextSegments(value: string): TextSegment[] {
+    if (!value) return [];
+    
+    // Collect all mentions for lookup
+    const mentionRecords = new Map<string, MentionRecord>();
+    mentionDraft.forEach((record) => {
+      if (value.includes(record.handle)) {
+        mentionRecords.set(record.handle.toLowerCase(), record);
+      }
+    });
+    
+    // Also check for mentions that match by handle/alias
+    const regex = /@([a-z0-9._-]{2,64})/gi;
+    let match: RegExpExecArray | null;
+    const tempValue = value;
+    while ((match = regex.exec(tempValue))) {
+      const raw = match[1] ?? '';
+      const fullHandle = `@${raw}`;
+      if (mentionRecords.has(fullHandle.toLowerCase())) continue;
+      
+      const byHandle = mentionLookup.get(raw.toLowerCase());
+      const byAlias = mentionAliasLookup.get(canonical(raw));
+      const candidate = byHandle ?? byAlias;
+      if (candidate) {
+        const record: MentionRecord = {
+          uid: candidate.uid,
+          handle: `@${candidate.handle}`,
+          label: candidate.label,
+          color: candidate.color ?? null,
+          kind: candidate.kind
+        };
+        mentionRecords.set(record.handle.toLowerCase(), record);
+      }
+    }
+    
+    if (mentionRecords.size === 0) {
+      return [{ type: 'text', content: value }];
+    }
+    
+    // Build segments by finding mentions in order
+    const segments: TextSegment[] = [];
+    let remaining = value;
+    let lastIndex = 0;
+    
+    // Create a pattern that matches any of the mention handles
+    const handles = Array.from(mentionRecords.keys()).map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const mentionPattern = new RegExp(`(${handles.join('|')})`, 'gi');
+    
+    let segMatch: RegExpExecArray | null;
+    while ((segMatch = mentionPattern.exec(value))) {
+      const matchedHandle = segMatch[1];
+      const record = mentionRecords.get(matchedHandle.toLowerCase());
+      
+      // Add text before this mention
+      if (segMatch.index > lastIndex) {
+        segments.push({ type: 'text', content: value.slice(lastIndex, segMatch.index) });
+      }
+      
+      // Add the mention segment
+      if (record) {
+        segments.push({ type: 'mention', content: matchedHandle, record });
+      } else {
+        segments.push({ type: 'text', content: matchedHandle });
+      }
+      
+      lastIndex = segMatch.index + matchedHandle.length;
+    }
+    
+    // Add remaining text after last mention
+    if (lastIndex < value.length) {
+      segments.push({ type: 'text', content: value.slice(lastIndex) });
+    }
+    
+    return segments;
   }
 
   function contextIdOf(source: any): string | null {
@@ -1229,6 +1351,7 @@
 
     mentionActive = true;
     mentionIndex = Math.min(mentionIndex, mentionFiltered.length - 1);
+    void tick().then(() => syncMentionMenuPosition());
   }
 
   async function insertMention(option: MentionCandidate) {
@@ -1272,7 +1395,10 @@
   const openEmoji = () => {
     if (disabled || !emojiSupported) return;
     showEmoji = !showEmoji;
-    if (showEmoji) popOpen = false;
+    if (showEmoji) {
+      popOpen = false;
+      void tick().then(() => syncEmojiPickerPosition());
+    }
   };
   const openPoll = () => {
     showPoll = true;
@@ -1301,6 +1427,7 @@
     const payload = { url, replyTo: replyTarget ?? undefined };
     onSendGif(payload);
     dispatch('sendGif', payload);
+    playSound('message-send');
     showGif = false;
   }
   function onPollCreate(poll: { question: string; options: string[] }) {
@@ -1341,12 +1468,21 @@
     if (typeof document === 'undefined') return null;
     const handler = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (!emojiTriggerEl) return;
-      if (emojiTriggerEl.contains(target)) return;
+      // Check if click is inside the trigger button or the picker
+      if (emojiTriggerEl?.contains(target)) return;
+      if (emojiPickerEl?.contains(target)) return;
+      // If picker hasn't mounted yet, don't close (prevents immediate close on open click)
+      if (!emojiPickerEl) return;
       showEmoji = false;
     };
-    document.addEventListener('pointerdown', handler);
-    return () => document.removeEventListener('pointerdown', handler);
+    // Delay adding listener to avoid catching the same click that opened the picker
+    const timeoutId = setTimeout(() => {
+      document.addEventListener('pointerdown', handler);
+    }, 0);
+    return () => {
+      clearTimeout(timeoutId);
+      document.removeEventListener('pointerdown', handler);
+    };
   }
 
   function registerPopoverOutsideWatcher() {
@@ -1365,25 +1501,33 @@
     const viewport = window.visualViewport;
     const viewportWidth = viewport?.width ?? window.innerWidth;
     const viewportHeight = viewport?.height ?? window.innerHeight;
-    const offsetLeft = viewport?.offsetLeft ?? 0;
     const offsetTop = viewport?.offsetTop ?? 0;
     const padding = 12;
-    const gap = 10;
-    const maxHeightCap = 520;
+    const gap = 4;
+    const maxHeightCap = 400;
     const comfortHeight = 220;
-    const minWidth = 240;
     const triggerRect = plusTriggerEl.getBoundingClientRect();
-    const naturalWidth = popoverEl.offsetWidth || 320;
-    const maxWidth = Math.max(minWidth, viewportWidth - padding * 2);
-    const baseWidth = clampValue(naturalWidth, minWidth, maxWidth);
-    const width = platform === 'mobile' ? maxWidth : baseWidth;
-    const desiredLeft = triggerRect.left - offsetLeft + triggerRect.width / 2 - width / 2;
-    const left =
-      platform === 'mobile'
-        ? offsetLeft + padding
-        : clampValue(desiredLeft + offsetLeft, padding + offsetLeft, offsetLeft + viewportWidth - width - padding);
+    
+    // Fixed small width
+    const width = platform === 'mobile' ? 288 : 320; // 18rem or 20rem
+    
+    // Position left edge aligned with the plus button
+    const desiredLeft = triggerRect.left;
+    const left = Math.max(padding, Math.min(desiredLeft, viewportWidth - width - padding));
 
-    let bottom = Math.max(padding, viewportHeight - (triggerRect.top - offsetTop) + gap);
+    // Find the chat-input-region wrapper to align popup bottom with its top
+    const regionEl = rootEl?.closest('.chat-input-region') ?? rootEl?.parentElement ?? rootEl;
+    const regionRect = regionEl?.getBoundingClientRect();
+    const regionTop = regionRect ? regionRect.top - offsetTop : triggerRect.top - offsetTop;
+    
+    // Bottom of popup should align with top of chat-input-region
+    let bottom = Math.max(padding, viewportHeight - regionTop + gap);
+    
+    // On mobile, ensure minimum bottom to account for nav bar
+    if (platform === 'mobile') {
+      bottom = Math.max(bottom, 80); // At least 80px from bottom
+    }
+    
     let availableHeight = Math.max(0, viewportHeight - bottom - padding);
     let maxHeight = Math.min(maxHeightCap, availableHeight);
 
@@ -1407,10 +1551,89 @@
     };
   }
 
+  function syncMentionMenuPosition() {
+    if (!inputEl || typeof window === 'undefined') return;
+    const viewport = window.visualViewport;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const offsetTop = viewport?.offsetTop ?? 0;
+    const padding = 12;
+    const gap = 4;
+    const menuWidth = Math.min(352, viewportWidth - padding * 2); // 22rem = 352px
+    const menuMaxHeight = 256; // 16rem
+
+    const inputRect = inputEl.getBoundingClientRect();
+    const inputLeft = inputRect.left;
+    
+    // Find the chat-input-region wrapper to align menu bottom with its top
+    const regionEl = rootEl?.closest('.chat-input-region') ?? rootEl?.parentElement ?? rootEl;
+    const regionRect = regionEl?.getBoundingClientRect();
+    const regionTop = regionRect ? regionRect.top - offsetTop : inputRect.top - offsetTop;
+    
+    // Bottom of menu should align with top of chat-input-region
+    let bottom = Math.max(padding, viewportHeight - regionTop + gap);
+    
+    // Check if menu would go above viewport, if so limit maxHeight
+    const availableHeight = viewportHeight - bottom - padding;
+    const actualMaxHeight = Math.min(menuMaxHeight, Math.max(100, availableHeight));
+    
+    // Ensure left position keeps menu on screen
+    let left = Math.max(padding, inputLeft);
+    if (left + menuWidth > viewportWidth - padding) {
+      left = Math.max(padding, viewportWidth - menuWidth - padding);
+    }
+
+    mentionMenuPosition = {
+      left: `${left}px`,
+      bottom: `${bottom}px`,
+      maxHeight: `${actualMaxHeight}px`
+    };
+  }
+
+  function syncEmojiPickerPosition() {
+    if (!emojiTriggerEl || typeof window === 'undefined') return;
+    const viewport = window.visualViewport;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const offsetTop = viewport?.offsetTop ?? 0;
+    const padding = 12;
+    const gap = 4;
+    const pickerWidth = Math.min(420, viewportWidth * 0.8); // min(420px, 80vw)
+    const pickerMaxHeight = Math.min(440, viewportHeight * 0.65); // min(440px, 65vh)
+
+    const triggerRect = emojiTriggerEl.getBoundingClientRect();
+    const triggerTop = triggerRect.top - offsetTop;
+    const triggerRight = triggerRect.right;
+    
+    // Bottom of picker should align with top of the emoji button
+    const bottomValue = viewportHeight - triggerTop + gap;
+    
+    // Calculate available space above the button
+    const spaceAbove = triggerTop - padding;
+    const actualMaxHeight = Math.min(pickerMaxHeight, Math.max(200, spaceAbove - gap));
+    
+    // Position the picker so its right edge aligns with the button's right edge
+    let right = Math.max(padding, viewportWidth - triggerRight);
+    
+    // If picker would go off left edge, adjust
+    if (viewportWidth - right - pickerWidth < padding) {
+      right = Math.max(padding, viewportWidth - pickerWidth - padding);
+    }
+
+    emojiPickerPosition = {
+      left: 'auto',
+      right: `${right}px`,
+      bottom: `${bottomValue}px`,
+      top: 'auto',
+      maxHeight: `${actualMaxHeight}px`
+    };
+  }
+
 
   onMount(() => {
     if (typeof window === 'undefined') return;
-    const mq = window.matchMedia('(min-width: 768px) and (pointer:fine)');
+    // Enable emoji picker on desktop screens (min 768px width)
+    const mq = window.matchMedia('(min-width: 768px)');
     const update = () => {
       emojiSupported = mq.matches;
       if (!emojiSupported) showEmoji = false;
@@ -1534,6 +1757,10 @@
     );
   });
   run(() => {
+    // Update text segments whenever text or mention lookups change
+    textSegments = parseTextSegments(text);
+  });
+  run(() => {
     if (!mentionOptions.length) {
       mentionDraft.clear();
       closeMentionMenu();
@@ -1609,7 +1836,7 @@
 
 <svelte:window onkeydown={onEsc} />
 
-<div class="chat-input-root">
+<div class="chat-input-root" bind:this={rootEl}>
   <div class="chat-input-overlays">
     {#if showRewriteCoach}
       <div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
@@ -1704,7 +1931,7 @@
       <div class="chat-input__primary-action">
         <button
           type="button"
-          class="chat-input__plus-button rounded-full px-3 py-2 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/10 disabled:opacity-60 transition-colors"
+          class="chat-input__plus-button"
           aria-haspopup="menu"
           aria-expanded={popOpen}
           aria-label="Add to message"
@@ -1713,7 +1940,7 @@
           disabled={disabled}
           bind:this={plusTriggerEl}
         >
-          <i class="bx bx-plus text-xl leading-none" aria-hidden="true"></i>
+          <i class="bx bx-plus" aria-hidden="true"></i>
         </button>
 
         {#if popOpen}
@@ -1730,101 +1957,6 @@
               }
             }}
           ></div>
-          <div
-            class="chat-input-popover"
-            class:chat-input-popover--mobile={platform === 'mobile'}
-            bind:this={popoverEl}
-            role="menu"
-            style:left={popoverPlacement.left}
-            style:bottom={popoverPlacement.bottom}
-            style:width={popoverPlacement.width}
-            style:max-height={popoverPlacement.maxHeight}
-          >
-            <div class="chat-input-popover__header">Add to message</div>
-            <div class="chat-input-menu">
-              <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
-                <span class="chat-input-menu__icon">
-                  <i class="bx bx-film" aria-hidden="true"></i>
-                </span>
-                <div class="chat-input-menu__content">
-                  <span class="chat-input-menu__title">Add GIF</span>
-                  <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
-                </div>
-              </button>
-              <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
-                <span class="chat-input-menu__icon">
-                  <i class="bx bx-paperclip" aria-hidden="true"></i>
-                </span>
-                <div class="chat-input-menu__content">
-                  <span class="chat-input-menu__title">Upload files</span>
-                  <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
-                </div>
-              </button>
-              <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
-                <span class="chat-input-menu__icon">
-                  <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
-                </span>
-                <div class="chat-input-menu__content">
-                  <span class="chat-input-menu__title">Create poll</span>
-                  <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
-                </div>
-              </button>
-              <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
-                <span class="chat-input-menu__icon">
-                  <i class="bx bx-detail" aria-hidden="true"></i>
-                </span>
-                <div class="chat-input-menu__content">
-                  <span class="chat-input-menu__title">Create form</span>
-                  <span class="chat-input-menu__subtitle">Collect structured responses.</span>
-                </div>
-              </button>
-              <div class="chat-input-menu__section">
-                <button
-                  type="button"
-                  class="chat-input-menu__section-toggle"
-                  aria-expanded={rewriteMenuOpen}
-                  onclick={() => (rewriteMenuOpen = !rewriteMenuOpen)}
-                >
-                  <span class="chat-input-menu__section-label">
-                    <span class="chat-input-menu__section-icon">
-                      <i class="bx bx-pencil" aria-hidden="true"></i>
-                    </span>
-                    <span class="chat-input-menu__section-title">Sound-check message</span>
-                  </span>
-                  <i class={`bx ${rewriteMenuOpen ? 'bx-chevron-up' : 'bx-chevron-down'}`} aria-hidden="true"></i>
-                </button>
-                {#if rewriteMenuOpen}
-                  {#if !aiAssistAllowed}
-                    <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
-                  {:else if !rewriteEligible}
-                    <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
-                  {:else}
-                    <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
-                  {/if}
-                  <div class="chat-input-menu__rewrite">
-                    {#each rewriteActions as action}
-                      {@const actionBusy = rewriteLoading && rewriteMode === action.id}
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="rewrite-menu__item chat-input-menu__rewrite-item"
-                        onclick={() => handleRewriteAction(action.id)}
-                        disabled={!rewriteEligible || actionBusy}
-                      >
-                        <span class="rewrite-menu__icon">
-                          <i class={`bx ${action.icon}`} aria-hidden="true"></i>
-                        </span>
-                        <span class="rewrite-menu__content">
-                          <span class="rewrite-menu__title">{action.label}</span>
-                          <span class="rewrite-menu__description">{action.description}</span>
-                        </span>
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            </div>
-          </div>
         {/if}
 
         <input class="hidden" type="file" multiple bind:this={fileEl} onchange={onFilesChange} />
@@ -1872,6 +2004,27 @@
           {disabled}
           aria-label="Message input"
 ></textarea>
+
+        {#if textSegments.some(s => s.type === 'mention')}
+          <div 
+            class="chat-input__mention-overlay" 
+            aria-hidden="true"
+            style={`transform: translateY(-${predictionScroll}px);`}
+          >
+            {#each textSegments as segment}
+              {#if segment.type === 'mention'}
+                <span 
+                  class="chat-input__mention-tag"
+                  class:chat-input__mention-tag--role={segment.record.kind === 'role'}
+                  class:chat-input__mention-tag--special={segment.record.kind === 'special'}
+                  style={segment.record.kind === 'role' && segment.record.color ? `--mention-color: ${segment.record.color}` : ''}
+                >{segment.content}</span>
+              {:else}
+                <span class="chat-input__mention-text">{segment.content}</span>
+              {/if}
+            {/each}
+          </div>
+        {/if}
 
         {#if showSuggestionGhost}
           {@const isReplySuggestion = showReplyGhost}
@@ -1969,7 +2122,13 @@
     </div>
 
       {#if mentionActive}
-        <div class="mention-menu" role="listbox">
+        <div 
+          class="mention-menu" 
+          role="listbox"
+          style:left={mentionMenuPosition.left}
+          style:bottom={mentionMenuPosition.bottom}
+          style:max-height={mentionMenuPosition.maxHeight}
+        >
           <div class="mention-menu__header">Tag someone or a role</div>
           <div class="mention-menu__list">
             {#each mentionFiltered as option, idx}
@@ -2041,9 +2200,6 @@
           >
             <i class="bx bx-smile text-xl leading-none"></i>
           </button>
-          {#if showEmoji}
-            <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
-          {/if}
         </div>
       {/if}
 
@@ -2062,6 +2218,20 @@
 </div>
 </div>
 
+{#if showEmoji}
+  <div 
+    class="emoji-picker-wrapper"
+    bind:this={emojiPickerEl}
+    style:left={emojiPickerPosition.left}
+    style:right={emojiPickerPosition.right}
+    style:bottom={emojiPickerPosition.bottom}
+    style:top={emojiPickerPosition.top}
+    style:max-height={emojiPickerPosition.maxHeight}
+  >
+    <EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
+  </div>
+{/if}
+
 {#if showGif}
   <GifPicker on:close={() => (showGif = false)} on:pick={(e) => onGifPicked(e.detail)} />
 {/if}
@@ -2070,6 +2240,104 @@
 {/if}
 {#if showForm}
   <FormBuilder on:close={() => (showForm = false)} on:create={(e) => onFormCreate(e.detail)} />
+{/if}
+
+{#if popOpen}
+  <div
+    class="chat-input-popover"
+    class:chat-input-popover--mobile={platform === 'mobile'}
+    bind:this={popoverEl}
+    role="menu"
+    style:left={popoverPlacement.left}
+    style:bottom={popoverPlacement.bottom}
+    style:width={popoverPlacement.width}
+    style:max-height={popoverPlacement.maxHeight}
+  >
+    <div class="chat-input-popover__header">Add to message</div>
+    <div class="chat-input-menu">
+      <button class="chat-input-menu__item" role="menuitem" onclick={openGif}>
+        <span class="chat-input-menu__icon">
+          <i class="bx bx-film" aria-hidden="true"></i>
+        </span>
+        <div class="chat-input-menu__content">
+          <span class="chat-input-menu__title">Add GIF</span>
+          <span class="chat-input-menu__subtitle">Share a fun animated moment.</span>
+        </div>
+      </button>
+      <button class="chat-input-menu__item" role="menuitem" onclick={pickFiles}>
+        <span class="chat-input-menu__icon">
+          <i class="bx bx-paperclip" aria-hidden="true"></i>
+        </span>
+        <div class="chat-input-menu__content">
+          <span class="chat-input-menu__title">Upload files</span>
+          <span class="chat-input-menu__subtitle">Send documents, audio, or images.</span>
+        </div>
+      </button>
+      <button class="chat-input-menu__item" role="menuitem" onclick={openPoll}>
+        <span class="chat-input-menu__icon">
+          <i class="bx bx-pie-chart-alt" aria-hidden="true"></i>
+        </span>
+        <div class="chat-input-menu__content">
+          <span class="chat-input-menu__title">Create poll</span>
+          <span class="chat-input-menu__subtitle">Let everyone vote on an option.</span>
+        </div>
+      </button>
+      <button class="chat-input-menu__item" role="menuitem" onclick={openForm}>
+        <span class="chat-input-menu__icon">
+          <i class="bx bx-detail" aria-hidden="true"></i>
+        </span>
+        <div class="chat-input-menu__content">
+          <span class="chat-input-menu__title">Create form</span>
+          <span class="chat-input-menu__subtitle">Collect structured responses.</span>
+        </div>
+      </button>
+      <div class="chat-input-menu__section">
+        <button
+          type="button"
+          class="chat-input-menu__section-toggle"
+          aria-expanded={rewriteMenuOpen}
+          onclick={() => (rewriteMenuOpen = !rewriteMenuOpen)}
+        >
+          <span class="chat-input-menu__section-label">
+            <span class="chat-input-menu__section-icon">
+              <i class="bx bx-pencil" aria-hidden="true"></i>
+            </span>
+            <span class="chat-input-menu__section-title">Sound-check message</span>
+          </span>
+          <i class={`bx ${rewriteMenuOpen ? 'bx-chevron-up' : 'bx-chevron-down'}`} aria-hidden="true"></i>
+        </button>
+        {#if rewriteMenuOpen}
+          {#if !aiAssistAllowed}
+            <div class="chat-input-menu__section-hint">Sound check is unavailable right now.</div>
+          {:else if !rewriteEligible}
+            <div class="chat-input-menu__section-hint">Type a few more words to unlock rewrites.</div>
+          {:else}
+            <div class="chat-input-menu__section-hint">Pick a tone to polish your draft.</div>
+          {/if}
+          <div class="chat-input-menu__rewrite">
+            {#each rewriteActions as action}
+              {@const actionBusy = rewriteLoading && rewriteMode === action.id}
+              <button
+                type="button"
+                role="menuitem"
+                class="rewrite-menu__item chat-input-menu__rewrite-item"
+                onclick={() => handleRewriteAction(action.id)}
+                disabled={!rewriteEligible || actionBusy}
+              >
+                <span class="rewrite-menu__icon">
+                  <i class={`bx ${action.icon}`} aria-hidden="true"></i>
+                </span>
+                <span class="rewrite-menu__content">
+                  <span class="rewrite-menu__title">{action.label}</span>
+                  <span class="rewrite-menu__description">{action.description}</span>
+                </span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -2163,36 +2431,34 @@
 
   .chat-input-popover {
     position: fixed;
-    left: 0.75rem;
-    bottom: 3.5rem;
-    width: min(20rem, 90vw);
-    max-width: calc(100vw - 1.5rem);
-    max-height: min(65vh, 26rem);
+    width: 20rem;
+    max-width: calc(100vw - 2rem);
+    max-height: min(50vh, 24rem);
     overflow-y: auto;
     overscroll-behavior: contain;
-    margin-bottom: 0;
-    z-index: 620;
-    border-radius: var(--radius-lg);
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
-    backdrop-filter: blur(18px);
-    box-shadow: var(--shadow-elevated);
-    padding: 0.75rem 0.6rem;
+    z-index: 999999;
+    border-radius: 1.25rem;
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+    background: var(--color-panel);
+    backdrop-filter: blur(24px);
+    box-shadow: 
+      0 -10px 40px rgba(0, 0, 0, 0.5),
+      0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+    padding: 0.85rem 0.75rem;
     color: var(--color-text-primary);
   }
 
   .chat-input-popover--mobile {
-    left: 0.6rem;
-    right: 0.6rem;
-    width: auto;
-    max-width: none;
+    width: 18rem;
+    max-width: calc(100vw - 2rem);
+    max-height: min(50vh, 22rem);
   }
 
   .chat-input-popover__backdrop {
     position: fixed;
     inset: 0;
-    background: transparent;
-    z-index: 610;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 999998;
   }
 
   .chat-input-popover__header {
@@ -2224,20 +2490,31 @@
   }
 
   .chat-input-menu__item:hover {
-    background: color-mix(in srgb, var(--color-panel) 94%, transparent);
-    border-color: color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
-    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel) 88%);
+    border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  .chat-input-menu__item:active {
+    transform: translateY(0);
   }
 
   .chat-input-menu__icon {
-    width: 2.4rem;
-    height: 2.4rem;
+    width: 2.5rem;
+    height: 2.5rem;
     border-radius: var(--radius-md);
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
     color: var(--color-accent);
-    font-size: 1.1rem;
+    font-size: 1.15rem;
+    transition: all 150ms ease;
+  }
+
+  .chat-input-menu__item:hover .chat-input-menu__icon {
+    background: color-mix(in srgb, var(--color-accent) 28%, transparent);
+    transform: scale(1.05);
   }
 
   .chat-input-menu__content {
@@ -2279,6 +2556,7 @@
     position: relative;
     display: flex;
     flex-direction: column;
+    z-index: 50;
   }
 
   .chat-input-overlays {
@@ -2302,6 +2580,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+    position: relative;
+    z-index: 10;
   }
 
   .chat-input__action-column {
@@ -2310,35 +2590,76 @@
     align-items: center;
     flex-shrink: 0;
     transition: align-self 120ms ease, transform 120ms ease;
+    z-index: 20;
   }
 
   .chat-input__primary-action {
     position: relative;
     display: flex;
+    z-index: 25;
   }
 
   .chat-input__plus-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+    background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+    color: var(--color-text-primary);
+    font-size: 1.25rem;
+    transition: all 150ms ease;
+    position: relative;
+    z-index: 15;
+    flex-shrink: 0;
+  }
+
+  .chat-input__plus-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-accent) 20%, var(--color-panel) 80%);
+    border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+    color: var(--color-accent);
+    transform: scale(1.05);
+  }
+
+  .chat-input__plus-button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 50%, transparent);
+    border-color: var(--color-accent);
+  }
+
+  .chat-input__plus-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .chat-input__plus-button i {
+    line-height: 1;
+    transition: transform 150ms ease;
+  }
+
+  .chat-input__plus-button:hover:not(:disabled) i {
+    transform: rotate(90deg);
   }
 
   .reply-banner {
     display: flex;
     align-items: center;
-    gap: 0.85rem;
-    padding: 0.65rem 0.95rem;
-    border-radius: 1.2rem;
-    border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
-    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
+    gap: 0.65rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 50%);
+    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel) 90%);
+    box-shadow: none;
+    margin-bottom: 0.4rem;
   }
 
   .reply-banner__indicator {
-    width: 0.3rem;
+    width: 3px;
     align-self: stretch;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    background: var(--color-accent);
   }
 
   .reply-banner__body {
@@ -2346,26 +2667,27 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.1rem;
   }
 
   .reply-banner__label {
-    font-size: 0.7rem;
+    font-size: 0.65rem;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--text-55);
+    letter-spacing: 0.08em;
+    color: color-mix(in srgb, var(--color-accent) 70%, var(--text-60) 30%);
+    font-weight: 600;
   }
 
   .reply-banner__name {
     font-weight: 600;
-    color: var(--color-text-primary);
-    font-size: 0.85rem;
+    color: var(--text-90);
+    font-size: 0.8rem;
   }
 
   .reply-banner__preview {
-    font-size: 0.82rem;
-    color: var(--text-70);
-    font-style: italic;
+    font-size: 0.78rem;
+    color: var(--text-60);
+    font-style: normal;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2505,18 +2827,20 @@
   .reply-banner__close {
     border: 0;
     background: transparent;
-    color: var(--text-60);
-    padding: 0.15rem;
-    border-radius: 999px;
+    color: var(--text-50);
+    padding: 0.2rem;
+    border-radius: 0.35rem;
     line-height: 1;
     display: grid;
     place-items: center;
+    font-size: 1.1rem;
+    transition: color 100ms ease, background 100ms ease;
   }
 
   .reply-banner__close:hover,
   .reply-banner__close:focus-visible {
-    color: var(--color-text-primary);
-    background: color-mix(in srgb, var(--color-border-subtle) 35%, transparent);
+    color: var(--text-90);
+    background: color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
     outline: none;
   }
 
@@ -2531,19 +2855,17 @@
   }
 
   .mention-menu {
-    position: absolute;
-    z-index: 70;
-    left: 0;
-    right: auto;
-    top: auto;
-    bottom: calc(100% + 0.6rem);
-    width: min(22rem, 100%);
+    position: fixed;
+    z-index: 999998;
+    width: min(22rem, calc(100vw - 2rem));
     border-radius: var(--radius-lg);
     border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
     background: color-mix(in srgb, var(--color-panel) 95%, transparent);
     box-shadow: var(--shadow-elevated);
     overflow: hidden;
     backdrop-filter: blur(18px);
+    display: flex;
+    flex-direction: column;
   }
 
   .mention-menu__header {
@@ -2553,11 +2875,13 @@
     letter-spacing: 0.08em;
     color: var(--text-55);
     padding: 0.45rem 0.85rem 0.35rem;
+    flex-shrink: 0;
   }
 
   .mention-menu__list {
     display: grid;
-    max-height: 16rem;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
 
@@ -2698,6 +3022,49 @@
   .chat-input__textarea-wrapper textarea::placeholder {
     line-height: 1.4;
     color: var(--text-50);
+  }
+
+  .chat-input__mention-overlay {
+    position: absolute;
+    inset: 0;
+    padding: 0.55rem 1rem;
+    pointer-events: none;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 1.4;
+    overflow: hidden;
+    z-index: 3;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: transparent;
+  }
+
+  .chat-input__mention-text {
+    color: transparent;
+  }
+
+  .chat-input__mention-tag {
+    display: inline;
+    font-weight: 600;
+    color: #2fd8c8;
+    text-shadow: 0 0 12px rgba(47, 216, 200, 0.9), 0 0 20px rgba(47, 216, 200, 0.5);
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    mix-blend-mode: screen;
+  }
+
+  .chat-input__mention-tag--role {
+    color: var(--mention-color, #2fd8c8);
+    text-shadow: 0 0 12px color-mix(in srgb, var(--mention-color, #2fd8c8) 90%, transparent), 
+                 0 0 20px color-mix(in srgb, var(--mention-color, #2fd8c8) 50%, transparent);
+    font-weight: 700;
+  }
+
+  .chat-input__mention-tag--special {
+    color: #38bdf8;
+    text-shadow: 0 0 12px rgba(56, 189, 248, 0.9), 0 0 20px rgba(56, 189, 248, 0.5);
+    font-weight: 700;
   }
 
   .chat-input__prediction {
@@ -2855,6 +3222,8 @@
     gap: 0.45rem;
     align-self: center;
     transition: align-self 120ms ease, padding-bottom 120ms ease;
+    position: relative;
+    z-index: 20;
   }
 
   .chat-input__actions--anchored {
@@ -2918,13 +3287,21 @@
 
   .emoji-trigger {
     position: relative;
+    z-index: 100;
   }
 
-  .emoji-trigger :global(.emoji-panel) {
-    position: absolute;
-    bottom: calc(100% + 0.5rem);
-    right: 0;
-    z-index: 40;
+  .emoji-picker-wrapper {
+    position: fixed;
+    z-index: 999997;
+    overflow: hidden;
+    border-radius: 1rem;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .emoji-picker-wrapper :global(.emoji-panel) {
+    max-height: 100% !important;
+    height: 100% !important;
   }
 
   .emoji-button {
@@ -3060,9 +3437,11 @@
     }
 
     .chat-input__action-column--mobile .chat-input__plus-button {
-      width: 2.6rem;
-      height: 2.6rem;
-      padding: 0.35rem;
+      width: 2.75rem;
+      height: 2.75rem;
+      font-size: 1.35rem;
+      border-width: 1.5px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     }
 
     .chat-input__textarea-wrapper textarea {

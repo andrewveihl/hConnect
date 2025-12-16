@@ -1,22 +1,25 @@
 import { browser } from '$app/environment';
 
-export type SoundEffect = 'notification' | 'call-join' | 'call-leave';
+export type SoundEffect = 'notification' | 'call-join' | 'call-leave' | 'message-send';
 export type SoundSources = {
   notificationUrl: string;
   callJoinUrl: string;
   callLeaveUrl: string;
+  messageSendUrl: string;
 };
 
 export const DEFAULT_SOUND_SOURCES: SoundSources = {
   notificationUrl: '/sounds/notification.wav',
   callJoinUrl: '/sounds/call-join.wav',
-  callLeaveUrl: '/sounds/call-leave.wav'
+  callLeaveUrl: '/sounds/call-leave.wav',
+  messageSendUrl: '/sounds/message-send.wav'
 };
 
 const SOUND_CONFIG: Record<SoundEffect, { getUrl: () => string; volume: number }> = {
   notification: { getUrl: () => currentSources.notificationUrl, volume: 0.7 },
   'call-join': { getUrl: () => currentSources.callJoinUrl, volume: 0.75 },
-  'call-leave': { getUrl: () => currentSources.callLeaveUrl, volume: 0.7 }
+  'call-leave': { getUrl: () => currentSources.callLeaveUrl, volume: 0.7 },
+  'message-send': { getUrl: () => currentSources.messageSendUrl, volume: 0.5 }
 };
 
 let currentSources: SoundSources = { ...DEFAULT_SOUND_SOURCES };
@@ -95,12 +98,13 @@ export function setSoundOverrides(sources?: Partial<SoundSources> | null) {
   const changed =
     next.notificationUrl !== currentSources.notificationUrl ||
     next.callJoinUrl !== currentSources.callJoinUrl ||
-    next.callLeaveUrl !== currentSources.callLeaveUrl;
+    next.callLeaveUrl !== currentSources.callLeaveUrl ||
+    next.messageSendUrl !== currentSources.messageSendUrl;
   if (!changed) return;
   currentSources = next;
   audioCache.clear();
   if (unlocked) {
     // Preload new sources for snappier playback
-    (['notification', 'call-join', 'call-leave'] as SoundEffect[]).forEach((id) => getAudio(id));
+    (['notification', 'call-join', 'call-leave', 'message-send'] as SoundEffect[]).forEach((id) => getAudio(id));
   }
 }

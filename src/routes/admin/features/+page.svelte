@@ -87,7 +87,7 @@
       id: 'ai',
       title: 'AI Assist Surfaces',
       description: 'Individually disable the AI experiences in chat.',
-      keys: ['enableAIFeatures', 'enableAISuggestedReplies', 'enableAIPredictions', 'enableAISummaries'],
+      keys: ['enableAIFeatures', 'enableAISuggestedReplies', 'enableAIPredictions', 'enableAISummaries', 'enableTicketAI'],
       accent: 'ai',
       icon: 'bx-bot'
     },
@@ -638,9 +638,8 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    height: 100%;
+    min-height: 100%;
     padding: 1rem;
-    overflow-y: auto;
   }
 
   /* Stats bar */
@@ -721,8 +720,6 @@
     display: grid;
     grid-template-columns: 2fr 1fr;
     gap: 1.5rem;
-    flex: 1;
-    min-height: 0;
   }
 
   .content-grid.mobile {
@@ -740,12 +737,6 @@
     border-radius: 16px;
     border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
     padding: 1.25rem;
-    overflow: hidden;
-    max-height: calc(100vh - 200px);
-  }
-
-  .toggles-panel {
-    overflow-y: auto;
   }
 
   .content-grid.mobile .toggles-panel,
@@ -795,8 +786,6 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    overflow-y: auto;
-    flex: 1;
   }
 
   .feature-section {

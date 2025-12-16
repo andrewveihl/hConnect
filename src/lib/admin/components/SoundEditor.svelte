@@ -53,6 +53,13 @@
       label: 'Call leave',
       description: 'Played when a user leaves or is disconnected from a call.',
       key: 'callLeaveUrl'
+    },
+    {
+      id: 'messageSend',
+      effect: 'message-send',
+      label: 'Message send',
+      description: 'Played when you send a message in any channel or DM.',
+      key: 'messageSendUrl'
     }
   ];
 

@@ -5,6 +5,7 @@ import {
 } from '$lib/servers/settingsSections';
 
 type ServerSettingsSource = 'route' | 'trigger';
+type FeatureModal = 'ticketAi' | null;
 
 type ServerSettingsUIState = {
   open: boolean;
@@ -12,6 +13,7 @@ type ServerSettingsUIState = {
   activeSection: ServerSettingsSectionId;
   source: ServerSettingsSource;
   returnTo: string | null;
+  featureModal: FeatureModal;
 };
 
 const initialState: ServerSettingsUIState = {
@@ -19,7 +21,8 @@ const initialState: ServerSettingsUIState = {
   serverId: null,
   activeSection: defaultServerSettingsSection,
   source: 'trigger',
-  returnTo: null
+  returnTo: null,
+  featureModal: null
 };
 
 export const serverSettingsUI = writable<ServerSettingsUIState>({ ...initialState });
@@ -29,19 +32,28 @@ export function openServerSettings(options: {
   section?: ServerSettingsSectionId | null;
   source?: ServerSettingsSource;
   returnTo?: string | null;
+  featureModal?: FeatureModal;
 } = {}) {
-  const { serverId = null, section = null, source = 'trigger', returnTo = null } = options;
+  const { serverId = null, section = null, source = 'trigger', returnTo = null, featureModal = null } = options;
   serverSettingsUI.set({
     open: true,
     serverId,
     activeSection: section ?? defaultServerSettingsSection,
     source,
-    returnTo
+    returnTo,
+    featureModal
   });
 }
 
 export function closeServerSettings() {
   serverSettingsUI.set({ ...initialState });
+}
+
+export function clearFeatureModal() {
+  serverSettingsUI.update((state) => ({
+    ...state,
+    featureModal: null
+  }));
 }
 
 export function setServerSettingsSection(section: ServerSettingsSectionId) {

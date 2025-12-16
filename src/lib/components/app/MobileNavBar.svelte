@@ -14,6 +14,7 @@
   import { setupSwipeGestures } from '$lib/utils/swipeGestures';
   import { isMobileViewport } from '$lib/stores/viewport';
   import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
+  import Avatar from '$lib/components/app/Avatar.svelte';
 
   type LinkKey = 'activity' | 'dms';
 
@@ -224,13 +225,6 @@
     openSettings({ source: 'trigger' });
   }
 
-  function handleAvatarError(event: Event) {
-    const target = event.currentTarget as HTMLImageElement | null;
-    if (!target) return;
-    target.onerror = null;
-    target.src = '/default-avatar.svg';
-  }
-
   function loadStoredChannelMemory() {
     if (!browser) return;
     try {
@@ -397,15 +391,12 @@
       title="Profile"
     >
       <span class="mobile-dock__icon-wrapper mobile-dock__icon-wrapper--profile">
-        <div style="width:1.5rem;height:1.5rem;overflow:hidden;border-radius:50%;aspect-ratio:1/1;background:#23272a;border:2px solid #1e1f22;display:flex;align-items:center;justify-content:center;">
-          <img
-            src={resolveProfilePhotoURL($userProfile ?? $user)}
-            alt="Me"
-            class="mobile-dock__avatar"
-            onerror={handleAvatarError}
-            style="width:100%;height:100%;object-fit:cover;"
-          />
-        </div>
+        <Avatar
+          user={$userProfile ?? $user}
+          size="xs"
+          isSelf={true}
+          class="mobile-dock__avatar-wrap"
+        />
       </span>
     </a>
   </div>

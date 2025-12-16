@@ -27,6 +27,7 @@ import {
   import type { PushDebugEvent } from '$lib/notify/push';
   import { triggerTestPush } from '$lib/notify/testPush';
   import { voicePreferences, loadVoicePreferences, defaultVoicePreferences, type VoicePreferences } from '$lib/stores/voicePreferences';
+  import { playSound, type SoundEffect } from '$lib/utils/sounds';
 
 import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 import InvitePanel from '$lib/components/app/InvitePanel.svelte';
@@ -763,6 +764,50 @@ let notif = $state<NotifPrefs>({
   allMessages: false
 });
 
+  // Sound preferences
+  type SoundPrefs = {
+    enabled: boolean;
+    notificationSound: boolean;
+    callJoinSound: boolean;
+    callLeaveSound: boolean;
+    volume: number;
+  };
+
+  const SOUND_PREFS_KEY = 'hconnect:sound:preferences';
+
+  function loadSoundPrefs(): SoundPrefs {
+    if (typeof localStorage === 'undefined') {
+      return { enabled: true, notificationSound: true, callJoinSound: true, callLeaveSound: true, volume: 70 };
+    }
+    try {
+      const raw = localStorage.getItem(SOUND_PREFS_KEY);
+      if (!raw) return { enabled: true, notificationSound: true, callJoinSound: true, callLeaveSound: true, volume: 70 };
+      return JSON.parse(raw);
+    } catch {
+      return { enabled: true, notificationSound: true, callJoinSound: true, callLeaveSound: true, volume: 70 };
+    }
+  }
+
+  function saveSoundPrefs(prefs: SoundPrefs) {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(SOUND_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let soundPrefs = $state<SoundPrefs>(loadSoundPrefs());
+
+  function updateSoundPref<K extends keyof SoundPrefs>(key: K, value: SoundPrefs[K]) {
+    soundPrefs = { ...soundPrefs, [key]: value };
+    saveSoundPrefs(soundPrefs);
+  }
+
+  function previewSound(effect: SoundEffect) {
+    playSound(effect);
+  }
+
   type AiAssistPrefs = {
     enabled: boolean;
   };
@@ -893,7 +938,7 @@ let notif = $state<NotifPrefs>({
               customThemes: [],
               splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
               splashGifs: [],
-              sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '' }
+              sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
             };
             applyThemeOverrides(customConfig, 'dark');
           }
@@ -1599,7 +1644,7 @@ let enablePushLoading = $state(false);
           customThemes: [],
           splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
           splashGifs: [],
-          sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '' }
+          sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
         };
         applyThemeOverrides(customConfig, 'dark');
       }
@@ -1800,6 +1845,160 @@ let enablePushLoading = $state(false);
                 </span>
               </label>
             </div>
+          </div>
+
+          <!-- Sound Settings -->
+          <div class="space-y-3">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">Sound Settings</h3>
+                <p class={mutedTextClasses}>Configure notification and call sounds.</p>
+              </div>
+              <label class="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  class="peer sr-only"
+                  checked={soundPrefs.enabled}
+                  onchange={() => updateSoundPref('enabled', !soundPrefs.enabled)}
+                />
+                <span class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]">
+                  <span class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"></span>
+                </span>
+                <span class="text-xs text-[color:var(--text-70)]">
+                  {soundPrefs.enabled ? 'Sounds on' : 'Sounds off'}
+                </span>
+              </label>
+            </div>
+
+            {#if soundPrefs.enabled}
+              <div class="grid gap-3">
+                <!-- Notification sound -->
+                <div class="flex items-center justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-3">
+                  <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-panel)] text-[color:var(--color-accent)]">
+                      <i class="bx bx-bell text-lg" aria-hidden="true"></i>
+                    </span>
+                    <div>
+                      <p class="text-sm font-medium text-[color:var(--color-text-primary)]">Notification sound</p>
+                      <p class="text-xs text-[color:var(--text-70)]">Plays for mentions and messages</p>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="flex h-8 w-8 items-center justify-center rounded-md text-[color:var(--text-70)] transition hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-accent)]"
+                      onclick={() => previewSound('notification')}
+                      aria-label="Preview notification sound"
+                    >
+                      <i class="bx bx-play text-lg" aria-hidden="true"></i>
+                    </button>
+                    <label class="flex items-center">
+                      <input
+                        type="checkbox"
+                        class="peer sr-only"
+                        checked={soundPrefs.notificationSound}
+                        onchange={() => updateSoundPref('notificationSound', !soundPrefs.notificationSound)}
+                      />
+                      <span class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]">
+                        <span class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"></span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Call join sound -->
+                <div class="flex items-center justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-3">
+                  <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-panel)] text-emerald-400">
+                      <i class="bx bx-phone-call text-lg" aria-hidden="true"></i>
+                    </span>
+                    <div>
+                      <p class="text-sm font-medium text-[color:var(--color-text-primary)]">Call join sound</p>
+                      <p class="text-xs text-[color:var(--text-70)]">Plays when joining voice channels</p>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="flex h-8 w-8 items-center justify-center rounded-md text-[color:var(--text-70)] transition hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-accent)]"
+                      onclick={() => previewSound('call-join')}
+                      aria-label="Preview call join sound"
+                    >
+                      <i class="bx bx-play text-lg" aria-hidden="true"></i>
+                    </button>
+                    <label class="flex items-center">
+                      <input
+                        type="checkbox"
+                        class="peer sr-only"
+                        checked={soundPrefs.callJoinSound}
+                        onchange={() => updateSoundPref('callJoinSound', !soundPrefs.callJoinSound)}
+                      />
+                      <span class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]">
+                        <span class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"></span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Call leave sound -->
+                <div class="flex items-center justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-3">
+                  <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-panel)] text-rose-400">
+                      <i class="bx bx-phone-off text-lg" aria-hidden="true"></i>
+                    </span>
+                    <div>
+                      <p class="text-sm font-medium text-[color:var(--color-text-primary)]">Call leave sound</p>
+                      <p class="text-xs text-[color:var(--text-70)]">Plays when leaving voice channels</p>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="flex h-8 w-8 items-center justify-center rounded-md text-[color:var(--text-70)] transition hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-accent)]"
+                      onclick={() => previewSound('call-leave')}
+                      aria-label="Preview call leave sound"
+                    >
+                      <i class="bx bx-play text-lg" aria-hidden="true"></i>
+                    </button>
+                    <label class="flex items-center">
+                      <input
+                        type="checkbox"
+                        class="peer sr-only"
+                        checked={soundPrefs.callLeaveSound}
+                        onchange={() => updateSoundPref('callLeaveSound', !soundPrefs.callLeaveSound)}
+                      />
+                      <span class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]">
+                        <span class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"></span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Volume slider -->
+                <div class="rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-3">
+                  <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-panel)] text-[color:var(--color-text-secondary)]">
+                      <i class="bx {soundPrefs.volume === 0 ? 'bx-volume-mute' : soundPrefs.volume < 50 ? 'bx-volume-low' : 'bx-volume-full'} text-lg" aria-hidden="true"></i>
+                    </span>
+                    <div class="flex-1">
+                      <div class="flex items-center justify-between mb-1">
+                        <p class="text-sm font-medium text-[color:var(--color-text-primary)]">Volume</p>
+                        <span class="text-xs text-[color:var(--text-70)]">{soundPrefs.volume}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="5"
+                        value={soundPrefs.volume}
+                        oninput={(e) => updateSoundPref('volume', parseInt((e.currentTarget as HTMLInputElement).value))}
+                        class="w-full h-2 rounded-full appearance-none bg-[color:var(--color-border-subtle)] cursor-pointer accent-[color:var(--color-accent)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {/if}
           </div>
 
           {#if $showNotificationDebugTools}

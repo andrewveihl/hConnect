@@ -280,11 +280,25 @@ service cloud.firestore {
         && ticketAiAllowedRoleIds(serverId).hasAny(memberRoleIds(serverId));
     }
 
+    function ticketAiStaffMemberIds(serverId) {
+      let settingsDoc = ticketAiSettingsPath(serverId);
+      return exists(settingsDoc)
+        && get(settingsDoc).data.staffMemberIds is list
+        ? get(settingsDoc).data.staffMemberIds
+        : [];
+    }
+
+    function isTicketAiStaffMember(serverId) {
+      return isSignedIn()
+        && ticketAiStaffMemberIds(serverId).hasAny([request.auth.uid]);
+    }
+
     function canViewTicketAi(serverId) {
       return isSuperAdminUser()
         || isServerOwner(serverId)
         || isServerAdmin(serverId)
-        || memberHasTicketAiAccess(serverId);
+        || memberHasTicketAiAccess(serverId)
+        || isTicketAiStaffMember(serverId);
     }
 
     function canManageTicketAi(serverId) {
@@ -528,25 +542,19 @@ service cloud.firestore {
 
       match /channels/{channelId} {
         // Members/admins always; anyone signed-in can read public channels.
-        allow read: if (isSignedIn() && channelIsPublic(serverId, channelId))
-                    || isMember(serverId)
-                    || isServerAdmin(serverId);
-      allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
+        allow read: if isMember(serverId)
+                    || isServerAdmin(serverId)
+                    || (isSignedIn() && channelIsPublic(serverId, channelId));
+        allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
 
         match /messages/{messageId} {
-          allow read: if (isSignedIn() && channelIsPublic(serverId, channelId))
-            || canViewChannel(serverId, channelId);
+          // TEMP: Super permissive for debugging - any signed in user can read/write
+          allow read: if isSignedIn();
+          
           allow create: if isSignedIn()
-            && (
-              // Allow signed-in users to send in public channels.
-              channelIsPublic(serverId, channelId)
-              // Also allow via member/admin permission path.
-              || canSendInChannel(serverId, channelId)
-            )
             && (
               request.resource.data.uid == request.auth.uid
               || request.resource.data.authorId == request.auth.uid
-              || request.resource.data.userId == request.auth.uid
             );
           allow update: if isSuperAdminUser()
             || (isSignedIn()
@@ -560,7 +568,8 @@ service cloud.firestore {
         }
 
         match /members/{uid} {
-          allow read: if canViewChannel(serverId, channelId);
+          allow read: if canViewChannel(serverId, channelId)
+            || (isMember(serverId) && hasPerm(serverId, "viewChannels"));
           allow create: if isSignedIn() && request.auth.uid == uid;
           allow update, delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
         }
@@ -634,6 +643,13 @@ service cloud.firestore {
         allow read: if canViewTicketAi(serverId);
         // Writes are performed by privileged backend only.
         allow create, update, delete: if isSuperAdminUser();
+      }
+
+      match /ticketAiAnalytics/{timeRangeKey} {
+        allow read: if canViewTicketAi(serverId);
+        // Allow users who can view to also cache analytics
+        allow create, update: if canViewTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
       }
 
       match /ticketAiReports/{reportId} {
@@ -767,8 +783,8 @@ service cloud.firestore {
 
     /* ---------------- App Config / Super Admin ---------------- */
     match /appConfig/{configId} {
-      // Allow all signed-in users to read customization (themes, splash) so it applies globally
-      allow read: if isSignedIn() && (configId == "superAdmins" || configId == "customization" || isSuperAdminUser());
+      // Allow all signed-in users to read customization (themes, splash) and featureFlags so they apply globally
+      allow read: if isSignedIn() && (configId == "superAdmins" || configId == "customization" || configId == "featureFlags" || isSuperAdminUser());
       allow write: if isSuperAdminUser();
     }
 

@@ -15,6 +15,8 @@
   import { voiceSession } from '$lib/stores/voice';
   import type { VoiceSession } from '$lib/stores/voice';
   import { notifications, channelIndicators } from '$lib/stores/notifications';
+  import { markChannelActivityRead } from '$lib/stores/activityFeed';
+  import Avatar from '$lib/components/app/Avatar.svelte';
   import {
     collection,
     doc,
@@ -23,6 +25,7 @@
     orderBy,
     query,
     where,
+    limit,
     type Unsubscribe,
     setDoc,
     writeBatch
@@ -116,8 +119,6 @@
   let activeVoice: VoiceSession | null = $state(null);
   const voiceProfileCache = new Map<string, { displayName?: string | null; photoURL?: string | null }>();
   const pendingVoiceProfiles = new Set<string>();
-  let brokenVoiceAvatars = $state(new Set<string>());
-  const lastVoiceAvatarUrl = new Map<string, string | null>();
   const unsubscribeVoiceSession = voiceSession.subscribe((value) => {
     activeVoice = value;
   });
@@ -188,15 +189,7 @@
   }
 
   function resolveVoiceAvatar(member: VoiceParticipant): string | null {
-    const url = voiceAvatarURL(member);
-    const previous = lastVoiceAvatarUrl.get(member.uid);
-    if (url !== previous && brokenVoiceAvatars.has(member.uid)) {
-      const next = new Set(brokenVoiceAvatars);
-      next.delete(member.uid);
-      brokenVoiceAvatars = next;
-    }
-    lastVoiceAvatarUrl.set(member.uid, url);
-    return url;
+    return voiceAvatarURL(member);
   }
 
   function isVoiceChannelActive(id: string): boolean {
@@ -1058,21 +1051,156 @@
 
   // Unread state map
   type ChannelIndicator = { high: number; low: number };
-  let unreadByChannel: Record<string, ChannelIndicator> = $state({});
   let prevUnread: Record<string, number> = {};
-  let unreadReady = $state(false);
 
   let computedServerId =
     $derived(serverId ??
     $page.params.serverID ??
     ($page.params as any).serverId ??
     null);
-  run(() => {
+
+  // Use $derived for reactive unread tracking from global store
+  let unreadByChannel: Record<string, ChannelIndicator> = $derived.by(() => {
     const indicators = $channelIndicators ?? {};
     const serverKey = computedServerId ?? null;
-    unreadByChannel = serverKey ? indicators[serverKey] ?? {} : {};
-    unreadReady = true;
+    return serverKey ? indicators[serverKey] ?? {} : {};
   });
+
+  // Simple local unread tracking - watches latest message per channel
+  let localUnread: Record<string, boolean> = $state({});
+  let channelWatchers = new Map<string, Unsubscribe>();
+  let channelReadWatchers = new Map<string, Unsubscribe>();
+  let lastReadTimestamps: Record<string, number | null> = {};
+  let initialLoadComplete: Set<string> = new Set();
+  let lastViewedChannel: string | null = null;
+
+  // Track when user views a channel - mark it as read
+  run(() => {
+    if (activeChannelId && activeChannelId !== lastViewedChannel) {
+      lastViewedChannel = activeChannelId;
+      // Mark channel as read when user views it
+      localUnread = { ...localUnread, [activeChannelId]: false };
+      // Update local timestamp to "now" so we don't show as unread after refresh
+      lastReadTimestamps[activeChannelId] = Date.now();
+      // Also mark activity entries as read
+      if (computedServerId) {
+        void markChannelActivityRead(computedServerId, activeChannelId);
+      }
+    }
+  });
+
+  // Helper to convert Firestore timestamp to millis
+  function toMillis(value: any): number | null {
+    if (!value) return null;
+    if (typeof value === 'number') return value;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === 'function') return value.toMillis();
+    if (typeof value?.seconds === 'number') return value.seconds * 1000;
+    return null;
+  }
+
+  // Set up watchers for each text channel to detect new messages
+  function setupChannelWatchers(chans: Chan[], sId: string | null, uid: string | null) {
+    if (!browser || !sId || !uid) return;
+    
+    const db = getDb();
+    const textChannels = chans.filter(c => c.type === 'text');
+    
+    // Clean up old watchers for channels no longer in list
+    for (const [channelId, unsub] of channelWatchers) {
+      if (!textChannels.find(c => c.id === channelId)) {
+        unsub();
+        channelWatchers.delete(channelId);
+        channelReadWatchers.get(channelId)?.();
+        channelReadWatchers.delete(channelId);
+        initialLoadComplete.delete(channelId);
+      }
+    }
+    
+    // Set up new watchers
+    for (const chan of textChannels) {
+      if (channelWatchers.has(chan.id)) continue;
+      
+      // First, watch the user's read state for this channel
+      const readDocRef = doc(db, 'profiles', uid, 'reads', `${sId}__${chan.id}`);
+      const readUnsub = onSnapshot(readDocRef, (snap) => {
+        const data = snap.data();
+        lastReadTimestamps[chan.id] = toMillis(data?.lastReadAt) ?? null;
+      }, () => {
+        // If no read doc exists, that's fine - they haven't read it yet
+        lastReadTimestamps[chan.id] = null;
+      });
+      channelReadWatchers.set(chan.id, readUnsub);
+      
+      // Then watch for latest messages
+      const messagesRef = collection(db, 'servers', sId, 'channels', chan.id, 'messages');
+      const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
+      
+      const unsub = onSnapshot(q, (snap) => {
+        if (snap.empty) return;
+        const latestMsg = snap.docs[0].data();
+        const msgTimestamp = toMillis(latestMsg?.createdAt);
+        const lastRead = lastReadTimestamps[chan.id];
+        const currentUid = $user?.uid;
+        const isFirstLoad = !initialLoadComplete.has(chan.id);
+        
+        // Mark initial load complete
+        initialLoadComplete.add(chan.id);
+        
+        // Skip if this is the active channel
+        if (chan.id === activeChannelId) return;
+        
+        // Skip if message is from current user
+        if (latestMsg?.authorId === currentUid) return;
+        
+        // Check if this message is newer than when user last read
+        if (msgTimestamp && lastRead && msgTimestamp > lastRead) {
+          localUnread = { ...localUnread, [chan.id]: true };
+        } else if (!isFirstLoad && msgTimestamp) {
+          // New message came in after initial load - mark as unread
+          localUnread = { ...localUnread, [chan.id]: true };
+        }
+      }, (err) => {
+        // Silently ignore permission errors
+      });
+      
+      channelWatchers.set(chan.id, unsub);
+    }
+  }
+
+  // Watch for channel list changes
+  run(() => {
+    if (browser && computedServerId && channels.length > 0) {
+      setupChannelWatchers(channels, computedServerId, $user?.uid ?? null);
+    }
+  });
+
+  // Cleanup on destroy
+  onDestroy(() => {
+    for (const unsub of channelWatchers.values()) {
+      unsub();
+    }
+    channelWatchers.clear();
+    for (const unsub of channelReadWatchers.values()) {
+      unsub();
+    }
+    channelReadWatchers.clear();
+    initialLoadComplete.clear();
+  });
+
+  // Combined unread check - use local tracking OR global store
+  function hasUnread(channelId: string): boolean {
+    const global = unreadByChannel[channelId];
+    const globalUnread = (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
+    return globalUnread || (localUnread[channelId] === true);
+  }
+
+  function hasHighPriority(channelId: string): number {
+    return unreadByChannel[channelId]?.high ?? 0;
+  }
+
+  let unreadReady = $derived(Object.keys($channelIndicators ?? {}).length > 0 || true);
+
   run(() => {
     if (browser) {
       setVoiceDebugSection('serverSidebar.channels', {
@@ -1196,6 +1324,14 @@
     orderedChannels = applyOrder(displayOrderIds, channels);
   });
   run(() => {
+    // Explicitly reference reactive dependencies to ensure re-computation when roles change
+    const _isMember = isMember;
+    const _isAdminLike = isAdminLike;
+    const _myRoleIds = myRoleIds;
+    const _defaultRoleId = defaultRoleId;
+    const _everyoneRoleId = everyoneRoleId;
+    const _user = $user;
+    // Re-filter channels when any role-related state changes
     visibleChannels = orderedChannels.filter(canSeeChannel);
   });
   run(() => {
@@ -1352,15 +1488,15 @@
                   </span>
                 {/if}
               {:else}
-                {#if (unreadByChannel[c.id]?.high ?? 0) > 0}
+                {#if hasHighPriority(c.id) > 0}
                   <span
                     class="channel-unread"
-                    aria-label={`${unreadByChannel[c.id]?.high ?? 0} unread high priority messages`}
+                    aria-label={`${hasHighPriority(c.id)} unread high priority messages`}
                   >
-                    {(unreadByChannel[c.id]?.high ?? 0) > 99 ? '99+' : unreadByChannel[c.id]?.high}
+                    {hasHighPriority(c.id) > 99 ? '99+' : hasHighPriority(c.id)}
                   </span>
-                {:else if (unreadByChannel[c.id]?.low ?? 0) > 0}
-                  <span class="channel-teal-dot" aria-hidden="true"></span>
+                {:else if hasUnread(c.id)}
+                  <span class="channel-blue-dot" aria-hidden="true" title="New messages"></span>
                 {/if}
               {/if}
             </span>
@@ -1371,24 +1507,15 @@
             <div class="channel-voice-presence">
               {#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
                 {@const avatarUrl = resolveVoiceAvatar(member)}
+                {@const cachedProfile = voiceProfileCache.get(member.uid)}
                 <div class="channel-voice-avatar">
-                  {#if avatarUrl && !brokenVoiceAvatars.has(member.uid)}
-                    <img
-                      src={avatarUrl}
-                      alt={member.displayName}
-                      class="h-full w-full object-cover"
-                      loading="lazy"
-                      onerror={() => {
-                        const next = new Set(brokenVoiceAvatars);
-                        next.add(member.uid);
-                        brokenVoiceAvatars = next;
-                      }}
-                    />
-                  {:else}
-                    <div class="grid h-full w-full place-items-center text-[10px] font-semibold text-primary">
-                      {voiceInitial(member.displayName)}
-                    </div>
-                  {/if}
+                  <Avatar
+                    src={avatarUrl}
+                    user={cachedProfile ? { ...member, ...cachedProfile } : member}
+                    name={member.displayName}
+                    size="xs"
+                    isSelf={member.uid === $user?.uid}
+                  />
                 </div>
               {/each}
                 {#if (voicePresence[c.id]?.length ?? 0) > 6}

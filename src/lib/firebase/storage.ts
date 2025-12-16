@@ -191,3 +191,43 @@ export async function uploadProfileAvatar(params: ProfileUploadParams): Promise<
   );
   return uploadToPath(path, params.file, params.uid, params);
 }
+
+/**
+ * Cache a Google/external photo URL to Firebase Storage.
+ * Returns the cached Storage URL, or null if caching failed.
+ */
+export async function cacheExternalPhoto(params: {
+  url: string;
+  uid: string;
+  onProgress?: (progress: number) => void;
+}): Promise<string | null> {
+  const { url, uid, onProgress } = params;
+  if (!url || !uid) return null;
+  
+  try {
+    // Fetch the external image
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.warn('[cacheExternalPhoto] Failed to fetch:', response.status);
+      return null;
+    }
+    
+    const blob = await response.blob();
+    if (!blob.size) {
+      console.warn('[cacheExternalPhoto] Empty blob');
+      return null;
+    }
+    
+    // Determine file extension from content type
+    const contentType = blob.type || 'image/jpeg';
+    const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+    const file = new File([blob], `cached-avatar.${ext}`, { type: contentType });
+    
+    // Upload to Storage
+    const result = await uploadProfileAvatar({ file, uid, onProgress });
+    return result.url;
+  } catch (error) {
+    console.warn('[cacheExternalPhoto] Error:', error);
+    return null;
+  }
+}

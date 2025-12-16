@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { presenceLabels, type PresenceState } from '$lib/presence/state';
+  import Avatar from '$lib/components/app/Avatar.svelte';
 
   type RoleDoc = {
     id: string;
@@ -137,12 +138,14 @@
       </button>
       <div class="member-profile__header">
         <div class="member-profile__avatar">
-          {#if member.avatar}
-            <img src={member.avatar} alt={member.label} />
-          {:else}
-            <i class="bx bx-user text-2xl text-soft"></i>
-          {/if}
-          <span class={`presence-dot ${statusClassName}`} aria-hidden="true"></span>
+          <Avatar
+            src={member.avatar}
+            user={profile}
+            name={member.label}
+            size="lg"
+            showPresence={true}
+            presence={member.status}
+          />
         </div>
         <div class="member-profile__summary">
           <h3>{preferredIdentifier()}</h3>

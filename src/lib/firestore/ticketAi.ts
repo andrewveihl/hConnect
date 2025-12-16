@@ -60,6 +60,46 @@ export type TicketAiIssue = {
   clientMessageCount?: number;
 };
 
+// Cached analytics types
+export type CachedStaffStat = {
+  uid: string;
+  ticketsAnswered: number;
+  ticketsResolved: number;
+  avgResponseMs: number | null;
+  avgResolutionMs: number | null;
+  totalMessages: number;
+};
+
+export type CachedTicketRow = {
+  id: string;
+  summary: string;
+  status: IssueStatus;
+  channelId: string;
+  resolvedByUids: string[];
+  resolvedAtMs: number | null;
+  resolutionTimeMs: number | null;
+  createdAtMs: number;
+};
+
+export type CachedAnalytics = {
+  updatedAt: Timestamp;
+  timeRangeKey: string; // e.g., "7d", "30d", "quarter"
+  rangeStartMs: number | null;
+  rangeEndMs: number;
+  totalIssues: number;
+  openIssues: number;
+  inProgressIssues: number;
+  closedIssues: number;
+  avgResponseTimeMs: number | null;
+  avgResolutionTimeMs: number | null;
+  slaCompliancePercent: number | null;
+  resolutionRatePercent: number | null;
+  staffStats: CachedStaffStat[];
+  ticketRows: CachedTicketRow[];
+  issuesByType: Record<string, number>;
+  issuesByChannel: Record<string, number>;
+};
+
 const SETTINGS_DOC_ID = 'current';
 
 const defaultSettings: TicketAiSettings = {
@@ -178,12 +218,36 @@ export async function fetchTicketAiIssues(
   if (options.end) {
     filters.push(where('createdAt', '<=', options.end));
   }
-  const qy = filters.length
-    ? query(col, ...filters, orderBy('createdAt', 'desc'))
-    : query(col, orderBy('createdAt', 'desc'));
+  
+  // Build query - if we have date filters, we need to ensure index exists
+  // For now, just order by createdAt desc (single field index)
+  let qy;
+  if (filters.length) {
+    qy = query(col, ...filters, orderBy('createdAt', 'desc'));
+  } else {
+    qy = query(col, orderBy('createdAt', 'desc'));
+  }
 
-  const snap = await getDocs(qy);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as TicketAiIssue));
+  try {
+    const snap = await getDocs(qy);
+    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as TicketAiIssue));
+  } catch (err: any) {
+    // If composite index is needed, fall back to simple query
+    if (err?.code === 'failed-precondition' || err?.message?.includes('index')) {
+      console.warn('[ticketAi] Composite index missing, falling back to simple query', err);
+      const simpleQy = query(col, orderBy('createdAt', 'desc'));
+      const snap = await getDocs(simpleQy);
+      const allDocs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as TicketAiIssue));
+      // Filter in memory
+      return allDocs.filter((issue) => {
+        const createdAt = issue.createdAt?.toDate?.() ?? new Date(0);
+        if (options.start && createdAt < options.start) return false;
+        if (options.end && createdAt > options.end) return false;
+        return true;
+      });
+    }
+    throw err;
+  }
 }
 
 export function issuesToCsv(rows: TicketAiIssue[]): string {
@@ -226,4 +290,166 @@ export function issuesToCsv(rows: TicketAiIssue[]): string {
     );
   }
   return lines.join('\n');
+}
+
+// Cached analytics functions
+const ANALYTICS_COLLECTION = 'ticketAiAnalytics';
+
+export async function fetchCachedAnalytics(
+  serverId: string,
+  timeRangeKey: string
+): Promise<CachedAnalytics | null> {
+  const db = getDb();
+  const docRef = doc(db, 'servers', serverId, ANALYTICS_COLLECTION, timeRangeKey);
+  const snap = await getDoc(docRef);
+  if (!snap.exists()) return null;
+  return snap.data() as CachedAnalytics;
+}
+
+export async function saveCachedAnalytics(
+  serverId: string,
+  timeRangeKey: string,
+  analytics: Omit<CachedAnalytics, 'updatedAt'>
+): Promise<void> {
+  const db = getDb();
+  const docRef = doc(db, 'servers', serverId, ANALYTICS_COLLECTION, timeRangeKey);
+  await setDoc(docRef, {
+    ...analytics,
+    updatedAt: serverTimestamp()
+  });
+}
+
+// Helper to compute analytics from issues
+export function computeAnalytics(
+  issues: TicketAiIssue[],
+  timeRangeKey: string,
+  rangeStart: Date | null,
+  rangeEnd: Date,
+  slaTargetMinutes: number = 60
+): Omit<CachedAnalytics, 'updatedAt'> {
+  const openIssues = issues.filter(i => i.status === 'opened').length;
+  const inProgressIssues = issues.filter(i => i.status === 'in_progress').length;
+  const closedIssues = issues.filter(i => i.status === 'closed').length;
+  
+  // Average response time
+  const responseTimes = issues
+    .map(i => i.timeToFirstResponseMs)
+    .filter((t): t is number => typeof t === 'number');
+  const avgResponseTimeMs = responseTimes.length > 0
+    ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length
+    : null;
+  
+  // Average resolution time
+  const resolutionTimes = issues
+    .map(i => i.timeToResolutionMs)
+    .filter((t): t is number => typeof t === 'number');
+  const avgResolutionTimeMs = resolutionTimes.length > 0
+    ? resolutionTimes.reduce((a, b) => a + b, 0) / resolutionTimes.length
+    : null;
+  
+  // SLA compliance
+  const slaTargetMs = slaTargetMinutes * 60 * 1000;
+  const issuesWithResponse = issues.filter(i => typeof i.timeToFirstResponseMs === 'number');
+  const issuesWithinSla = issuesWithResponse.filter(i => (i.timeToFirstResponseMs ?? Infinity) <= slaTargetMs);
+  const slaCompliancePercent = issuesWithResponse.length > 0
+    ? (issuesWithinSla.length / issuesWithResponse.length) * 100
+    : null;
+  
+  // Resolution rate
+  const resolutionRatePercent = issues.length > 0
+    ? (closedIssues / issues.length) * 100
+    : null;
+  
+  // Staff stats
+  const staffMap = new Map<string, {
+    ticketsAnswered: number;
+    ticketsResolved: number;
+    responseTimes: number[];
+    resolutionTimes: number[];
+    totalMessages: number;
+  }>();
+  
+  for (const issue of issues) {
+    if (!issue.staffMemberIds?.length) continue;
+    for (const uid of issue.staffMemberIds) {
+      const existing = staffMap.get(uid) ?? {
+        ticketsAnswered: 0,
+        ticketsResolved: 0,
+        responseTimes: [],
+        resolutionTimes: [],
+        totalMessages: 0
+      };
+      existing.ticketsAnswered += 1;
+      if (issue.status === 'closed') {
+        existing.ticketsResolved += 1;
+      }
+      if (typeof issue.timeToFirstResponseMs === 'number') {
+        existing.responseTimes.push(issue.timeToFirstResponseMs);
+      }
+      if (typeof issue.timeToResolutionMs === 'number') {
+        existing.resolutionTimes.push(issue.timeToResolutionMs);
+      }
+      existing.totalMessages += issue.staffMessageCount ?? 0;
+      staffMap.set(uid, existing);
+    }
+  }
+  
+  const staffStats: CachedStaffStat[] = Array.from(staffMap.entries())
+    .map(([uid, data]) => ({
+      uid,
+      ticketsAnswered: data.ticketsAnswered,
+      ticketsResolved: data.ticketsResolved,
+      avgResponseMs: data.responseTimes.length > 0
+        ? data.responseTimes.reduce((a, b) => a + b, 0) / data.responseTimes.length
+        : null,
+      avgResolutionMs: data.resolutionTimes.length > 0
+        ? data.resolutionTimes.reduce((a, b) => a + b, 0) / data.resolutionTimes.length
+        : null,
+      totalMessages: data.totalMessages
+    }))
+    .sort((a, b) => b.ticketsResolved - a.ticketsResolved);
+  
+  // Ticket rows
+  const ticketRows: CachedTicketRow[] = issues.map(issue => ({
+    id: issue.id,
+    summary: issue.summary ?? 'No description',
+    status: issue.status,
+    channelId: issue.channelId,
+    resolvedByUids: issue.status === 'closed' ? (issue.staffMemberIds ?? []) : [],
+    resolvedAtMs: issue.closedAt?.toMillis?.() ?? null,
+    resolutionTimeMs: issue.timeToResolutionMs ?? null,
+    createdAtMs: issue.createdAt?.toMillis?.() ?? Date.now()
+  }));
+  
+  // Issues by type
+  const issuesByType: Record<string, number> = {};
+  for (const issue of issues) {
+    const type = issue.typeTag ?? 'other';
+    issuesByType[type] = (issuesByType[type] ?? 0) + 1;
+  }
+  
+  // Issues by channel
+  const issuesByChannel: Record<string, number> = {};
+  for (const issue of issues) {
+    const channelId = issue.channelId;
+    issuesByChannel[channelId] = (issuesByChannel[channelId] ?? 0) + 1;
+  }
+  
+  return {
+    timeRangeKey,
+    rangeStartMs: rangeStart?.getTime() ?? null,
+    rangeEndMs: rangeEnd.getTime(),
+    totalIssues: issues.length,
+    openIssues,
+    inProgressIssues,
+    closedIssues,
+    avgResponseTimeMs,
+    avgResolutionTimeMs,
+    slaCompliancePercent,
+    resolutionRatePercent,
+    staffStats,
+    ticketRows,
+    issuesByType,
+    issuesByChannel
+  };
 }

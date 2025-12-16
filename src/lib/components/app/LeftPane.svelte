@@ -13,7 +13,6 @@
   import { streamMyDMs } from '$lib/firestore/dms';
   import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
   import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
-  import VoiceRailItem from '$lib/components/voice/VoiceRailItem.svelte';
   import { superAdminEmailsStore } from '$lib/admin/superAdmin';
   import { featureFlags } from '$lib/stores/featureFlags';
   import { dmUnreadCount, notifications } from '$lib/stores/notifications';
@@ -28,6 +27,7 @@
   } from '$lib/presence/state';
   import { user, userProfile } from '$lib/stores/user';
   import { resolveProfilePhotoURL } from '$lib/utils/profile';
+  import Avatar from '$lib/components/app/Avatar.svelte';
 
   interface Props {
     activeServerId?: string | null;
@@ -626,7 +626,9 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
           animate:flip={{ duration: 180 }}
         >
           {#if s.icon}
-            <img src={s.icon} alt={s.name} class="rail-button__image" draggable="false" />
+            <span class="rail-button__avatar">
+              <img src={s.icon} alt={s.name} class="rail-button__image" draggable="false" />
+            </span>
           {:else}
             <span class="rail-button__fallback">{s.name.slice(0, 2).toUpperCase()}</span>
           {/if}
@@ -668,16 +670,11 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
               title={dm.title}
               aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
             >
-              <img
-                src={resolveProfilePhotoURL(dm)}
-                alt={dm.title}
-                class="rail-button__image"
-                draggable="false"
-                onerror={(event) => {
-                  const img = event.currentTarget as HTMLImageElement;
-                  img.onerror = null;
-                  img.src = '/default-avatar.svg';
-                }}
+              <Avatar
+                user={dm}
+                name={dm.title}
+                size="sm"
+                class="rail-button__avatar-wrap"
               />
               <span class="rail-badge">{formatBadge(dm.unread)}</span>
             </a>
@@ -686,10 +683,6 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
       {/if}
 
       <div class="w-full flex flex-col items-center gap-2 pt-1">
-        {#if enableVoice}
-          <VoiceRailItem />
-        {/if}
-
         {#if enableDMs}
           <a
             href="/dms"
@@ -733,11 +726,12 @@ const displayedServers = $derived(draggingServerId ? dragPreview : serverList);
             aria-current={isSettingsOpen || currentPath.startsWith('/settings') ? 'page' : undefined}
             onclick={openUserSettings}
           >
-            {#if $user?.photoURL || $userProfile}
-              <img src={resolveProfilePhotoURL($userProfile ?? $user)} alt="Me" class="rail-button__image" draggable="false" />
-            {:else}
-              <i class="bx bx-user text-xl leading-none"></i>
-            {/if}
+            <Avatar
+              user={$userProfile ?? $user}
+              size="sm"
+              isSelf={true}
+              class="rail-button__avatar-wrap"
+            />
           </a>
           <div class="status-menu-container">
             <button
