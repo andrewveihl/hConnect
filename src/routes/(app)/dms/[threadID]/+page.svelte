@@ -8,7 +8,6 @@
 	import { getDb } from '$lib/firebase';
 	import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
-	import { playSound } from '$lib/utils/sounds';
 
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 	import MessageList from '$lib/components/chat/MessageList.svelte';
@@ -1089,7 +1088,7 @@
 				mentions: mentionList.length ? mentionList : undefined,
 				replyTo: replyRef ?? undefined
 			});
-			playSound('message-send');
+			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
 			restoreReply(replyRef);
@@ -1113,7 +1112,7 @@
 				photoURL: deriveMePhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
-			playSound('message-send');
+			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
 			restoreReply(replyRef);
@@ -1680,7 +1679,7 @@
 			top: 0;
 			left: 0;
 			right: 0;
-			z-index: 100;
+			z-index: 10;
 			height: calc(3.25rem + env(safe-area-inset-top, 0px));
 			padding-top: env(safe-area-inset-top, 0px);
 			padding-left: calc(0.75rem + env(safe-area-inset-left, 0px));
@@ -1708,13 +1707,21 @@
 		flex-direction: column;
 	}
 
+	/* Desktop: ensure chat input is below image preview overlay (z-index 9999) */
+	@media (min-width: 768px) {
+		.dm-page .chat-input-region {
+			position: relative;
+			z-index: 10;
+		}
+	}
+
 	@media (max-width: 767px) {
 		.dm-page .chat-input-region {
 			position: fixed;
 			left: 0;
 			right: 0;
 			bottom: 0;
-			z-index: 60;
+			z-index: 10;
 			padding: 0.375rem 0.5rem env(safe-area-inset-bottom, 0px) 0.5rem;
 		}
 

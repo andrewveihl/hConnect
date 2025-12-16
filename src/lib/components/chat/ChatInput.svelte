@@ -564,9 +564,14 @@
 		const data = event.clipboardData;
 		if (!data) return;
 		const directFiles = Array.from(data.files ?? []);
-		const itemFiles = Array.from(data.items ?? [])
-			.map((item) => (item.kind === 'file' ? item.getAsFile() : null))
-			.filter((file): file is File => file instanceof File);
+		// Only check data.items if data.files is empty to avoid duplicates
+		// (browsers often provide the same file in both locations)
+		const itemFiles =
+			directFiles.length > 0
+				? []
+				: Array.from(data.items ?? [])
+						.map((item) => (item.kind === 'file' ? item.getAsFile() : null))
+						.filter((file): file is File => file instanceof File);
 		const merged = dedupeFiles([...directFiles, ...itemFiles]);
 		if (!merged.length) return;
 		queueAttachments(merged);

@@ -573,7 +573,7 @@ export async function markThreadRead(
 /**
  * Live unread count for a thread for a given user.
  * Counts messages where createdAt > lastReadAt.
- * If there’s no read doc, counts all messages.
+ * If there's no read doc, counts all messages.
  *
  * NOTE: use orderBy('createdAt') with the inequality filter for correctness.
  */
@@ -586,6 +586,8 @@ export function streamUnreadCount(
 	const readDocRef = doc(db, COL_DMS, threadId, SUB_READS, uid);
 
 	let stopMsgs: Unsubscribe | undefined;
+	let lastEmittedCount: number | null = null;
+
 	const isOtherMessage = (data: any) => {
 		const author =
 			(typeof data?.uid === 'string' && data.uid.trim()) ||
@@ -608,16 +610,24 @@ export function streamUnreadCount(
 				s.forEach((docSnap) => {
 					if (isOtherMessage(docSnap.data())) count += 1;
 				});
-				cb(count);
+				// Only emit if count changed
+				if (lastEmittedCount !== count) {
+					lastEmittedCount = count;
+					cb(count);
+				}
 			});
 		} else {
-			const qAll = query(base); // first-time: “all unread”
+			const qAll = query(base); // first-time: "all unread"
 			stopMsgs = onSnapshot(qAll, (s) => {
 				let count = 0;
 				s.forEach((docSnap) => {
 					if (isOtherMessage(docSnap.data())) count += 1;
 				});
-				cb(count);
+				// Only emit if count changed
+				if (lastEmittedCount !== count) {
+					lastEmittedCount = count;
+					cb(count);
+				}
 			});
 		}
 	});

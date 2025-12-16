@@ -304,6 +304,13 @@ export async function createChannelThread(options: CreateThreadOptions): Promise
 		throw new Error('Missing thread creation identifiers.');
 	}
 
+	console.log('[createChannelThread] Starting thread creation', {
+		serverId,
+		channelId,
+		sourceMessageId,
+		creatorUid
+	});
+
 	const ttlHours = clampNumber(
 		Number(options.ttlHours) || THREAD_DEFAULT_TTL_HOURS,
 		1,
@@ -336,55 +343,89 @@ export async function createChannelThread(options: CreateThreadOptions): Promise
 	const autoArchiveAt = nextAutoArchiveAt(ttlHours);
 	const preview = normalizeText(options.sourceMessageText) || introText;
 
-	await setDoc(threadRef, {
-		id: threadRef.id,
-		serverId,
-		channelId,
-		parentChannelId: channelId,
-		createdBy: creatorUid,
-		createdFromMessageId: sourceMessageId,
-		createdAt: now,
-		name: threadName,
-		preview,
-		rootPreview: preview,
-		lastMessageAt: now,
-		lastMessagePreview: introText,
-		autoArchiveAt,
-		status: 'active',
-		ttlHours,
-		maxMembers,
-		memberUids,
-		memberCount: memberUids.length,
-		visibility: THREAD_VISIBILITY,
-		archivedAt: null,
-		messageCount: 0
-	});
+	// Step 1: Create thread document
+	console.log('[createChannelThread] Step 1: Creating thread document', threadRef.path);
+	try {
+		await setDoc(threadRef, {
+			id: threadRef.id,
+			serverId,
+			channelId,
+			parentChannelId: channelId,
+			createdBy: creatorUid,
+			createdFromMessageId: sourceMessageId,
+			createdAt: now,
+			name: threadName,
+			preview,
+			rootPreview: preview,
+			lastMessageAt: now,
+			lastMessagePreview: introText,
+			autoArchiveAt,
+			status: 'active',
+			ttlHours,
+			maxMembers,
+			memberUids,
+			memberCount: memberUids.length,
+			visibility: THREAD_VISIBILITY,
+			archivedAt: null,
+			messageCount: 0
+		});
+		console.log('[createChannelThread] Step 1: SUCCESS - Thread document created');
+	} catch (err) {
+		console.error('[createChannelThread] Step 1: FAILED - Thread document creation', err);
+		throw new Error(`Thread creation failed at step 1 (thread doc): ${err instanceof Error ? err.message : err}`);
+	}
 
+	// Step 2: Create system message
 	const systemRef = doc(threadMessagesCollection(db, serverId, channelId, threadRef.id));
-	await setDoc(systemRef, {
-		type: 'system',
-		systemKind: 'created',
-		text: introText,
-		authorId: creatorUid,
-		authorName: creatorName,
-		authorDisplay: creatorName,
-		createdAt: now
-	});
+	console.log('[createChannelThread] Step 2: Creating system message', systemRef.path);
+	try {
+		await setDoc(systemRef, {
+			type: 'system',
+			systemKind: 'created',
+			text: introText,
+			authorId: creatorUid,
+			authorName: creatorName,
+			authorDisplay: creatorName,
+			createdAt: now
+		});
+		console.log('[createChannelThread] Step 2: SUCCESS - System message created');
+	} catch (err) {
+		console.error('[createChannelThread] Step 2: FAILED - System message creation', err);
+		throw new Error(`Thread creation failed at step 2 (system message): ${err instanceof Error ? err.message : err}`);
+	}
 
-	await Promise.all(
-		memberUids.map((uid) =>
-			setDoc(
-				threadPermissionsDoc(db, serverId, channelId, threadRef.id, uid),
-				{
-					canRead: true,
-					canPost: true,
-					grantedBy: creatorUid,
-					grantedAt: now
-				},
-				{ merge: true }
-			)
-		)
-	);
+	// Step 3: Create permission documents
+	console.log('[createChannelThread] Step 3: Creating permission docs for', memberUids);
+	try {
+		await Promise.all(
+			memberUids.map(async (uid) => {
+				const permRef = threadPermissionsDoc(db, serverId, channelId, threadRef.id, uid);
+				console.log('[createChannelThread] Step 3: Writing permission for', uid, permRef.path);
+				try {
+					await setDoc(
+						permRef,
+						{
+							canRead: true,
+							canPost: true,
+							grantedBy: creatorUid,
+							grantedAt: now
+						},
+						{ merge: true }
+					);
+					console.log('[createChannelThread] Step 3: SUCCESS - Permission for', uid);
+				} catch (permErr) {
+					console.error('[createChannelThread] Step 3: FAILED - Permission for', uid, permErr);
+					throw permErr;
+				}
+			})
+		);
+		console.log('[createChannelThread] Step 3: SUCCESS - All permissions created');
+	} catch (err) {
+		console.error('[createChannelThread] Step 3: FAILED - Permission creation', err);
+		throw new Error(`Thread creation failed at step 3 (permissions): ${err instanceof Error ? err.message : err}`);
+	}
+
+	console.log('[createChannelThread] Thread creation complete, id:', threadRef.id);
 	return threadRef.id;
 }
 

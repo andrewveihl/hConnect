@@ -145,6 +145,8 @@ const channelIndicatorsInternal = writable<Record<string, Record<string, Channel
 let lastBadgeValue: number | null = null;
 let lastNotificationSoundTotal: number | null = null;
 let notificationSoundEnabled = false; // Delay sound until after initial load
+let lastNotificationSoundTime = 0; // Debounce: track last sound time
+let recomputeTimer: ReturnType<typeof setTimeout> | null = null; // Debounce recompute calls
 
 export const notifications: Readable<NotificationItem[]> = {
 	subscribe: notificationsInternal.subscribe
@@ -310,7 +312,7 @@ function ensureLatestWatcher(serverId: string, channelId: string) {
 				}
 				activity.set(channelId, current);
 			}
-			recompute();
+			scheduleRecompute();
 		},
 		() => {
 			const perServerLatest = serverLatestMessages.get(serverId);
@@ -396,7 +398,7 @@ function handleUnreadUpdate(serverId: string, map: UnreadMap) {
 		}
 	}
 
-	recompute();
+	scheduleRecompute();
 }
 
 function watchServerChannels(serverId: string) {
@@ -426,7 +428,7 @@ function watchServerChannels(serverId: string) {
 					}
 				}
 			}
-			recompute();
+			scheduleRecompute();
 		},
 		() => {
 			serverChannelMeta.delete(serverId);
@@ -479,7 +481,7 @@ function handleServersUpdate(uid: string, rows: ServerInfo[]) {
 		}
 	}
 
-	recompute();
+	scheduleRecompute();
 }
 
 function startServerRail(uid: string) {
@@ -496,7 +498,7 @@ function startDMWatchers(uid: string) {
 			if (!dmUnreadStops.has(id)) {
 				const stop = streamUnreadCount(id, uid, (count) => {
 					dmCounts.set(id, count);
-					recompute();
+					scheduleRecompute();
 				});
 				dmUnreadStops.set(id, stop);
 			}
@@ -511,7 +513,7 @@ function startDMWatchers(uid: string) {
 			}
 		}
 
-		recompute();
+		scheduleRecompute();
 	});
 }
 
@@ -615,7 +617,7 @@ async function computeThreadUnread(state: ThreadState) {
 		const unread = agg.data().count ?? 0;
 		applyThreadContribution(state, unread);
 		updateThreadActivityEntry(state);
-		recompute();
+		scheduleRecompute();
 	} catch (err: any) {
 		const code = err?.code ?? err?.message ?? '';
 		if (typeof code === 'string' && code.toLowerCase().includes('permission')) {
@@ -705,7 +707,7 @@ function startThreadWatchers(uid: string) {
 					detachThread(threadId);
 				}
 			}
-			recompute();
+			scheduleRecompute();
 		},
 		() => {
 			stopThreadWatchers();
@@ -759,6 +761,7 @@ function cleanupAll() {
 	readyInternal.set(false);
 	lastNotificationSoundTotal = null;
 	notificationSoundEnabled = false; // Reset on cleanup
+	lastNotificationSoundTime = 0; // Reset debounce timer
 	if (browser) {
 		const nav = navigator as any;
 		const clearer: (() => Promise<void> | void) | undefined =
@@ -794,13 +797,27 @@ function maybePlayNotificationSound(total: number) {
 		}, 3000);
 		return;
 	}
-	if (notificationSoundEnabled && total > lastNotificationSoundTotal) {
+	
+	const prevTotal = lastNotificationSoundTotal;
+	lastNotificationSoundTotal = total;
+	
+	// Only play sound if total increased and sound is enabled
+	// The playSound function itself has debouncing to prevent multiple plays
+	if (notificationSoundEnabled && total > prevTotal) {
 		playSound('notification');
 	}
-	lastNotificationSoundTotal = total;
 }
 
-function recompute() {
+// Debounced wrapper - coalesces rapid recompute calls
+function scheduleRecompute() {
+	if (recomputeTimer) clearTimeout(recomputeTimer);
+	recomputeTimer = setTimeout(() => {
+		recomputeTimer = null;
+		recomputeNow();
+	}, 150);
+}
+
+function recomputeNow() {
 	const list: NotificationItem[] = [];
 	let dmTotal = 0;
 	let channelTotal = 0;
