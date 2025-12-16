@@ -17,6 +17,8 @@ export const load: PageLoad = async ({ parent }) => {
 				uid: docSnap.id,
 				displayName: data.name ?? data.displayName ?? '',
 				email: data.email ?? '',
+				photoURL: data.customPhotoURL ?? data.authPhotoURL ?? data.photoURL ?? null,
+				hasCustomPhoto: !!data.customPhotoURL,
 				createdAt: data.createdAt?.toDate?.() ?? null,
 				lastSeen: data.updatedAt?.toDate?.() ?? null,
 				roles: data.roles ?? [],

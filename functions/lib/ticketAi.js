@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleTicketAiThreadMessage = handleTicketAiThreadMessage;
 exports.handleTicketAiChannelMessage = handleTicketAiChannelMessage;
+exports.createManualTicket = createManualTicket;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-admin/firestore");
 const openai_1 = __importDefault(require("openai"));
@@ -100,6 +101,98 @@ Say NO for:
     catch (err) {
         firebase_functions_1.logger.error('[ticketAi] AI classification failed', { err });
         return true; // Default to creating ticket on error
+    }
+}
+/**
+ * Use AI Vision to analyze a screenshot and determine if it shows a PC/IT issue.
+ * Returns { isIssue: boolean, description: string | null }
+ */
+async function analyzeScreenshotForITIssue(imageUrl) {
+    if (!imageUrl)
+        return { isIssue: false, description: null };
+    // Skip if no API key configured
+    if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
+        firebase_functions_1.logger.warn('[ticketAi] No OpenAI API key - skipping screenshot analysis');
+        return { isIssue: false, description: null };
+    }
+    try {
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o', // Use gpt-4o for vision capabilities
+            max_tokens: 200,
+            temperature: 0,
+            messages: [
+                {
+                    role: 'system',
+                    content: `You are an IT support image analyzer for an MSP (Managed Service Provider).
+Analyze the screenshot and determine if it shows a PC or IT-related issue that needs support attention.
+
+Reply in this exact JSON format:
+{"isIssue": true/false, "description": "brief description of issue or null"}
+
+Say isIssue: true for screenshots showing:
+- Error messages, blue screens (BSOD), crash dialogs
+- Software errors or application failures
+- Network connectivity issues or error icons
+- Printer errors or hardware warnings
+- Login/authentication problems
+- System performance issues (task manager, high CPU/memory)
+- Security warnings or virus alerts
+- Email errors or Outlook issues
+- Browser errors or connection problems
+- Any technical error dialog or warning
+- Device manager issues or driver problems
+
+Say isIssue: false for:
+- Normal desktop screenshots without errors
+- Casual images, photos, memes
+- Documents or spreadsheets without issues
+- General screenshots not showing problems
+- Social media content
+- Non-technical images`
+                },
+                {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'image_url',
+                            image_url: { url: imageUrl, detail: 'low' }
+                        },
+                        {
+                            type: 'text',
+                            text: 'Analyze this screenshot. Is it showing a PC/IT issue that needs support?'
+                        }
+                    ]
+                }
+            ]
+        });
+        const content = response.choices[0]?.message?.content?.trim() ?? '';
+        try {
+            // Try to parse JSON response
+            const parsed = JSON.parse(content);
+            const isIssue = parsed.isIssue === true;
+            const description = typeof parsed.description === 'string' ? parsed.description : null;
+            firebase_functions_1.logger.debug('[ticketAi] Screenshot analysis', {
+                imageUrl: imageUrl.slice(0, 100),
+                isIssue,
+                description
+            });
+            return { isIssue, description };
+        }
+        catch {
+            // Fallback: check if response contains "true" for isIssue
+            const isIssue = content.toLowerCase().includes('"isisue": true') ||
+                content.toLowerCase().includes('"isisue":true');
+            firebase_functions_1.logger.debug('[ticketAi] Screenshot analysis (fallback parse)', {
+                imageUrl: imageUrl.slice(0, 100),
+                isIssue,
+                rawContent: content.slice(0, 200)
+            });
+            return { isIssue, description: null };
+        }
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[ticketAi] Screenshot analysis failed', { err, imageUrl: imageUrl.slice(0, 100) });
+        return { isIssue: false, description: null };
     }
 }
 const normalizeList = (input) => {
@@ -424,8 +517,27 @@ async function handleTicketAiChannelMessage(event) {
         return;
     }
     const messageText = normalizeText(message.text ?? message.content ?? message.plainTextContent ?? '');
-    // Use AI to determine if this is a genuine IT support issue
-    const isSupport = await isITSupportIssue(messageText);
+    // Check for image attachment
+    const hasImageAttachment = message.type === 'file' &&
+        message.file?.url &&
+        (message.file.contentType?.startsWith('image/') ||
+            /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(message.file.name ?? ''));
+    let screenshotAnalysis = null;
+    // If there's an image, analyze it for IT issues
+    if (hasImageAttachment && message.file?.url) {
+        screenshotAnalysis = await analyzeScreenshotForITIssue(message.file.url);
+        // If screenshot shows an IT issue, create ticket even without text
+        if (screenshotAnalysis.isIssue) {
+            firebase_functions_1.logger.info('[ticketAi] Screenshot detected as IT issue', {
+                serverId, channelId, messageId,
+                description: screenshotAnalysis.description
+            });
+        }
+    }
+    // Use AI to determine if this is a genuine IT support issue (text-based)
+    const isTextSupport = messageText ? await isITSupportIssue(messageText) : false;
+    // Create ticket if either text or screenshot indicates an IT issue
+    const isSupport = isTextSupport || (screenshotAnalysis?.isIssue ?? false);
     if (!isSupport) {
         firebase_functions_1.logger.info('[ticketAi] AI classified as non-issue, skipping', {
             serverId, channelId, messageId,
@@ -445,6 +557,14 @@ async function handleTicketAiChannelMessage(event) {
     // Get author info from message
     const authorId = message.uid ?? message.authorId ?? null;
     const authorName = message.displayName ?? message.authorName ?? message.name ?? null;
+    // Build summary: prefer screenshot description, then text
+    let summary = messageText.slice(0, 160) || 'Channel message';
+    if (screenshotAnalysis?.description) {
+        summary = screenshotAnalysis.description.slice(0, 160);
+        if (messageText) {
+            summary = `${summary} - ${messageText.slice(0, 80)}`;
+        }
+    }
     const payload = {
         serverId,
         channelId,
@@ -456,7 +576,7 @@ async function handleTicketAiChannelMessage(event) {
         rootCreatedAt: createdAt,
         status: 'opened',
         statusTimeline,
-        summary: messageText.slice(0, 160) || 'Channel message',
+        summary: summary.slice(0, 160),
         typeTag,
         reopenedAfterClose: false,
         firstStaffResponseAt: null,
@@ -476,9 +596,11 @@ async function handleTicketAiChannelMessage(event) {
         await issueRef.set({
             ...payload,
             updatedAt: firestore_1.Timestamp.now(),
-            lastEmailUsed: email ?? null
+            lastEmailUsed: email ?? null,
+            hasScreenshot: hasImageAttachment || false,
+            screenshotUrl: hasImageAttachment ? message.file?.url : null
         });
-        firebase_functions_1.logger.info('[ticketAi] created ticket from channel message', { serverId, channelId, messageId });
+        firebase_functions_1.logger.info('[ticketAi] created ticket from channel message', { serverId, channelId, messageId, hasScreenshot: hasImageAttachment });
     }
     catch (err) {
         firebase_functions_1.logger.error('[ticketAi] failed to create issue from channel message', {
@@ -487,6 +609,113 @@ async function handleTicketAiChannelMessage(event) {
             messageId,
             err
         });
+    }
+}
+/**
+ * Create a ticket manually from a message.
+ * Called by staff members via the UI button.
+ */
+async function createManualTicket(data) {
+    const { serverId, channelId, messageId, threadId, callerUid } = data;
+    if (!serverId || !channelId || !messageId || !callerUid) {
+        return { ok: false, error: 'Missing required fields' };
+    }
+    try {
+        // Fetch settings to verify caller is staff
+        const settings = await fetchSettings(serverId);
+        if (!settings) {
+            return { ok: false, error: 'Settings not found' };
+        }
+        // Check if caller is staff
+        const callerEmail = await resolveUserEmail(callerUid);
+        const isStaff = isStaffMember(callerUid, settings.staffMemberIds) ||
+            isStaffEmail(callerEmail, settings.staffDomains);
+        if (!isStaff) {
+            return { ok: false, error: 'Not authorized - staff only' };
+        }
+        // Fetch the message
+        let messageRef;
+        if (threadId) {
+            messageRef = firebase_1.db.doc(`servers/${serverId}/channels/${channelId}/threads/${threadId}/messages/${messageId}`);
+        }
+        else {
+            messageRef = firebase_1.db.doc(`servers/${serverId}/channels/${channelId}/messages/${messageId}`);
+        }
+        const messageSnap = await messageRef.get();
+        if (!messageSnap.exists) {
+            return { ok: false, error: 'Message not found' };
+        }
+        const message = messageSnap.data();
+        // Check if ticket already exists
+        const ticketId = threadId ?? messageId;
+        const issueRef = firebase_1.db.doc(`servers/${serverId}/ticketAiIssues/${ticketId}`);
+        const issueSnap = await issueRef.get();
+        if (issueSnap.exists) {
+            return { ok: false, error: 'Ticket already exists for this message' };
+        }
+        const msgDate = toDate(message.createdAt) ?? new Date();
+        const createdAt = firestore_1.Timestamp.fromDate(msgDate);
+        const messageText = normalizeText(message.text ?? message.content ?? message.plainTextContent ?? '');
+        // Check for screenshot
+        const hasImageAttachment = message.type === 'file' &&
+            message.file?.url &&
+            (message.file.contentType?.startsWith('image/') ||
+                /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(message.file.name ?? ''));
+        let summary = messageText.slice(0, 160) || 'Manually created ticket';
+        // Analyze screenshot if present
+        if (hasImageAttachment && message.file?.url) {
+            const screenshotAnalysis = await analyzeScreenshotForITIssue(message.file.url);
+            if (screenshotAnalysis.description) {
+                summary = `${screenshotAnalysis.description.slice(0, 100)}${messageText ? ` - ${messageText.slice(0, 50)}` : ''}`;
+            }
+        }
+        const authorId = message.uid ?? message.authorId ?? null;
+        const authorName = message.displayName ?? message.authorName ?? message.name ?? null;
+        const typeTag = inferTypeTag([messageText]);
+        const statusTimeline = [{ status: 'opened', at: createdAt }];
+        const payload = {
+            serverId,
+            channelId,
+            threadId: threadId ?? null,
+            parentMessageId: messageId,
+            authorId,
+            authorName,
+            createdAt,
+            rootCreatedAt: createdAt,
+            status: 'opened',
+            statusTimeline,
+            summary: summary.slice(0, 160),
+            typeTag,
+            reopenedAfterClose: false,
+            firstStaffResponseAt: null,
+            closedAt: null,
+            timeToFirstResponseMs: null,
+            timeToResolutionMs: null,
+            messageCount: 1,
+            staffMessageCount: 0,
+            clientMessageCount: 1,
+            lastMessageAt: createdAt,
+            lastMessageText: messageText || null,
+            staffDomains: settings.staffDomains,
+            staffMemberIds: [],
+            retention: settings.retention
+        };
+        await issueRef.set({
+            ...payload,
+            updatedAt: firestore_1.Timestamp.now(),
+            manuallyCreated: true,
+            createdByUid: callerUid,
+            hasScreenshot: hasImageAttachment || false,
+            screenshotUrl: hasImageAttachment ? message.file?.url : null
+        });
+        firebase_functions_1.logger.info('[ticketAi] manually created ticket', {
+            serverId, channelId, messageId, threadId, ticketId, createdBy: callerUid
+        });
+        return { ok: true, ticketId };
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[ticketAi] failed to create manual ticket', { serverId, channelId, messageId, threadId, err });
+        return { ok: false, error: 'Failed to create ticket' };
     }
 }
 //# sourceMappingURL=ticketAi.js.map

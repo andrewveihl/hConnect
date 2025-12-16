@@ -207,3 +207,68 @@ export async function removeSuperAdminEmail(targetEmail: string, actor: User) {
 		userId: actor.uid
 	});
 }
+
+/**
+ * Super Admin utility to refresh ALL users' Google profile photos from Firebase Auth.
+ * Does NOT override users who have uploaded custom photos (customPhotoURL).
+ */
+export async function refreshAllGooglePhotos(): Promise<{
+	ok: boolean;
+	total: number;
+	synced: number;
+	skipped: number;
+	failed: number;
+	noAuthPhoto: number;
+	message: string;
+}> {
+	await ensureFirebaseReady();
+	const { functions } = getFirebase();
+	
+	if (!functions) {
+		throw new Error('Firebase Functions not available');
+	}
+	
+	const { httpsCallable } = await import('firebase/functions');
+	const callable = httpsCallable(functions, 'refreshAllGooglePhotos');
+	
+	const result = await callable({});
+	return result.data as {
+		ok: boolean;
+		total: number;
+		synced: number;
+		skipped: number;
+		failed: number;
+		noAuthPhoto: number;
+		message: string;
+	};
+}
+
+/**
+ * Refresh a single user's Google profile photo from Firebase Auth.
+ * @param uid - The user ID to refresh
+ * @param force - If true, will override even if user has customPhotoURL
+ */
+export async function refreshUserGooglePhoto(uid: string, force = false): Promise<{
+	ok: boolean;
+	photoURL?: string;
+	reason?: string;
+	message: string;
+}> {
+	await ensureFirebaseReady();
+	const { functions } = getFirebase();
+	
+	if (!functions) {
+		throw new Error('Firebase Functions not available');
+	}
+	
+	const { httpsCallable } = await import('firebase/functions');
+	const callable = httpsCallable(functions, 'refreshUserGooglePhoto');
+	
+	const result = await callable({ uid, force });
+	return result.data as {
+		ok: boolean;
+		photoURL?: string;
+		reason?: string;
+		message: string;
+	};
+}

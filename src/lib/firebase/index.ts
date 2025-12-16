@@ -20,6 +20,7 @@ import {
 	GoogleAuthProvider,
 	OAuthProvider,
 	signInWithPopup,
+	reauthenticateWithPopup,
 	onAuthStateChanged,
 	signOut
 } from 'firebase/auth';
@@ -225,6 +226,68 @@ export async function signOutUser() {
 	await signOut(auth!);
 }
 export const signOutNow = signOutUser;
+
+/**
+ * Re-authenticate with Google to refresh profile data (including photo).
+ * This triggers a Google popup and updates the user's Firebase Auth record.
+ * Returns the new photoURL if successful.
+ */
+export async function reauthenticateWithGoogleForPhoto(): Promise<{ success: boolean; photoURL?: string; error?: string }> {
+	await ensureFirebaseReady();
+	const current = auth?.currentUser;
+	
+	if (!current) {
+		return { success: false, error: 'No user logged in' };
+	}
+	
+	try {
+		const provider = new GoogleAuthProvider();
+		// Force account selection to ensure fresh data
+		provider.setCustomParameters({ prompt: 'select_account' });
+		
+		const result = await reauthenticateWithPopup(current, provider);
+		const newPhotoURL = result.user.photoURL;
+		
+		console.log('[reauthenticateWithGoogleForPhoto] Re-auth successful, new photoURL:', newPhotoURL);
+		
+		// Now cache the photo to Firebase Storage (same as afterLoginEnsureDoc)
+		if (newPhotoURL) {
+			try {
+				const response = await fetch(newPhotoURL);
+				if (!response.ok) throw new Error(`Failed to fetch avatar: ${response.status}`);
+				const blob = await response.blob();
+				const file = new File([blob], 'google-avatar.jpg', { type: blob.type || 'image/jpeg' });
+				
+				const { uploadProfileAvatar } = await import('./storage');
+				const uploaded = await uploadProfileAvatar({ file, uid: current.uid });
+				
+				const ref = profileRef(current.uid);
+				await setDoc(
+					ref,
+					{
+						cachedPhotoURL: uploaded.url,
+						cachedPhotoAt: serverTimestamp(),
+						photoURL: uploaded.url,
+						authPhotoURL: newPhotoURL,
+						updatedAt: serverTimestamp()
+					},
+					{ merge: true }
+				);
+				
+				return { success: true, photoURL: uploaded.url };
+			} catch (e) {
+				console.warn('[reauthenticateWithGoogleForPhoto] Failed to cache photo:', e);
+				// Still return the Google URL even if caching failed
+				return { success: true, photoURL: newPhotoURL };
+			}
+		}
+		
+		return { success: true, photoURL: newPhotoURL || undefined };
+	} catch (e: any) {
+		console.error('[reauthenticateWithGoogleForPhoto] Re-auth failed:', e);
+		return { success: false, error: e.message || 'Re-authentication failed' };
+	}
+}
 
 async function afterLoginEnsureDoc() {
 	await ensureFirebaseReady();

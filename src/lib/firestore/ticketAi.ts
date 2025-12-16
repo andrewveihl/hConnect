@@ -464,3 +464,70 @@ export function computeAnalytics(
 		issuesByChannel
 	};
 }
+
+/**
+ * Create a ticket manually from a message by calling the cloud function.
+ */
+export async function createTicketFromMessage(params: {
+	serverId: string;
+	channelId: string;
+	messageId: string;
+	threadId?: string | null;
+}): Promise<{ ok: boolean; ticketId?: string; error?: string }> {
+	const { getFunctions, httpsCallable } = await import('firebase/functions');
+	const { getApp } = await import('firebase/app');
+	
+	try {
+		const app = getApp();
+		const functions = getFunctions(app, 'us-central1');
+		const createTicket = httpsCallable<
+			{ serverId: string; channelId: string; messageId: string; threadId?: string | null },
+			{ ok: boolean; ticketId?: string }
+		>(functions, 'createTicketFromMessage');
+		
+		const result = await createTicket({
+			serverId: params.serverId,
+			channelId: params.channelId,
+			messageId: params.messageId,
+			threadId: params.threadId ?? null
+		});
+		
+		return { ok: true, ticketId: result.data.ticketId };
+	} catch (err: any) {
+		console.error('[ticketAi] Failed to create ticket', err);
+		const message = err?.message ?? 'Unknown error';
+		return { ok: false, error: message };
+	}
+}
+
+/**
+ * Subscribe to the set of message IDs that already have tickets in a channel.
+ * Returns an unsubscribe function.
+ */
+export function subscribeToTicketedMessageIds(
+	serverId: string,
+	channelId: string,
+	cb: (messageIds: Set<string>) => void
+): Unsubscribe {
+	const db = getDb();
+	const col = collection(db, 'servers', serverId, 'ticketAiIssues');
+	const q = query(col, where('channelId', '==', channelId));
+	
+	return onSnapshot(
+		q,
+		(snapshot) => {
+			const ids = new Set<string>();
+			snapshot.forEach((docSnap) => {
+				const data = docSnap.data();
+				if (data.parentMessageId) {
+					ids.add(data.parentMessageId);
+				}
+			});
+			cb(ids);
+		},
+		(err) => {
+			console.error('[ticketAi] Error subscribing to ticketed messages:', err);
+			cb(new Set());
+		}
+	);
+}

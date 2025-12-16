@@ -60,6 +60,20 @@
 		replyTarget?: ReplyReferenceInput | null;
 		scrollContextKey?: string | number;
 		empty?: import('svelte').Snippet;
+		/** Whether the current user is a Ticket AI staff member */
+		isTicketAiStaff?: boolean;
+		/** Server ID for ticket creation */
+		serverId?: string | null;
+		/** Channel ID for ticket creation */
+		channelId?: string | null;
+		/** Thread ID for ticket creation */
+		threadId?: string | null;
+		/** Set of message IDs that already have tickets */
+		ticketedMessageIds?: Set<string>;
+		/** Callback when a ticket is created */
+		onTicketCreated?: (event: CustomEvent<{ messageId: string; ticketId?: string }>) => void;
+		/** Callback when a ticket creation fails */
+		onTicketError?: (event: CustomEvent<{ messageId: string; error?: string }>) => void;
 	}
 
 	let {
@@ -93,7 +107,14 @@
 		scrollToMessageId = null,
 		replyTarget = null,
 		scrollContextKey = 'channel-pane',
-		empty
+		empty,
+		isTicketAiStaff = false,
+		serverId = null,
+		channelId = null,
+		threadId = null,
+		ticketedMessageIds = new Set<string>(),
+		onTicketCreated = () => {},
+		onTicketError = () => {}
 	}: Props = $props();
 
 	const dispatch = createEventDispatcher();
@@ -156,12 +177,19 @@
 				{pendingUploads}
 				scrollToBottomSignal={combinedScrollSignal}
 				{scrollToMessageId}
+				{isTicketAiStaff}
+				{serverId}
+				{channelId}
+				{threadId}
+				{ticketedMessageIds}
 				on:vote={onVote}
 				on:submitForm={onSubmitForm}
 				on:react={onReact}
 				on:loadMore={onLoadMore}
 				on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
 				on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
+				on:ticketCreated={onTicketCreated}
+				on:ticketError={onTicketError}
 			/>
 		{/key}
 	</div>

@@ -67,13 +67,55 @@
 		return null;
 	}
 
-	// Helper to check if URL is valid
+	// Check if this is a Firebase Storage URL that requires auth token but doesn't have one
+	function isUnauthenticatedFirebaseUrl(url: string): boolean {
+		// storage.googleapis.com URLs need auth token to work
+		if (url.includes('storage.googleapis.com/') && !url.includes('token=')) {
+			return true;
+		}
+		return false;
+	}
+
+	// Check if URL is a Google profile photo URL
+	function isGooglePhotoUrl(url: string): boolean {
+		return url.includes('googleusercontent.com') || 
+		       url.includes('lh3.google.com') ||
+		       url.includes('lh4.google.com');
+	}
+
+	// Try to fix Google profile photo URLs that might not load
+	function fixGooglePhotoUrl(url: string): string {
+		if (!isGooglePhotoUrl(url)) return url;
+		
+		// Some Google URLs with -/ALV- pattern don't work, try removing size params
+		// Original: https://lh3.googleusercontent.com/a-/ALV-...=s96-c
+		// Try: https://lh3.googleusercontent.com/a-/ALV-...=s400
+		if (url.includes('=s96-c')) {
+			return url.replace('=s96-c', '=s400');
+		}
+		if (url.includes('=s96')) {
+			return url.replace('=s96', '=s400');
+		}
+		
+		return url;
+	}
+
+	// Helper to check if URL is valid and likely to work
 	function isValidUrl(url: string | null | undefined): boolean {
 		if (!url) return false;
 		const lower = url.toLowerCase();
 		if (['undefined', 'null', 'none', 'false', '0'].includes(lower)) return false;
+		if (lower === '/default-avatar.svg') return false; // Skip default avatar URL
 		if (url.startsWith('blob:') && url.includes('undefined')) return false;
-		return url.startsWith('http') || url.startsWith('/') || url.startsWith('data:');
+		if (!url.startsWith('http') && !url.startsWith('/') && !url.startsWith('data:')) return false;
+		
+		// Google photo URLs - try them (even long ones), error handler will catch failures
+		if (isGooglePhotoUrl(url)) return true;
+		
+		// Skip Firebase Storage URLs without auth token
+		if (isUnauthenticatedFirebaseUrl(url)) return false;
+		
+		return true;
 	}
 
 	// Build list of fallback URLs to try - order matters!
@@ -125,7 +167,9 @@
 
 	const currentSrc = $derived.by(() => {
 		if (imgError || fallbackIndex >= fallbackUrls.length) return null;
-		return fallbackUrls[fallbackIndex] ?? null;
+		const url = fallbackUrls[fallbackIndex] ?? null;
+		// Try to fix Google URLs that might not load
+		return url ? fixGooglePhotoUrl(url) : null;
 	});
 
 	// Get display name for alt text and initials
@@ -184,7 +228,19 @@
 		offline: 'presence-dot--offline'
 	};
 
-	function handleImageError() {
+	function handleImageError(event: Event) {
+		const img = event.target as HTMLImageElement;
+		console.warn('[Avatar] Image failed to load:', {
+			src: img?.src,
+			fullUrl: img?.currentSrc,
+			naturalWidth: img?.naturalWidth,
+			naturalHeight: img?.naturalHeight,
+			complete: img?.complete,
+			fallbackIndex,
+			totalFallbacks: fallbackUrls.length,
+			name: displayName
+		});
+		
 		// Try next fallback URL
 		const nextIndex = fallbackIndex + 1;
 		if (nextIndex < fallbackUrls.length) {
@@ -194,6 +250,16 @@
 
 		// All fallbacks exhausted, show placeholder
 		imgError = true;
+	}
+	
+	function handleImageLoad(event: Event) {
+		const img = event.target as HTMLImageElement;
+		console.log('[Avatar] Image loaded successfully:', {
+			src: img?.src?.substring(0, 80) + '...',
+			naturalWidth: img?.naturalWidth,
+			naturalHeight: img?.naturalHeight,
+			name: displayName
+		});
 	}
 </script>
 
@@ -213,7 +279,9 @@
 					alt={altText}
 					class="w-full h-full object-cover"
 					draggable="false"
+					referrerpolicy="no-referrer"
 					onerror={handleImageError}
+					onload={handleImageLoad}
 				/>
 			{/key}
 		{:else}
