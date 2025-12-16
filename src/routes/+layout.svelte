@@ -226,10 +226,10 @@
 		padding-left: env(safe-area-inset-left);
 	}
 
-	/* Mobile: use single flat background to prevent two-tone gray */
+	/* Mobile: use single flat background to match theme */
 	@media (max-width: 932px) {
 		.app-shell {
-			background: #1e1f22; /* Match mobile nav bar */
+			background: var(--color-panel-muted);
 			background-attachment: scroll;
 			box-shadow: none;
 		}

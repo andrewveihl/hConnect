@@ -1641,7 +1641,7 @@
 		flex-direction: column;
 		min-height: 0;
 		height: 100%;
-		background: #2b2d31; /* Discord's channel sidebar background */
+		background: var(--color-sidebar);
 		border: none;
 	}
 
@@ -1680,8 +1680,8 @@
 		padding: 0.35rem 0.75rem;
 		display: flex;
 		align-items: center;
-		background: #2b2d31;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+		background: var(--color-sidebar);
+		border-bottom: 1px solid var(--color-border-subtle);
 		flex-shrink: 0;
 	}
 
@@ -1699,7 +1699,7 @@
 			overflow: visible;
 		}
 
-		/* Dark bar behind icon - same color as server rail */
+		/* Bar behind icon - matches panel muted */
 		.server-sidebar__header::before {
 			content: '';
 			position: absolute;
@@ -1707,7 +1707,7 @@
 			left: 0;
 			width: 100%;
 			height: 100%;
-			background: #1e1f22;
+			background: var(--color-panel-muted);
 			z-index: 0;
 		}
 
@@ -1821,19 +1821,21 @@
 	.server-name {
 		font-weight: 700;
 		font-size: 1rem;
+		color: var(--color-text-primary);
 	}
 
 	.channel-heading {
 		font-weight: 800;
 		font-size: 0.9rem;
 		padding-left: 0.15rem;
+		color: var(--color-text-primary);
 	}
 
 	/* Clickable channel heading for mobile admin access */
 	.channel-heading--clickable {
 		background: none;
 		border: none;
-		color: inherit;
+		color: var(--color-text-primary);
 		text-align: left;
 		cursor: pointer;
 		display: inline-block;
@@ -1904,6 +1906,7 @@
 		border: 1px solid transparent;
 		border-radius: 0.55rem;
 		box-shadow: none;
+		color: var(--color-text-secondary);
 		transition:
 			background 120ms ease,
 			border-color 120ms ease,
@@ -1913,10 +1916,11 @@
 	.channel-row__button:hover,
 	.channel-row__button:focus-visible,
 	.channel-row__button:active {
-		background: color-mix(in srgb, var(--color-sidebar) 68%, transparent);
-		border-color: color-mix(in srgb, var(--color-sidebar) 72%, transparent);
+		background: var(--button-ghost-hover);
+		border-color: var(--color-border-subtle);
 		box-shadow: none;
 		outline: none;
+		color: var(--color-text-primary);
 	}
 
 	.channel-row--active .channel-row__button {
@@ -1924,7 +1928,7 @@
 		border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
 		border-radius: 0.55rem;
 		box-shadow: none;
-		color: inherit;
+		color: var(--color-text-primary);
 		font-weight: 600;
 	}
 
@@ -1936,7 +1940,7 @@
 		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
-		color: var(--text-70);
+		color: var(--color-text-secondary);
 	}
 
 	.channel-icon i {
@@ -1944,7 +1948,7 @@
 	}
 
 	.channel-row--active .channel-icon {
-		color: inherit;
+		color: var(--color-text-primary);
 	}
 
 	.channel-icon__lock {
@@ -1974,11 +1978,12 @@
 		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
 		border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
 		box-shadow: none;
-		color: inherit;
+		color: var(--color-text-primary);
 	}
 
 	.channel-name {
 		font-size: 0.98rem;
+		color: inherit;
 	}
 
 	.channel-voice-count {
@@ -2058,11 +2063,11 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
-		background: color-mix(in srgb, var(--color-panel) 75%, transparent);
+		background: var(--button-ghost-bg);
 		border-radius: 0.6rem;
 		border: 1px solid transparent;
 		padding: 0.35rem 0.45rem;
-		color: var(--text-70);
+		color: var(--color-text-secondary);
 		font-size: 0.8rem;
 	}
 

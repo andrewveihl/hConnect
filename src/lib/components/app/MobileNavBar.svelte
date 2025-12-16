@@ -409,7 +409,7 @@
 		z-index: 99999;
 		width: 100%;
 		box-sizing: border-box;
-		background: #40444e !important; /* Match provided image color */
+		background: var(--color-panel) !important;
 		border-top: none;
 		padding: 0;
 		padding-bottom: calc(
@@ -427,7 +427,7 @@
 		right: 0;
 		bottom: 0;
 		height: env(safe-area-inset-bottom, 0px);
-		background: #40444e;
+		background: var(--color-panel);
 		pointer-events: none;
 		z-index: 1;
 	}
@@ -456,7 +456,7 @@
 		border-radius: 0;
 		border: none;
 		background: transparent;
-		color: #80848e; /* Discord's inactive tab color */
+		color: var(--color-text-tertiary);
 		text-decoration: none;
 		transition: none;
 		flex: 1;
@@ -465,16 +465,16 @@
 	}
 
 	.mobile-dock__item:hover {
-		color: #80848e; /* No hover change - look like icons */
+		color: var(--color-text-tertiary);
 	}
 
 	.mobile-dock__item.is-active {
-		color: #ffffff; /* Discord's active color - white */
+		color: var(--color-text-primary);
 	}
 
 	.mobile-dock__item.is-active .mobile-dock__label,
 	.mobile-dock__item.is-active .mobile-dock__icon {
-		color: #ffffff;
+		color: var(--color-text-primary);
 	}
 
 	.mobile-dock__icon-wrapper {
@@ -516,18 +516,18 @@
 		height: 0.9rem;
 		padding: 0 0.2rem;
 		border-radius: 999px;
-		background: #ed4245; /* Discord's red notification color */
+		background: var(--color-danger);
 		color: white;
 		font-size: 0.55rem;
 		font-weight: 700;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		border: 2px solid #1e1f22; /* Match dock background */
+		border: 2px solid var(--color-panel);
 	}
 
 	.mobile-dock__item--alert {
-		color: #80848e;
+		color: var(--color-text-tertiary);
 	}
 
 	.mobile-dock__server-icon,
@@ -543,8 +543,8 @@
 		width: 1.5rem;
 		height: 1.5rem;
 		border-radius: 50%;
-		background: #5865f2; /* Discord blurple */
-		color: #ffffff;
+		background: var(--color-accent);
+		color: var(--button-primary-text);
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -553,8 +553,8 @@
 	}
 
 	.mobile-dock__server-placeholder {
-		background: #1e1f22;
-		color: #80848e;
+		background: var(--color-panel-muted);
+		color: var(--color-text-tertiary);
 	}
 
 	.mobile-dock__item--profile .mobile-dock__icon,
@@ -588,7 +588,7 @@
 	/* Keep nav + children matching the dock background to prevent artifacts */
 	.mobile-dock *,
 	.mobile-dock__icon-wrapper {
-		background-color: #40444e !important;
+		background-color: var(--color-panel) !important;
 		box-shadow: none !important;
 	}
 </style>
