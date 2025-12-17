@@ -142,6 +142,8 @@ const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>(
 	{}
 );
+const threadUnreadCountInternal = writable(0);
+const threadUnreadByIdInternal = writable<Record<string, number>>({});
 let lastBadgeValue: number | null = null;
 let lastNotificationSoundTotal: number | null = null;
 let notificationSoundEnabled = false; // Delay sound until after initial load
@@ -167,6 +169,8 @@ export const channelUnreadCount: Readable<number> = {
 export const notificationsReady = derived(readyInternal, (value) => value);
 export const hasNotifications = derived(notificationCountInternal, (total) => total > 0);
 export const channelIndicators = derived(channelIndicatorsInternal, (value) => value);
+export const threadUnreadCount = derived(threadUnreadCountInternal, (value) => value);
+export const threadUnreadById = derived(threadUnreadByIdInternal, (value) => value);
 
 const servers = new Map<string, ServerInfo>();
 const serverChannelMeta = new Map<string, Map<string, ChannelMeta>>();
@@ -930,7 +934,8 @@ function recomputeNow() {
 		const inner: Record<string, ChannelIndicatorState> = {};
 		for (const [channelId, stats] of activity) {
 			inner[channelId] = {
-				high: (stats.high ?? 0) + (stats.threadHigh ?? 0),
+				// Only count channel messages, not thread messages (threads have their own FAB)
+				high: stats.high ?? 0,
 				low: stats.low ?? 0
 			};
 		}
@@ -951,11 +956,23 @@ function recomputeNow() {
 
 	const total = channelTotal + dmTotal;
 
+	// Calculate thread unread totals
+	let threadTotal = 0;
+	const threadById: Record<string, number> = {};
+	for (const thread of threadActivities.values()) {
+		if (thread.unread > 0) {
+			threadTotal += thread.unread;
+			threadById[thread.threadId] = thread.unread;
+		}
+	}
+
 	maybePlayNotificationSound(total);
 	notificationsInternal.set(list);
 	notificationCountInternal.set(total);
 	dmUnreadCountInternal.set(dmTotal);
 	channelUnreadCountInternal.set(channelTotal);
+	threadUnreadCountInternal.set(threadTotal);
+	threadUnreadByIdInternal.set(threadById);
 	readyInternal.set(true);
 
 	if (browser) {

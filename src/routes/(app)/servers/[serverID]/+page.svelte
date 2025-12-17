@@ -52,6 +52,7 @@
 	import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 	import {
 		createChannelThread,
+		getThread,
 		sendThreadMessage,
 		streamChannelThreads,
 		streamThreadMessages,
@@ -71,6 +72,7 @@
 	import { openOverlay, closeOverlay } from '$lib/stores/mobileNav';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
+	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
 
 	interface Props {
 		data: { serverId: string | null };
@@ -122,6 +124,9 @@
 	let activeChannel: Channel | null = $state(null);
 	let requestedChannelId: string | null = $state(null);
 	let requestedMessageId: string | null = $state(null);
+	let requestedThreadId: string | null = $state(null);
+	let isPopupMode: boolean = $state(false);
+	let popupThreadHandled = false;
 	let handledRequestedChannelId: string | null = null;
 	let channelListServerId: string | null = null;
 	let routerReady = false;
@@ -150,7 +155,6 @@
 	let profiles: Record<string, any> = $state({});
 	let pendingUploads: PendingUploadPreview[] = $state([]);
 	let threadPendingUploads: PendingUploadPreview[] = $state([]);
-	let floatingThreadPendingUploads: PendingUploadPreview[] = $state([]);
 	let scrollToBottomSignal = $state(0);
 	let lastPendingChannelId: string | null = null;
 	let lastThreadUploadThreadId: string | null = null;
@@ -195,21 +199,37 @@
 	let threadResizeStartX = 0;
 	let threadResizeStartWidth = 360;
 	let threadMembersContext = $state<'active' | 'floating'>('active');
-	let floatingThreadVisible = $state(false);
-	let floatingThread: { thread: ChannelThread | null; root: any } | null = $state(null);
-	let floatingThreadMessages: ThreadMessage[] = $state([]);
-	let floatingThreadReplyTarget: ReplyReferenceInput | null = $state(null);
-	let floatingThreadConversationContext: any[] = $state([]);
-	let floatingThreadDefaultSuggestionSource: any = $state(null);
-	let floatingThreadStream: Unsubscribe | null = null;
-	let floatingThreadLastServerId: string | null = null;
-	let floatingThreadLastChannelId: string | null = null;
-	let floatingThreadLastThreadId: string | null = null;
-	let floatingThreadPosition = $state({ x: 0, y: 0 });
-	let floatingThreadDragActive = $state(false);
-	let floatingThreadDragStart = { x: 0, y: 0 };
-	let floatingThreadWindowStart = { x: 0, y: 0 };
-	let floatingHeaderPointerId: number | null = null;
+	let floatingThreadMembersId: string | null = $state(null);
+	
+	// Multi-popup floating threads
+	type FloatingThreadInstance = {
+		id: string;
+		thread: ChannelThread;
+		root: any;
+		messages: ThreadMessage[];
+		replyTarget: ReplyReferenceInput | null;
+		conversationContext: any[];
+		defaultSuggestionSource: any;
+		pendingUploads: PendingUploadPreview[];
+		position: { x: number; y: number };
+		stream: Unsubscribe | null;
+	};
+	let floatingThreads = $state<FloatingThreadInstance[]>([]);
+	let activeFloatingDragId: string | null = null;
+	let floatingDragStart = { x: 0, y: 0 };
+	let floatingWindowStart = { x: 0, y: 0 };
+	let floatingDragPointerId: number | null = null;
+	
+	// Legacy single-thread state (for backward compatibility during transition)
+	let floatingThreadVisible = $derived(floatingThreads.length > 0);
+	let floatingThread = $derived(floatingThreads[0] ?? null);
+	let floatingThreadMessages = $derived(floatingThreads[0]?.messages ?? []);
+	let floatingThreadReplyTarget = $derived(floatingThreads[0]?.replyTarget ?? null);
+	let floatingThreadConversationContext = $derived(floatingThreads[0]?.conversationContext ?? []);
+	let floatingThreadDefaultSuggestionSource = $derived(floatingThreads[0]?.defaultSuggestionSource ?? null);
+	let floatingThreadPendingUploads = $derived(floatingThreads[0]?.pendingUploads ?? []);
+	let floatingThreadPosition = $derived(floatingThreads[0]?.position ?? { x: 0, y: 0 });
+	
 	let channelMessagesPopout = $state(false);
 	let channelMessagesPopoutChannelId: string | null = $state(null);
 	let channelMessagesPopoutChannelName = $state('');
@@ -2490,22 +2510,27 @@
 		window.removeEventListener('pointercancel', stopFloatingCallChatResize);
 	}
 
+	// Multi-popup drag handling
 	function resetFloatingThreadDragListeners() {
 		window.removeEventListener('pointermove', handleFloatingHeaderPointerMove);
 		window.removeEventListener('pointerup', stopFloatingHeaderDrag);
 		window.removeEventListener('pointercancel', stopFloatingHeaderDrag);
-		floatingHeaderPointerId = null;
+		floatingDragPointerId = null;
+		activeFloatingDragId = null;
 	}
 
-	function handleFloatingHeaderPointerDown(event: PointerEvent) {
-		if (!floatingThreadVisible) return;
+	function handleFloatingHeaderPointerDown(threadId: string, event: PointerEvent) {
 		const target = event.target as HTMLElement | null;
-		if (target?.closest?.('.thread-popout-close')) return;
+		if (target?.closest?.('.thread-popout-close') || target?.closest?.('.thread-popout-action')) return;
 		if (event.button !== 0) return;
-		floatingThreadDragActive = true;
-		floatingHeaderPointerId = event.pointerId;
-		floatingThreadDragStart = { x: event.clientX, y: event.clientY };
-		floatingThreadWindowStart = { ...floatingThreadPosition };
+		
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return;
+		
+		activeFloatingDragId = threadId;
+		floatingDragPointerId = event.pointerId;
+		floatingDragStart = { x: event.clientX, y: event.clientY };
+		floatingWindowStart = { ...instance.position };
 		window.addEventListener('pointermove', handleFloatingHeaderPointerMove, { passive: false });
 		window.addEventListener('pointerup', stopFloatingHeaderDrag);
 		window.addEventListener('pointercancel', stopFloatingHeaderDrag);
@@ -2513,27 +2538,36 @@
 	}
 
 	function handleFloatingHeaderPointerMove(event: PointerEvent) {
-		if (
-			!floatingThreadDragActive ||
-			floatingHeaderPointerId === null ||
-			event.pointerId !== floatingHeaderPointerId
-		) {
+		if (!activeFloatingDragId || floatingDragPointerId === null || event.pointerId !== floatingDragPointerId) {
 			return;
 		}
 		event.preventDefault();
-		const dx = event.clientX - floatingThreadDragStart.x;
-		const dy = event.clientY - floatingThreadDragStart.y;
-		floatingThreadPosition = {
-			x: floatingThreadWindowStart.x + dx,
-			y: floatingThreadWindowStart.y + dy
-		};
+		const dx = event.clientX - floatingDragStart.x;
+		const dy = event.clientY - floatingDragStart.y;
+		
+		// Fixed popup size: 400x520, centered on screen
+		const popupWidth = 400;
+		const popupHeight = 520;
+		const minVisible = 60;
+		
+		const minX = minVisible - window.innerWidth / 2 + popupWidth / 2;
+		const maxX = window.innerWidth / 2 - minVisible - popupWidth / 2;
+		const minY = minVisible - window.innerHeight / 2 + popupHeight / 2;
+		const maxY = window.innerHeight / 2 - minVisible - popupHeight / 2;
+		
+		const newX = Math.max(minX, Math.min(maxX, floatingWindowStart.x + dx));
+		const newY = Math.max(minY, Math.min(maxY, floatingWindowStart.y + dy));
+		
+		floatingThreads = floatingThreads.map(f => 
+			f.id === activeFloatingDragId 
+				? { ...f, position: { x: newX, y: newY } }
+				: f
+		);
 	}
 
 	function stopFloatingHeaderDrag(event?: PointerEvent) {
-		if (!floatingThreadDragActive) return;
-		if (event && floatingHeaderPointerId !== null && event.pointerId !== floatingHeaderPointerId)
-			return;
-		floatingThreadDragActive = false;
+		if (!activeFloatingDragId) return;
+		if (event && floatingDragPointerId !== null && event.pointerId !== floatingDragPointerId) return;
 		resetFloatingThreadDragListeners();
 	}
 	const channelsTransform = $derived.by(() => {
@@ -2818,9 +2852,47 @@
 		loadServerChannelMemory();
 		const cleanupGestures = setupGestures();
 		const cleanupMembersWatcher = setupDesktopMembersWatcher();
+		
+		// Listen for openFloatingThread custom events from ThreadsFab and TicketFab
+		// Can receive either { thread, root } or { serverId, channelId, threadId }
+		function handleOpenFloatingThread(event: Event) {
+			const detail = (event as CustomEvent<{ thread?: ChannelThread; root?: any; serverId?: string; channelId?: string; threadId?: string }>).detail;
+			
+			// If we got IDs, fetch the thread first
+			if (detail.serverId && detail.channelId && detail.threadId) {
+				openFloatingThreadById(detail.serverId, detail.channelId, detail.threadId);
+				return;
+			}
+			
+			// Otherwise use the thread object directly - create a new popup
+			if (detail.thread) {
+				// Check if already open
+				const existingIndex = floatingThreads.findIndex(f => f.id === detail.thread!.id);
+				if (existingIndex >= 0) return;
+				
+				const offset = floatingThreads.length * 30;
+				const newInstance: FloatingThreadInstance = {
+					id: detail.thread.id,
+					thread: detail.thread,
+					root: detail.root ?? null,
+					messages: [],
+					replyTarget: null,
+					conversationContext: [],
+					defaultSuggestionSource: null,
+					pendingUploads: [],
+					position: { x: offset, y: offset },
+					stream: null
+				};
+				floatingThreads = [...floatingThreads, newInstance];
+				attachFloatingThreadStream(detail.thread.id, detail.thread);
+			}
+		}
+		window.addEventListener('openFloatingThread', handleOpenFloatingThread);
+		
 		return () => {
 			cleanupGestures();
 			cleanupMembersWatcher();
+			window.removeEventListener('openFloatingThread', handleOpenFloatingThread);
 		};
 	});
 
@@ -3529,24 +3601,24 @@
 		};
 	};
 
-	function attachFloatingThreadStream(thread: ChannelThread | null) {
-		floatingThreadStream?.();
-		floatingThreadStream = null;
-		floatingThreadMessages = [];
-		floatingThreadLastServerId = null;
-		floatingThreadLastChannelId = null;
-		floatingThreadLastThreadId = null;
+	function attachFloatingThreadStream(threadId: string, thread: ChannelThread | null) {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return;
+		
+		// Clean up existing stream for this instance
+		instance.stream?.();
+		
 		const info = threadChannelInfo(thread);
 		if (!info) return;
-		floatingThreadLastServerId = info.serverId;
-		floatingThreadLastChannelId = info.channelId;
-		floatingThreadLastThreadId = info.thread.id;
-		floatingThreadStream = streamThreadMessages(
+		
+		const unsubscribe = streamThreadMessages(
 			info.serverId,
 			info.channelId,
 			info.thread.id,
 			(list) => {
-				floatingThreadMessages = list;
+				floatingThreads = floatingThreads.map(f => 
+					f.id === threadId ? { ...f, messages: list } : f
+				);
 				if ($user?.uid) {
 					const last = list[list.length - 1];
 					const at = last?.createdAt ?? null;
@@ -3566,37 +3638,408 @@
 				}
 			}
 		);
+		
+		floatingThreads = floatingThreads.map(f => 
+			f.id === threadId ? { ...f, stream: unsubscribe } : f
+		);
 	}
 
 	function openThreadPopout() {
 		if (isMobile) return;
 		if (!activeThread || !activeThreadRoot) return;
-		floatingThread = { thread: activeThread, root: activeThreadRoot };
-		floatingThreadVisible = true;
-		floatingThreadReplyTarget = null;
-		floatingThreadPendingUploads = [];
-		floatingThreadDefaultSuggestionSource = null;
-		floatingThreadPosition = { x: 0, y: 0 };
-		attachFloatingThreadStream(activeThread);
+		
+		const threadId = activeThread.id;
+		
+		// Check if this thread is already open
+		const existingIndex = floatingThreads.findIndex(f => f.thread.id === threadId);
+		if (existingIndex >= 0) {
+			// Already open, just bring focus (could add z-index later)
+			return;
+		}
+		
+		// Calculate position offset for stacking multiple popups
+		const offset = floatingThreads.length * 30;
+		
+		const newInstance: FloatingThreadInstance = {
+			id: threadId,
+			thread: activeThread,
+			root: activeThreadRoot,
+			messages: [],
+			replyTarget: null,
+			conversationContext: [],
+			defaultSuggestionSource: null,
+			pendingUploads: [],
+			position: { x: offset, y: offset },
+			stream: null
+		};
+		
+		floatingThreads = [...floatingThreads, newInstance];
+		attachFloatingThreadStream(threadId, activeThread);
 		closeThreadView();
 	}
 
-	function closeFloatingThread() {
-		floatingThreadVisible = false;
-		floatingThread = null;
-		floatingThreadMessages = [];
-		floatingThreadReplyTarget = null;
-		floatingThreadConversationContext = [];
-		floatingThreadPendingUploads = [];
-		floatingThreadDefaultSuggestionSource = null;
-		floatingThreadStream?.();
-		floatingThreadStream = null;
-		floatingThreadLastChannelId = null;
-		floatingThreadLastServerId = null;
-		floatingThreadLastThreadId = null;
-		floatingThreadPosition = { x: 0, y: 0 };
-		floatingThreadDragActive = false;
-		resetFloatingThreadDragListeners();
+	// Open a floating thread by ID (used for popup mode and external events)
+	async function openFloatingThreadById(sId: string, chId: string, thId: string) {
+		try {
+			// Check if this thread is already open
+			const existingIndex = floatingThreads.findIndex(f => f.id === thId);
+			if (existingIndex >= 0) {
+				// Already open
+				return;
+			}
+			
+			const thread = await getThread(sId, chId, thId);
+			if (!thread) {
+				console.warn('Thread not found:', thId);
+				return;
+			}
+			
+			// Fetch the root message (original message the thread was created from)
+			let root = null;
+			if (thread.createdFromMessageId) {
+				try {
+					const database = db();
+					const snap = await getDoc(
+						doc(database, 'servers', sId, 'channels', chId, 'messages', thread.createdFromMessageId)
+					);
+					if (snap.exists()) {
+						root = toChatMessage(snap.id, snap.data());
+					}
+				} catch (err) {
+					console.warn('Failed to load root message for floating thread:', err);
+				}
+			}
+			
+			// Calculate position offset for stacking multiple popups
+			const offset = floatingThreads.length * 30;
+			
+			const newInstance: FloatingThreadInstance = {
+				id: thread.id,
+				thread,
+				root,
+				messages: [],
+				replyTarget: null,
+				conversationContext: [],
+				defaultSuggestionSource: null,
+				pendingUploads: [],
+				position: { x: offset, y: offset },
+				stream: null
+			};
+			
+			floatingThreads = [...floatingThreads, newInstance];
+			attachFloatingThreadStream(thread.id, thread);
+		} catch (err) {
+			console.error('Failed to open floating thread by ID:', err);
+		}
+	}
+
+	function closeFloatingThread(threadId?: string) {
+		if (!threadId) {
+			// Close all
+			floatingThreads.forEach(f => f.stream?.());
+			floatingThreads = [];
+			resetFloatingThreadDragListeners();
+			return;
+		}
+		
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (instance) {
+			instance.stream?.();
+			floatingThreads = floatingThreads.filter(f => f.id !== threadId);
+		}
+		
+		if (activeFloatingDragId === threadId) {
+			resetFloatingThreadDragListeners();
+		}
+	}
+
+	// Open thread in a separate mini browser window (like Google Meet PiP)
+	function openThreadInWindow(threadId: string) {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance?.thread) return;
+		
+		const thread = instance.thread;
+		const url = `/servers/${thread.serverId}?channel=${thread.parentChannelId}&thread=${thread.id}&popup=1`;
+		
+		// Calculate window size and position
+		const width = 420;
+		const height = 600;
+		const left = window.screen.width - width - 20;
+		const top = window.screen.height - height - 100;
+		
+		// Open as a popup window
+		const popup = window.open(
+			url,
+			`thread-${thread.id}`,
+			`width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=no`
+		);
+		
+		if (popup) {
+			// Close the in-page floating thread
+			closeFloatingThread(threadId);
+		}
+	}
+
+	// Instance-specific handlers for multi-popup support
+	function handleFloatingThreadReplySelectForInstance(threadId: string, event: CustomEvent<{ message: any }>) {
+		const ref = buildReplyReference(event.detail?.message);
+		if (!ref) return;
+		floatingThreads = floatingThreads.map(f => 
+			f.id === threadId ? { ...f, replyTarget: ref } : f
+		);
+	}
+
+	function resetFloatingThreadReplyTargetForInstance(threadId: string) {
+		floatingThreads = floatingThreads.map(f => 
+			f.id === threadId ? { ...f, replyTarget: null } : f
+		);
+	}
+
+	function consumeFloatingThreadReplyForInstance(threadId: string, explicit?: ReplyReferenceInput | null): ReplyReferenceInput | null {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return null;
+		
+		const candidate =
+			explicit && explicit.messageId
+				? explicit
+				: instance.replyTarget && instance.replyTarget.messageId
+					? instance.replyTarget
+					: null;
+		
+		// Clear the reply target
+		floatingThreads = floatingThreads.map(f => 
+			f.id === threadId ? { ...f, replyTarget: null } : f
+		);
+		
+		return candidate && candidate.messageId ? candidate : null;
+	}
+
+	function restoreFloatingThreadReplyForInstance(threadId: string, ref: ReplyReferenceInput | null) {
+		if (ref?.messageId) {
+			floatingThreads = floatingThreads.map(f => 
+				f.id === threadId ? { ...f, replyTarget: ref } : f
+			);
+		}
+	}
+
+	async function handleFloatingThreadSendForInstance(
+		threadId: string,
+		payload:
+			| string
+			| { text: string; mentions?: MentionSendRecord[]; replyTo?: ReplyReferenceInput | null }
+	) {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return;
+		
+		const raw = typeof payload === 'string' ? payload : (payload?.text ?? '');
+		const trimmed = raw?.trim?.() ?? '';
+		if (!trimmed) return;
+		const info = threadChannelInfo(instance.thread ?? null);
+		if (!info) {
+			alert('Open a thread before replying.');
+			return;
+		}
+		if (!$user) {
+			alert('Sign in to send messages.');
+			return;
+		}
+		const replyRef = consumeFloatingThreadReplyForInstance(
+			threadId,
+			typeof payload === 'object' ? (payload?.replyTo ?? null) : null
+		);
+		const mentions = normalizeMentionSendList(
+			typeof payload === 'object' ? (payload?.mentions ?? []) : []
+		);
+		try {
+			await sendThreadMessage({
+				serverId: info.serverId,
+				channelId: info.channelId,
+				threadId: info.thread.id,
+				message: {
+					type: 'text',
+					text: trimmed,
+					uid: $user.uid,
+					displayName: deriveCurrentDisplayName(),
+					photoURL: deriveCurrentPhotoURL(),
+					mentions,
+					replyTo: replyRef ?? undefined
+				},
+				mentionProfiles: profiles
+			});
+		} catch (err) {
+			restoreFloatingThreadReplyForInstance(threadId, replyRef);
+			console.error(err);
+			alert(`Failed to send thread reply: ${err instanceof Error ? err.message : err}`);
+		}
+	}
+
+	async function handleFloatingThreadSendGifForInstance(
+		threadId: string,
+		detail: string | { url: string; replyTo?: ReplyReferenceInput | null }
+	) {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return;
+		
+		const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
+		if (!trimmed) return;
+		const info = threadChannelInfo(instance.thread ?? null);
+		if (!info) {
+			alert('Open a thread before replying.');
+			return;
+		}
+		if (!$user) {
+			alert('Sign in to send messages.');
+			return;
+		}
+		const replyRef = consumeFloatingThreadReplyForInstance(
+			threadId,
+			typeof detail === 'object' ? (detail?.replyTo ?? null) : null
+		);
+		try {
+			await sendThreadMessage({
+				serverId: info.serverId,
+				channelId: info.channelId,
+				threadId: info.thread.id,
+				message: {
+					type: 'gif',
+					url: trimmed,
+					uid: $user.uid,
+					displayName: deriveCurrentDisplayName(),
+					photoURL: deriveCurrentPhotoURL(),
+					replyTo: replyRef ?? undefined
+				},
+				mentionProfiles: profiles
+			});
+		} catch (err) {
+			restoreFloatingThreadReplyForInstance(threadId, replyRef);
+			console.error(err);
+			alert(`Failed to share GIF: ${err instanceof Error ? err.message : err}`);
+		}
+	}
+
+	async function handleFloatingThreadUploadFilesForInstance(
+		threadId: string,
+		request: {
+			files: File[];
+			replyTo?: ReplyReferenceInput | null;
+		}
+	) {
+		const instance = floatingThreads.find(f => f.id === threadId);
+		if (!instance) return;
+		
+		const selection = Array.from(request?.files ?? []).filter(
+			(file): file is File => file instanceof File
+		);
+		if (!selection.length) return;
+		const info = threadChannelInfo(instance.thread ?? null);
+		if (!info) {
+			alert('Open a thread before uploading.');
+			return;
+		}
+		if (!$user) {
+			alert('Sign in to send messages.');
+			return;
+		}
+		const replyRef = consumeFloatingThreadReplyForInstance(threadId, request?.replyTo ?? null);
+		let replyUsed = false;
+		const identity = {
+			uid: $user.uid,
+			displayName: deriveCurrentDisplayName(),
+			photoURL: deriveCurrentPhotoURL()
+		};
+		
+		// Register pending upload for this instance
+		const addPendingUpload = (file: File) => {
+			const pendingId = `${threadId}-${Date.now()}-${Math.random()}`;
+			const isImage = file.type?.startsWith('image/') ?? false;
+			const previewUrl = isImage ? URL.createObjectURL(file) : null;
+			const preview: PendingUploadPreview = {
+				id: pendingId,
+				uid: $user?.uid ?? null,
+				name: file.name,
+				size: file.size,
+				contentType: file.type || null,
+				isImage,
+				previewUrl,
+				progress: 0
+			};
+			floatingThreads = floatingThreads.map(f =>
+				f.id === threadId ? { ...f, pendingUploads: [...f.pendingUploads, preview] } : f
+			);
+			return {
+				update: (progress: number) => {
+					floatingThreads = floatingThreads.map(f =>
+						f.id === threadId
+							? {
+									...f,
+									pendingUploads: f.pendingUploads.map(p =>
+										p.id === pendingId ? { ...p, progress } : p
+									)
+								}
+							: f
+					);
+				},
+				finish: (success: boolean) => {
+					// Revoke the preview URL if it was created
+					if (previewUrl) {
+						URL.revokeObjectURL(previewUrl);
+					}
+					floatingThreads = floatingThreads.map(f =>
+						f.id === threadId
+							? {
+									...f,
+									pendingUploads: f.pendingUploads.filter(p => p.id !== pendingId)
+								}
+							: f
+					);
+				}
+			};
+		};
+		
+		for (const file of selection) {
+			const pending = addPendingUpload(file);
+			try {
+				const uploaded = await uploadChannelFile({
+					serverId: info.serverId,
+					channelId: info.channelId,
+					uid: $user.uid,
+					file,
+					onProgress: (progress) => pending.update(progress ?? 0)
+				});
+				await sendThreadMessage({
+					serverId: info.serverId,
+					channelId: info.channelId,
+					threadId: info.thread.id,
+					message: {
+						type: 'file',
+						file: {
+							name: file.name || uploaded.name,
+							url: uploaded.url,
+							size: file.size ?? uploaded.size,
+							contentType: file.type || uploaded.contentType,
+							storagePath: uploaded.storagePath
+						},
+						...identity,
+						replyTo: !replyUsed && replyRef ? replyRef : undefined
+					},
+					mentionProfiles: profiles
+				});
+				pending.finish(true);
+				if (replyRef && !replyUsed) {
+					replyUsed = true;
+				}
+			} catch (err) {
+				pending.finish(false);
+				if (replyRef && !replyUsed) {
+					restoreFloatingThreadReplyForInstance(threadId, replyRef);
+				}
+				console.error(err);
+				alert(
+					`Failed to upload ${file?.name || 'file'}: ${err instanceof Error ? err.message : err}`
+				);
+				break;
+			}
+		}
 	}
 
 	async function handleFloatingThreadSend(
@@ -4190,6 +4633,17 @@
 	run(() => {
 		requestedChannelId = $page?.url?.searchParams?.get('channel') ?? null;
 		requestedMessageId = $page?.url?.searchParams?.get('msg') ?? null;
+		requestedThreadId = $page?.url?.searchParams?.get('thread') ?? null;
+		isPopupMode = $page?.url?.searchParams?.get('popup') === '1';
+	});
+	// Handle popup mode - open thread directly when loaded via popup=1&thread=xxx
+	run(() => {
+		if (!isPopupMode || !requestedThreadId || popupThreadHandled) return;
+		if (!serverId || !requestedChannelId) return;
+		
+		// Use openFloatingThreadById which handles all the logic
+		popupThreadHandled = true;
+		openFloatingThreadById(serverId, requestedChannelId, requestedThreadId);
 	});
 	// Clear msg param from URL after a delay (gives time for scroll animation)
 	run(() => {
@@ -5185,29 +5639,142 @@
 	</div>
 </div>
 
-{#if floatingThreadVisible && floatingThread?.thread}
-	<div class="thread-popout-overlay">
-		<div
-			class="thread-popout-window"
-			style={`--thread-popout-x:${floatingThreadPosition.x}px; --thread-popout-y:${floatingThreadPosition.y}px;`}
-		>
-			<div class="thread-popout-header" onpointerdown={handleFloatingHeaderPointerDown}>
-				<div class="thread-popout-title">
-					<span
-						>{resolveThreadTitle(floatingThread.thread, floatingThread.root) ||
-							floatingThread.thread.name ||
-							'Thread'}</span
-					>
+{#if floatingThreads.length > 0}
+	{#each floatingThreads as fThread (fThread.id)}
+		<div class="thread-popout-overlay" style="pointer-events: none;">
+			<div
+				class="thread-popout-window"
+				style={`--thread-popout-x:${fThread.position.x}px; --thread-popout-y:${fThread.position.y}px; pointer-events: auto;`}
+			>
+				<div class="thread-popout-header" onpointerdown={(e) => handleFloatingHeaderPointerDown(fThread.id, e)}>
+					<div class="thread-popout-title">
+						<i class="bx bx-message-square-detail"></i>
+						<span
+							>{resolveThreadTitle(fThread.thread, fThread.root) ||
+								fThread.thread.name ||
+								'Thread'}</span
+						>
+					</div>
+					<div class="thread-popout-actions">
+						<button
+							type="button"
+							class="thread-popout-action"
+							aria-label="Open in new window"
+							title="Open in separate window"
+							onclick={() => openThreadInWindow(fThread.id)}
+						>
+							<i class="bx bx-link-external"></i>
+						</button>
+						<button
+							type="button"
+							class="thread-popout-close"
+							aria-label="Close floating thread"
+							onclick={() => closeFloatingThread(fThread.id)}
+						>
+							<i class="bx bx-x"></i>
+						</button>
+					</div>
 				</div>
+				<ThreadPane
+					root={fThread.root}
+					messages={fThread.messages}
+					users={profiles}
+					currentUserId={$user?.uid ?? null}
+					{mentionOptions}
+					pendingUploads={fThread.pendingUploads}
+					{aiAssistEnabled}
+					threadLabel={resolveThreadTitle(fThread.thread, fThread.root)}
+					parentChannelName={parentChannelNameForThread(fThread.thread, activeChannel)}
+					isMobileView={false}
+					popoutEnabled={false}
+					showCloseButton={false}
+					conversationContext={fThread.conversationContext}
+					replyTarget={fThread.replyTarget}
+					defaultSuggestionSource={fThread.defaultSuggestionSource}
+					members={resolveThreadMembers(fThread.thread)}
+					threadStatus={fThread.thread?.status ?? null}
+					on:close={() => closeFloatingThread(fThread.id)}
+					on:send={(event) => handleFloatingThreadSendForInstance(fThread.id, event.detail)}
+					on:sendGif={(event) => handleFloatingThreadSendGifForInstance(fThread.id, event.detail)}
+					on:upload={(event) => handleFloatingThreadUploadFilesForInstance(fThread.id, event.detail)}
+					on:createPoll={handleFloatingThreadCreatePoll}
+					on:createForm={handleFloatingThreadCreateForm}
+					on:reply={(event) => handleFloatingThreadReplySelectForInstance(fThread.id, event)}
+					on:cancelReply={() => resetFloatingThreadReplyTargetForInstance(fThread.id)}
+					on:openMembers={() => {
+						floatingThreadMembersId = fThread.id;
+						showThreadMembersSheet = true;
+					}}
+				/>
+			</div>
+		</div>
+	{/each}
+{/if}
+
+{#if showThreadMembersSheet && (activeThread || floatingThreads.length > 0)}
+	{@const floatingInstance = floatingThreadMembersId ? floatingThreads.find(f => f.id === floatingThreadMembersId) : null}
+	{@const sheetThread = floatingInstance ? floatingInstance.thread : activeThread}
+	{@const sheetRoot = floatingInstance ? floatingInstance.root : activeThreadRoot}
+	{@const sheetName = resolveThreadTitle(sheetThread, sheetRoot) || sheetThread?.name || 'Thread'}
+	<div class="thread-members-sheet md:hidden" role="dialog" aria-modal="true">
+		<button
+			class="thread-members-sheet__backdrop"
+			type="button"
+			aria-label="Close members list"
+			onclick={() => {
+				showThreadMembersSheet = false;
+				floatingThreadMembersId = null;
+			}}
+		></button>
+		<div class="thread-members-sheet__body">
+			<div class="thread-members-sheet__header">
+				<span>Thread members</span>
 				<button
 					type="button"
-					class="thread-popout-close"
-					aria-label="Close floating thread"
-					onclick={closeFloatingThread}
+					class="thread-members-sheet__close"
+					aria-label="Close"
+					onclick={() => {
+						showThreadMembersSheet = false;
+						floatingThreadMembersId = null;
+					}}
 				>
 					<i class="bx bx-x"></i>
 				</button>
 			</div>
+			<ThreadMembersPane members={resolveThreadMembers(sheetThread)} threadName={sheetName} />
+		</div>
+	</div>
+{/if}
+
+<NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
+
+<!-- Threads FAB - shows when there are active threads (hidden in popup mode) -->
+{#if !isPopupMode}
+	<ThreadsFab />
+{/if}
+
+<!-- Popup mode: show only the thread in a minimal window -->
+{#if isPopupMode && floatingThread && floatingThreadVisible}
+	<div class="popup-thread-window">
+		<div class="popup-thread-header">
+			<div class="popup-thread-title">
+				<i class="bx bx-message-square-detail"></i>
+				<span
+					>{resolveThreadTitle(floatingThread.thread, floatingThread.root) ||
+						floatingThread.thread?.name ||
+						'Thread'}</span
+				>
+			</div>
+			<button
+				type="button"
+				class="popup-thread-close"
+				aria-label="Close thread"
+				onclick={() => window.close()}
+			>
+				<i class="bx bx-x"></i>
+			</button>
+		</div>
+		<div class="popup-thread-content">
 			<ThreadPane
 				root={floatingThread.root}
 				messages={floatingThreadMessages}
@@ -5226,7 +5793,7 @@
 				defaultSuggestionSource={floatingThreadDefaultSuggestionSource}
 				members={resolveThreadMembers(floatingThread.thread)}
 				threadStatus={floatingThread.thread?.status ?? null}
-				on:close={closeFloatingThread}
+				on:close={() => window.close()}
 				on:send={(event) => handleFloatingThreadSend(event.detail)}
 				on:sendGif={(event) => handleFloatingThreadSendGif(event.detail)}
 				on:upload={(event) => handleFloatingThreadUploadFiles(event.detail)}
@@ -5234,54 +5801,144 @@
 				on:createForm={handleFloatingThreadCreateForm}
 				on:reply={handleFloatingThreadReplySelect}
 				on:cancelReply={resetFloatingThreadReplyTarget}
-				on:openMembers={() => {
-					threadMembersContext = 'floating';
-					showThreadMembersSheet = true;
-				}}
+				on:openMembers={() => {}}
 			/>
 		</div>
 	</div>
-{/if}
-
-{#if showThreadMembersSheet && (activeThread || floatingThread?.thread)}
-	{@const sheetThread =
-		threadMembersContext === 'floating' ? (floatingThread?.thread ?? null) : activeThread}
-	{@const sheetName =
-		threadMembersContext === 'floating'
-			? resolveThreadTitle(sheetThread, floatingThread?.root ?? null) ||
-				sheetThread?.name ||
-				'Thread'
-			: resolveThreadTitle(
-					sheetThread ?? activeThread,
-					sheetThread === activeThread ? activeThreadRoot : null
-				) || 'Thread'}
-	<div class="thread-members-sheet md:hidden" role="dialog" aria-modal="true">
-		<button
-			class="thread-members-sheet__backdrop"
-			type="button"
-			aria-label="Close members list"
-			onclick={() => (showThreadMembersSheet = false)}
-		></button>
-		<div class="thread-members-sheet__body">
-			<div class="thread-members-sheet__header">
-				<span>Thread members</span>
-				<button
-					type="button"
-					class="thread-members-sheet__close"
-					aria-label="Close"
-					onclick={() => (showThreadMembersSheet = false)}
-				>
-					<i class="bx bx-x"></i>
-				</button>
-			</div>
-			<ThreadMembersPane members={resolveThreadMembers(sheetThread)} threadName={sheetName} />
+{:else if isPopupMode}
+	<div class="popup-thread-loading">
+		<div class="popup-loading-icon">
+			<i class="bx bx-message-square-detail"></i>
 		</div>
+		<span>Loading thread...</span>
 	</div>
 {/if}
 
-<NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
-
 <style>
+	/* Popup window mode styles (when opened in separate browser window) */
+	.popup-thread-window {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		background: var(--color-bg);
+		overflow: hidden;
+	}
+
+	.popup-thread-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.875rem 1rem;
+		background: linear-gradient(to bottom, var(--color-sidebar), color-mix(in srgb, var(--color-sidebar) 95%, black));
+		border-bottom: 1px solid var(--color-border-subtle);
+		-webkit-app-region: drag;
+		user-select: none;
+	}
+
+	.popup-thread-title {
+		display: flex;
+		align-items: center;
+		gap: 0.625rem;
+		font-weight: 600;
+		font-size: 0.9375rem;
+		color: var(--color-text-primary);
+	}
+
+	.popup-thread-title i {
+		font-size: 1.125rem;
+		color: #a855f7;
+	}
+
+	.popup-thread-close {
+		width: 32px;
+		height: 32px;
+		border-radius: 8px;
+		border: none;
+		background: transparent;
+		color: var(--color-text-secondary);
+		display: grid;
+		place-items: center;
+		font-size: 1.375rem;
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+		-webkit-app-region: no-drag;
+	}
+
+	.popup-thread-close:hover {
+		background: rgba(239, 68, 68, 0.15);
+		color: #ef4444;
+		transform: scale(1.05);
+	}
+
+	.popup-thread-close:active {
+		transform: scale(0.95);
+	}
+
+	.popup-thread-content {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		background: var(--color-bg);
+	}
+
+	.popup-thread-content :global(.thread-pane) {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		border: none;
+		border-radius: 0;
+	}
+
+	.popup-thread-content :global(.thread-pane__header) {
+		display: none;
+	}
+
+	.popup-thread-content :global(.thread-pane__messages) {
+		padding: 0.75rem;
+	}
+
+	.popup-thread-content :global(.thread-pane__composer) {
+		border-top: 1px solid var(--color-border-subtle);
+		background: var(--color-sidebar);
+		padding: 0.75rem;
+	}
+
+	.popup-thread-loading {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 1rem;
+		background: var(--color-bg);
+		color: var(--color-text-secondary);
+	}
+
+	.popup-loading-icon {
+		width: 56px;
+		height: 56px;
+		border-radius: 16px;
+		background: linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(168, 85, 247, 0.1));
+		display: grid;
+		place-items: center;
+		animation: pulse-loading 1.5s ease-in-out infinite;
+	}
+
+	.popup-loading-icon i {
+		font-size: 1.75rem;
+		color: #a855f7;
+	}
+
+	@keyframes pulse-loading {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.7; transform: scale(0.95); }
+	}
+
 	.mobile-panel__body {
 		flex: 1;
 		display: flex;
@@ -5562,36 +6219,63 @@
 	}
 
 	.thread-popout-window {
-		width: min(420px, calc(100vw - 2.5rem));
-		max-height: min(80vh, 720px);
-		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
-		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
-		border-radius: 1rem;
-		box-shadow: 0 24px 60px rgba(5, 8, 20, 0.45);
+		width: 400px;
+		height: 520px;
+		background: var(--color-bg);
+		border: 1px solid var(--color-border-subtle);
+		border-radius: 12px;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.05);
 		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
 		position: absolute;
-		right: 1.25rem;
-		bottom: 1.25rem;
-		transform: translate(var(--thread-popout-x, 0px), var(--thread-popout-y, 0px));
+		left: 50%;
+		top: 50%;
+		transform: translate(calc(-50% + var(--thread-popout-x, 0px)), calc(-50% + var(--thread-popout-y, 0px)));
 	}
 
 	.thread-popout-window :global(.thread-pane) {
-		border-left: none;
+		flex: 1;
+		border: none;
+		border-radius: 0;
+		min-height: 0;
+	}
+
+	.thread-popout-window :global(.thread-pane__body) {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+	}
+
+	.thread-popout-window :global(.thread-pane__header) {
+		display: none;
+	}
+
+	.thread-popout-window :global(.thread-pane__messages-wrap) {
+		flex: 1;
+		min-height: 0;
+	}
+
+	.thread-popout-window :global(.thread-pane__composer) {
+		border-top: 1px solid var(--color-border-subtle);
+		background: var(--color-sidebar);
+		flex-shrink: 0;
 	}
 
 	.thread-popout-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.75rem 1rem;
-		border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+		padding: 0.75rem 0.875rem;
+		background: var(--color-sidebar);
+		border-bottom: 1px solid var(--color-border-subtle);
 		cursor: grab;
 		user-select: none;
 		-webkit-user-select: none;
 		touch-action: none;
+		flex-shrink: 0;
 	}
 
 	.thread-popout-header:active {
@@ -5599,26 +6283,74 @@
 	}
 
 	.thread-popout-title {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 		font-weight: 600;
+		font-size: 0.875rem;
 		color: var(--color-text-primary);
-		max-width: 280px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.thread-popout-title i {
+		font-size: 1rem;
+		color: #a855f7;
+		flex-shrink: 0;
+	}
+
+	.thread-popout-title span {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.thread-popout-close {
-		width: 32px;
-		height: 32px;
-		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
+	.thread-popout-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		flex-shrink: 0;
+	}
+
+	.thread-popout-action {
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		border: none;
 		background: transparent;
+		color: var(--color-text-secondary);
+		display: grid;
+		place-items: center;
+		font-size: 1rem;
+		transition: background 120ms ease, color 120ms ease;
+		cursor: pointer;
+	}
+
+	.thread-popout-action:hover,
+	.thread-popout-action:focus-visible {
+		background: var(--color-border-subtle);
 		color: var(--color-text-primary);
+		outline: none;
+	}
+
+	.thread-popout-close {
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		border: none;
+		background: transparent;
+		color: var(--color-text-secondary);
+		display: grid;
+		place-items: center;
+		font-size: 1.125rem;
+		transition: background 120ms ease, color 120ms ease;
+		cursor: pointer;
 	}
 
 	.thread-popout-close:hover,
 	.thread-popout-close:focus-visible {
-		background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
+		background: rgba(239, 68, 68, 0.15);
+		color: #ef4444;
 		outline: none;
 	}
 

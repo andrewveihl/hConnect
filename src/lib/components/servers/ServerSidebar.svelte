@@ -42,9 +42,12 @@
 		activeChannelId?: string | null;
 		onPickChannel?: (id: string) => void;
 		threads?: Array<ChannelThread & { unread?: boolean }>;
+		availableThreads?: Array<ChannelThread>;
 		activeThreadId?: string | null;
 		onPickThread?: (thread: { id: string; parentChannelId: string }) => void;
+		onJoinThread?: (thread: { id: string; channelId: string }) => void;
 		threadUnreadByChannel?: Record<string, boolean>;
+		currentUserId?: string | null;
 	}
 
 	let {
@@ -52,10 +55,23 @@
 		activeChannelId = null,
 		onPickChannel = () => {},
 		threads = [],
+		availableThreads = [],
 		activeThreadId = null,
 		onPickThread = () => {},
-		threadUnreadByChannel = {}
+		onJoinThread = () => {},
+		threadUnreadByChannel = {},
+		currentUserId = null
 	}: Props = $props();
+
+	// Debug logging for threads
+	$effect(() => {
+		if (threads.length > 0 || availableThreads.length > 0) {
+			console.log('[ServerSidebar] Received threads:', threads.length);
+			console.log('[ServerSidebar] Thread parentChannelIds:', threads.map(t => ({id: t.id, name: t.name, parentChannelId: t.parentChannelId})));
+			console.log('[ServerSidebar] Available channels:', channels.map(c => ({id: c.id, name: c.name})));
+		}
+	});
+
 	type ChannelEventDetail = { serverId: string | null; channels: Chan[] };
 	const dispatch = createEventDispatcher<{ pick: string; channels: ChannelEventDetail }>();
 
@@ -1526,9 +1542,6 @@
 						</span>
 						<span class="channel-name truncate">{c.name}</span>
 						<span class="channel-row__meta ml-auto">
-							{#if threadUnreadByChannel?.[c.id]}
-								<span class="channel-thread-unread-dot" aria-hidden="true"></span>
-							{/if}
 							{#if mentionHighlights.has(c.id)}
 								<span class="channel-mention-pill" title="You were mentioned">@</span>
 							{/if}
@@ -1578,7 +1591,14 @@
 						{@const channelThreadList = (threads ?? []).filter(
 							(thread) => thread.parentChannelId === c.id && thread.status !== 'archived'
 						)}
-						{#if channelThreadList.length}
+						{@const joinableThreads = (availableThreads ?? []).filter(
+							(at) => at.parentChannelId === c.id && 
+								at.status !== 'archived' && 
+								!channelThreadList.some((ct) => ct.id === at.id) &&
+								currentUserId &&
+								!(at.memberUids ?? []).includes(currentUserId)
+						)}
+						{#if channelThreadList.length || joinableThreads.length}
 							<ul class="thread-list">
 								{#each channelThreadList as thread (thread.id)}
 									<li>
@@ -1604,6 +1624,30 @@
 												{#if thread.messageCount}
 													<span class="thread-row__count">{thread.messageCount}</span>
 												{/if}
+											</div>
+										</button>
+									</li>
+								{/each}
+								{#each joinableThreads as thread (thread.id)}
+									<li>
+										<button
+											type="button"
+											class="thread-row thread-row--joinable"
+											onclick={(event) => {
+												event.stopPropagation();
+												onJoinThread({
+													id: thread.id,
+													channelId: c.id
+												});
+											}}
+											title="Click to join this thread"
+										>
+											<div class="thread-row__info">
+												<i class="bx bx-message-square-add" aria-hidden="true"></i>
+												<span class="thread-row__name">{thread.name || 'Thread'}</span>
+											</div>
+											<div class="thread-row__meta">
+												<span class="thread-row__join">Join</span>
 											</div>
 										</button>
 									</li>
@@ -2108,5 +2152,28 @@
 		border-radius: 999px;
 		background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 		color: var(--color-accent);
+	}
+
+	.thread-row--joinable {
+		opacity: 0.6;
+		border-style: dashed;
+	}
+
+	.thread-row--joinable:hover {
+		opacity: 1;
+		border-color: color-mix(in srgb, var(--color-success, #22c55e) 50%, transparent);
+	}
+
+	.thread-row--joinable .thread-row__info i {
+		color: var(--color-success, #22c55e);
+	}
+
+	.thread-row__join {
+		font-size: 0.65rem;
+		padding: 0.1rem 0.4rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--color-success, #22c55e) 15%, transparent);
+		color: var(--color-success, #22c55e);
+		font-weight: 500;
 	}
 </style>
