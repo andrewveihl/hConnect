@@ -45,6 +45,11 @@ export type DMThread = {
 	updatedAt?: any;
 	lastMessage?: string | null;
 	lastSender?: string | null;
+	// Group DM fields
+	isGroup?: boolean;
+	name?: string | null;
+	iconURL?: string | null;
+	createdBy?: string | null;
 };
 
 export type DMMessage = {
@@ -345,6 +350,163 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 	return await toThread(existingSnap, normalizedUids);
 }
 
+/** Create a group DM with 3+ participants. Returns the new thread. */
+export async function createGroupDM(
+	uids: string[],
+	creatorUid: string,
+	groupName?: string
+): Promise<DMThread & { id: string }> {
+	const normalizedUids = toSortedUnique(uids);
+	if (normalizedUids.length < 3) {
+		throw new Error('Group DM requires at least 3 participants');
+	}
+	if (!creatorUid || !normalizedUids.includes(creatorUid)) {
+		throw new Error('Creator must be a participant');
+	}
+
+	const db = getDb();
+	// For groups, we generate a unique ID instead of using participant key
+	const groupsCol = collection(db, COL_DMS);
+	
+	const payload: DMThread = {
+		key: participantsKey(normalizedUids),
+		participants: normalizedUids,
+		createdAt: serverTimestamp(),
+		updatedAt: serverTimestamp(),
+		lastMessage: null,
+		lastSender: null,
+		isGroup: true,
+		name: groupName?.trim() || null,
+		iconURL: null,
+		createdBy: creatorUid
+	};
+
+	const docRef = await addDoc(groupsCol, payload);
+	
+	// Update rail for all participants
+	try {
+		await upsertDMRailForParticipants(docRef.id, normalizedUids, null, { isGroup: true, name: groupName?.trim() || null });
+	} catch (err) {
+		console.warn('[dms] createGroupDM: failed to update rail for participants', err);
+	}
+
+	return {
+		id: docRef.id,
+		...payload,
+		createdAt: new Date(),
+		updatedAt: new Date()
+	};
+}
+
+/** Update group DM settings (name, icon). */
+export async function updateGroupDM(
+	threadId: string,
+	updates: { name?: string | null; iconURL?: string | null }
+): Promise<void> {
+	const cleanThreadId = trimValue(threadId);
+	if (!cleanThreadId) throw new Error('Missing thread ID');
+
+	const db = getDb();
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	
+	const updateData: Record<string, any> = {
+		updatedAt: serverTimestamp()
+	};
+	
+	if ('name' in updates) {
+		updateData.name = updates.name?.trim() || null;
+	}
+	if ('iconURL' in updates) {
+		updateData.iconURL = updates.iconURL || null;
+	}
+
+	await updateDoc(tRef, updateData);
+}
+
+/** Add a participant to a group DM. */
+export async function addGroupDMParticipant(
+	threadId: string,
+	newParticipantUid: string,
+	actorUid: string
+): Promise<void> {
+	const cleanThreadId = trimValue(threadId);
+	const cleanNewUid = trimValue(newParticipantUid);
+	if (!cleanThreadId || !cleanNewUid) throw new Error('Missing identifiers');
+
+	const db = getDb();
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	const tSnap = await getDoc(tRef);
+	
+	if (!tSnap.exists()) throw new Error('Thread not found');
+	
+	const data = tSnap.data() as DMThread;
+	if (!data.isGroup) throw new Error('Cannot add participants to a 1:1 DM');
+	
+	const currentParticipants = data.participants ?? [];
+	if (currentParticipants.includes(cleanNewUid)) {
+		return; // Already a participant
+	}
+	
+	const newParticipants = toSortedUnique([...currentParticipants, cleanNewUid]);
+	
+	await updateDoc(tRef, {
+		participants: newParticipants,
+		key: participantsKey(newParticipants),
+		updatedAt: serverTimestamp()
+	});
+
+	// Update rail for the new participant
+	try {
+		await upsertDMRailForUid(cleanThreadId, cleanNewUid, newParticipants, data.lastMessage ?? null);
+	} catch {}
+}
+
+/** Remove a participant from a group DM (leave group). */
+export async function leaveGroupDM(
+	threadId: string,
+	participantUid: string
+): Promise<void> {
+	const cleanThreadId = trimValue(threadId);
+	const cleanUid = trimValue(participantUid);
+	if (!cleanThreadId || !cleanUid) throw new Error('Missing identifiers');
+
+	const db = getDb();
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	const tSnap = await getDoc(tRef);
+	
+	if (!tSnap.exists()) throw new Error('Thread not found');
+	
+	const data = tSnap.data() as DMThread;
+	if (!data.isGroup) throw new Error('Cannot leave a 1:1 DM');
+	
+	const currentParticipants = data.participants ?? [];
+	const newParticipants = currentParticipants.filter(uid => uid !== cleanUid);
+	
+	if (newParticipants.length < 2) {
+		throw new Error('Cannot leave group - at least 2 participants required');
+	}
+	
+	await updateDoc(tRef, {
+		participants: newParticipants,
+		key: participantsKey(newParticipants),
+		updatedAt: serverTimestamp()
+	});
+
+	// Remove from user's rail
+	try {
+		await deleteDMRailForUid(cleanThreadId, cleanUid);
+	} catch {}
+}
+
+/** Delete a DM rail entry for a specific user */
+async function deleteDMRailForUid(threadId: string, uid: string): Promise<void> {
+	const db = getDb();
+	const railRef = doc(db, COL_PROFILES, uid, SUB_DM_RAIL, threadId);
+	try {
+		await updateDoc(railRef, { deleted: true });
+	} catch {}
+}
+
 /** Send a DM message into a thread (updates thread meta). */
 const THREAD_SUMMARY_MAX = 120;
 
@@ -417,7 +579,8 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 
 	// Update rail mapping for all participants so new DMs appear (and refresh metadata)
 	try {
-		await upsertDMRailForParticipants(cleanThreadId, participants, summary);
+		const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
+		await upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta);
 	} catch {}
 }
 
@@ -645,10 +808,11 @@ export function streamUnreadCount(
 async function upsertDMRailForParticipants(
 	threadId: string,
 	participants: string[],
-	lastMessage: string | null
+	lastMessage: string | null,
+	threadMeta?: { isGroup?: boolean; name?: string | null }
 ) {
 	await Promise.all(
-		participants.map((uid) => upsertDMRailForUid(threadId, uid, participants, lastMessage))
+		participants.map((uid) => upsertDMRailForUid(threadId, uid, participants, lastMessage, threadMeta))
 	);
 }
 
@@ -657,21 +821,25 @@ async function upsertDMRailForUid(
 	threadId: string,
 	uid: string,
 	participants: string[],
-	lastMessage: string | null
+	lastMessage: string | null,
+	threadMeta?: { isGroup?: boolean; name?: string | null }
 ) {
 	const db = getDb();
 	const now = serverTimestamp();
 	const others = participants.filter((p) => p !== uid);
 	const otherUid = others.length === 1 ? others[0] : null;
+	const isGroup = threadMeta?.isGroup ?? participants.length > 2;
 	const payload: Record<string, any> = {
 		threadId,
 		otherUid,
 		participants,
 		lastMessage: lastMessage ?? null,
 		hidden: false,
-		updatedAt: now
+		updatedAt: now,
+		isGroup,
+		groupName: isGroup ? (threadMeta?.name ?? null) : null
 	};
-	if (otherUid) {
+	if (otherUid && !isGroup) {
 		try {
 			const profSnap = await getDoc(doc(db, COL_PROFILES, otherUid));
 			if (profSnap.exists()) {
@@ -701,6 +869,8 @@ export function streamMyDMs(
 			lastMessage?: string | null;
 			updatedAt?: any;
 			hidden?: boolean;
+			isGroup?: boolean;
+			groupName?: string | null;
 		}>
 	) => void
 ): Unsubscribe {
@@ -749,7 +919,8 @@ export async function seedDMRailFromThreads(uid: string, { limitTo = 50 } = {}) 
 		const snap = await getDocs(q1);
 		for (const d of snap.docs) {
 			const data = d.data() as any;
-			await upsertDMRailForParticipants(d.id, data.participants ?? [], data.lastMessage ?? null);
+			const threadMeta = { isGroup: data.isGroup ?? false, name: data.name ?? null };
+			await upsertDMRailForParticipants(d.id, data.participants ?? [], data.lastMessage ?? null, threadMeta);
 		}
 	} catch {
 		// ignore (index may be missing; optional convenience)

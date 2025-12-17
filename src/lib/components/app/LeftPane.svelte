@@ -53,6 +53,7 @@
 		unread: number;
 		href: string;
 		lastActivity: number;
+		isGroup?: boolean;
 	};
 
 	let {
@@ -84,7 +85,7 @@
 	let statusMenuEl: HTMLDivElement | null = $state(null);
 	let presenceUnsub: (() => void) | null = null;
 	let dmRailUnsub: Unsubscribe | null = null;
-	let dmMetadata: Record<string, { title: string; photoURL: string | null }> = $state({});
+	let dmMetadata: Record<string, { title: string; photoURL: string | null; isGroup?: boolean; groupName?: string | null }> = $state({});
 	let serverList: ServerRailEntry[] = $state([]);
 	let stopUserWatch: (() => void) | null = null;
 	let dragPreview: ServerRailEntry[] = $state([]);
@@ -297,6 +298,7 @@
 				const photoURL = meta?.photoURL ?? item.photoURL ?? null;
 				const unread = item.unread ?? item.highCount ?? 0;
 				const lastActivity = item.lastActivity ?? Date.now();
+				const isGroup = meta?.isGroup ?? false;
 				return {
 					id: item.id,
 					threadId,
@@ -304,7 +306,8 @@
 					photoURL,
 					unread,
 					href: item.href,
-					lastActivity
+					lastActivity,
+					isGroup
 				} satisfies DmAlert;
 			});
 		list.sort((a, b) => b.lastActivity - a.lastActivity);
@@ -333,19 +336,26 @@
 		const uid = $user?.uid;
 		if (!uid) return;
 		dmRailUnsub = streamMyDMs(uid, (rows) => {
-			const next: Record<string, { title: string; photoURL: string | null }> = {};
+			const next: Record<string, { title: string; photoURL: string | null; isGroup?: boolean; groupName?: string | null }> = {};
 			rows.forEach((row) => {
 				const data = row as Record<string, any>;
+				const isGroup = data.isGroup ?? false;
+				const groupName = data.groupName ?? null;
 				const rawName =
 					typeof data.otherDisplayName === 'string' ? data.otherDisplayName.trim() : '';
 				const rawEmail = typeof data.otherEmail === 'string' ? data.otherEmail.trim() : '';
-				const title = rawName || rawEmail || 'Direct message';
+				// For groups, prefer groupName; for 1:1, use other person's name/email
+				const title = isGroup 
+					? (groupName || 'Group chat') 
+					: (rawName || rawEmail || 'Direct message');
 				next[row.id] = {
 					title,
 					photoURL:
 						typeof data.otherPhotoURL === 'string' && data.otherPhotoURL.length
 							? data.otherPhotoURL
-							: null
+							: null,
+					isGroup,
+					groupName
 				};
 			});
 			dmMetadata = next;
@@ -818,7 +828,13 @@
 							title={dm.title}
 							aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
 						>
-							<Avatar user={dm} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
+							{#if dm.isGroup}
+								<div class="rail-button__avatar-wrap w-8 h-8 rounded-full bg-muted flex items-center justify-center">
+									<i class="bx bx-group text-lg text-muted-foreground"></i>
+								</div>
+							{:else}
+								<Avatar user={dm} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
+							{/if}
 							<span class="rail-badge">{formatBadge(dm.unread)}</span>
 						</a>
 					{/each}

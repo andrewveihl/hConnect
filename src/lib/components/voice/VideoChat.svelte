@@ -248,6 +248,8 @@
 	let isCameraOff = $state(initialVoicePrefs.videoOffOnJoin);
 	let isMicToggling = $state(false);
 	let isCameraToggling = $state(false);
+	// Counter to force reactivity when track states change (since track.enabled doesn't trigger Svelte reactivity)
+	let trackStateVersion = $state(0);
 	let remoteConnected = $state(false);
 	let screenStream: MediaStream | null = null;
 	let isScreenSharing = $state(false);
@@ -308,6 +310,18 @@
 	let iceGatheringState = $state('new');
 	let publishedCandidateCount = $state(0);
 	let appliedCandidateCount = $state(0);
+
+	// ICE restart debouncing and state tracking
+	let iceRestartPending = false;
+	let iceRestartTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastIceRestartTime = 0;
+	const ICE_RESTART_DEBOUNCE_MS = 2000; // Minimum time between ICE restarts
+	const ICE_RESTART_COOLDOWN_MS = 5000; // Cooldown after successful connection
+	let connectionHealthCheckInterval: ReturnType<typeof setInterval> | null = null;
+	const CONNECTION_HEALTH_CHECK_INTERVAL_MS = 5000; // Check connection health every 5 seconds
+	let lastSuccessfulConnectionTime = 0;
+	let consecutiveHealthCheckFailures = 0;
+	const MAX_HEALTH_CHECK_FAILURES = 3;
 
 	function readUiPrefs(): VoiceUiPrefs {
 		if (!browser) return { gridMode: 'equal', showSelfInGrid: true };
@@ -2094,6 +2108,9 @@
 		memberUnsub?.();
 		prefsStop?.();
 		resetVoiceClientState();
+		// Clean up ICE restart and health check timers
+		clearIceRestartTimer();
+		stopConnectionHealthCheck();
 		hangUp().catch(() => {});
 		removeVoiceDebugSection('call.session');
 		removeVoiceDebugSection('call.participants');
@@ -2262,11 +2279,39 @@
 			destroyAudioPlayback(uid);
 			return;
 		}
+		
+		// Check if stream has active audio tracks
+		const audioTracks = stream.getAudioTracks();
+		if (audioTracks.length === 0) {
+			voiceDebug('ensureAudioPlayback: stream has no audio tracks', { uid, streamId: stream.id });
+			destroyAudioPlayback(uid);
+			return;
+		}
+		
 		const existing = audioPlayback.get(uid);
-		if (existing?.stream === stream) {
+		
+		// Check if we need to recreate the audio node
+		// This can happen if the stream changed, or if the audio track changed
+		const firstAudioTrack = audioTracks[0];
+		const needsRecreate = !existing || 
+			existing.stream !== stream || 
+			existing.stream.getAudioTracks()[0]?.id !== firstAudioTrack?.id;
+		
+		if (!needsRecreate) {
+			// Just update the volume
 			existing.gain.gain.value = muted ? 0 : volume;
 			return;
 		}
+		
+		voiceDebug('ensureAudioPlayback: creating audio playback node', { 
+			uid, 
+			streamId: stream.id, 
+			trackId: firstAudioTrack?.id,
+			trackEnabled: firstAudioTrack?.enabled,
+			trackMuted: firstAudioTrack?.muted,
+			trackReadyState: firstAudioTrack?.readyState
+		});
+		
 		destroyAudioPlayback(uid);
 		const ctx = ensureAudioContext();
 		if (!ctx) return;
@@ -2280,8 +2325,10 @@
 			if (ctx.state === 'suspended') {
 				ctx.resume().catch(() => {});
 			}
+			voiceDebug('ensureAudioPlayback: audio node created successfully', { uid, ctxState: ctx.state });
 		} catch (err) {
 			console.warn('Failed to create audio playback node', err);
+			voiceDebug('ensureAudioPlayback: failed to create audio node', { uid, error: String(err) });
 		}
 	}
 
@@ -2355,6 +2402,110 @@
 			}
 			if (uid !== currentUserId) {
 				video.muted = true;
+			}
+		}
+	}
+
+	/**
+	 * Force refresh media elements for a given stream ID.
+	 * This is called after remote streams are updated to ensure audio/video plays correctly.
+	 */
+	function refreshRemoteMediaElements(streamId: string) {
+		const stream = remoteStreams.get(streamId);
+		if (!stream) return;
+
+		// Find which participant this stream belongs to
+		const participant = participants.find((p) => p.streamId === streamId);
+		if (!participant) {
+			voiceDebug('refreshRemoteMediaElements: no participant found for stream', { streamId });
+			return;
+		}
+
+		const uid = participant.uid;
+		if (uid === currentUserId) return; // Don't refresh self
+
+		voiceDebug('refreshRemoteMediaElements', {
+			uid,
+			streamId,
+			audioTracks: stream.getAudioTracks().length,
+			videoTracks: stream.getVideoTracks().length
+		});
+
+		// Refresh audio element
+		const audio = audioRefs.get(uid);
+		if (audio) {
+			// Force re-attach if srcObject doesn't match
+			if (audio.srcObject !== stream) {
+				audio.srcObject = stream;
+			}
+			// Try to play audio
+			const playPromise = audio.play?.();
+			if (playPromise && typeof playPromise.then === 'function') {
+				playPromise
+					.then(() => {
+						audioNeedsUnlock = false;
+					})
+					.catch((err: any) => {
+						if (err?.name === 'NotAllowedError') {
+							audioNeedsUnlock = true;
+						}
+					});
+			}
+		}
+
+		// Refresh video element
+		const video = videoRefs.get(uid);
+		if (video) {
+			if (video.srcObject !== stream) {
+				video.srcObject = stream;
+			}
+			video.play?.().catch(() => {});
+		}
+
+		// Ensure audio playback via Web Audio API
+		const controls = participantControls.get(uid);
+		const moderation = participantModeration.get(uid);
+		const shouldMute = !!(controls?.muted || isPlaybackMuted || moderation?.serverMuted || moderation?.serverDeafened);
+		const volume = controls?.volume ?? DEFAULT_VOLUME;
+		ensureAudioPlayback(uid, stream, shouldMute, shouldMute ? 0 : volume);
+	}
+
+	/**
+	 * Refresh audio playback for a participant by UID.
+	 * This uses participantMedia to find the stream, handling cases where
+	 * the stream ID might not match what's in the participant doc.
+	 */
+	function refreshAudioForParticipant(uid: string) {
+		if (uid === currentUserId) return;
+		
+		const tile = participantMedia.find((t) => t.uid === uid);
+		if (!tile || !tile.stream) {
+			voiceDebug('refreshAudioForParticipant: no stream found for participant', { uid });
+			return;
+		}
+		
+		voiceDebug('refreshAudioForParticipant', {
+			uid,
+			streamId: tile.streamId,
+			audioTracks: tile.stream.getAudioTracks().length,
+			videoTracks: tile.stream.getVideoTracks().length
+		});
+		
+		// Ensure audio playback via Web Audio API
+		const controls = participantControls.get(uid);
+		const moderation = participantModeration.get(uid);
+		const shouldMute = !!(controls?.muted || isPlaybackMuted || moderation?.serverMuted || moderation?.serverDeafened);
+		const volume = controls?.volume ?? DEFAULT_VOLUME;
+		ensureAudioPlayback(uid, tile.stream, shouldMute, shouldMute ? 0 : volume);
+		
+		// Also refresh the audio element
+		const audio = audioRefs.get(uid);
+		if (audio) {
+			if (audio.srcObject !== tile.stream) {
+				audio.srcObject = tile.stream;
+			}
+			if (audio.paused) {
+				audio.play?.().catch(() => {});
 			}
 		}
 	}
@@ -2715,8 +2866,39 @@
 	function applyTrackStates() {
 		const audioTracks = localStream?.getAudioTracks() ?? [];
 		const videoTracks = localStream?.getVideoTracks() ?? [];
-		audioTracks.forEach((track) => (track.enabled = !isMicMuted));
-		videoTracks.forEach((track) => (track.enabled = !isCameraOff));
+		
+		// Apply enabled state to tracks
+		let trackStateChanged = false;
+		audioTracks.forEach((track) => {
+			const shouldBeEnabled = !isMicMuted;
+			if (track.enabled !== shouldBeEnabled) {
+				track.enabled = shouldBeEnabled;
+				trackStateChanged = true;
+				voiceDebug('Audio track enabled state changed', { 
+					enabled: shouldBeEnabled, 
+					trackId: track.id 
+				});
+			}
+		});
+		videoTracks.forEach((track) => {
+			const shouldBeEnabled = !isCameraOff;
+			if (track.enabled !== shouldBeEnabled) {
+				track.enabled = shouldBeEnabled;
+				trackStateChanged = true;
+				voiceDebug('Video track enabled state changed', { 
+					enabled: shouldBeEnabled, 
+					trackId: track.id 
+				});
+			}
+		});
+		
+		// Increment version to trigger button state updates
+		if (trackStateChanged) {
+			trackStateVersion += 1;
+		}
+
+		const previousAudioDir = audioTransceiverRef?.direction;
+		const previousVideoDir = videoTransceiverRef?.direction;
 
 		const desiredAudioDir: RTCRtpTransceiverDirection = audioTracks.length
 			? 'sendrecv'
@@ -2730,6 +2912,11 @@
 			isCameraOff,
 			isScreenSharing
 		});
+
+		// Check if transceiver direction changed (needs renegotiation)
+		const audioDirChanged = previousAudioDir && audioTransceiverRef?.direction !== previousAudioDir;
+		const videoDirChanged = previousVideoDir && videoTransceiverRef?.direction !== previousVideoDir;
+
 		voiceDebug('applyTrackStates', {
 			audioTrackCount: audioTracks.length,
 			videoTrackCount: videoTracks.length,
@@ -2737,8 +2924,17 @@
 			cameraOff: isCameraOff,
 			screenSharing: isScreenSharing,
 			audioDirection: audioTransceiverRef?.direction,
-			videoDirection: videoTransceiverRef?.direction
+			videoDirection: videoTransceiverRef?.direction,
+			audioDirChanged,
+			videoDirChanged
 		});
+
+		// If direction changed, we may need renegotiation
+		if ((audioDirChanged || videoDirChanged) && isJoined && pc && callRef) {
+			voiceDebug('Transceiver direction changed, scheduling renegotiation');
+			scheduleRenegotiation('transceiver-direction-change', { requireOfferer: true });
+		}
+
 		capturePeerDiagnostics(pc, 'apply-track-states');
 	}
 
@@ -2818,6 +3014,10 @@
 		}
 
 		voiceDebug('performRenegotiation start', { reasons });
+		
+		// Ensure our tracks are synced before renegotiating
+		syncLocalTracksToPeer();
+		
 		negotiationInFlight = renegotiateOffer()
 			.catch((err) => {
 				console.warn('Renegotiation failed', err);
@@ -2825,6 +3025,21 @@
 			})
 			.finally(() => {
 				negotiationInFlight = null;
+				// After renegotiation completes, refresh remote streams
+				// Use multiple delays to handle timing variations
+				const refreshAllAudio = () => {
+					remoteStreams.forEach((_, streamId) => {
+						refreshRemoteMediaElements(streamId);
+					});
+					// Also refresh by participant UID
+					participants.forEach(p => {
+						if (p.uid !== currentUserId) {
+							refreshAudioForParticipant(p.uid);
+						}
+					});
+				};
+				setTimeout(refreshAllAudio, 500);
+				setTimeout(refreshAllAudio, 1500);
 			});
 		await negotiationInFlight;
 	}
@@ -2975,14 +3190,32 @@
 		options: { fallback?: boolean; fromQueue?: boolean } = {}
 	) {
 		const { fallback = false, fromQueue = false } = options;
-		if (!connection || connection.signalingState === 'closed') return;
+		
+		// Validate connection state
+		if (!connection) {
+			voiceDebug('applyRemoteIceCandidate skipped (no connection)', { role });
+			return;
+		}
+		if (connection.signalingState === 'closed') {
+			voiceDebug('applyRemoteIceCandidate skipped (connection closed)', { role });
+			return;
+		}
+		
+		// Skip empty candidates (end-of-candidates signal)
+		if (!candidateData.candidate || candidateData.candidate.trim() === '') {
+			voiceDebug('Received end-of-candidates signal', { role });
+			return;
+		}
+		
 		const key = remoteCandidateKey(candidateData);
 		if (remoteCandidateKeys.has(key)) {
-			voiceDebug('Skipping duplicate remote ICE candidate', {
-				role,
-				key,
-				source: fallback ? 'fallback' : 'primary'
-			});
+			// Only log occasionally to reduce noise
+			if (appliedCandidateCount < 20) {
+				voiceDebug('Skipping duplicate remote ICE candidate', {
+					role,
+					source: fallback ? 'fallback' : 'primary'
+				});
+			}
 			return;
 		}
 		if (!fromQueue && pendingRemoteCandidateKeys.has(key)) {
@@ -2992,16 +3225,34 @@
 		if (!fromQueue) {
 			logRemoteCandidate(role, info, { fallback });
 		}
+		
+		// Check if we need to queue the candidate
 		if (!connection.remoteDescription) {
 			pendingRemoteCandidateKeys.add(key);
 			pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
 			voiceDebug('Queued remote ICE candidate (awaiting remote description)', {
 				role,
+				queueLength: pendingRemoteIceCandidates.length,
 				...info,
 				fallback
 			});
 			return;
 		}
+		
+		// Also check signaling state - some browsers need offer/answer exchange complete
+		if (connection.signalingState !== 'stable' && connection.signalingState !== 'have-local-offer' && connection.signalingState !== 'have-remote-offer') {
+			pendingRemoteCandidateKeys.add(key);
+			pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+			voiceDebug('Queued remote ICE candidate (signaling not ready)', {
+				role,
+				signalingState: connection.signalingState,
+				queueLength: pendingRemoteIceCandidates.length,
+				...info,
+				fallback
+			});
+			return;
+		}
+		
 		pendingRemoteCandidateKeys.delete(key);
 		remoteCandidateKeys.add(key);
 		const candidate = new RTCIceCandidate(candidateData);
@@ -3015,32 +3266,59 @@
 				voiceDebug('Failed to add remote ICE candidate', {
 					role,
 					error: err instanceof Error ? err.message : String(err),
+					signalingState: connection.signalingState,
+					hasRemoteDescription: !!connection.remoteDescription,
 					...info
 				});
+				
+				// Re-queue if it's a state error and we might be able to apply later
 				if (
 					err instanceof DOMException &&
-					err.name === 'InvalidStateError' &&
-					!connection.remoteDescription
+					(err.name === 'InvalidStateError' || err.name === 'OperationError')
 				) {
+					// Remove from applied set since it failed
+					remoteCandidateKeys.delete(key);
+					
+					// Only re-queue if not already pending
 					if (!pendingRemoteCandidateKeys.has(key)) {
 						pendingRemoteCandidateKeys.add(key);
 						pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+						voiceDebug('Re-queued failed ICE candidate for retry', { role });
 					}
 				}
 			});
 	}
 
 	function flushPendingRemoteIceCandidates(connection: RTCPeerConnection | null = pc) {
-		if (!connection || !connection.remoteDescription) return;
+		if (!connection) {
+			voiceDebug('flushPendingRemoteIceCandidates skipped (no connection)');
+			return;
+		}
+		if (!connection.remoteDescription) {
+			voiceDebug('flushPendingRemoteIceCandidates skipped (no remote description)');
+			return;
+		}
 		if (!pendingRemoteIceCandidates.length) return;
-		const queued = pendingRemoteIceCandidates;
+		
+		const queueLength = pendingRemoteIceCandidates.length;
+		voiceDebug('Flushing pending ICE candidates', {
+			count: queueLength,
+			signalingState: connection.signalingState
+		});
+		
+		const queued = [...pendingRemoteIceCandidates];
 		pendingRemoteIceCandidates = [];
-		queued.forEach((entry) =>
-			applyRemoteIceCandidate(connection, entry.candidate, entry.role, {
-				fallback: entry.fallback,
-				fromQueue: true
-			})
-		);
+		
+		// Process candidates in order with small delay between to avoid overwhelming
+		queued.forEach((entry, index) => {
+			// Small staggered delay to prevent race conditions
+			setTimeout(() => {
+				applyRemoteIceCandidate(connection, entry.candidate, entry.role, {
+					fallback: entry.fallback,
+					fromQueue: true
+				});
+			}, index * 10); // 10ms between each candidate
+		});
 	}
 
 	function attachOffererIceHandlers(connection: RTCPeerConnection) {
@@ -3315,48 +3593,93 @@
 
 	function syncLocalTracksToPeer() {
 		const connection = pc;
-		if (!connection) return;
+		if (!connection) {
+			voiceDebug('syncLocalTracksToPeer skipped (no connection)');
+			return;
+		}
+		if (connection.signalingState === 'closed') {
+			voiceDebug('syncLocalTracksToPeer skipped (connection closed)');
+			return;
+		}
+		
 		const stream = localStream;
 		const audioTrack = stream?.getAudioTracks()[0] ?? null;
 		const videoTrack = stream?.getVideoTracks()[0] ?? null;
 
-		const updateSender = (
+		voiceDebug('syncLocalTracksToPeer', {
+			hasStream: !!stream,
+			streamId: stream?.id ?? null,
+			hasAudioTrack: !!audioTrack,
+			hasVideoTrack: !!videoTrack,
+			audioSenderTrack: audioSender?.track?.id ?? null,
+			videoSenderTrack: videoSender?.track?.id ?? null
+		});
+
+		const updateSender = async (
 			sender: RTCRtpSender | null,
 			track: MediaStreamTrack | null,
 			kind: 'audio' | 'video'
-		): RTCRtpSender | null => {
+		): Promise<RTCRtpSender | null> => {
 			if (sender) {
-				voiceDebug('Replacing track on sender', { kind, hasTrack: !!track });
-				sender
-					.replaceTrack(track)
-					.catch((err) => console.warn(`Failed to sync ${kind} track`, err));
+				// Check if track actually needs updating
+				if (sender.track === track) {
+					voiceDebug(`${kind} track already on sender`, { trackId: track?.id ?? null });
+					return sender;
+				}
+				
+				voiceDebug(`Replacing ${kind} track on sender`, { 
+					hasTrack: !!track,
+					trackId: track?.id ?? null,
+					previousTrackId: sender.track?.id ?? null 
+				});
+				
 				try {
+					await sender.replaceTrack(track);
 					if (stream) {
 						sender.setStreams?.(stream);
 					} else {
 						sender.setStreams?.();
 					}
+					voiceDebug(`${kind} track replaced successfully`);
 				} catch (err) {
-					console.warn(`Failed to sync ${kind} stream metadata`, err);
+					console.warn(`Failed to sync ${kind} track`, err);
+					voiceDebug(`Failed to sync ${kind} track`, { 
+						error: err instanceof Error ? err.message : String(err) 
+					});
 				}
 				return sender;
 			}
+			
 			if (track && stream) {
-				voiceDebug('Adding track to connection', { kind, streamId: stream.id });
-				const next = connection.addTrack(track, stream);
+				voiceDebug(`Adding ${kind} track to connection`, { 
+					streamId: stream.id,
+					trackId: track.id 
+				});
 				try {
+					const next = connection.addTrack(track, stream);
 					next.setStreams?.(stream);
+					return next;
 				} catch (err) {
-					console.warn(`Failed to sync ${kind} stream metadata`, err);
+					console.warn(`Failed to add ${kind} track`, err);
+					voiceDebug(`Failed to add ${kind} track`, {
+						error: err instanceof Error ? err.message : String(err)
+					});
 				}
-				return next;
 			}
 			return sender;
 		};
 
-		audioSender = updateSender(audioSender, audioTrack, 'audio');
-		videoSender = updateSender(videoSender, videoTrack, 'video');
-		capturePeerDiagnostics(connection, 'sync-local-tracks');
+		// Update tracks asynchronously but don't block
+		(async () => {
+			audioSender = await updateSender(audioSender, audioTrack, 'audio');
+			videoSender = await updateSender(videoSender, videoTrack, 'video');
+			capturePeerDiagnostics(connection, 'sync-local-tracks');
+			
+			// Update presence after sync to ensure streamId is published
+			if (isJoined && localStream) {
+				updateParticipantPresence().catch(() => {});
+			}
+		})();
 	}
 
 	function videoConstraintsFromPrefs(prefs: UserVoicePreferences) {
@@ -3466,6 +3789,176 @@
 		syncLocalTracksToPeer();
 	}
 
+	/**
+	 * Debounced ICE restart to prevent multiple simultaneous restart attempts.
+	 * Includes cooldown period and proper state tracking.
+	 */
+	function requestIceRestart(reason: string) {
+		if (!pc || pc.signalingState === 'closed') {
+			voiceDebug('ICE restart skipped (no connection or closed)', { reason });
+			return;
+		}
+
+		const now = Date.now();
+		const timeSinceLastRestart = now - lastIceRestartTime;
+		const timeSinceLastSuccess = now - lastSuccessfulConnectionTime;
+
+		// If we recently had a successful connection, be more conservative
+		if (lastSuccessfulConnectionTime > 0 && timeSinceLastSuccess < ICE_RESTART_COOLDOWN_MS) {
+			voiceDebug('ICE restart deferred (in cooldown after success)', {
+				reason,
+				timeSinceLastSuccess,
+				cooldown: ICE_RESTART_COOLDOWN_MS
+			});
+			return;
+		}
+
+		// Debounce rapid restart requests
+		if (timeSinceLastRestart < ICE_RESTART_DEBOUNCE_MS) {
+			if (!iceRestartPending) {
+				iceRestartPending = true;
+				voiceDebug('ICE restart debounced', {
+					reason,
+					timeSinceLastRestart,
+					debounceMs: ICE_RESTART_DEBOUNCE_MS
+				});
+				if (iceRestartTimer) clearTimeout(iceRestartTimer);
+				iceRestartTimer = setTimeout(() => {
+					iceRestartTimer = null;
+					iceRestartPending = false;
+					executeIceRestart(reason);
+				}, ICE_RESTART_DEBOUNCE_MS - timeSinceLastRestart);
+			}
+			return;
+		}
+
+		// Clear any pending debounced restart
+		if (iceRestartTimer) {
+			clearTimeout(iceRestartTimer);
+			iceRestartTimer = null;
+		}
+		iceRestartPending = false;
+		executeIceRestart(reason);
+	}
+
+	function executeIceRestart(reason: string) {
+		if (!pc || pc.signalingState === 'closed') {
+			voiceDebug('ICE restart execution skipped (connection unavailable)', { reason });
+			return;
+		}
+
+		lastIceRestartTime = Date.now();
+		voiceDebug('Executing ICE restart', {
+			reason,
+			connectionState: pc.connectionState,
+			iceConnectionState: pc.iceConnectionState,
+			signalingState: pc.signalingState
+		});
+
+		try {
+			pc.restartIce();
+			// After ICE restart, we should trigger renegotiation as offerer
+			if (isOfferer) {
+				scheduleRenegotiation('ice-restart', { requireOfferer: true });
+			}
+		} catch (err) {
+			console.warn('ICE restart failed:', err);
+			voiceDebug('ICE restart execution failed', {
+				reason,
+				error: err instanceof Error ? err.message : String(err)
+			});
+		}
+	}
+
+	function clearIceRestartTimer() {
+		if (iceRestartTimer) {
+			clearTimeout(iceRestartTimer);
+			iceRestartTimer = null;
+		}
+		iceRestartPending = false;
+	}
+
+	/**
+	 * Start periodic connection health checks to proactively detect degraded connections
+	 */
+	function startConnectionHealthCheck() {
+		stopConnectionHealthCheck();
+		if (!browser) return;
+
+		connectionHealthCheckInterval = setInterval(async () => {
+			if (!pc || pc.connectionState === 'closed') {
+				stopConnectionHealthCheck();
+				return;
+			}
+
+			// Skip health check if we're in connecting/reconnecting states
+			if (isConnecting || isRestartingCall) return;
+
+			try {
+				const stats = await pc.getStats();
+				let hasActiveConnection = false;
+				let currentRtt: number | null = null;
+				let packetLossRate: number | null = null;
+
+				stats.forEach((report) => {
+					if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+						hasActiveConnection = true;
+						if (typeof report.currentRoundTripTime === 'number') {
+							currentRtt = report.currentRoundTripTime * 1000; // Convert to ms
+						}
+					}
+					if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+						const packetsLost = report.packetsLost || 0;
+						const packetsReceived = report.packetsReceived || 0;
+						const totalPackets = packetsLost + packetsReceived;
+						if (totalPackets > 0) {
+							packetLossRate = (packetsLost / totalPackets) * 100;
+						}
+					}
+				});
+
+				// Check for connection health issues
+				if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected') {
+					consecutiveHealthCheckFailures = 0;
+					lastSuccessfulConnectionTime = Date.now();
+
+					// Log significant RTT or packet loss
+					if (currentRtt !== null && currentRtt > 500) {
+						voiceDebug('High latency detected', { rtt: currentRtt });
+					}
+					if (packetLossRate !== null && packetLossRate > 5) {
+						voiceDebug('High packet loss detected', { packetLossRate });
+					}
+				} else if (!hasActiveConnection && isJoined) {
+					consecutiveHealthCheckFailures++;
+					voiceDebug('Connection health check: no active candidate pair', {
+						failures: consecutiveHealthCheckFailures,
+						connectionState: pc.connectionState,
+						iceConnectionState: pc.iceConnectionState
+					});
+
+					if (consecutiveHealthCheckFailures >= MAX_HEALTH_CHECK_FAILURES) {
+						voiceDebug('Connection health check: triggering ICE restart after repeated failures');
+						requestIceRestart('health-check-failure');
+						consecutiveHealthCheckFailures = 0;
+					}
+				}
+			} catch (err) {
+				voiceDebug('Connection health check failed', {
+					error: err instanceof Error ? err.message : String(err)
+				});
+			}
+		}, CONNECTION_HEALTH_CHECK_INTERVAL_MS);
+	}
+
+	function stopConnectionHealthCheck() {
+		if (connectionHealthCheckInterval) {
+			clearInterval(connectionHealthCheckInterval);
+			connectionHealthCheckInterval = null;
+		}
+		consecutiveHealthCheckFailures = 0;
+	}
+
 	function createPeerConnection() {
 		if (pc) return pc;
 		const config = buildRtcConfiguration();
@@ -3537,16 +4030,24 @@
 			const incoming = stream ?? new MediaStream();
 
 			voiceDebug('Received remote track', {
-				uid: event.transceiver?.mid ?? 'unknown',
+				mid: event.transceiver?.mid ?? 'unknown',
 				kind: track.kind,
 				id: track.id,
 				muted: track.muted,
+				enabled: track.enabled,
 				readyState: track.readyState,
-				streamId: incoming.id
+				streamId: incoming.id,
+				hasStream: !!stream
 			});
 
 			if (!stream) {
 				incoming.addTrack(track);
+			}
+
+			// Force enable the track - remote tracks may come in disabled
+			if (!track.enabled) {
+				voiceDebug('Enabling disabled remote track', { kind: track.kind, id: track.id });
+				track.enabled = true;
 			}
 
 			const syncRemoteStream = (reason: string) => {
@@ -3561,12 +4062,19 @@
 						draft.set(incoming.id, incoming);
 					}
 				}, `track-${reason}`);
+				
+				// After updating remote streams, trigger UI refresh for audio/video elements
+				refreshRemoteMediaElements(incoming.id);
+				
 				voiceDebug('Remote stream synced', {
 					streamId: incoming.id,
 					reason,
 					trackId: track.id,
 					trackState: track.readyState,
-					muted: track.muted
+					muted: track.muted,
+					enabled: track.enabled,
+					audioTracks: incoming.getAudioTracks().length,
+					videoTracks: incoming.getVideoTracks().length
 				});
 			};
 
@@ -3576,8 +4084,13 @@
 				voiceDebug('Remote track unmuted', {
 					id: track.id,
 					kind: track.kind,
-					streamId: incoming.id
+					streamId: incoming.id,
+					enabled: track.enabled
 				});
+				// Ensure track is enabled when unmuted
+				if (!track.enabled) {
+					track.enabled = true;
+				}
 				syncRemoteStream('track-unmuted');
 			};
 
@@ -3624,21 +4137,37 @@
 				case 'connected':
 					statusMessage = 'Connected.';
 					clearReconnectTimer();
+					clearIceRestartTimer();
 					consecutiveIceErrors = 0;
 					lastIceErrorTimestamp = 0;
 					connectionFailureCount = 0;
+					lastSuccessfulConnectionTime = Date.now();
+					consecutiveHealthCheckFailures = 0;
+					// Start health monitoring once connected
+					startConnectionHealthCheck();
+					
+					// Re-verify track states and refresh media after connection established
+					setTimeout(() => {
+						applyTrackStates();
+						syncLocalTracksToPeer();
+						// Update presence to ensure remote peers have our streamId
+						updateParticipantPresence().catch(() => {});
+						// Refresh all remote media elements to ensure playback
+						remoteStreams.forEach((stream, streamId) => {
+							refreshRemoteMediaElements(streamId);
+						});
+						voiceDebug('Post-connection media refresh completed');
+					}, 500);
 					break;
 				case 'disconnected':
 					statusMessage = 'Connection interrupted. Reconnecting...';
-					try {
-						voiceDebug('Restarting ICE (connection disconnected)');
-						pc.restartIce();
-					} catch (err) {
-						console.warn('ICE restart failed', err);
-					}
+					// Use debounced ICE restart instead of direct call
+					requestIceRestart('connection-disconnected');
 					if (maybeActivateFallbackTurnFromConnection('connection-disconnected')) {
 						break;
 					}
+					// Only schedule reconnect if ICE restart doesn't recover in time
+					// The scheduleReconnect will be a fallback with longer delay
 					scheduleReconnect('Rejoining call...', false);
 					break;
 				case 'failed':
@@ -3646,10 +4175,12 @@
 					if (maybeActivateFallbackTurnFromConnection('connection-failed')) {
 						break;
 					}
+					// For failed state, be more aggressive with reconnect
 					scheduleReconnect('Rejoining call...', true);
 					break;
 				case 'closed':
 					statusMessage = '';
+					stopConnectionHealthCheck();
 					break;
 			}
 		};
@@ -3664,15 +4195,21 @@
 			});
 			if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
 				clearReconnectTimer();
+				clearIceRestartTimer();
 				consecutiveIceErrors = 0;
 				lastIceErrorTimestamp = 0;
-			} else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-				try {
-					voiceDebug('Restarting ICE (ice connection state)', { state: pc.iceConnectionState });
-					pc.restartIce();
-				} catch (err) {
-					console.warn('Failed to restart ICE', err);
-				}
+				lastSuccessfulConnectionTime = Date.now();
+				consecutiveHealthCheckFailures = 0;
+			} else if (pc.iceConnectionState === 'failed') {
+				// For ICE failure, use debounced restart
+				requestIceRestart('ice-connection-failed');
+			} else if (pc.iceConnectionState === 'disconnected') {
+				// For disconnected, wait briefly then request restart if still disconnected
+				setTimeout(() => {
+					if (pc?.iceConnectionState === 'disconnected') {
+						requestIceRestart('ice-connection-disconnected-timeout');
+					}
+				}, 1500);
 			}
 		};
 
@@ -3860,6 +4397,20 @@
 				await deleteDoc(answerDescriptionRef).catch(() => {});
 				latestAnswerDescription = null;
 			}
+			// Also clear stale answer ICE candidates to ensure fresh exchange
+			if (answerCandidatesRef) {
+				try {
+					const staleCandidates = await getDocs(answerCandidatesRef);
+					const deletePromises = staleCandidates.docs.map(d => deleteDoc(d.ref));
+					await Promise.all(deletePromises);
+					consumedAnswerCandidateIds.clear();
+					voiceDebug('Cleared stale answer ICE candidates for fresh renegotiation', {
+						count: staleCandidates.size
+					});
+				} catch (err) {
+					voiceDebug('Failed to clear stale answer candidates', err);
+				}
+			}
 			lastOfferRevision = revision;
 			voiceDebug('Renegotiation offer published', { revision });
 		} catch (err) {
@@ -3950,6 +4501,61 @@
 					active: snapshotSummary.filter((p) => (p.status ?? 'active') === 'active').length,
 					summary: snapshotSummary
 				});
+				
+				// Detect new participants who joined (for audio setup)
+				const previousActiveUids = new Set(lastParticipantsSnapshot?.filter(p => (p.status ?? 'active') === 'active').map(p => p.uid) ?? []);
+				const newActiveParticipants = mapped.filter(p => 
+					(p.status ?? 'active') === 'active' && 
+					!previousActiveUids.has(p.uid) &&
+					p.uid !== currentUid
+				);
+				
+				if (newActiveParticipants.length > 0) {
+					voiceDebug('New participants joined', { 
+						uids: newActiveParticipants.map(p => p.uid),
+						streamIds: newActiveParticipants.map(p => p.streamId ?? null)
+					});
+					
+					// Refresh remote media elements for new participants after delays
+					const refreshParticipants = () => {
+						newActiveParticipants.forEach(p => {
+							if (p.streamId) {
+								refreshRemoteMediaElements(p.streamId);
+							}
+							refreshAudioForParticipant(p.uid);
+						});
+					};
+					
+					setTimeout(() => {
+						refreshParticipants();
+						syncLocalTracksToPeer();
+					}, 2000);
+					
+					setTimeout(refreshParticipants, 3000);
+					setTimeout(refreshParticipants, 5000);
+				}
+				
+				// Detect participants who left (for cleanup)
+				const nextActiveUids = new Set(mapped.filter(p => (p.status ?? 'active') === 'active').map(p => p.uid));
+				const departedUids = Array.from(previousActiveUids).filter(uid => !nextActiveUids.has(uid));
+				
+				if (departedUids.length > 0) {
+					voiceDebug('Participants left', { uids: departedUids });
+					// Cleanup audio playback and streams for departed participants
+					departedUids.forEach(uid => {
+						destroyAudioPlayback(uid);
+						participantControls.delete(uid);
+					});
+					
+					// When a participant leaves, if we're the offerer, we need to create a fresh offer
+					// so that when they (or anyone else) rejoins, they can properly answer it.
+					// This ensures the signaling state is ready for new answerers.
+					if (isOfferer && isJoined && pc && pc.signalingState === 'stable') {
+						voiceDebug('Participant left while we are offerer - creating fresh offer for future joiners');
+						scheduleRenegotiation('participant-left-refresh-offer', { requireOfferer: true });
+					}
+				}
+				
 				lastParticipantsSnapshot = mapped;
 				participants = mapped.filter((p) => (p.status ?? 'active') === 'active');
 				voiceDebug('Active participant list refreshed', {
@@ -4194,19 +4800,26 @@
 	}
 
 	async function joinChannel() {
+		console.log('[JOIN] joinChannel start', { serverId, channelId, isJoined, isConnecting });
 		voiceDebug('joinChannel start', { serverId, channelId, isJoined, isConnecting });
 		if (!serverId || !channelId) {
+			console.log('[JOIN] No serverId or channelId');
 			errorMessage = 'Select a voice channel to start a call.';
 			return;
 		}
-		if (isJoined || isConnecting) return;
+		if (isJoined || isConnecting) {
+			console.log('[JOIN] Already joined or connecting');
+			return;
+		}
 
 		const current = get(user);
 		if (!current?.uid) {
+			console.log('[JOIN] No user');
 			errorMessage = 'Sign in to join voice.';
 			return;
 		}
 
+		console.log('[JOIN] Starting connection...');
 		isConnecting = true;
 		errorMessage = '';
 		statusMessage = 'Setting up call...';
@@ -4281,12 +4894,27 @@
 				isOfferer = false;
 				processedRenegotiationSignals.clear();
 				lastOfferRevision = existingData?.offer?.revision ?? 1;
-				lastAnswerRevision = existingData?.answer?.revision ?? 0;
+				
+				const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
+				const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
+				
+				// If the existing answer was authored by us (from a previous session),
+				// we need to ignore it and create a fresh answer. This handles the rejoin case
+				// where user left and is rejoining - they shouldn't use their own old answer.
+				const answerIsSelfAuthored = answerUpdatedBy && answerUpdatedBy === current.uid;
+				if (answerIsSelfAuthored) {
+					voiceDebug('Existing answer was authored by self (rejoin case); will create fresh answer', {
+						answerUpdatedBy,
+						existingAnswerRevision: existingData?.answer?.revision ?? 0
+					});
+					lastAnswerRevision = 0;
+				} else {
+					lastAnswerRevision = existingData?.answer?.revision ?? 0;
+				}
+				
 				voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
 				attachAnswererIceHandlers(connection);
 
-				const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
-				const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
 				const selfAuthored =
 					offerUpdatedBy &&
 					offerUpdatedBy === current.uid &&
@@ -4306,7 +4934,7 @@
 					}
 					promoteToOfferer = true;
 				}
-
+				
 				if (!promoteToOfferer) {
 					const initialFallbackOffer =
 						typeof existingData.offer?.sdp === 'string'
@@ -4407,7 +5035,7 @@
 					}
 				}
 			}
-
+			
 			if (promoteToOfferer) {
 				await startAsOfferer(connection, docRef, current, existingData);
 				joinRole = 'offerer';
@@ -4417,12 +5045,16 @@
 				joinRole = isOfferer ? 'offerer' : 'answerer';
 			}
 
+			console.log('[JOIN] Updating participant presence...');
 			await updateParticipantPresence({ joinedAt: serverTimestamp(), status: 'active' as const });
+			console.log('[JOIN] Setting isJoined = true');
 			isJoined = true;
+			console.log('[JOIN] isJoined is now:', isJoined);
 			startCallTimer();
 			emitVoiceActivity('joined');
 			playSound('call-join');
 			startInactivityHeartbeat();
+			console.log('[JOIN] joinChannel complete', { joinRole, isOfferer });
 			voiceDebug('joinChannel ready', { joinRole, isOfferer });
 
 			// Acquire initial media tracks based on join preferences
@@ -4520,6 +5152,9 @@
 								isOfferer = false;
 
 								processedRenegotiationSignals.clear();
+								
+								// Clear consumed ICE candidate IDs to receive fresh candidates
+								consumedOfferCandidateIds.clear();
 
 								localCandidatesRef = answerCandidatesRef;
 
@@ -4529,6 +5164,10 @@
 										if (!pc) return;
 
 										try {
+											// Sync our tracks before processing the offer
+											syncLocalTracksToPeer();
+											applyTrackStates();
+											
 											await pc.setRemoteDescription(new RTCSessionDescription(description));
 											flushPendingRemoteIceCandidates(pc);
 
@@ -4626,6 +5265,23 @@
 											}
 
 											voiceDebug('Published fallback answer', { revision: nextRevision });
+											
+											// After answering a new offer, refresh audio for all remote participants
+											// since the media may have changed
+											setTimeout(() => {
+												participants.forEach(p => {
+													if (p.uid !== currentUidValue) {
+														refreshAudioForParticipant(p.uid);
+													}
+												});
+											}, 500);
+											setTimeout(() => {
+												participants.forEach(p => {
+													if (p.uid !== currentUidValue) {
+														refreshAudioForParticipant(p.uid);
+													}
+												});
+											}, 2000);
 										} catch (err) {
 											console.warn('Failed to process remote offer while offerer', err);
 
@@ -4671,12 +5327,17 @@
 								});
 
 								if (connection.signalingState !== 'have-local-offer') {
-									voiceDebug('Skipping remote answer (unexpected signaling state)', {
+									voiceDebug('Remote answer received but signaling not in have-local-offer state', {
 										revision,
-
 										signalingState: connection.signalingState
 									});
-
+									
+									// If we're in stable state and receive a new answer, it means a participant
+									// rejoined and sent an answer to our OLD offer. We need to renegotiate.
+									if (connection.signalingState === 'stable') {
+										voiceDebug('Triggering renegotiation to establish fresh connection with rejoining participant');
+										scheduleRenegotiation('answer-received-in-stable-state', { requireOfferer: true });
+									}
 									return;
 								}
 
@@ -4690,12 +5351,34 @@
 										voiceDebug('Remote answer applied', { revision });
 
 										flushPendingRemoteIceCandidates(connection);
+										
+										// After applying remote answer, schedule audio refresh
+										// to ensure audio playback is set up for all participants
+										setTimeout(() => {
+											participants.forEach(p => {
+												if (p.uid !== currentUidValue) {
+													refreshAudioForParticipant(p.uid);
+												}
+											});
+										}, 500);
+										setTimeout(() => {
+											participants.forEach(p => {
+												if (p.uid !== currentUidValue) {
+													refreshAudioForParticipant(p.uid);
+												}
+											});
+										}, 2000);
 									})
 
 									.catch((err) => {
 										console.warn('Failed to set remote description', err);
 
 										voiceDebug('Failed to set remote description', err);
+										
+										// If applying the answer failed, it might be due to mismatched offer/answer
+										// (e.g., from a rejoining participant). Trigger renegotiation to recover.
+										voiceDebug('Triggering renegotiation after failed answer application');
+										scheduleRenegotiation('answer-application-failed', { requireOfferer: true });
 									});
 							}
 						}
@@ -4731,6 +5414,8 @@
 		voiceDebug('hangUp start', options);
 		reconnectAttemptCount = 0;
 		connectionFailureCount = 0;
+		consecutiveHealthCheckFailures = 0;
+		lastSuccessfulConnectionTime = 0;
 		const { cleanupDoc = true, resetError = true, preserveMediaState = false } = options;
 		const wasJoined = isJoined;
 
@@ -4739,6 +5424,8 @@
 		}
 
 		clearReconnectTimer();
+		clearIceRestartTimer();
+		stopConnectionHealthCheck();
 		clearInactivityTimer();
 		stopInactivityHeartbeat();
 		stopCallTimer();
@@ -4970,6 +5657,8 @@
 				applyTrackStates();
 				statusMessage = 'Microphone muted.';
 			}
+			// Force button state update
+			trackStateVersion += 1;
 			await updateParticipantPresence();
 			scheduleRenegotiation(enabling ? 'mic-unmuted' : 'mic-muted', { requireOfferer: true });
 			const currentUid = $user?.uid ?? null;
@@ -5025,6 +5714,8 @@
 					stopThumbnailPublishing();
 				}
 
+				// Force button state update
+				trackStateVersion += 1;
 				await updateParticipantPresence();
 				scheduleRenegotiation(enabling ? 'camera-on' : 'camera-off', { requireOfferer: true });
 				const currentUid = $user?.uid ?? null;
@@ -5534,20 +6225,65 @@
 	}
 
 	function scheduleReconnect(message: string, force = false) {
+		// Don't schedule reconnect if connection has recovered
+		if (pc && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected')) {
+			voiceDebug('scheduleReconnect skipped (connection recovered)', {
+				connectionState: pc.connectionState,
+				iceConnectionState: pc.iceConnectionState
+			});
+			clearReconnectTimer();
+			return;
+		}
+
+		// Don't schedule if already reconnecting/restarting
+		if (isRestartingCall || isConnecting) {
+			voiceDebug('scheduleReconnect skipped (already in progress)', {
+				isRestartingCall,
+				isConnecting
+			});
+			return;
+		}
+
 		statusMessage = message;
 		voiceDebug('scheduleReconnect', {
 			message,
 			force,
 			existingTimer: !!reconnectTimer,
+			reconnectAttemptCount,
 			connectionState: pc?.connectionState ?? null,
 			iceState: pc?.iceConnectionState ?? null,
 			signalingState: pc?.signalingState ?? null
 		});
+		
+		// If there's already a pending timer and this is not a forced reconnect, skip
 		if (reconnectTimer && !force) return;
+		
 		clearReconnectTimer();
+		
+		// Calculate delay with exponential backoff
+		const baseDelay = force ? 1500 : RECONNECT_DELAY_MS;
+		const backoffMultiplier = Math.min(Math.pow(1.5, reconnectAttemptCount), 4); // Cap at 4x
+		const delay = Math.min(baseDelay * backoffMultiplier, 15000); // Cap at 15 seconds
+		
+		voiceDebug('scheduleReconnect delay calculated', {
+			baseDelay,
+			backoffMultiplier,
+			finalDelay: delay,
+			attempt: reconnectAttemptCount
+		});
+		
 		reconnectTimer = setTimeout(
 			() => {
 				reconnectTimer = null;
+				
+				// Final check before reconnecting - connection may have recovered
+				if (pc && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected')) {
+					voiceDebug('Reconnect cancelled (connection recovered during wait)');
+					reconnectAttemptCount = 0;
+					statusMessage = 'Connected.';
+					return;
+				}
+				
 				reconnectAttemptCount += 1;
 				const shouldPurge = force || reconnectAttemptCount >= 3;
 				voiceDebug('performFullReconnect queued', {
@@ -5557,9 +6293,22 @@
 				});
 				sessionQueue = sessionQueue
 					.then(() => performFullReconnect({ purgeDoc: shouldPurge }))
-					.catch((err) => console.warn('Failed to reconnect to voice call', err));
+					.catch((err) => {
+						console.warn('Failed to reconnect to voice call', err);
+						voiceDebug('Reconnect failed', {
+							attempt: reconnectAttemptCount,
+							error: err instanceof Error ? err.message : String(err)
+						});
+						// Schedule another attempt if we haven't exceeded max attempts
+						if (reconnectAttemptCount < 5) {
+							scheduleReconnect('Retrying connection...', false);
+						} else {
+							errorMessage = 'Unable to reconnect. Please try again manually.';
+							statusMessage = 'Connection failed.';
+						}
+					});
 			},
-			force ? 1500 : RECONNECT_DELAY_MS
+			delay
 		);
 	}
 
@@ -5807,8 +6556,31 @@
 	}
 	let hasAudioTrack = $derived(!!(localStream && localStream.getAudioTracks().length));
 	let hasVideoTrack = $derived(!!(localStream && localStream.getVideoTracks().length));
-	let micButtonLabel = $derived(hasAudioTrack && !isMicMuted ? 'Mute mic' : 'Enable mic');
-	let cameraButtonLabel = $derived(hasVideoTrack && !isCameraOff ? 'Stop video' : 'Start video');
+	
+	// Check actual track enabled state for accurate button display
+	// This prevents UI from being out of sync with actual media state
+	// trackStateVersion is included to force re-evaluation when tracks change
+	let actualMicEnabled = $derived.by(() => {
+		// Reference trackStateVersion to trigger reactivity
+		void trackStateVersion;
+		if (!localStream) return false;
+		const audioTrack = localStream.getAudioTracks()[0];
+		return audioTrack?.enabled === true && audioTrack?.readyState === 'live';
+	});
+	let actualCameraEnabled = $derived.by(() => {
+		// Reference trackStateVersion to trigger reactivity
+		void trackStateVersion;
+		if (!localStream || isScreenSharing) return false;
+		const videoTrack = localStream.getVideoTracks()[0];
+		return videoTrack?.enabled === true && videoTrack?.readyState === 'live';
+	});
+	
+	// Combined state: use actual track state when available, fall back to UI state
+	let isMicActive = $derived(hasAudioTrack ? actualMicEnabled : !isMicMuted);
+	let isCameraActive = $derived(hasVideoTrack && !isScreenSharing ? actualCameraEnabled : !isCameraOff);
+	
+	let micButtonLabel = $derived(isMicActive ? 'Mute mic' : 'Enable mic');
+	let cameraButtonLabel = $derived(isCameraActive ? 'Stop video' : 'Start video');
 	let screenShareButtonLabel = $derived(isScreenSharing ? 'Stop sharing' : 'Share screen');
 	let isEmbedded = $derived(layout === 'embedded');
 	run(() => {
@@ -5951,7 +6723,35 @@
 	run(() => {
 		participantMedia = (() => {
 			const usedStreamIds = new Set<string>();
-			const tiles: ParticipantMedia[] = participants.map((p) => {
+			
+			// Start with participants from Firestore
+			let sourceParticipants = [...participants];
+			
+			// If joined but self not yet in participants list, add synthetic self entry
+			// This ensures we show the user immediately after joining before Firestore confirms
+			if (isJoined && currentUserId && !sourceParticipants.some(p => p.uid === currentUserId)) {
+				sourceParticipants.push({
+					uid: currentUserId,
+					displayName: 'You',
+					photoURL: null,
+					authPhotoURL: null,
+					hasAudio: hasAudioTrack && !isMicMuted,
+					hasVideo: hasVideoTrack && !isCameraOff,
+					screenSharing: isScreenSharing,
+					status: 'active',
+					joinedAt: null,
+					updatedAt: null,
+					streamId: localStream?.id ?? null,
+					kickedBy: null,
+					removedAt: null,
+					renegotiationRequestId: null,
+					renegotiationRequestReason: null,
+					renegotiationRequestedAt: null,
+					renegotiationResolvedAt: null
+				});
+			}
+			
+			const tiles: ParticipantMedia[] = sourceParticipants.map((p) => {
 				const streamId = p.streamId ?? null;
 				let stream: MediaStream | null = null;
 				if (p.uid === currentUserId) {
@@ -6091,8 +6891,46 @@
 	run(() => {
 		remoteConnected = participantMedia.some((tile) => !tile.isSelf && !!tile.stream);
 	});
+	// Ensure audio playback whenever remote streams or participant media changes
+	run(() => {
+		if (!isJoined) return;
+		participantMedia.forEach((tile) => {
+			if (tile.isSelf || !tile.stream) return;
+			
+			// Ensure Web Audio API playback is active
+			const controls = participantControls.get(tile.uid);
+			const moderation = participantModeration.get(tile.uid);
+			const shouldMute = !!(controls?.muted || isPlaybackMuted || moderation?.serverMuted || moderation?.serverDeafened);
+			const volume = controls?.volume ?? DEFAULT_VOLUME;
+			ensureAudioPlayback(tile.uid, tile.stream, shouldMute, shouldMute ? 0 : volume);
+			
+			// Also try to play the audio element
+			const audio = audioRefs.get(tile.uid);
+			if (audio && audio.srcObject && audio.paused) {
+				audio.play?.().catch(() => {});
+			}
+		});
+	});
+	// Cleanup audio playback and moderation when participants leave
 	run(() => {
 		const activeUids = new Set(participantMedia.map((tile) => tile.uid));
+		
+		// Cleanup audio playback for participants who left
+		audioPlayback.forEach((_, uid) => {
+			if (!activeUids.has(uid)) {
+				voiceDebug('Cleaning up audio playback for departed participant', { uid });
+				destroyAudioPlayback(uid);
+			}
+		});
+		
+		// Cleanup participant controls for departed participants
+		participantControls.forEach((_, uid) => {
+			if (!activeUids.has(uid)) {
+				participantControls.delete(uid);
+			}
+		});
+		
+		// Cleanup moderation state
 		const previousModeration = getParticipantModerationCache();
 		let changed = false;
 		let nextModeration = previousModeration;
@@ -6364,10 +7202,10 @@
 					focusedTileId={gridMode === 'focus' && focusedTile ? focusedTile.uid : null}
 					gridMode={gridMode === 'focus' ? 'focus' : 'grid'}
 					showSelf={showSelfInGrid}
-					muteActive={!isMicMuted}
-					videoActive={!isCameraOff && !isScreenSharing}
+					muteActive={isMicActive}
+					videoActive={isCameraActive}
 					shareActive={isScreenSharing}
-					shareDisabled={isScreenSharePending}
+					shareDisabled={isScreenSharePending || isCameraToggling}
 					moreOpen={moreMenuOpen}
 					onToggleMute={toggleMic}
 					onToggleVideo={toggleCamera}
@@ -6451,12 +7289,12 @@
 											</button>
 										</div>
 										{#if tile.isSelf}
-											<button type="button" class="call-menu__action" onclick={toggleMic}>
+											<button type="button" class="call-menu__action" onclick={toggleMic} disabled={isMicToggling}>
 												<div>
-													<span>{isMicMuted ? 'Unmute mic' : 'Mute mic'}</span>
+													<span>{isMicActive ? 'Mute mic' : 'Unmute mic'}</span>
 													<small>Control your microphone</small>
 												</div>
-												<i class={`bx ${isMicMuted ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
+												<i class={`bx ${isMicActive ? 'bx-microphone' : 'bx-microphone-off'}`}></i>
 											</button>
 											<button type="button" class="call-menu__action" onclick={toggleDeafenSelf}>
 												<div>
@@ -6466,12 +7304,12 @@
 												<i class={`bx ${isPlaybackMuted ? 'bx-volume-full' : 'bx-volume-mute'}`}
 												></i>
 											</button>
-											<button type="button" class="call-menu__action" onclick={toggleCamera}>
+											<button type="button" class="call-menu__action" onclick={toggleCamera} disabled={isCameraToggling}>
 												<div>
-													<span>{isCameraOff ? 'Turn camera on' : 'Turn camera off'}</span>
+													<span>{isCameraActive ? 'Turn camera off' : 'Turn camera on'}</span>
 													<small>Control your video</small>
 												</div>
-												<i class={`bx ${isCameraOff ? 'bx-video-off' : 'bx-video'}`}></i>
+												<i class={`bx ${isCameraActive ? 'bx-video' : 'bx-video-off'}`}></i>
 											</button>
 											<button type="button" class="call-menu__action" onclick={openSelfPreview}>
 												<div>
@@ -6616,6 +7454,20 @@
 						<i class="bx bx-message-dots"></i>
 					</button>
 				</div>
+			{:else if isJoined}
+				<!-- Joined but no tiles yet - show loading state -->
+				{@const selfPhotoUrl = resolveProfilePhotoURL($userProfile ?? $user)}
+				<div class="call-empty" aria-label="Call loading">
+					<div class="call-empty__tile">
+						<div class="call-empty__avatar">
+							<Avatar src={selfPhotoUrl} user={$userProfile ?? $user} name="Your avatar" size="2xl" isSelf={true} class="w-full h-full" />
+						</div>
+						<div class="call-empty__label">
+							{sessionChannelName || 'Voice channel'}
+						</div>
+						<div class="call-empty__hint">Connected — loading call...</div>
+					</div>
+				</div>
 			{:else}
 				{@const selfPhotoUrl = resolveProfilePhotoURL($userProfile ?? $user)}
 				<div class="call-empty" aria-label="Call preview">
@@ -6685,13 +7537,14 @@
 						<div class="call-controls__group call-controls__group--main">
 							<div class="call-controls__item">
 								<button
-									class={controlClasses({ active: !isMicMuted })}
+									class={controlClasses({ active: isMicActive, disabled: isMicToggling })}
 									onclick={toggleMic}
 									aria-label={micButtonLabel}
+									disabled={isMicToggling}
 								>
-									<i class={`bx ${isMicMuted ? 'bx-microphone-off' : 'bx-microphone'}`}></i>
+									<i class={`bx ${isMicActive ? 'bx-microphone' : 'bx-microphone-off'}`}></i>
 								</button>
-								<span>{isMicMuted ? 'Muted' : 'Mute'}</span>
+								<span>{isMicActive ? 'Mute' : 'Muted'}</span>
 							</div>
 							<div class="call-controls__item">
 								<button
@@ -6705,14 +7558,14 @@
 							</div>
 							<div class="call-controls__item">
 								<button
-									class={controlClasses({ active: !isCameraOff && !isScreenSharing })}
+									class={controlClasses({ active: isCameraActive, disabled: isCameraToggling })}
 									onclick={toggleCamera}
 									aria-label={cameraButtonLabel}
+									disabled={isCameraToggling}
 								>
-									<i class={`bx ${isCameraOff || isScreenSharing ? 'bx-video-off' : 'bx-video'}`}
-									></i>
+									<i class={`bx ${isCameraActive ? 'bx-video' : 'bx-video-off'}`}></i>
 								</button>
-								<span>{isCameraOff || isScreenSharing ? 'Camera off' : 'Camera'}</span>
+								<span>{isCameraActive ? 'Camera' : 'Camera off'}</span>
 							</div>
 							{#if !compactMatch}
 								<div class="call-controls__item">

@@ -10,6 +10,7 @@
 	import {
 		searchUsersByName,
 		getOrCreateDMThread,
+		createGroupDM,
 		streamMyDMs,
 		streamUnreadCount,
 		streamProfiles,
@@ -103,6 +104,12 @@
 	let visibleSearchResults: any[] = $state([]);
 	let visiblePeopleList: any[] = $state([]);
 
+	// Group DM creation state
+	let isGroupMode = $state(false);
+	let selectedForGroup: any[] = $state([]);
+	let groupName = $state('');
+	let isCreatingGroup = $state(false);
+
 	function resetSearchState() {
 		clearTimeout(searchTimer);
 		searchTimer = null;
@@ -113,16 +120,81 @@
 		searchVisibleCount = SEARCH_PAGE_SIZE;
 	}
 
+	function resetGroupState() {
+		isGroupMode = false;
+		selectedForGroup = [];
+		groupName = '';
+		isCreatingGroup = false;
+	}
+
 	function openPeoplePicker() {
 		resetSearchState();
+		resetGroupState();
 		peopleVisibleCount = Math.min(PEOPLE_PAGE_SIZE, people.length || PEOPLE_PAGE_SIZE);
 		showPeoplePicker = true;
 	}
 
 	function closePeoplePicker() {
 		resetSearchState();
+		resetGroupState();
 		showPeoplePicker = false;
 		peopleVisibleCount = PEOPLE_PAGE_SIZE;
+	}
+
+	function toggleGroupMode() {
+		isGroupMode = !isGroupMode;
+		if (!isGroupMode) {
+			selectedForGroup = [];
+			groupName = '';
+		}
+	}
+
+	function togglePersonForGroup(person: any) {
+		const idx = selectedForGroup.findIndex(p => p.uid === person.uid);
+		if (idx >= 0) {
+			selectedForGroup = selectedForGroup.filter(p => p.uid !== person.uid);
+		} else {
+			selectedForGroup = [...selectedForGroup, person];
+		}
+	}
+
+	function isSelectedForGroup(uid: string): boolean {
+		return selectedForGroup.some(p => p.uid === uid);
+	}
+
+	async function createGroup() {
+		if (!me?.uid || selectedForGroup.length < 2 || isCreatingGroup) return;
+		
+		isCreatingGroup = true;
+		try {
+			const participantUids = [me.uid, ...selectedForGroup.map(p => p.uid)];
+			const thread = await createGroupDM(participantUids, me.uid, groupName.trim() || undefined);
+			
+			// Add to local threads list
+			if (!threads.find((x) => x.id === thread.id)) {
+				threads = [
+					{
+						id: thread.id,
+						participants: thread.participants,
+						lastMessage: null,
+						updatedAt: new Date(),
+						isGroup: true,
+						name: thread.name
+					},
+					...threads
+				];
+			}
+
+			activeThreadId = thread.id;
+			dispatch('select', thread.id);
+			closePeoplePicker();
+			await goto(`/dms/${thread.id}`);
+		} catch (err: any) {
+			console.error('Failed to create group DM', err);
+			alert(err?.message ?? 'Failed to create group. Please try again.');
+		} finally {
+			isCreatingGroup = false;
+		}
 	}
 
 	async function runSearch(q: string) {
@@ -196,6 +268,38 @@
 
 	function resolveOtherUid(t: any) {
 		return t.otherUid || (t.participants || []).find((p: string) => p !== me?.uid) || null;
+	}
+
+	function isGroupThread(t: any): boolean {
+		return t.isGroup === true || (t.participants?.length ?? 0) > 2;
+	}
+
+	function getGroupParticipantNames(t: any): string {
+		const participants = t.participants || [];
+		const otherParticipants = participants.filter((uid: string) => uid !== me?.uid);
+		const names = otherParticipants.slice(0, 3).map((uid: string) => {
+			if (nameCache[uid]) return nameCache[uid];
+			const fromPeople = peopleMap[uid];
+			if (fromPeople) {
+				return fromPeople.displayName || fromPeople.name || fromPeople.email || uid.slice(0, 8);
+			}
+			return uid.slice(0, 8);
+		});
+		const remaining = otherParticipants.length - 3;
+		if (remaining > 0) {
+			return `${names.join(', ')} +${remaining}`;
+		}
+		return names.join(', ');
+	}
+
+	function threadDisplayName(t: any): string {
+		// For group chats, use the group name if set, otherwise list participant names
+		if (isGroupThread(t)) {
+			if (t.name) return t.name;
+			return getGroupParticipantNames(t);
+		}
+		// For 1:1 chats, use the other person's name
+		return otherOf(t);
 	}
 
 	function otherOf(t: any) {
@@ -860,10 +964,12 @@
 					{#each sortedThreads as t}
 						{@const isActive = activeThreadId === t.id}
 						{@const otherUid = resolveOtherUid(t)}
-						{@const presenceState = presenceStateFor(otherUid, t)}
+						{@const isGroup = isGroupThread(t)}
+						{@const presenceState = isGroup ? 'offline' : presenceStateFor(otherUid, t)}
 						{@const timestampLabel = formatThreadTimestamp(t.updatedAt)}
 						{@const isSwipingThis = swipeThreadId === t.id}
 						{@const swipeOffset = isSwipingThis ? swipeDelta : 0}
+						{@const displayName = threadDisplayName(t)}
 						<li class="dm-thread__item">
 							<!-- Delete action revealed by swipe -->
 							<div
@@ -894,17 +1000,23 @@
 									onclick={(event) => handleThreadClick(event, t.id)}
 								>
 									<div class="dm-thread__avatar">
-										<Avatar
-											user={peopleMap[otherUid ?? ''] ?? t.profile ?? t}
-											name={otherOf(t)}
-											size="sm"
-											showPresence={Boolean(otherUid)}
-											presence={presenceState}
-										/>
+										{#if isGroup}
+											<div class="dm-thread__group-icon">
+												<i class="bx bx-group"></i>
+											</div>
+										{:else}
+											<Avatar
+												user={peopleMap[otherUid ?? ''] ?? t.profile ?? t}
+												name={otherOf(t)}
+												size="sm"
+												showPresence={Boolean(otherUid)}
+												presence={presenceState}
+											/>
+										{/if}
 									</div>
 									<div class="dm-thread__content">
 										<div class="dm-thread__header-line">
-											<span class="dm-thread__name">{otherOf(t)}</span>
+											<span class="dm-thread__name">{displayName}</span>
 											{#if timestampLabel}
 												<span class="dm-thread__timestamp">{timestampLabel}</span>
 											{/if}
@@ -938,18 +1050,68 @@
 		<div class="people-picker absolute inset-0 z-20 flex flex-col text-primary">
 			<div class="px-4 py-3 border-b border-subtle flex items-center justify-between">
 				<div>
-					<div class="text-base font-semibold">Start a conversation</div>
-					<div class="people-picker__subtitle">Search anyone on hConnect</div>
+					<div class="text-base font-semibold">
+						{isGroupMode ? 'Create Group Chat' : 'Start a conversation'}
+					</div>
+					<div class="people-picker__subtitle">
+						{isGroupMode ? 'Select people to add to the group' : 'Search anyone on hConnect'}
+					</div>
 				</div>
-				<button
-					class="btn btn-ghost btn-sm rounded-full people-picker__close"
-					type="button"
-					aria-label="Close people picker"
-					onclick={closePeoplePicker}
-				>
-					<i class="bx bx-x text-xl"></i>
-				</button>
+				<div class="flex items-center gap-2">
+					<button
+						class="btn btn-ghost btn-sm rounded-full people-picker__group-toggle"
+						class:people-picker__group-toggle--active={isGroupMode}
+						type="button"
+						aria-label={isGroupMode ? 'Switch to direct message' : 'Create group chat'}
+						title={isGroupMode ? 'Switch to direct message' : 'Create group chat'}
+						onclick={toggleGroupMode}
+					>
+						<i class="bx bx-group text-lg"></i>
+					</button>
+					<button
+						class="btn btn-ghost btn-sm rounded-full people-picker__close"
+						type="button"
+						aria-label="Close people picker"
+						onclick={closePeoplePicker}
+					>
+						<i class="bx bx-x text-xl"></i>
+					</button>
+				</div>
 			</div>
+
+			{#if isGroupMode && selectedForGroup.length > 0}
+				<div class="people-picker__selected-bar">
+					<div class="people-picker__selected-list">
+						{#each selectedForGroup as person}
+							<button
+								class="people-picker__selected-chip"
+								onclick={() => togglePersonForGroup(person)}
+								title="Remove {person.displayName || person.email || 'User'}"
+							>
+								<Avatar user={person} name={person.displayName || person.email || 'User'} size="xs" />
+								<span class="people-picker__selected-name">{person.displayName || person.email || 'User'}</span>
+								<i class="bx bx-x"></i>
+							</button>
+						{/each}
+					</div>
+					<div class="people-picker__selected-count">
+						{selectedForGroup.length} selected
+					</div>
+				</div>
+			{/if}
+
+			{#if isGroupMode}
+				<div class="p-4 border-b border-subtle space-y-2">
+					<div class="people-picker__input">
+						<i class="bx bx-group people-picker__search-icon"></i>
+						<input
+							class="input input--compact pl-9 pr-3 people-picker__field"
+							placeholder="Group name (optional)"
+							bind:value={groupName}
+						/>
+					</div>
+				</div>
+			{/if}
 
 			<div class="p-4 border-b border-subtle space-y-2">
 				<div class="people-picker__input">
@@ -965,19 +1127,31 @@
 					<p class="people-picker__hint text-red-400">{error}</p>
 				{:else if searching}
 					<p class="people-picker__hint">Searching...</p>
-				{:else if term.trim().length < 2}
+				{:else if term.trim().length < 2 && !isGroupMode}
 					<p class="people-picker__hint">Type at least 2 characters to search.</p>
 				{/if}
 			</div>
 
 			<div class="people-picker__body flex-1 overflow-y-auto p-4 space-y-6">
-				<section>
-					<div class="people-picker__section-label px-2">Search results</div>
-					{#if visibleSearchResults.length > 0}
+				{#if visibleSearchResults.length > 0}
+					<section>
+						<div class="people-picker__section-label px-2">Search results</div>
 						<ul class="space-y-1">
 							{#each visibleSearchResults as u}
+								{@const isSelected = isSelectedForGroup(u.uid)}
 								<li>
-									<button class="people-picker__option" onclick={() => openOrStartDM(u.uid)}>
+									<button 
+										class="people-picker__option"
+										class:people-picker__option--selected={isGroupMode && isSelected}
+										onclick={() => isGroupMode ? togglePersonForGroup(u) : openOrStartDM(u.uid)}
+									>
+										{#if isGroupMode}
+											<div class="people-picker__checkbox" class:people-picker__checkbox--checked={isSelected}>
+												{#if isSelected}
+													<i class="bx bx-check"></i>
+												{/if}
+											</div>
+										{/if}
 										<Avatar user={u} name={u.displayName || u.email || u.uid} size="sm" />
 										<div class="text-sm text-left">
 											<div class="font-medium leading-5">{u.displayName || u.email || u.uid}</div>
@@ -996,14 +1170,18 @@
 								</li>
 							{/if}
 						</ul>
-					{:else if term.trim().length >= 2 && !searching && !error}
+					</section>
+				{:else if term.trim().length >= 2 && !searching && !error}
+					<section>
+						<div class="people-picker__section-label px-2">Search results</div>
 						<p class="people-picker__empty">No people found.</p>
-					{:else if searching}
+					</section>
+				{:else if searching}
+					<section>
+						<div class="people-picker__section-label px-2">Search results</div>
 						<p class="people-picker__empty">Looking up people...</p>
-					{:else}
-						<p class="people-picker__empty">Start typing to search for anyone on hConnect.</p>
-					{/if}
-				</section>
+					</section>
+				{/if}
 
 				<section>
 					<div class="people-picker__section-label px-2">All people</div>
@@ -1025,8 +1203,20 @@
 					{:else if visiblePeopleList.length > 0}
 						<ul class="space-y-1 pr-1">
 							{#each visiblePeopleList as p}
+								{@const isSelected = isSelectedForGroup(p.uid)}
 								<li>
-									<button class="people-picker__option" onclick={() => openOrStartDM(p.uid)}>
+									<button 
+										class="people-picker__option"
+										class:people-picker__option--selected={isGroupMode && isSelected}
+										onclick={() => isGroupMode ? togglePersonForGroup(p) : openOrStartDM(p.uid)}
+									>
+										{#if isGroupMode}
+											<div class="people-picker__checkbox" class:people-picker__checkbox--checked={isSelected}>
+												{#if isSelected}
+													<i class="bx bx-check"></i>
+												{/if}
+											</div>
+										{/if}
 										<Avatar user={p} name={p.displayName || p.email || 'User'} size="sm" />
 										<div class="text-sm text-left">
 											<div class="font-medium leading-5">{p.displayName || p.email || 'User'}</div>
@@ -1050,6 +1240,24 @@
 					{/if}
 				</section>
 			</div>
+
+			{#if isGroupMode}
+				<div class="people-picker__footer">
+					<button
+						class="people-picker__create-btn"
+						disabled={selectedForGroup.length < 2 || isCreatingGroup}
+						onclick={createGroup}
+					>
+						{#if isCreatingGroup}
+							<i class="bx bx-loader-alt animate-spin"></i>
+							Creating...
+						{:else}
+							<i class="bx bx-group"></i>
+							Create Group ({selectedForGroup.length + 1} members)
+						{/if}
+					</button>
+				</div>
+			{/if}
 		</div>
 	{/if}
 </aside>
@@ -1293,6 +1501,19 @@
 		border-radius: 0.375rem;
 	}
 
+	.dm-thread__group-icon {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.5rem;
+		background: linear-gradient(135deg, var(--color-accent, #5865f2) 0%, #7c3aed 100%);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: white;
+		font-size: 1rem;
+		flex-shrink: 0;
+	}
+
 	.dm-thread__delete-btn {
 		position: absolute;
 		top: 50%;
@@ -1423,5 +1644,129 @@
 	.people-picker__sentinel {
 		width: 100%;
 		height: 1px;
+	}
+
+	/* Group chat creation styles */
+	.people-picker__group-toggle {
+		min-width: 2rem;
+		height: 2rem;
+		color: var(--color-text-secondary);
+		transition: color 150ms ease, background 150ms ease;
+	}
+
+	.people-picker__group-toggle:hover {
+		color: var(--color-text-primary);
+		background: rgba(255, 255, 255, 0.1);
+	}
+
+	.people-picker__group-toggle--active {
+		color: var(--color-accent, #5865f2);
+		background: rgba(88, 101, 242, 0.15);
+	}
+
+	.people-picker__selected-bar {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.75rem 1rem;
+		background: rgba(88, 101, 242, 0.1);
+		border-bottom: 1px solid var(--color-border-subtle);
+	}
+
+	.people-picker__selected-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+		flex: 1;
+	}
+
+	.people-picker__selected-chip {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem 0.25rem 0.25rem;
+		background: var(--color-panel);
+		border: 1px solid var(--color-border-subtle);
+		border-radius: 9999px;
+		font-size: 0.75rem;
+		color: var(--color-text-primary);
+		transition: background 150ms ease;
+	}
+
+	.people-picker__selected-chip:hover {
+		background: rgba(220, 38, 38, 0.1);
+		border-color: rgba(220, 38, 38, 0.3);
+	}
+
+	.people-picker__selected-chip:hover i {
+		color: #f87171;
+	}
+
+	.people-picker__selected-name {
+		max-width: 6rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.people-picker__selected-count {
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		flex-shrink: 0;
+	}
+
+	.people-picker__checkbox {
+		width: 1.25rem;
+		height: 1.25rem;
+		border-radius: 0.25rem;
+		border: 2px solid var(--color-border-subtle);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		transition: background 150ms ease, border-color 150ms ease;
+	}
+
+	.people-picker__checkbox--checked {
+		background: var(--color-accent, #5865f2);
+		border-color: var(--color-accent, #5865f2);
+		color: white;
+	}
+
+	.people-picker__option--selected {
+		background: rgba(88, 101, 242, 0.1);
+	}
+
+	.people-picker__footer {
+		padding: 1rem;
+		border-top: 1px solid var(--color-border-subtle);
+		background: var(--color-panel);
+	}
+
+	.people-picker__create-btn {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
+		padding: 0.75rem 1rem;
+		background: var(--color-accent, #5865f2);
+		color: white;
+		border: none;
+		border-radius: 0.5rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 150ms ease, opacity 150ms ease;
+	}
+
+	.people-picker__create-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--color-accent, #5865f2) 90%, white);
+	}
+
+	.people-picker__create-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 </style>
