@@ -848,3 +848,17 @@ export async function searchUsersByName(term: string, { limitTo = 25 } = {}) {
 
 	return results;
 }
+
+/**
+ * Trigger a server-side backfill of the user's DM rail.
+ * This is a cloud function that will find all DM threads the user
+ * participates in and ensure they appear in their sidebar.
+ * Useful for recovering "missing" conversations.
+ */
+export async function triggerDMRailBackfill(): Promise<{ ok: boolean; updated: number; total: number }> {
+	const { getFunctions, httpsCallable } = await import('firebase/functions');
+	const functions = getFunctions();
+	const backfill = httpsCallable(functions, 'backfillMyDMRail');
+	const result = await backfill();
+	return result.data as { ok: boolean; updated: number; total: number };
+}

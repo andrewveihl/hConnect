@@ -2,7 +2,6 @@
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
 	import { onMount, tick } from 'svelte';
-	import SuperAdminFab from './SuperAdminFab.svelte';
 	import TestPushFab from './TestPushFab.svelte';
 
 	type Position = { x: number; y: number };
@@ -234,7 +233,6 @@
 	ontouchcancel={stopTouchPropagation}
 >
 	<TestPushFab />
-	<SuperAdminFab />
 </div>
 
 <style>

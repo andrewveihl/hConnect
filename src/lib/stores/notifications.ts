@@ -134,6 +134,11 @@ type ChannelIndicatorState = {
 	low: number;
 };
 
+type ServerUnreadState = {
+	hasActivity: boolean;
+	hasHighPriority: boolean;
+};
+
 const notificationsInternal = writable<NotificationItem[]>([]);
 const notificationCountInternal = writable(0);
 const dmUnreadCountInternal = writable(0);
@@ -142,6 +147,7 @@ const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>(
 	{}
 );
+const serverUnreadInternal = writable<Record<string, ServerUnreadState>>({});
 const threadUnreadCountInternal = writable(0);
 const threadUnreadByIdInternal = writable<Record<string, number>>({});
 let lastBadgeValue: number | null = null;
@@ -169,6 +175,7 @@ export const channelUnreadCount: Readable<number> = {
 export const notificationsReady = derived(readyInternal, (value) => value);
 export const hasNotifications = derived(notificationCountInternal, (total) => total > 0);
 export const channelIndicators = derived(channelIndicatorsInternal, (value) => value);
+export const serverUnreadIndicators = derived(serverUnreadInternal, (value) => value);
 export const threadUnreadCount = derived(threadUnreadCountInternal, (value) => value);
 export const threadUnreadById = derived(threadUnreadByIdInternal, (value) => value);
 
@@ -762,6 +769,7 @@ function cleanupAll() {
 	dmUnreadCountInternal.set(0);
 	channelUnreadCountInternal.set(0);
 	channelIndicatorsInternal.set({});
+	serverUnreadInternal.set({});
 	readyInternal.set(false);
 	lastNotificationSoundTotal = null;
 	notificationSoundEnabled = false; // Reset on cleanup
@@ -944,6 +952,27 @@ function recomputeNow() {
 		}
 	}
 	channelIndicatorsInternal.set(indicatorPayload);
+
+	// Compute server-level unread indicators
+	const serverUnreadPayload: Record<string, ServerUnreadState> = {};
+	for (const [serverId, activity] of serverChannelActivity) {
+		let hasActivity = false;
+		let hasHighPriority = false;
+		for (const [, stats] of activity) {
+			const total = (stats.high ?? 0) + (stats.low ?? 0) + (stats.threadHigh ?? 0);
+			if (total > 0) {
+				hasActivity = true;
+				if ((stats.high ?? 0) > 0 || (stats.threadHigh ?? 0) > 0) {
+					hasHighPriority = true;
+					break; // No need to check more channels
+				}
+			}
+		}
+		if (hasActivity) {
+			serverUnreadPayload[serverId] = { hasActivity, hasHighPriority };
+		}
+	}
+	serverUnreadInternal.set(serverUnreadPayload);
 
 	list.sort((a, b) => {
 		const aTime = a.lastActivity ?? 0;

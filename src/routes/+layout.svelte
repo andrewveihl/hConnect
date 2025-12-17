@@ -6,6 +6,8 @@
 	import { initMobileNavigation } from '$lib/stores/mobileNav';
 	import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
 	import TicketFab from '$lib/components/app/TicketFab.svelte';
+	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
+	import SuperAdminFab from '$lib/components/app/SuperAdminFab.svelte';
 	import {
 		initClientErrorReporting,
 		teardownClientErrorReporting
@@ -17,6 +19,7 @@
 	} from '$lib/admin/customization';
 	import { theme } from '$lib/stores/theme';
 	import { setSoundOverrides } from '$lib/utils/sounds';
+	import { initFabSnappingSettings } from '$lib/stores/fabSnap';
 
 	interface Props {
 		children?: import('svelte').Snippet;
@@ -32,6 +35,7 @@
 	const isAuthPage = $derived(
 		currentPath.startsWith('/sign-in') || currentPath.startsWith('/login')
 	);
+	const isAdminPage = $derived(currentPath.startsWith('/admin'));
 	const hideFloatingDock = $derived(currentPath.startsWith('/splash') || isAuthPage);
 
 	// Global customization config for themes and splash
@@ -117,6 +121,7 @@
 		detachViewportListeners = attachViewportListeners();
 		const teardownNavigation = initMobileNavigation();
 		initClientErrorReporting();
+		initFabSnappingSettings();
 		const isMobile = shouldUseMobileSplash();
 
 		if (!isMobile) {
@@ -191,6 +196,10 @@
 	{#if !hideFloatingDock}
 		<FloatingActionDock />
 		<TicketFab />
+		<ThreadsFab />
+		{#if !isAdminPage}
+			<SuperAdminFab />
+		{/if}
 	{/if}
 </div>
 

@@ -7,7 +7,6 @@
 	import type { ServerInvite } from '$lib/firestore/invites';
 	import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
 	import { triggerTestPush } from '$lib/notify/testPush';
-	import { setTheme, resetThemeToSystem, type ThemeMode } from '$lib/stores/theme';
 	import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
 	import { isMobileViewport } from '$lib/stores/viewport';
 
@@ -108,7 +107,7 @@
 			id: 'ops',
 			title: 'Ops & QA',
 			description: 'Safety, lockdown, and debugging switches.',
-			keys: ['readOnlyMode', 'showNotificationDebugTools'],
+			keys: ['readOnlyMode', 'showNotificationDebugTools', 'disableFabSnapping'],
 			accent: 'ops',
 			icon: 'bx-cog'
 		}
@@ -193,17 +192,6 @@
 		}
 	};
 
-	const openSplashDemo = () => {
-		if (!browser) {
-			showAdminToast({
-				type: 'info',
-				message: 'Splash preview is available in browser sessions only.'
-			});
-			return;
-		}
-		window.open('/splash', '_blank', 'noopener');
-	};
-
 	const buildSampleInvite = (): ServerInvite => ({
 		id: '__domain_preview__',
 		toUid: data?.user?.uid ?? 'tester',
@@ -283,33 +271,6 @@
 		} finally {
 			testPushLoading = false;
 		}
-	};
-
-	const previewTheme = (mode: ThemeMode, label: string) => {
-		if (!browser) {
-			showAdminToast({ type: 'info', message: 'Open this page in the browser to preview themes.' });
-			return;
-		}
-		setTheme(mode, { persist: false });
-		showAdminToast({
-			type: 'success',
-			message: `${label} theme preview applied for this session.`
-		});
-	};
-
-	const handleResetThemePreference = () => {
-		if (!browser) {
-			showAdminToast({
-				type: 'info',
-				message: 'Open this page in the browser to reset theme preferences.'
-			});
-			return;
-		}
-		resetThemeToSystem();
-		showAdminToast({
-			type: 'success',
-			message: 'Theme preference reset to match the system default.'
-		});
 	};
 
 	const resetNavigationMemory = () => {
@@ -518,23 +479,6 @@
 						</div>
 					</article>
 
-					<!-- Splash screen preview -->
-					<article class="test-card">
-						<div class="test-icon splash">
-							<i class="bx bx-rocket"></i>
-						</div>
-						<div class="test-content">
-							<h4>Splash screen preview</h4>
-							<p>Opens the standalone splash page to verify animations and branding.</p>
-						</div>
-						<div class="test-actions">
-							<button type="button" class="btn primary" onclick={openSplashDemo}>
-								<i class="bx bx-window-open"></i>
-								Open demo
-							</button>
-						</div>
-					</article>
-
 					<!-- Push delivery test -->
 					<article class="test-card">
 						<div class="test-icon push">
@@ -558,39 +502,6 @@
 									<i class="bx bx-send"></i>
 									Send test push
 								{/if}
-							</button>
-						</div>
-					</article>
-
-					<!-- Theme labs -->
-					<article class="test-card">
-						<div class="test-icon theme">
-							<i class="bx bx-palette"></i>
-						</div>
-						<div class="test-content">
-							<h4>Theme labs</h4>
-							<p>Preview alternate themes instantly or reset to system default.</p>
-						</div>
-						<div class="test-actions">
-							<button
-								type="button"
-								class="btn outline"
-								onclick={() => previewTheme('holiday', 'Holiday')}
-							>
-								<i class="bx bx-gift"></i>
-								Holiday
-							</button>
-							<button
-								type="button"
-								class="btn outline"
-								onclick={() => previewTheme('midnight', 'Midnight')}
-							>
-								<i class="bx bx-moon"></i>
-								Midnight
-							</button>
-							<button type="button" class="btn secondary" onclick={handleResetThemePreference}>
-								<i class="bx bx-reset"></i>
-								Reset
 							</button>
 						</div>
 					</article>
@@ -648,8 +559,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
-		min-height: 100%;
-		padding: 1rem;
+		min-height: 0;
+		padding: 0;
 	}
 
 	/* Stats bar */
@@ -728,13 +639,13 @@
 	/* Content grid */
 	.content-grid {
 		display: grid;
-		grid-template-columns: 2fr 1fr;
+		grid-template-columns: 3fr 2fr;
 		gap: 1.5rem;
 	}
 
 	.content-grid.mobile {
 		grid-template-columns: 1fr;
-		gap: 0;
+		gap: 1rem;
 	}
 
 	/* Panels */
@@ -747,6 +658,18 @@
 		border-radius: 16px;
 		border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
 		padding: 1.25rem;
+	}
+
+	.sections-list {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.test-tools-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
 	}
 
 	.content-grid.mobile .toggles-panel,
@@ -789,13 +712,6 @@
 		font-size: 0.8125rem;
 		color: var(--color-text-secondary);
 		margin: 0;
-	}
-
-	/* Sections list */
-	.sections-list {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
 	}
 
 	.feature-section {
@@ -1048,15 +964,6 @@
 		color: var(--accent-primary);
 	}
 
-	/* Testing tools grid */
-	.test-tools-grid {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-		overflow-y: auto;
-		flex: 1;
-	}
-
 	.test-card {
 		display: flex;
 		flex-direction: column;
@@ -1094,28 +1001,12 @@
 		color: #10b981;
 	}
 
-	.test-icon.splash {
-		background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.2));
-	}
-
-	.test-icon.splash i {
-		color: #8b5cf6;
-	}
-
 	.test-icon.push {
 		background: linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(249, 115, 22, 0.2));
 	}
 
 	.test-icon.push i {
 		color: #f59e0b;
-	}
-
-	.test-icon.theme {
-		background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2));
-	}
-
-	.test-icon.theme i {
-		color: #ec4899;
 	}
 
 	.test-icon.nav {
@@ -1218,20 +1109,5 @@
 	.btn.outline:hover {
 		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
 		border-color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
-	}
-
-	/* Desktop tweaks */
-	@media (min-width: 768px) {
-		.features-page {
-			padding: 1.5rem;
-		}
-
-		.toggles-panel {
-			max-height: calc(100vh - 12rem);
-		}
-
-		.testing-panel {
-			max-height: calc(100vh - 12rem);
-		}
 	}
 </style>

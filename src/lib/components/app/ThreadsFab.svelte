@@ -14,6 +14,7 @@
 	import type { ChannelThread } from '$lib/firestore/threads';
 	import { leaveThread } from '$lib/firestore/threads';
 	import { threadUnreadCount, threadUnreadById } from '$lib/stores/notifications';
+	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
 
 	type ThreadWithMeta = ChannelThread & {
 		serverName?: string;
@@ -24,6 +25,8 @@
 
 	// Position management - independent from FloatingActionDock
 	const STORAGE_KEY = 'hconnect:threadsFab:position';
+	const FAB_ID = 'threads-fab';
+	const FAB_SIZE = 48; // 3rem - matches rail-button size when snapped
 	const MIN_MARGIN = 8;
 
 	type Position = { x: number; y: number };
@@ -36,6 +39,9 @@
 	let dragging = $state(false);
 	let dragOffset: Position = { x: 0, y: 0 };
 	let dragStartTime = 0;
+	let isSnapped = $state(false);
+	let snappedZoneId: string | null = $state(null);
+	let nearSnapZone: SnapZone | null = $state(null);
 
 	let showPopover = $state(false);
 	let recentThreads = $state<ThreadWithMeta[]>([]);
@@ -59,10 +65,11 @@
 		return null;
 	}
 
-	function persistPosition(value: Position) {
+	function persistPosition(value: Position, snapped: boolean = false, zoneId?: string) {
 		if (!browser) return;
 		customPosition = true;
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+		fabSnapStore.setSnapped(FAB_ID, snapped, zoneId);
 	}
 
 	function clampToViewport(value: Position): Position {
@@ -76,18 +83,63 @@
 		};
 	}
 
-	async function setDefaultPosition() {
+	async function initPosition() {
 		if (!browser || !fabEl) {
 			ready = true;
 			return;
 		}
 		await tick();
-		const rect = fabEl.getBoundingClientRect();
-		// Default: center of screen
-		const x = Math.round((window.innerWidth - rect.width) / 2);
-		const y = Math.round((window.innerHeight - rect.height) / 2);
-		position = clampToViewport({ x, y });
+
+		// Check if we were snapped to a zone (only if snapping is enabled)
+		const wasSnapped = !$isFabSnappingDisabled && fabSnapStore.isSnappedToRail(FAB_ID);
+		const savedZoneId = fabSnapStore.getSnappedZoneId(FAB_ID);
+		if (wasSnapped && savedZoneId) {
+			// Wait a bit for zones to be registered
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			const zones = fabSnapStore.getZones();
+			const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+			if (zone) {
+				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+				position = clampToViewport(snapPos);
+				isSnapped = true;
+				snappedZoneId = zone.id;
+				fabSnapStore.occupyZone(zone.id, FAB_ID);
+				ready = true;
+				return;
+			}
+		}
+
+		// Load saved position or use default
+		const saved = loadSavedPosition();
+		if (saved) {
+			position = clampToViewport(saved);
+			customPosition = true;
+		} else {
+			const rect = fabEl.getBoundingClientRect();
+			// Default: center of screen
+			const x = Math.round((window.innerWidth - rect.width) / 2);
+			const y = Math.round((window.innerHeight - rect.height) / 2);
+			position = clampToViewport({ x, y });
+		}
 		ready = true;
+	}
+
+	// Check if current FAB center is near a snap zone
+	function checkNearSnapZone(): SnapZone | null {
+		if (!browser || $isFabSnappingDisabled) return null;
+		const fabCenterX = position.x + FAB_SIZE / 2;
+		const fabCenterY = position.y + FAB_SIZE / 2;
+		return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+	}
+
+	// Snap to a zone
+	function snapToZone(zone: SnapZone) {
+		const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+		position = clampToViewport(snapPos);
+		isSnapped = true;
+		snappedZoneId = zone.id;
+		fabSnapStore.occupyZone(zone.id, FAB_ID);
+		persistPosition(position, true, zone.id);
 	}
 
 	// Drag handlers - only for the FAB button itself
@@ -103,6 +155,13 @@
 		};
 		fabBtnEl.setPointerCapture(event.pointerId);
 		dragging = true;
+		
+		// Release from snap zone when starting to drag
+		if (isSnapped) {
+			fabSnapStore.releaseZone(FAB_ID);
+			isSnapped = false;
+			snappedZoneId = null;
+		}
 	}
 
 	function handlePointerMove(event: PointerEvent) {
@@ -113,6 +172,16 @@
 			x: event.clientX - dragOffset.x,
 			y: event.clientY - dragOffset.y
 		});
+		
+		// Check if near a snap zone and dispatch event for visual feedback
+		nearSnapZone = checkNearSnapZone();
+		if (browser) {
+			window.dispatchEvent(
+				new CustomEvent('fabNearSnapZone', {
+					detail: { zoneId: nearSnapZone?.id ?? null }
+				})
+			);
+		}
 	}
 
 	function handlePointerUp(event: PointerEvent) {
@@ -125,8 +194,20 @@
 		
 		console.log('[ThreadsFab] handlePointerUp - dragDuration:', dragDuration, 'wasDrag:', wasDrag);
 		
+		// Clear snap zone highlight
+		nearSnapZone = null;
+		if (browser) {
+			window.dispatchEvent(new CustomEvent('fabNearSnapZone', { detail: { zoneId: null } }));
+		}
+		
 		if (wasDrag) {
-			persistPosition(position);
+			// Check if we should snap to a zone
+			const snapZone = checkNearSnapZone();
+			if (snapZone) {
+				snapToZone(snapZone);
+			} else {
+				persistPosition(position, false);
+			}
 		}
 		dragging = false;
 		
@@ -134,6 +215,17 @@
 		if (!wasDrag) {
 			console.log('[ThreadsFab] Toggling popover, current:', showPopover, 'new:', !showPopover);
 			showPopover = !showPopover;
+		}
+	}
+
+	// Handler for snap zone position updates (e.g., when DMs come in)
+	function handleSnapZoneUpdated() {
+		if (!isSnapped || !snappedZoneId) return;
+		const zones = fabSnapStore.getZones();
+		const zone = zones.find((z) => z.id === snappedZoneId);
+		if (zone) {
+			const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+			position = clampToViewport(snapPos);
 		}
 	}
 
@@ -377,17 +469,9 @@
 			return;
 		}
 
-		// Initialize position
-		const saved = loadSavedPosition();
-		console.log('[ThreadsFab] Saved position:', saved);
-		if (saved) {
-			position = clampToViewport(saved);
-			customPosition = true;
-			ready = true;
-		} else {
-			setDefaultPosition();
-		}
-		console.log('[ThreadsFab] Position set to:', position, 'ready:', ready);
+		// Initialize position (handles snapped state restoration)
+		initPosition();
+		console.log('[ThreadsFab] Position initialized');
 
 		// Subscribe to threads
 		subscribeToThreads();
@@ -401,6 +485,9 @@
 		};
 		window.addEventListener('resize', handleResize);
 		
+		// Listen for snap zone position updates
+		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		
 		// Update expiration times every minute
 		expirationInterval = setInterval(() => {
 			now = Date.now();
@@ -409,6 +496,7 @@
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			window.removeEventListener('resize', handleResize);
+			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 		};
 	});
 
@@ -476,6 +564,8 @@
 
 <div
 	class="threads-fab-wrapper"
+	class:threads-fab-wrapper--snapped={isSnapped}
+	class:threads-fab-wrapper--near-snap={nearSnapZone !== null}
 	bind:this={fabEl}
 	data-ready={ready}
 	data-dragging={dragging}
@@ -490,6 +580,7 @@
 		class="threads-fab"
 		class:threads-fab--active={showPopover}
 		class:threads-fab--empty={!hasThreads}
+		class:threads-fab--snapped={isSnapped}
 		aria-label="Recent Threads"
 		title={hasThreads ? `${totalUnread} unread in ${visibleThreads.length} threads` : 'No recent threads'}
 		bind:this={fabBtnEl}
@@ -933,5 +1024,21 @@
 
 	.threads-popover__empty span {
 		font-size: 0.85rem;
+	}
+
+	/* Snap states */
+	.threads-fab-wrapper--snapped {
+		transition: transform 200ms ease-out;
+	}
+
+	.threads-fab-wrapper--near-snap {
+		filter: drop-shadow(0 0 8px var(--color-accent, #a855f7));
+	}
+
+	.threads-fab--snapped {
+		/* Match rail-button size when docked */
+		width: 3rem;
+		height: 3rem;
+		box-shadow: 0 0 0 2px var(--color-accent, #a855f7);
 	}
 </style>

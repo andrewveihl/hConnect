@@ -2,6 +2,8 @@ import type { Timestamp } from 'firebase-admin/firestore';
 
 export type MentionKind = 'member' | 'role' | 'special';
 
+export type MentionType = 'direct' | 'role' | 'here' | 'everyone' | 'dm' | 'channel';
+
 export type MentionEntry = {
   uid: string;
   handle?: string | null;
@@ -28,11 +30,14 @@ export type RawMessage = {
 export type ServerDoc = {
   name?: string;
   icon?: string | null;
+  defaultRoleId?: string | null;
+  everyoneRoleId?: string | null;
 };
 
 export type ChannelDoc = {
   name?: string;
   type?: 'text' | 'voice';
+  allowedRoleIds?: string[];
 };
 
 export type ThreadDoc = {
@@ -70,6 +75,7 @@ export type NotificationSettings = {
   allowRoleMentionPush: boolean;
   allowHereMentionPush: boolean;
   allowEveryoneMentionPush: boolean;
+  allowChannelMessagePush: boolean;
   doNotDisturbUntil: number | null;
 };
 
@@ -94,5 +100,3 @@ export type DeviceDoc = {
   platform?: string | null;
   subscription?: WebPushSubscription | null;
 };
-
-export type MentionType = 'direct' | 'role' | 'here' | 'everyone' | 'dm';

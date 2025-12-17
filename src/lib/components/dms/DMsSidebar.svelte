@@ -15,13 +15,15 @@
 		streamProfiles,
 		getProfile,
 		deleteThreadForUser,
-		streamThreadMeta
+		streamThreadMeta,
+		triggerDMRailBackfill
 	} from '$lib/firestore/dms';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
 	const dispatch = createEventDispatcher();
 	let me: any = $state(null);
+	let isRefreshing = $state(false);
 
 	interface Props {
 		activeThreadId?: string | null;
@@ -610,6 +612,41 @@
 			console.error('Failed to delete DM thread', err);
 		}
 	}
+
+	async function refreshConversations() {
+		if (isRefreshing) return;
+		isRefreshing = true;
+		try {
+			const result = await triggerDMRailBackfill();
+			console.log('[DMs] Backfill complete:', result);
+			// The streamMyDMs subscription will automatically pick up new entries
+		} catch (err) {
+			console.error('[DMs] Failed to refresh conversations:', err);
+		} finally {
+			isRefreshing = false;
+		}
+	}
+
+	// Auto-backfill once when component mounts and user is logged in
+	// This ensures any DMs that exist in the main collection but not in the user's rail are synced
+	let hasAutoBackfilled = $state(false);
+	
+	async function autoBackfillOnMount() {
+		if (hasAutoBackfilled || isRefreshing || !me?.uid) return;
+		hasAutoBackfilled = true;
+		
+		// Wait a short delay to avoid race conditions
+		await new Promise(resolve => setTimeout(resolve, 500));
+		
+		try {
+			console.log('[DMs] Running auto-backfill on mount...');
+			const result = await triggerDMRailBackfill();
+			console.log('[DMs] Auto-backfill complete:', result);
+		} catch (err) {
+			console.warn('[DMs] Auto-backfill failed (non-critical):', err);
+		}
+	}
+
 	run(() => {
 		me = $user;
 	});
@@ -622,6 +659,10 @@
 				threads = t;
 				threadsLoading = false;
 			});
+			// Trigger auto-backfill when user is set
+			if (!hasAutoBackfilled) {
+				autoBackfillOnMount();
+			}
 		} else {
 			threads = [];
 			threadsLoading = false;
@@ -756,15 +797,27 @@
 	<!-- Minimalistic header -->
 	<div class="dms-sidebar-header px-4 py-3 flex items-center justify-between gap-2">
 		<div class="text-sm font-semibold tracking-tight text-white/90">Messages</div>
-		<button
-			class="dms-sidebar-header__new-btn"
-			type="button"
-			aria-label="New message"
-			onclick={openPeoplePicker}
-			disabled={showPeoplePicker}
-		>
-			<i class="bx bx-edit-alt text-lg"></i>
-		</button>
+		<div class="flex items-center gap-1">
+			<button
+				class="dms-sidebar-header__refresh-btn"
+				type="button"
+				aria-label="Refresh conversations"
+				title="Refresh conversations (recover missing DMs)"
+				onclick={refreshConversations}
+				disabled={isRefreshing}
+			>
+				<i class={`bx bx-refresh text-lg ${isRefreshing ? 'animate-spin' : ''}`}></i>
+			</button>
+			<button
+				class="dms-sidebar-header__new-btn"
+				type="button"
+				aria-label="New message"
+				onclick={openPeoplePicker}
+				disabled={showPeoplePicker}
+			>
+				<i class="bx bx-edit-alt text-lg"></i>
+			</button>
+		</div>
 	</div>
 
 	<div class="flex-1 overflow-y-auto px-2 pb-4 space-y-4 touch-pan-y">
@@ -1008,6 +1061,7 @@
 		border-bottom: 1px solid var(--color-border-subtle);
 	}
 
+	.dms-sidebar-header__refresh-btn,
 	.dms-sidebar-header__new-btn {
 		width: 2rem;
 		height: 2rem;
@@ -1022,11 +1076,13 @@
 			color 150ms ease;
 	}
 
+	.dms-sidebar-header__refresh-btn:hover:not(:disabled),
 	.dms-sidebar-header__new-btn:hover:not(:disabled) {
 		background: rgba(255, 255, 255, 0.1);
 		color: var(--color-text-primary);
 	}
 
+	.dms-sidebar-header__refresh-btn:disabled,
 	.dms-sidebar-header__new-btn:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;

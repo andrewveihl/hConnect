@@ -18,13 +18,15 @@ const SPECIAL_MENTION_IDS = {
     HERE: 'special:mention:here'
 };
 const MENTION_PRIORITY = {
-    dm: 5,
-    direct: 4,
-    role: 3,
-    here: 2,
-    everyone: 1
+    dm: 6,
+    direct: 5,
+    role: 4,
+    here: 3,
+    everyone: 2,
+    channel: 1 // lowest priority - channel member notifications
 };
 let functionsConfig = {};
+;
 try {
     functionsConfig = (0, firebase_functions_1.config)();
 }
@@ -277,8 +279,26 @@ function pickMentionUids(mentions, kind) {
 function hasSpecialMention(mentions, id) {
     return mentions.some((entry) => entry.uid === id || entry.handle === id);
 }
+/**
+ * Check if a member has access to a channel.
+ * - Public channels (no allowedRoleIds): all members have access
+ * - Private channels: member must have at least one role in allowedRoleIds
+ */
+function memberHasChannelAccess(member, channelAllowedRoleIds, defaultRoleId) {
+    // If no allowedRoleIds, channel is public - all members have access
+    if (!channelAllowedRoleIds || channelAllowedRoleIds.length === 0) {
+        return true;
+    }
+    // Get member's roles (including default role)
+    const memberRoles = new Set(Array.isArray(member.roleIds) ? member.roleIds : []);
+    if (defaultRoleId) {
+        memberRoles.add(defaultRoleId);
+    }
+    // Check if member has any of the allowed roles
+    return channelAllowedRoleIds.some((roleId) => memberRoles.has(roleId));
+}
 async function computeServerCandidates(options) {
-    const { message, serverId, channelId, authorId, memberCache } = options;
+    const { message, serverId, channelId, authorId, memberCache, channelAllowedRoleIds, defaultRoleId } = options;
     const mentionList = extractMentions(message);
     const directMentionUids = pickMentionUids(mentionList);
     const roleMentionIds = pickMentionUids(mentionList, 'role');
@@ -293,16 +313,19 @@ async function computeServerCandidates(options) {
             candidateMap.set(candidate.uid, candidate);
         }
     };
+    // Get all members first - we'll need them for channel access check
+    const allMembers = await memberCache.getAll();
+    // Add direct mentions
     await Promise.all(directMentionUids.map(async (uid) => {
         const member = await memberCache.get(uid);
         if (!member)
             return;
         addCandidate({ uid, mentionType: 'direct' });
     }));
+    // Add role mentions
     if (roleMentionIds.length) {
-        const members = await memberCache.getAll();
         for (const roleId of roleMentionIds) {
-            for (const member of members) {
+            for (const member of allMembers) {
                 const roleIds = Array.isArray(member.roleIds) ? member.roleIds : [];
                 if (roleIds.includes(roleId) && member.uid !== authorId) {
                     addCandidate({ uid: member.uid, mentionType: 'role', roleId });
@@ -310,13 +333,20 @@ async function computeServerCandidates(options) {
             }
         }
     }
+    // Add @everyone and @here mentions
     if (includeEveryone || includeHere) {
-        const members = await memberCache.getAll();
         if (includeEveryone) {
-            members.forEach((member) => addCandidate({ uid: member.uid, mentionType: 'everyone', requirePresence: false }));
+            allMembers.forEach((member) => addCandidate({ uid: member.uid, mentionType: 'everyone', requirePresence: false }));
         }
         if (includeHere) {
-            members.forEach((member) => addCandidate({ uid: member.uid, mentionType: 'here', requirePresence: true }));
+            allMembers.forEach((member) => addCandidate({ uid: member.uid, mentionType: 'here', requirePresence: true }));
+        }
+    }
+    // ALWAYS add all channel members as 'channel' type candidates
+    // This ensures everyone with channel access gets notified (lowest priority)
+    for (const member of allMembers) {
+        if (memberHasChannelAccess(member, channelAllowedRoleIds ?? null, defaultRoleId ?? null)) {
+            addCandidate({ uid: member.uid, mentionType: 'channel' });
         }
     }
     return Array.from(candidateMap.values());
@@ -360,6 +390,9 @@ function respectsSettings(settings, candidate, opts) {
             return settings.allowMentionPush && settings.allowHereMentionPush !== false;
         case 'everyone':
             return settings.allowMentionPush && settings.allowEveryoneMentionPush !== false;
+        case 'channel':
+            // Channel notifications - users can opt out with allowChannelMessagePush setting
+            return settings.allowChannelMessagePush !== false;
         default:
             return true;
     }
@@ -634,13 +667,18 @@ async function handleServerMessage(event) {
     if (channel?.type === 'voice')
         return;
     const server = serverSnap.data() ?? null;
+    // Get channel access info for filtering members
+    const channelAllowedRoleIds = Array.isArray(channel?.allowedRoleIds) ? channel.allowedRoleIds : null;
+    const defaultRoleId = server?.defaultRoleId ?? server?.everyoneRoleId ?? null;
     const memberCache = new ServerMemberCache(serverId);
     const candidates = await computeServerCandidates({
         message,
         serverId,
         channelId,
         authorId,
-        memberCache
+        memberCache,
+        channelAllowedRoleIds,
+        defaultRoleId
     });
     if (!candidates.length)
         return;
@@ -684,13 +722,18 @@ async function handleThreadMessage(event) {
     const server = serverSnap.data() ?? null;
     const channel = channelSnap.data() ?? null;
     const thread = threadSnap.data() ?? null;
+    // Get channel access info for filtering members
+    const channelAllowedRoleIds = Array.isArray(channel?.allowedRoleIds) ? channel.allowedRoleIds : null;
+    const defaultRoleId = server?.defaultRoleId ?? server?.everyoneRoleId ?? null;
     const memberCache = new ServerMemberCache(serverId);
     const candidates = await computeServerCandidates({
         message,
         serverId,
         channelId,
         authorId,
-        memberCache
+        memberCache,
+        channelAllowedRoleIds,
+        defaultRoleId
     });
     if (!candidates.length)
         return;
@@ -724,6 +767,55 @@ function computeDmCandidates(dm, authorId) {
         .filter((uid) => Boolean(uid) && uid !== authorId)
         .map((uid) => ({ uid, mentionType: 'dm' }));
 }
+/**
+ * Upsert DM rail entry for a participant.
+ * This ensures the DM appears in their sidebar list.
+ */
+async function upsertDMRailForParticipant(threadId, uid, participants, lastMessage) {
+    const others = participants.filter((p) => p !== uid);
+    const otherUid = others.length === 1 ? others[0] : null;
+    const payload = {
+        threadId,
+        otherUid,
+        participants,
+        lastMessage: lastMessage ?? null,
+        hidden: false,
+        updatedAt: firestore_1.FieldValue.serverTimestamp()
+    };
+    // Fetch other participant's profile for display metadata
+    if (otherUid) {
+        try {
+            const profSnap = await firebase_1.db.doc(`profiles/${otherUid}`).get();
+            if (profSnap.exists) {
+                const data = profSnap.data() ?? {};
+                const name = data.name ?? data.displayName ?? null;
+                const email = data.email ?? null;
+                const photoURL = data.cachedPhotoURL ?? data.photoURL ?? data.authPhotoURL ?? null;
+                if (name)
+                    payload.otherDisplayName = name;
+                if (email)
+                    payload.otherEmail = email;
+                if (photoURL)
+                    payload.otherPhotoURL = photoURL;
+            }
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[upsertDMRailForParticipant] Failed to fetch profile', { otherUid, err });
+        }
+    }
+    try {
+        await firebase_1.db.doc(`profiles/${uid}/dms/${threadId}`).set(payload, { merge: true });
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[upsertDMRailForParticipant] Failed to upsert rail entry', { uid, threadId, err });
+    }
+}
+/**
+ * Upsert DM rail entries for all participants (server-side with admin privileges).
+ */
+async function upsertDMRailForAllParticipants(threadId, participants, lastMessage) {
+    await Promise.all(participants.map((uid) => upsertDMRailForParticipant(threadId, uid, participants, lastMessage)));
+}
 async function handleDmMessage(event) {
     const { threadID, messageId } = event.params;
     const dmId = threadID;
@@ -739,6 +831,26 @@ async function handleDmMessage(event) {
     if (!dmSnap.exists)
         return;
     const dm = dmSnap.data() ?? null;
+    const participants = resolveDmParticipants(dm);
+    // Compute last message preview
+    const lastMessage = previewFromMessage(message);
+    // CRITICAL: Update DM rail for ALL participants so the conversation appears in their sidebar.
+    // This runs server-side with admin privileges, bypassing client-side Firestore rules
+    // that prevent User A from writing to User B's profiles/{userB}/dms subcollection.
+    if (participants.length > 0) {
+        try {
+            await upsertDMRailForAllParticipants(dmId, participants, lastMessage);
+            firebase_functions_1.logger.info('[handleDmMessage] Updated DM rail for all participants', {
+                dmId,
+                participants,
+                messageId
+            });
+        }
+        catch (err) {
+            firebase_functions_1.logger.error('[handleDmMessage] Failed to update DM rail', { dmId, participants, err });
+        }
+    }
+    // Proceed with notification delivery
     const candidates = computeDmCandidates(dm, authorId);
     if (!candidates.length)
         return;

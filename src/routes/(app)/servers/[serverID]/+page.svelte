@@ -72,7 +72,6 @@
 	import { openOverlay, closeOverlay } from '$lib/stores/mobileNav';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
-	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
 
 	interface Props {
 		data: { serverId: string | null };
@@ -5496,6 +5495,7 @@
 								{#if serverId}
 									<MembersPane
 										{serverId}
+										channel={activeChannel}
 										onHide={() => {
 											desktopMembersPreferred = false;
 											desktopMembersVisible = false;
@@ -5585,7 +5585,7 @@
 				threadName={activeThread?.name ?? activeChannel?.name ?? 'Thread'}
 			/>
 		{:else if serverId}
-			<MembersPane {serverId} showHeader={false} />
+			<MembersPane {serverId} showHeader={false} channel={activeChannel} />
 		{:else}
 			<div class="p-4 text-white/70">No server selected.</div>
 		{/if}
@@ -5747,11 +5747,6 @@
 {/if}
 
 <NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
-
-<!-- Threads FAB - shows when there are active threads (hidden in popup mode) -->
-{#if !isPopupMode}
-	<ThreadsFab />
-{/if}
 
 <!-- Popup mode: show only the thread in a minimal window -->
 {#if isPopupMode && floatingThread && floatingThreadVisible}
