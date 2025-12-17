@@ -196,8 +196,8 @@
 				
 				// Log full URL for debugging - use prompt() so user can copy
 				console.log('[handleRefreshUserPhoto] Full photo URL:', result.photoURL);
-				console.log('[handleRefreshUserPhoto] Original Google URL:', result.googleURL);
-				const debugInfo = `Cached URL (in Storage):\n${result.photoURL}\n\nOriginal Google URL:\n${result.googleURL || 'N/A'}`;
+				console.log('[handleRefreshUserPhoto] Original Google URL:', (result as any).googleURL);
+				const debugInfo = `Cached URL (in Storage):\n${result.photoURL}\n\nOriginal Google URL:\n${(result as any).googleURL || 'N/A'}`;
 				prompt('Cached Photo URL (Ctrl+C to copy):', result.photoURL);
 				alert(debugInfo);
 				

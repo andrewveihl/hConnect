@@ -138,6 +138,12 @@
 	let otherProfile: any = $state(null);
 	let otherMessageUser: any = $state(null);
 	let metaLoading = $state(true);
+	
+	// Group chat state
+	let isGroupChat = $state(false);
+	let groupName = $state<string | null>(null);
+	let groupParticipants = $state<string[]>([]);
+	let groupParticipantProfiles = $state<Record<string, any>>({});
 
 	let showThreads = $state(false);
 	let showInfo = $state(false);
@@ -720,21 +726,56 @@
 			const snap = await getDoc(doc(database, 'dms', threadID));
 			const payload: any = snap.data() ?? {};
 			const parts: string[] = payload.participants ?? [];
-			otherUid = parts.find((p) => p !== me?.uid) ?? null;
+			
+			// Check if this is a group chat
+			isGroupChat = payload.isGroup === true || parts.length > 2;
+			groupName = payload.name ?? null;
+			groupParticipants = parts;
 
-			if (otherUid) {
-				const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
-				if (profileDoc.exists()) {
-					otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
-				} else {
-					otherProfile = normalizeUserRecord(otherUid, {});
+			if (isGroupChat) {
+				// Load profiles for all other participants
+				const otherUids = parts.filter(p => p !== me?.uid);
+				const profilePromises = otherUids.map(async (uid) => {
+					try {
+						const profileDoc = await getDoc(doc(database, 'profiles', uid));
+						if (profileDoc.exists()) {
+							return { uid, profile: normalizeUserRecord(profileDoc.id, profileDoc.data()) };
+						}
+						return { uid, profile: normalizeUserRecord(uid, {}) };
+					} catch {
+						return { uid, profile: normalizeUserRecord(uid, {}) };
+					}
+				});
+				
+				const profiles = await Promise.all(profilePromises);
+				const profileMap: Record<string, any> = {};
+				for (const { uid, profile } of profiles) {
+					profileMap[uid] = profile;
 				}
-			} else {
+				groupParticipantProfiles = profileMap;
+				otherUid = null;
 				otherProfile = null;
+			} else {
+				// Regular 1:1 DM
+				otherUid = parts.find((p) => p !== me?.uid) ?? null;
+				groupParticipantProfiles = {};
+
+				if (otherUid) {
+					const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
+					if (profileDoc.exists()) {
+						otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
+					} else {
+						otherProfile = normalizeUserRecord(otherUid, {});
+					}
+				} else {
+					otherProfile = null;
+				}
 			}
 		} catch (err) {
 			console.error('[DM thread] failed to load meta', err);
 			otherProfile = null;
+			isGroupChat = false;
+			groupParticipantProfiles = {};
 		} finally {
 			metaLoading = false;
 		}
@@ -826,9 +867,17 @@
 				email: pickString(me?.email) ?? null
 			});
 		}
-		if (otherProfile?.uid) {
+		
+		// For group chats, add all participants
+		if (isGroupChat && Object.keys(groupParticipantProfiles).length > 0) {
+			Object.entries(groupParticipantProfiles).forEach(([uid, profile]) => {
+				addCandidate(uid, profile);
+			});
+		} else if (otherProfile?.uid) {
+			// For 1:1 chats, add the other person
 			addCandidate(otherProfile.uid, otherProfile);
 		}
+		
 		Object.values(messageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
 
 		mentionOptions = Array.from(map.values()).sort((a, b) =>
@@ -1322,15 +1371,35 @@
 		aiConversationContext = messages.slice(-10);
 	});
 
-	let displayName = $derived(
-		pickString(otherProfile?.displayName) ??
+	// Compute group participant names
+	let groupParticipantNames = $derived.by(() => {
+		if (!isGroupChat) return '';
+		const otherUids = groupParticipants.filter(uid => uid !== me?.uid);
+		const names = otherUids.slice(0, 3).map(uid => {
+			const profile = groupParticipantProfiles[uid];
+			return profile?.displayName || profile?.name || profile?.email || uid.slice(0, 8);
+		});
+		const remaining = otherUids.length - 3;
+		if (remaining > 0) {
+			return `${names.join(', ')} +${remaining}`;
+		}
+		return names.join(', ');
+	});
+
+	let displayName = $derived.by(() => {
+		if (isGroupChat) {
+			return groupName || groupParticipantNames || 'Group Chat';
+		}
+		return (
+			pickString(otherProfile?.displayName) ??
 			pickString(otherProfile?.name) ??
 			pickString(otherMessageUser?.displayName) ??
 			pickString(otherMessageUser?.name) ??
 			pickString(otherProfile?.email) ??
 			pickString(otherMessageUser?.email) ??
 			(otherProfile || otherMessageUser ? (otherUid ?? 'Member') : 'Direct Message')
-	);
+		);
+	});
 </script>
 
 <div class="flex flex-1 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
@@ -1363,20 +1432,29 @@
 				<button
 					class="dm-header__profile-btn"
 					type="button"
-					aria-label="View participant profile"
+					aria-label={isGroupChat ? 'View group info' : 'View participant profile'}
 					onclick={() => syncInfoVisibility(true)}
 				>
 					<div class="dm-header__avatar">
-						<Avatar
-							user={otherProfile}
-							name={displayName}
-							size="sm"
-							showPresence={true}
-							presence={otherProfile?.presence ?? 'offline'}
-						/>
+						{#if isGroupChat}
+							<div class="dm-header__group-icon">
+								<i class="bx bx-group"></i>
+							</div>
+						{:else}
+							<Avatar
+								user={otherProfile}
+								name={displayName}
+								size="sm"
+								showPresence={true}
+								presence={otherProfile?.presence ?? 'offline'}
+							/>
+						{/if}
 					</div>
 					<div class="dm-header__info">
 						<span class="dm-header__name">{displayName}</span>
+						{#if isGroupChat}
+							<span class="dm-header__member-count">{groupParticipants.length} members</span>
+						{/if}
 					</div>
 					<i class="bx bx-chevron-right dm-header__chevron"></i>
 				</button>
@@ -1665,6 +1743,26 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.dm-header__member-count {
+		font-size: 0.75rem;
+		color: var(--color-text-tertiary);
+		display: block;
+		line-height: 1.2;
+	}
+
+	.dm-header__group-icon {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.5rem;
+		background: linear-gradient(135deg, var(--color-accent, #5865f2) 0%, #7c3aed 100%);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: white;
+		font-size: 1rem;
+		flex-shrink: 0;
 	}
 
 	.dm-header__chevron {

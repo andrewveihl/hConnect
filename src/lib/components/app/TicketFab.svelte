@@ -6,6 +6,7 @@
 	import { getDb } from '$lib/firebase';
 	import { user } from '$lib/stores/user';
 	import { servers, serverMemberships } from '$lib/stores';
+	import type { Server, Membership } from '$lib/types';
 	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
 	import {
 		doc,
