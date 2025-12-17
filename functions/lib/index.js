@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.sendTestPush = exports.syncServerMemberPhotos = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
+exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
@@ -146,6 +146,144 @@ exports.onThreadMessageCreated = (0, firestore_1.onDocumentCreated)('servers/{se
 });
 exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)('dms/{threadID}/messages/{messageId}', async (event) => {
     await (0, notifications_1.handleDmMessage)(event);
+});
+/**
+ * Callable function to backfill DM rail entries for the calling user.
+ * This finds all DM threads the user is a participant in and ensures
+ * they appear in the user's DM sidebar list.
+ */
+exports.backfillMyDMRail = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    firebase_functions_1.logger.info('[backfillMyDMRail] Starting backfill', { callerUid });
+    try {
+        const seenThreadIds = new Set();
+        let updated = 0;
+        let skipped = 0;
+        // Helper to resolve participants from various formats
+        const resolveParticipants = (data) => {
+            // Try participants array first
+            if (Array.isArray(data.participants) && data.participants.length >= 2) {
+                return data.participants;
+            }
+            // Try participantUids
+            if (Array.isArray(data.participantUids) && data.participantUids.length >= 2) {
+                return data.participantUids;
+            }
+            // Try participantsMap
+            if (data.participantsMap && typeof data.participantsMap === 'object') {
+                const map = data.participantsMap;
+                const uids = Object.keys(map).filter(uid => map[uid] === true);
+                if (uids.length >= 2)
+                    return uids;
+            }
+            // Try key (format: uid1_uid2)
+            if (typeof data.key === 'string' && data.key.includes('_')) {
+                const parts = data.key.split('_').filter(Boolean);
+                if (parts.length >= 2)
+                    return parts;
+            }
+            return [];
+        };
+        // Helper to process a DM document
+        const processDm = async (doc) => {
+            if (seenThreadIds.has(doc.id))
+                return;
+            seenThreadIds.add(doc.id);
+            const dmData = doc.data();
+            const participants = resolveParticipants(dmData);
+            // Check if caller is actually a participant
+            if (!participants.includes(callerUid)) {
+                skipped++;
+                return;
+            }
+            if (participants.length < 2) {
+                skipped++;
+                return;
+            }
+            const others = participants.filter((p) => p !== callerUid);
+            const otherUid = others.length === 1 ? others[0] : null;
+            const payload = {
+                threadId: doc.id,
+                otherUid,
+                participants,
+                lastMessage: dmData.lastMessage ?? null,
+                hidden: false,
+                updatedAt: firestore_2.FieldValue.serverTimestamp()
+            };
+            // Fetch other participant's profile for display metadata
+            if (otherUid) {
+                try {
+                    const profSnap = await firebase_1.db.doc(`profiles/${otherUid}`).get();
+                    if (profSnap.exists) {
+                        const profData = profSnap.data() ?? {};
+                        const name = profData.name ?? profData.displayName ?? null;
+                        const email = profData.email ?? null;
+                        const photoURL = profData.cachedPhotoURL ?? profData.photoURL ?? profData.authPhotoURL ?? null;
+                        if (name)
+                            payload.otherDisplayName = name;
+                        if (email)
+                            payload.otherEmail = email;
+                        if (photoURL)
+                            payload.otherPhotoURL = photoURL;
+                    }
+                }
+                catch (err) {
+                    firebase_functions_1.logger.warn('[backfillMyDMRail] Failed to fetch profile', { otherUid, err });
+                }
+            }
+            await firebase_1.db.doc(`profiles/${callerUid}/dms/${doc.id}`).set(payload, { merge: true });
+            updated++;
+        };
+        // Query 1: Find threads by participants array
+        try {
+            const threadsSnap = await firebase_1.db.collection('dms')
+                .where('participants', 'array-contains', callerUid)
+                .limit(100)
+                .get();
+            for (const doc of threadsSnap.docs) {
+                await processDm(doc);
+            }
+            firebase_functions_1.logger.info('[backfillMyDMRail] Found threads by participants', { count: threadsSnap.size });
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[backfillMyDMRail] Query by participants failed', { err });
+        }
+        // Query 2: Find threads where the document ID contains the user's UID (key-based lookup)
+        // This catches legacy threads that might not have participants array
+        try {
+            // Get all DMs and filter client-side (less efficient but catches edge cases)
+            const allDmsSnap = await firebase_1.db.collection('dms').limit(500).get();
+            for (const doc of allDmsSnap.docs) {
+                // Check if the doc ID (which is often the key) contains the user's UID
+                if (doc.id.includes(callerUid)) {
+                    await processDm(doc);
+                }
+                else {
+                    // Also check the key field
+                    const data = doc.data();
+                    if (typeof data.key === 'string' && data.key.includes(callerUid)) {
+                        await processDm(doc);
+                    }
+                }
+            }
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[backfillMyDMRail] Key-based lookup failed', { err });
+        }
+        firebase_functions_1.logger.info('[backfillMyDMRail] Complete', { callerUid, updated, skipped, total: seenThreadIds.size });
+        return { ok: true, updated, skipped, total: seenThreadIds.size };
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[backfillMyDMRail] Error', { callerUid, err });
+        throw new https_1.HttpsError('internal', 'Failed to backfill DM rail');
+    }
 });
 /**
  * Callable function to sync Google photos for all members of a server.

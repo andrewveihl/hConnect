@@ -14,6 +14,7 @@
 	} from '$lib/utils/voiceDebugContext';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { voiceClientState, invokeVoiceClientControl } from '$lib/stores/voiceClient';
+	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
 
 	interface Props {
 		serverId?: string | null;
@@ -25,6 +26,8 @@
 
 	const CALL_DOC_ID = 'live';
 	const STORAGE_KEY = 'hconnect:voice-mini-panel:position';
+	const FAB_ID = 'voice-mini-panel';
+	const PANEL_SIZE = 200; // Approximate panel width for snap calculations
 
 	type VoiceParticipant = {
 		uid: string;
@@ -48,6 +51,8 @@
 	let positionY = $state(0);
 	let panelEl = $state<HTMLElement | null>(null);
 	let pointerId: number | null = null;
+	let isSnapped = $state(false);
+	let nearSnapZone: SnapZone | null = $state(null);
 
 	const callState = $derived($voiceClientState);
 
@@ -99,6 +104,25 @@
 		}
 	});
 
+	// Handler for snap zone position updates (e.g., when DMs come in)
+	function handleSnapZoneUpdated() {
+		// Only reposition if we're snapped
+		if (!isSnapped || !snappedZoneId) return;
+		
+		// Find the updated zone position
+		const zones = fabSnapStore.getZones();
+		const zone = zones.find((z) => z.id === snappedZoneId);
+		if (zone) {
+			const snapPos = fabSnapStore.getSnapPosition(zone, PANEL_SIZE);
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const defaultX = vw / 2;
+			const defaultY = vh - 100;
+			positionX = snapPos.x - defaultX + PANEL_SIZE / 2;
+			positionY = snapPos.y - defaultY + PANEL_SIZE / 2;
+		}
+	}
+
 	onDestroy(() => {
 		unsub?.();
 		unsub = null;
@@ -106,17 +130,46 @@
 		if (browser) {
 			window.removeEventListener('pointermove', handlePointerMove);
 			window.removeEventListener('pointerup', handlePointerUp);
+			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 		}
 	});
 
 	onMount(() => {
 		if (browser && draggable) {
 			loadSavedPosition();
+			window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 		}
 	});
 
+	let snappedZoneId: string | null = $state(null);
+
 	function loadSavedPosition() {
 		try {
+			// Check if we were snapped (only if snapping is enabled)
+			const wasSnapped = !$isFabSnappingDisabled && fabSnapStore.isSnappedToRail(FAB_ID);
+			const savedZoneId = fabSnapStore.getSnappedZoneId(FAB_ID);
+			if (wasSnapped && savedZoneId) {
+				// Wait for zones to be registered
+				setTimeout(() => {
+					const zones = fabSnapStore.getZones();
+					const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+					if (zone) {
+						// Calculate offset from default center position to snap zone
+						const snapPos = fabSnapStore.getSnapPosition(zone, PANEL_SIZE);
+						const vw = window.innerWidth;
+						const vh = window.innerHeight;
+						const defaultX = vw / 2;
+						const defaultY = vh - 100;
+						positionX = snapPos.x - defaultX + PANEL_SIZE / 2;
+						positionY = snapPos.y - defaultY + PANEL_SIZE / 2;
+						isSnapped = true;
+						snappedZoneId = zone.id;
+						fabSnapStore.occupyZone(zone.id, FAB_ID);
+					}
+				}, 100);
+				return;
+			}
+
 			const saved = localStorage.getItem(STORAGE_KEY);
 			if (saved) {
 				const { x, y } = JSON.parse(saved);
@@ -128,18 +181,62 @@
 		}
 	}
 
-	function savePosition() {
+	function savePosition(snapped: boolean = false, zoneId?: string) {
 		try {
 			localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: positionX, y: positionY }));
+			fabSnapStore.setSnapped(FAB_ID, snapped, zoneId);
 		} catch {
 			// ignore
 		}
+	}
+
+	// Get the absolute position of the panel center
+	function getPanelCenterPosition(): { x: number; y: number } {
+		if (!browser) return { x: 0, y: 0 };
+		const vw = window.innerWidth;
+		const vh = window.innerHeight;
+		// Default position is center-bottom
+		const baseX = vw / 2;
+		const baseY = vh - 100;
+		return {
+			x: baseX + positionX,
+			y: baseY + positionY
+		};
+	}
+
+	// Check if we're near a snap zone
+	function checkNearSnapZone(): SnapZone | null {
+		if (!browser || $isFabSnappingDisabled) return null;
+		const center = getPanelCenterPosition();
+		return fabSnapStore.findSnapZone(center.x, center.y, FAB_ID);
+	}
+
+	// Snap to zone
+	function snapToZone(zone: SnapZone) {
+		if (!browser) return;
+		const snapPos = fabSnapStore.getSnapPosition(zone, PANEL_SIZE);
+		const vw = window.innerWidth;
+		const vh = window.innerHeight;
+		const baseX = vw / 2;
+		const baseY = vh - 100;
+		positionX = snapPos.x - baseX + PANEL_SIZE / 2;
+		positionY = snapPos.y - baseY + PANEL_SIZE / 2;
+		isSnapped = true;
+		snappedZoneId = zone.id;
+		fabSnapStore.occupyZone(zone.id, FAB_ID);
+		savePosition(true, zone.id);
 	}
 
 	function handleDragStart(event: PointerEvent) {
 		if (!draggable) return;
 		event.preventDefault();
 		isDragging = true;
+		// Release zone when starting to drag
+		if (isSnapped) {
+			fabSnapStore.releaseZone(FAB_ID);
+			snappedZoneId = null;
+		}
+		isSnapped = false;
 		pointerId = event.pointerId;
 		dragStartX = event.clientX;
 		dragStartY = event.clientY;
@@ -156,6 +253,14 @@
 		const dy = event.clientY - dragStartY;
 		positionX = panelStartX + dx;
 		positionY = panelStartY + dy;
+
+		// Check if near snap zone
+		nearSnapZone = checkNearSnapZone();
+		if (browser) {
+			window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
+				detail: { zoneId: nearSnapZone?.id ?? null }
+			}));
+		}
 	}
 
 	function handlePointerUp(event: PointerEvent) {
@@ -164,8 +269,23 @@
 		pointerId = null;
 		window.removeEventListener('pointermove', handlePointerMove);
 		window.removeEventListener('pointerup', handlePointerUp);
+		
 		if (draggable) {
-			savePosition();
+			// Check if we should snap
+			const snapZone = checkNearSnapZone();
+			if (snapZone) {
+				snapToZone(snapZone);
+			} else {
+				savePosition(false);
+			}
+
+			// Clear snap zone highlight
+			if (browser) {
+				window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
+					detail: { zoneId: null }
+				}));
+			}
+			nearSnapZone = null;
 		}
 	}
 
@@ -219,6 +339,8 @@
 		class="voice-mini-panel rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)]/95 shadow-lg backdrop-blur"
 		class:dragging={isDragging}
 		class:is-draggable={draggable}
+		class:is-snapped={isSnapped}
+		class:near-snap={nearSnapZone !== null}
 		style={draggable ? `transform: translate(${positionX}px, ${positionY}px)` : ''}
 	>
 		<!-- Drag handle -->
@@ -369,12 +491,24 @@
 		min-width: 260px;
 		max-width: 320px;
 		user-select: none;
+		transition: box-shadow 200ms ease, transform 200ms ease;
 	}
 	.voice-mini-panel.is-draggable {
 		will-change: transform;
 	}
 	.voice-mini-panel.dragging {
 		opacity: 0.95;
+		transition: none;
+	}
+	.voice-mini-panel.is-snapped {
+		/* Subtle indicator when snapped */
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+	}
+	.voice-mini-panel.near-snap {
+		/* Glow effect when near snap zone */
+		box-shadow:
+			0 12px 32px rgba(0, 0, 0, 0.4),
+			0 0 20px var(--color-accent, #14b8a6);
 	}
 	.drag-handle {
 		touch-action: none;

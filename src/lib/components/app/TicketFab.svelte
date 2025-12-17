@@ -6,6 +6,7 @@
 	import { getDb } from '$lib/firebase';
 	import { user } from '$lib/stores/user';
 	import { servers, serverMemberships } from '$lib/stores';
+	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
 	import {
 		doc,
 		onSnapshot,
@@ -56,6 +57,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 	// Dragging state
 	type Position = { x: number; y: number };
 	const STORAGE_KEY = 'hconnect:ticketFab:position';
+	const FAB_ID = 'ticket-fab';
 	const MIN_MARGIN = 8;
 	const HOLD_DELAY_MS = 150;
 
@@ -69,11 +71,13 @@ import { createChannelThread } from '$lib/firestore/threads';
 	let hasCustomPosition = $state(false);
 	let wasDragging = false;
 	let skipNextClick = false;
+	let isSnapped = $state(false);
+	let nearSnapZone: SnapZone | null = $state(null);
 
 	const DONE_EMOJI = '✅';
 	const PANEL_WIDTH = 340;
 	const PANEL_HEIGHT = 420;
-	const FAB_SIZE = 50;
+	const FAB_SIZE = 48; // 3rem - matches rail-button size when snapped
 
 	// Derived
 	let openCount = $derived(issues.length);
@@ -177,10 +181,11 @@ import { createChannelThread } from '$lib/firestore/threads';
 		return null;
 	}
 
-	function persistPosition(value: Position) {
+	function persistPosition(value: Position, snapped: boolean = false, zoneId?: string) {
 		if (!browser) return;
 		hasCustomPosition = true;
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+		fabSnapStore.setSnapped(FAB_ID, snapped, zoneId);
 	}
 
 	function clampToViewport(value: Position): Position {
@@ -194,9 +199,30 @@ import { createChannelThread } from '$lib/firestore/threads';
 		};
 	}
 
+	let snappedZoneId: string | null = $state(null);
+
 	async function initPosition() {
 		if (!browser) return;
 		await tick();
+
+		// Check if we were snapped to a zone (only if snapping is enabled)
+		const wasSnapped = !$isFabSnappingDisabled && fabSnapStore.isSnappedToRail(FAB_ID);
+		const savedZoneId = fabSnapStore.getSnappedZoneId(FAB_ID);
+		if (wasSnapped && savedZoneId) {
+			// Wait a bit for zones to be registered
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			const zones = fabSnapStore.getZones();
+			const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+			if (zone) {
+				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+				position = clampToViewport(snapPos);
+				isSnapped = true;
+				snappedZoneId = zone.id;
+				fabSnapStore.occupyZone(zone.id, FAB_ID);
+				ready = true;
+				return;
+			}
+		}
 
 		const saved = loadSavedPosition();
 		if (saved) {
@@ -210,6 +236,24 @@ import { createChannelThread } from '$lib/firestore/threads';
 			});
 		}
 		ready = true;
+	}
+
+	// Check if current FAB center is near a snap zone
+	function checkNearSnapZone(): SnapZone | null {
+		if (!browser || $isFabSnappingDisabled) return null;
+		const fabCenterX = position.x + FAB_SIZE / 2;
+		const fabCenterY = position.y + FAB_SIZE / 2;
+		return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+	}
+
+	// Snap to a zone
+	function snapToZone(zone: SnapZone) {
+		const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+		position = clampToViewport(snapPos);
+		isSnapped = true;
+		snappedZoneId = zone.id;
+		fabSnapStore.occupyZone(zone.id, FAB_ID);
+		persistPosition(position, true, zone.id);
 	}
 
 	// Drag handlers
@@ -226,6 +270,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 			skipNextClick = false;
 			return;
 		}
+		// Only allow expanding for staff members
+		if (!isStaff) return;
 		// Toggle expanded state
 		expanded = !expanded;
 	}
@@ -247,6 +293,12 @@ import { createChannelThread } from '$lib/firestore/threads';
 			if (pointerId === null) return;
 			dragging = true;
 			wasDragging = true;
+			// Release zone when starting to drag
+			if (isSnapped) {
+				fabSnapStore.releaseZone(FAB_ID);
+				snappedZoneId = null;
+			}
+			isSnapped = false;
 			fabEl?.setPointerCapture(pointerId);
 		}, HOLD_DELAY_MS);
 	}
@@ -259,6 +311,15 @@ import { createChannelThread } from '$lib/firestore/threads';
 			x: event.clientX - dragOffset.x,
 			y: event.clientY - dragOffset.y
 		});
+		// Check if we're near a snap zone
+		nearSnapZone = checkNearSnapZone();
+		
+		// Dispatch event to highlight snap zone in LeftPane
+		if (browser) {
+			window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
+				detail: { zoneId: nearSnapZone?.id ?? null }
+			}));
+		}
 	}
 
 	function handlePointerUp(event: PointerEvent) {
@@ -268,7 +329,23 @@ import { createChannelThread } from '$lib/firestore/threads';
 		if (dragging && pointerId != null) {
 			event.preventDefault();
 			fabEl?.releasePointerCapture(pointerId);
-			persistPosition(position);
+			
+			// Check if we should snap
+			const snapZone = checkNearSnapZone();
+			if (snapZone) {
+				snapToZone(snapZone);
+			} else {
+				persistPosition(position, false);
+			}
+			
+			// Clear snap zone highlight
+			if (browser) {
+				window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
+					detail: { zoneId: null }
+				}));
+			}
+			nearSnapZone = null;
+			
 			// Skip the click event since we were dragging
 			skipNextClick = true;
 		}
@@ -507,7 +584,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 					issues = [];
 				}
 
-				if (userIsStaff && !ready) {
+				// Always initialize position for dragging/snapping
+				if (!ready) {
 					initPosition();
 				}
 			},
@@ -517,8 +595,9 @@ import { createChannelThread } from '$lib/firestore/threads';
 				if (adminOrOwner) {
 					isStaff = true;
 					enabled = false;
-					if (!ready) initPosition();
 				}
+				// Always initialize position
+				if (!ready) initPosition();
 			}
 		);
 	});
@@ -579,8 +658,30 @@ import { createChannelThread } from '$lib/firestore/threads';
 		window.addEventListener('resize', handleResize);
 		return () => window.removeEventListener('resize', handleResize);
 	});
+
+	// Listen for snap zone position updates (e.g., when DMs come in)
+	$effect(() => {
+		if (!browser) return;
+		
+		const handleSnapZoneUpdated = () => {
+			// Only reposition if we're snapped
+			if (!isSnapped || !snappedZoneId) return;
+			
+			// Find the updated zone position
+			const zones = fabSnapStore.getZones();
+			const zone = zones.find((z) => z.id === snappedZoneId);
+			if (zone) {
+				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+				position = clampToViewport(snapPos);
+			}
+		};
+		
+		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		return () => window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+	});
 </script>
 
+<!-- Only show FAB for staff members -->
 {#if isStaff}
 	<!-- Backdrop when expanded -->
 	{#if expanded}
@@ -591,6 +692,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 	<div
 		class="ticket-container"
 		class:ticket-container--ready={ready}
+		class:ticket-container--snapped={isSnapped}
+		class:ticket-container--near-snap={nearSnapZone !== null}
 		style="transform: translate({position.x}px, {position.y}px)"
 	>
 		<!-- FAB Button -->
@@ -602,6 +705,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 			class:ticket-fab--disabled={!enabled}
 			class:ticket-fab--active={expanded}
 			class:ticket-fab--has-issues={openCount > 0 && enabled}
+			class:ticket-fab--snapped={isSnapped}
 			aria-label="Support Tickets"
 			title={enabled ? `Support Tickets (${openCount} open)` : 'Ticket AI (Disabled)'}
 			onclick={handleFabClick}
@@ -850,15 +954,31 @@ import { createChannelThread } from '$lib/firestore/threads';
 		cursor: grab;
 		transition:
 			box-shadow 180ms ease,
-			transform 180ms ease;
+			transform 180ms ease,
+			width 200ms ease,
+			height 200ms ease;
 		touch-action: none;
 		user-select: none;
 		position: relative;
 	}
 
+	.ticket-fab--snapped {
+		/* Match rail-button size when docked */
+		width: 3rem;
+		height: 3rem;
+		box-shadow: 0 8px 18px rgba(249, 115, 22, 0.25);
+	}
+
 	.ticket-fab--dragging {
 		cursor: grabbing;
 		box-shadow: 0 20px 40px rgba(249, 115, 22, 0.45);
+	}
+
+	.ticket-container--near-snap .ticket-fab {
+		/* Glow effect when near snap zone */
+		box-shadow:
+			0 14px 26px rgba(249, 115, 22, 0.32),
+			0 0 20px var(--color-accent, #14b8a6);
 	}
 
 	.ticket-fab--active {

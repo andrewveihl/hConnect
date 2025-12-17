@@ -102,7 +102,8 @@ export type FeatureFlagKey =
 	| 'enableMessageEditing'
 	| 'enableMessageDeleting'
 	| 'readOnlyMode'
-	| 'showNotificationDebugTools';
+	| 'showNotificationDebugTools'
+	| 'disableFabSnapping';
 
 export type FeatureFlagMap = Record<FeatureFlagKey, boolean>;
 
@@ -222,6 +223,11 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
 		key: 'readOnlyMode',
 		label: 'Read-only Mode',
 		description: 'Lock outbound messaging globally.'
+	},
+	{
+		key: 'disableFabSnapping',
+		label: 'Disable FAB Snapping',
+		description: 'Turn off floating button snap-to-rail feature.'
 	}
 ];
 
@@ -247,7 +253,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
 	enableMessageEditing: true,
 	enableMessageDeleting: true,
 	readOnlyMode: false,
-	showNotificationDebugTools: true
+	showNotificationDebugTools: true,
+	disableFabSnapping: false
 };
 
 export type AdminLogType =

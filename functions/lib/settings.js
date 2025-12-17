@@ -22,6 +22,7 @@ exports.defaultNotificationSettings = {
     allowRoleMentionPush: true,
     allowHereMentionPush: true,
     allowEveryoneMentionPush: true,
+    allowChannelMessagePush: true,
     doNotDisturbUntil: null
 };
 async function fetchNotificationSettings(uid) {

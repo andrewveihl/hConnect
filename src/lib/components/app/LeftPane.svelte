@@ -22,7 +22,7 @@
 	import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
 	import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 	import { featureFlags } from '$lib/stores/featureFlags';
-	import { dmUnreadCount, notifications } from '$lib/stores/notifications';
+	import { dmUnreadCount, notifications, serverUnreadIndicators } from '$lib/stores/notifications';
 	import type { NotificationItem } from '$lib/stores/notifications';
 	import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
 	import { defaultSettingsSection } from '$lib/settings/sections';
@@ -35,6 +35,7 @@
 	import { user, userProfile } from '$lib/stores/user';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import { fabSnapStore, isFabSnappingDisabled } from '$lib/stores/fabSnap';
 
 	interface Props {
 		activeServerId?: string | null;
@@ -103,6 +104,9 @@
 	let autoScrollFrame: number | null = null;
 	const AUTO_SCROLL_EDGE_PX = 56;
 	const AUTO_SCROLL_MAX_STEP = 18;
+	let fabSnapZoneEl: HTMLDivElement | null = $state(null);
+	const FAB_SNAP_ZONE_ID = 'left-rail-fab-snap';
+	let snapZones = $state<import('$lib/stores/fabSnap').SnapZone[]>([]);
 	const currentStatusSelection = $derived(
 		myOverrideActive && myOverrideState ? myOverrideState : 'auto'
 	);
@@ -149,17 +153,82 @@
 		unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? []));
 	}
 
+	function updateFabSnapZone() {
+		if (!browser || !fabSnapZoneEl) return;
+		const rect = fabSnapZoneEl.getBoundingClientRect();
+		fabSnapStore.updateZone(FAB_SNAP_ZONE_ID, {
+			x: rect.left,
+			y: rect.top,
+			width: rect.width,
+			height: rect.height
+		});
+	}
+
+	function registerFabSnapZone() {
+		if (!browser || !fabSnapZoneEl) return;
+		const rect = fabSnapZoneEl.getBoundingClientRect();
+		fabSnapStore.registerZone({
+			id: FAB_SNAP_ZONE_ID,
+			x: rect.left,
+			y: rect.top,
+			width: rect.width,
+			height: rect.height
+		});
+	}
+
+	// Snap zone highlight state - can be any zone ID now
+	let activeSnapZoneId = $state<string | null>(null);
+
+	function handleFabNearSnapZone(event: CustomEvent<{ zoneId: string | null }>) {
+		activeSnapZoneId = event.detail.zoneId;
+	}
+
+	// Subscribe to snap zones updates
+	let snapZonesUnsub: (() => void) | null = null;
+	let snapZoneRegistered = false;
+
+	// Watch for snap zone element to be bound and register
+	$effect(() => {
+		if (browser && fabSnapZoneEl && !snapZoneRegistered) {
+			snapZoneRegistered = true;
+			requestAnimationFrame(() => {
+				registerFabSnapZone();
+			});
+		}
+	});
+
 	onMount(() => {
 		restartServerSubscription($user?.uid ?? null);
 		stopUserWatch = user.subscribe((next) => {
 			restartServerSubscription(next?.uid ?? null);
 		});
+
+		// Set up event listeners
+		if (browser) {
+			window.addEventListener('resize', updateFabSnapZone);
+			window.addEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
+			
+			// Subscribe to snap zones
+			snapZonesUnsub = fabSnapStore.subscribe((state) => {
+				snapZones = state.zones.filter(
+					(z) => z.id === FAB_SNAP_ZONE_ID || z.id.startsWith(`${FAB_SNAP_ZONE_ID}-stack-`)
+				);
+			});
+		}
 	});
 
 	onDestroy(() => stopUserWatch?.());
 	onDestroy(() => unsub?.());
 	onDestroy(() => dmRailUnsub?.());
 	onDestroy(() => stopAutoScroll());
+	onDestroy(() => {
+		if (browser) {
+			fabSnapStore.unregisterZone(FAB_SNAP_ZONE_ID);
+			window.removeEventListener('resize', updateFabSnapZone);
+			window.removeEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
+			snapZonesUnsub?.();
+		}
+	});
 
 	const handleCreateClick = () => {
 		if (onCreateServer) onCreateServer();
@@ -240,6 +309,21 @@
 			});
 		list.sort((a, b) => b.lastActivity - a.lastActivity);
 		return list;
+	});
+
+	// When DM alerts change, update snap zone positions so snapped FABs move up/down
+	let prevDmAlertCount = 0;
+	run(() => {
+		const currentCount = dmAlerts.length;
+		if (currentCount !== prevDmAlertCount) {
+			prevDmAlertCount = currentCount;
+			// Use requestAnimationFrame to wait for DOM update
+			if (browser) {
+				requestAnimationFrame(() => {
+					updateFabSnapZone();
+				});
+			}
+		}
 	});
 
 	run(() => {
@@ -657,6 +741,13 @@
 					{:else}
 						<span class="rail-button__fallback">{s.name.slice(0, 2).toUpperCase()}</span>
 					{/if}
+					<!-- Server activity dot -->
+					{#if $serverUnreadIndicators[s.id] && activeServerId !== s.id}
+						<span
+							class="server-activity-dot"
+							class:server-activity-dot--high={$serverUnreadIndicators[s.id].hasHighPriority}
+						></span>
+					{/if}
 				</button>
 			{/each}
 
@@ -676,6 +767,38 @@
 			{/if}
 		</div>
 	</div>
+
+	<!-- FAB Snap Zones - floating icons can snap here, stacks dynamically -->
+	{#if !$isFabSnappingDisabled}
+	<div class="fab-snap-zones">
+		<!-- Base snap zone (always visible when not occupied) -->
+		<div
+			class="fab-snap-zone"
+			class:fab-snap-zone--active={activeSnapZoneId === FAB_SNAP_ZONE_ID}
+			class:fab-snap-zone--occupied={snapZones.find(z => z.id === FAB_SNAP_ZONE_ID)?.occupiedBy != null}
+			bind:this={fabSnapZoneEl}
+			aria-label="Snap zone for floating buttons"
+			role="region"
+		>
+			<div class="fab-snap-zone__indicator">
+				<i class="bx bx-target-lock"></i>
+			</div>
+		</div>
+		<!-- Stacked snap zones (appear above occupied zones for next FAB to snap) -->
+		{#each snapZones.filter(z => z.id !== FAB_SNAP_ZONE_ID && !z.occupiedBy).sort((a, b) => (a.stackOrder ?? 0) - (b.stackOrder ?? 0)) as zone (zone.id)}
+			<div
+				class="fab-snap-zone fab-snap-zone--stacked"
+				class:fab-snap-zone--active={activeSnapZoneId === zone.id}
+				aria-label="Additional snap zone for stacking"
+				role="region"
+			>
+				<div class="fab-snap-zone__indicator">
+					<i class="bx bx-target-lock"></i>
+				</div>
+			</div>
+		{/each}
+	</div>
+	{/if}
 
 	{#if showBottomActions}
 		<div
@@ -864,6 +987,23 @@
 	:global(.rail-button--dragging) {
 		opacity: 0.65;
 		cursor: grabbing;
+	}
+
+	.server-activity-dot {
+		position: absolute;
+		bottom: -2px;
+		right: -2px;
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: var(--color-accent);
+		border: 2.5px solid var(--color-panel);
+		pointer-events: none;
+		z-index: 2;
+	}
+
+	.server-activity-dot--high {
+		background: var(--color-accent);
 	}
 
 	@media (max-width: 767px) {
@@ -1067,5 +1207,90 @@
 		font-size: 0.72rem;
 		text-align: center;
 		margin-top: 0.4rem;
+	}
+
+	/* FAB Snap Zones Container */
+	.fab-snap-zones {
+		display: flex;
+		flex-direction: column-reverse;
+		align-items: center;
+		gap: 0.5rem; /* 8px - matches gap-2 used by DM buttons */
+		margin: 0.5rem auto;
+		flex-shrink: 0;
+	}
+
+	/* FAB Snap Zone */
+	.fab-snap-zone {
+		width: 3rem; /* 48px - matches rail-button size */
+		height: 3rem;
+		border-radius: 50%;
+		border: 2px dashed color-mix(in srgb, var(--color-accent) 40%, transparent);
+		background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 200ms ease;
+		opacity: 0.6;
+		flex-shrink: 0;
+	}
+
+	.fab-snap-zone--stacked {
+		opacity: 0.5;
+		transform: scale(0.95);
+		animation: fabZoneAppear 200ms ease-out;
+	}
+
+	@keyframes fabZoneAppear {
+		from {
+			opacity: 0;
+			transform: scale(0.8) translateY(10px);
+		}
+		to {
+			opacity: 0.5;
+			transform: scale(0.95) translateY(0);
+		}
+	}
+
+	.fab-snap-zone--occupied {
+		opacity: 0;
+		pointer-events: none;
+		height: 0;
+		width: 0;
+		margin: 0;
+		padding: 0;
+		border: none;
+		overflow: hidden;
+	}
+
+	.fab-snap-zone:hover {
+		opacity: 1;
+		border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+		background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+	}
+
+	.fab-snap-zone__indicator {
+		color: var(--color-accent);
+		font-size: 1.25rem;
+		opacity: 0.7;
+	}
+
+	/* When a FAB is nearby/hovering */
+	.fab-snap-zone--active {
+		opacity: 1;
+		border-color: var(--color-accent);
+		background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+		transform: scale(1.08);
+		box-shadow: 0 0 16px color-mix(in srgb, var(--color-accent) 40%, transparent);
+	}
+
+	.fab-snap-zone--active .fab-snap-zone__indicator {
+		opacity: 1;
+	}
+
+	/* Hide on mobile (snap zone not needed) */
+	@media (max-width: 767px) {
+		.fab-snap-zones {
+			display: none;
+		}
 	}
 </style>

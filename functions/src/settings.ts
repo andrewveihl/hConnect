@@ -19,6 +19,7 @@ export const defaultNotificationSettings: NotificationSettings = {
   allowRoleMentionPush: true,
   allowHereMentionPush: true,
   allowEveryoneMentionPush: true,
+  allowChannelMessagePush: true,
   doNotDisturbUntil: null
 };
 
