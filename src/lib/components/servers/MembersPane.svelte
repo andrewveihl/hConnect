@@ -23,13 +23,21 @@
 	import MemberProfileCard from './MemberProfileCard.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
+	interface ChannelInfo {
+		id: string;
+		name?: string;
+		isPrivate?: boolean;
+		allowedRoleIds?: string[];
+	}
+
 	interface Props {
 		serverId: string;
 		showHeader?: boolean;
 		onHide?: (() => void) | null;
+		channel?: ChannelInfo | null;
 	}
 
-	let { serverId, showHeader = true, onHide = null }: Props = $props();
+	let { serverId, showHeader = true, onHide = null, channel = null }: Props = $props();
 
 	type MemberDoc = {
 		uid: string;
@@ -290,7 +298,9 @@
 	}
 
 	function updateRows() {
-		const computed: MemberRow[] = Object.values(members).map((member) => {
+		// First, compute all member rows with their role information
+		type MemberRowWithRoleIds = MemberRow & { _roleIds: string[] };
+		const allComputed: MemberRowWithRoleIds[] = Object.values(members).map((member) => {
 			const label = labelFor(member.uid);
 			const status = presenceState(member.uid);
 			const tooltip = label;
@@ -312,13 +322,27 @@
 				status,
 				tooltip,
 				baseRole,
-				roles: resolvedRoles
+				roles: resolvedRoles,
+				_roleIds: roleIds // Store for filtering
 			};
 		});
 
-		rows = computed.sort((a, b) =>
-			a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
-		);
+		// Filter members based on channel access if a private channel is selected
+		let computed: MemberRowWithRoleIds[] = allComputed;
+		if (channel?.isPrivate && Array.isArray(channel.allowedRoleIds) && channel.allowedRoleIds.length > 0) {
+			const allowedRoleSet = new Set(channel.allowedRoleIds);
+			computed = allComputed.filter((row) => {
+				// Owners and admins always have access
+				if (row.baseRole === 'owner' || row.baseRole === 'admin') return true;
+				// Check if any of the member's roles are in the allowed list
+				return row._roleIds.some((roleId) => allowedRoleSet.has(roleId));
+			});
+		}
+
+		// Clean up the temporary _roleIds property and sort
+		rows = computed
+			.map(({ _roleIds, ...rest }) => rest)
+			.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
 		syncVisibilityState(rows.length);
 		recomputeBuckets();
 		recomputeVisibleGroups();
@@ -653,6 +677,18 @@
 			clearRolesIfAny();
 			cleanupProfiles();
 			resetMemberVisibility();
+		}
+	});
+
+	// Recompute visible members when the channel changes (for private channel filtering)
+	run(() => {
+		// Track channel changes
+		const _channelId = channel?.id;
+		const _isPrivate = channel?.isPrivate;
+		const _allowedRoles = channel?.allowedRoleIds;
+		// Recompute rows with the new channel filter
+		if (Object.keys(members).length > 0) {
+			updateRows();
 		}
 	});
 

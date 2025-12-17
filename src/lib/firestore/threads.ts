@@ -684,3 +684,124 @@ export async function toggleThreadMute(uid: string, threadId: string, muted: boo
 		{ merge: true }
 	);
 }
+
+/**
+ * Stream all threads where the user is a member for a specific server.
+ * This queries the user's threadMembership subcollection filtered by serverId.
+ */
+export function streamUserServerThreads(
+	uid: string,
+	serverId: string,
+	cb: (threads: Array<{ threadId: string; channelId: string; serverId: string; lastReadAt?: Timestamp }>) => void,
+	{ onError }: { onError?: (err: unknown) => void } = {}
+): Unsubscribe {
+	const db = getDb();
+	const membershipRef = collection(db, 'profiles', uid, 'threadMembership');
+	const q = query(membershipRef);
+
+	return onSnapshot(
+		q,
+		(snap) => {
+			const memberships = snap.docs
+				.map((d) => ({ threadId: d.id, ...(d.data() as any) }))
+				.filter((m) => m.serverId === serverId);
+			cb(memberships);
+		},
+		(err) => {
+			if (onError) onError(err);
+		}
+	);
+}
+
+/**
+ * Fetch a single thread by ID
+ */
+export async function getThread(
+	serverId: string,
+	channelId: string,
+	threadId: string
+): Promise<ChannelThread | null> {
+	const db = getDb();
+	const ref = threadDocRef(db, serverId, channelId, threadId);
+	const snap = await getDoc(ref);
+	if (!snap.exists()) return null;
+	return toThread(snap);
+}
+
+/**
+ * Join a thread - adds user to memberUids and creates permission doc
+ */
+export async function joinThread(
+	uid: string,
+	serverId: string,
+	channelId: string,
+	threadId: string,
+	displayName?: string
+): Promise<void> {
+	const db = getDb();
+	const batch = writeBatch(db);
+
+	// Add user to thread memberUids
+	const threadRef = threadDocRef(db, serverId, channelId, threadId);
+	batch.update(threadRef, {
+		memberUids: arrayUnion(uid),
+		memberCount: increment(1)
+	});
+
+	// Create permission doc for user
+	batch.set(
+		threadPermissionsDoc(db, serverId, channelId, threadId, uid),
+		{
+			canRead: true,
+			canPost: true,
+			grantedBy: uid,
+			grantedAt: serverTimestamp(),
+			joinedAt: serverTimestamp()
+		},
+		{ merge: true }
+	);
+
+	// Create membership doc in user's profile
+	batch.set(
+		membershipDoc(db, uid, threadId),
+		{
+			threadId,
+			serverId,
+			channelId,
+			joinedAt: serverTimestamp()
+		},
+		{ merge: true }
+	);
+
+	await batch.commit();
+}
+
+/**
+ * Leave a thread - removes user from memberUids
+ */
+export async function leaveThread(
+	uid: string,
+	serverId: string,
+	channelId: string,
+	threadId: string
+): Promise<void> {
+	const db = getDb();
+	const { arrayRemove, deleteDoc } = await import('firebase/firestore');
+	const batch = writeBatch(db);
+
+	// Remove user from thread memberUids
+	const threadRef = threadDocRef(db, serverId, channelId, threadId);
+	batch.update(threadRef, {
+		memberUids: arrayRemove(uid),
+		memberCount: increment(-1)
+	});
+
+	await batch.commit();
+
+	// Delete membership doc (outside batch since it's in different path)
+	try {
+		await deleteDoc(membershipDoc(db, uid, threadId));
+	} catch {
+		// Ignore if doesn't exist
+	}
+}

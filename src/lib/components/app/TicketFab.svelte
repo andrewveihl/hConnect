@@ -19,7 +19,7 @@
 		type Timestamp
 	} from 'firebase/firestore';
 	import { toggleChannelReaction } from '$lib/firestore/messages';
-	import type { Server, Membership } from '$lib/types';
+import { createChannelThread } from '$lib/firestore/threads';
 
 	// Types
 	type IssueStatus = 'opened' | 'in_progress' | 'closed';
@@ -44,8 +44,9 @@
 	let issues = $state<TicketIssue[]>([]);
 	let loading = $state(true);
 	let expanded = $state(false);
-	let filter = $state<'all' | 'mine' | 'open'>('all');
+	let filter = $state<'unassigned' | 'all' | 'assigned' | 'mine'>('unassigned');
 	let completingId = $state<string | null>(null);
+	let claimingId = $state<string | null>(null);
 	let channelNames = $state<Record<string, string>>({});
 
 	let settingsUnsub: Unsubscribe | null = null;
@@ -77,12 +78,13 @@
 	// Derived
 	let openCount = $derived(issues.length);
 	let myIssues = $derived(issues.filter((i) => i.staffMemberIds?.includes($user?.uid ?? '')));
-	// "Open" now means assigned (has staff members) - the inverse of unassigned
 	let assignedIssues = $derived(issues.filter((i) => (i.staffMemberIds?.length ?? 0) > 0));
+	let unassignedIssues = $derived(issues.filter((i) => (i.staffMemberIds?.length ?? 0) === 0));
 
 	let filteredIssues = $derived.by(() => {
+		if (filter === 'unassigned') return unassignedIssues;
 		if (filter === 'mine') return myIssues;
-		if (filter === 'open') return assignedIssues;
+		if (filter === 'assigned') return assignedIssues;
 		return issues;
 	});
 
@@ -314,6 +316,59 @@
 
 	let deletingId = $state<string | null>(null);
 
+	// Claim ticket and create thread, then open as popup
+	async function createAndOpenThread(issue: TicketIssue) {
+		if (!currentServerId || !$user?.uid || claimingId) return;
+		claimingId = issue.id;
+
+		try {
+			const db = getDb();
+			const uid = $user.uid;
+			const displayName = $user.displayName ?? 'Staff';
+
+			// First, claim the ticket
+			const issueRef = doc(db, 'servers', currentServerId, 'ticketAiIssues', issue.id);
+			await updateDoc(issueRef, {
+				staffMemberIds: [uid],
+				status: 'in_progress'
+			});
+
+			// Create a thread from the message (if there's a parentMessageId)
+			let threadId = issue.threadId;
+			if (!threadId && issue.parentMessageId) {
+				threadId = await createChannelThread({
+					serverId: currentServerId,
+					channelId: issue.channelId,
+					sourceMessageId: issue.parentMessageId,
+					sourceMessageText: issue.summary?.slice(0, 100),
+					creator: { uid, displayName },
+					initialMentions: issue.authorId ? [issue.authorId] : []
+				});
+
+				// Update the issue with the new threadId
+				await updateDoc(issueRef, { threadId });
+			}
+
+			// Close the panel
+			expanded = false;
+
+			// Dispatch event to open floating thread popup
+			if (threadId) {
+				window.dispatchEvent(new CustomEvent('openFloatingThread', {
+					detail: {
+						serverId: currentServerId,
+						channelId: issue.channelId,
+						threadId: threadId
+					}
+				}));
+			}
+		} catch (err) {
+			console.error('[TicketFab] Failed to create thread:', err);
+		} finally {
+			claimingId = null;
+		}
+	}
+
 	async function deleteIssue(issue: TicketIssue) {
 		if (!currentServerId || deletingId) return;
 		deletingId = issue.id;
@@ -328,6 +383,28 @@
 		} finally {
 			deletingId = null;
 		}
+	}
+
+	// Open an existing thread as a popup (for assigned tickets)
+	function openThreadPopup(issue: TicketIssue) {
+		if (!currentServerId || !issue.channelId) return;
+		
+		const threadId = issue.threadId || issue.parentMessageId;
+		if (!threadId) {
+			console.warn('[TicketFab] No thread ID available for issue:', issue.id);
+			return;
+		}
+		
+		expanded = false;
+		
+		// Dispatch event to open floating thread popup
+		window.dispatchEvent(new CustomEvent('openFloatingThread', {
+			detail: {
+				serverId: currentServerId,
+				channelId: issue.channelId,
+				threadId: threadId
+			}
+		}));
 	}
 
 	function navigateToIssue(issue: TicketIssue) {
@@ -568,6 +645,14 @@
 						<button
 							type="button"
 							class="filter-tab"
+							class:filter-tab--active={filter === 'unassigned'}
+							onclick={() => (filter = 'unassigned')}
+						>
+							Unassigned ({unassignedIssues.length})
+						</button>
+						<button
+							type="button"
+							class="filter-tab"
 							class:filter-tab--active={filter === 'all'}
 							onclick={() => (filter = 'all')}
 						>
@@ -576,8 +661,8 @@
 						<button
 							type="button"
 							class="filter-tab"
-							class:filter-tab--active={filter === 'open'}
-							onclick={() => (filter = 'open')}
+							class:filter-tab--active={filter === 'assigned'}
+							onclick={() => (filter = 'assigned')}
 						>
 							Assigned ({assignedIssues.length})
 						</button>
@@ -599,6 +684,8 @@
 								<span>
 									{#if filter === 'all'}
 										All tickets answered! 🎉
+									{:else if filter === 'unassigned'}
+										No unassigned tickets 🎉
 									{:else if filter === 'mine'}
 										No tickets assigned to you
 									{:else}
@@ -638,30 +725,67 @@
 									</div>
 
 									<div class="ticket-card__actions">
-										<button
-											type="button"
-											class="ticket-btn ticket-btn--link"
-											onclick={() => navigateToIssue(issue)}
-											title="Go to message"
-										>
-											<i class="bx bx-link-external"></i>
-											View
-										</button>
-
-										{#if isMine}
+										{#if !isAssigned}
+											<!-- Unassigned: Primary action is "Create Thread" -->
 											<button
 												type="button"
-												class="ticket-btn ticket-btn--complete"
-												onclick={() => markComplete(issue)}
-												disabled={completingId === issue.id}
-												title="Mark as resolved"
+												class="ticket-btn ticket-btn--claim"
+												onclick={() => createAndOpenThread(issue)}
+												disabled={claimingId === issue.id}
+												title="Claim ticket and open thread"
 											>
-												{#if completingId === issue.id}
+												{#if claimingId === issue.id}
 													<i class="bx bx-loader-alt bx-spin"></i>
 												{:else}
-													<i class="bx bx-check"></i>
+													<i class="bx bx-message-square-add"></i>
 												{/if}
-												Done
+												Create Thread
+											</button>
+											<!-- Small view button for unassigned -->
+											<button
+												type="button"
+												class="ticket-btn ticket-btn--icon"
+												onclick={() => navigateToIssue(issue)}
+												title="Go to message"
+											>
+												<i class="bx bx-link-external"></i>
+											</button>
+										{:else}
+											<!-- Assigned: Primary action is "Open" popup -->
+											<button
+												type="button"
+												class="ticket-btn ticket-btn--open"
+												onclick={() => openThreadPopup(issue)}
+												title="Open thread popup"
+											>
+												<i class="bx bx-window-open"></i>
+												Open
+											</button>
+											{#if isMine}
+												<!-- Assigned to me: Show "Done" button -->
+												<button
+													type="button"
+													class="ticket-btn ticket-btn--complete"
+													onclick={() => markComplete(issue)}
+													disabled={completingId === issue.id}
+													title="Mark as resolved"
+												>
+													{#if completingId === issue.id}
+														<i class="bx bx-loader-alt bx-spin"></i>
+													{:else}
+														<i class="bx bx-check"></i>
+													{/if}
+													Done
+												</button>
+											{/if}
+											<!-- Small view button for assigned -->
+											<button
+												type="button"
+												class="ticket-btn ticket-btn--icon"
+												onclick={() => navigateToIssue(issue)}
+												title="Go to message"
+											>
+												<i class="bx bx-link-external"></i>
 											</button>
 										{/if}
 
@@ -1029,6 +1153,36 @@
 
 	.ticket-btn--complete:hover:not(:disabled) {
 		background: rgba(34, 197, 94, 0.3);
+	}
+
+	.ticket-btn--claim {
+		background: rgba(168, 85, 247, 0.2);
+		color: #a855f7;
+	}
+
+	.ticket-btn--claim:hover:not(:disabled) {
+		background: rgba(168, 85, 247, 0.3);
+	}
+
+	.ticket-btn--open {
+		background: rgba(59, 130, 246, 0.2);
+		color: #3b82f6;
+	}
+
+	.ticket-btn--open:hover:not(:disabled) {
+		background: rgba(59, 130, 246, 0.3);
+	}
+
+	.ticket-btn--icon {
+		background: rgba(100, 116, 139, 0.15);
+		color: #64748b;
+		padding: 4px 6px;
+		min-width: unset;
+	}
+
+	.ticket-btn--icon:hover:not(:disabled) {
+		background: rgba(100, 116, 139, 0.25);
+		color: #94a3b8;
 	}
 
 	.ticket-btn--delete {
