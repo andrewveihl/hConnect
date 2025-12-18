@@ -454,6 +454,19 @@ export async function enablePushForUser(
 		});
 		return null;
 	}
+	
+	// Check if push is supported on this iOS browser
+	if (!isIOSPushSupported()) {
+		const supportInfo = getPushSupportMessage();
+		emitPushDebug(debug, {
+			step: 'ios.unsupported',
+			message: supportInfo.message,
+			context: { platform: detectPlatform(), userAgent: navigator.userAgent }
+		});
+		logPushDebug('Push not supported on this iOS browser', { message: supportInfo.message });
+		return null;
+	}
+	
 	emitPushDebug(debug, {
 		step: 'enable.start',
 		message: 'Attempting to enable push for user.',
@@ -706,6 +719,13 @@ function detectPlatform(): DevicePlatform {
 	const ua = navigator.userAgent || '';
 	const standalone = isStandalone();
 	if (/iPhone|iPad|iPod/i.test(ua)) {
+		// Check for third-party browsers on iOS (they can't do push)
+		// CriOS = Chrome, FxiOS = Firefox, OPiOS = Opera, EdgiOS = Edge
+		const isThirdPartyBrowser = /CriOS|FxiOS|OPiOS|EdgiOS/i.test(ua);
+		if (isThirdPartyBrowser) {
+			// Return a special platform to indicate push won't work
+			return 'ios_browser'; // Will be filtered out by shouldUseSafariWebPush
+		}
 		return standalone ? 'ios_pwa' : 'ios_browser';
 	}
 	if (/Android/i.test(ua)) {
@@ -716,6 +736,72 @@ function detectPlatform(): DevicePlatform {
 	if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) return 'web_safari';
 	if (/Chrome|Chromium/i.test(ua)) return 'web_chrome';
 	return 'web';
+}
+
+/**
+ * Check if the current browser supports push notifications on iOS.
+ * Only Safari and Safari-based PWAs support push on iOS.
+ */
+export function isIOSPushSupported(): boolean {
+	if (typeof navigator === 'undefined') return true; // Assume supported on non-iOS
+	const ua = navigator.userAgent || '';
+	if (!/iPhone|iPad|iPod/i.test(ua)) return true; // Not iOS, assume supported
+	
+	// On iOS, only Safari supports push. Check for third-party browsers.
+	const isThirdPartyBrowser = /CriOS|FxiOS|OPiOS|EdgiOS/i.test(ua);
+	if (isThirdPartyBrowser) {
+		return false; // Chrome, Firefox, Opera, Edge on iOS don't support push
+	}
+	
+	// Safari or Safari-based PWA
+	return true;
+}
+
+/**
+ * Get a user-friendly message about push notification support.
+ */
+export function getPushSupportMessage(): { supported: boolean; message: string } {
+	if (typeof navigator === 'undefined') {
+		return { supported: false, message: 'Notifications are not available in this environment.' };
+	}
+	
+	const ua = navigator.userAgent || '';
+	const isIOS = /iPhone|iPad|iPod/i.test(ua);
+	
+	if (!isIOS) {
+		return { supported: true, message: 'Push notifications are supported.' };
+	}
+	
+	// Check for third-party browsers on iOS
+	if (/CriOS/i.test(ua)) {
+		return {
+			supported: false,
+			message: 'Push notifications are not supported in Chrome on iOS. Please use Safari and add hConnect to your home screen for notifications.'
+		};
+	}
+	if (/FxiOS/i.test(ua)) {
+		return {
+			supported: false,
+			message: 'Push notifications are not supported in Firefox on iOS. Please use Safari and add hConnect to your home screen for notifications.'
+		};
+	}
+	if (/OPiOS|EdgiOS/i.test(ua)) {
+		return {
+			supported: false,
+			message: 'Push notifications are not supported in this browser on iOS. Please use Safari and add hConnect to your home screen for notifications.'
+		};
+	}
+	
+	// Safari on iOS
+	const standalone = isStandalone();
+	if (standalone) {
+		return { supported: true, message: 'Push notifications are supported in this PWA.' };
+	}
+	
+	return {
+		supported: true,
+		message: 'For the best notification experience, add hConnect to your home screen from Safari.'
+	};
 }
 
 function isStandalone() {

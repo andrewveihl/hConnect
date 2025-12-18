@@ -218,6 +218,10 @@
 		}
 	}
 
+	function stopTouchPropagation(event: TouchEvent) {
+		event.stopPropagation();
+	}
+
 	// Handler for snap zone position updates (e.g., when DMs come in)
 	function handleSnapZoneUpdated() {
 		if (!isSnapped || !snappedZoneId) return;
@@ -574,6 +578,10 @@
 	onpointermove={handlePointerMove}
 	onpointerup={handlePointerUp}
 	onpointercancel={handlePointerUp}
+	ontouchstart={stopTouchPropagation}
+	ontouchmove={stopTouchPropagation}
+	ontouchend={stopTouchPropagation}
+	ontouchcancel={stopTouchPropagation}
 >
 	<button
 		type="button"

@@ -572,21 +572,66 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
     fcmTokens: fcmTokens.length,
     dataKeys: Object.keys(payload.data ?? {}),
     messageId: payload.data?.messageId ?? null,
-    targetUrl: payload.data?.targetUrl ?? null
+    targetUrl: payload.data?.targetUrl ?? null,
+    platforms: deviceTokens.map((d) => d.platform ?? 'unknown')
   });
   const tasks: Promise<unknown>[] = [];
   if (fcmTokens.length) {
-    tasks.push(
-      messaging.sendEachForMulticast({
-        tokens: fcmTokens,
-        data: payload.data,
-        webpush: {
-          fcmOptions: {
-            link: payload.data.targetUrl
+    // Send to FCM tokens with notification payload for mobile devices
+    const fcmTask = messaging.sendEachForMulticast({
+      tokens: fcmTokens,
+      data: payload.data,
+      notification: {
+        title: payload.title,
+        body: payload.body
+      },
+      webpush: {
+        fcmOptions: {
+          link: payload.data.targetUrl
+        },
+        notification: {
+          title: payload.title,
+          body: payload.body
+        }
+      },
+      apns: {
+        payload: {
+          aps: {
+            alert: {
+              title: payload.title,
+              body: payload.body
+            },
+            sound: 'default',
+            badge: 1
           }
         }
-      })
-    );
+      }
+    }).then((response) => {
+      // Log detailed results for debugging
+      const successCount = response.successCount;
+      const failureCount = response.failureCount;
+      logger.info('[push] FCM multicast result', {
+        successCount,
+        failureCount,
+        totalTokens: fcmTokens.length,
+        messageId: payload.data?.messageId ?? null
+      });
+      // Log individual failures for debugging
+      if (failureCount > 0) {
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            logger.warn('[push] FCM token delivery failed', {
+              tokenIndex: idx,
+              tokenPreview: `${fcmTokens[idx]?.slice(0, 10)}...`,
+              errorCode: resp.error?.code,
+              errorMessage: resp.error?.message
+            });
+          }
+        });
+      }
+      return response;
+    });
+    tasks.push(fcmTask);
   }
   if (safariSubscriptions.length) {
     if (!WEB_PUSH_AVAILABLE) {
@@ -619,12 +664,22 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
 }
 
 async function sendSafariWebPush(subscription: WebPushSubscription, body: string) {
-  if (!subscription?.endpoint) return;
+  if (!subscription?.endpoint) {
+    logger.warn('[push] Safari subscription missing endpoint');
+    return;
+  }
   if (!subscription.keys?.auth || !subscription.keys?.p256dh) {
-    logger.warn('Safari web push subscription missing keys', { endpoint: subscription.endpoint });
+    logger.warn('[push] Safari web push subscription missing keys', { 
+      endpoint: subscription.endpoint.slice(0, 50) + '...',
+      hasAuth: Boolean(subscription.keys?.auth),
+      hasP256dh: Boolean(subscription.keys?.p256dh)
+    });
     return;
   }
   try {
+    logger.info('[push] Sending Safari web push', {
+      endpointPreview: subscription.endpoint.slice(0, 50) + '...'
+    });
     await webpush.sendNotification(
       {
         endpoint: subscription.endpoint,
@@ -636,11 +691,22 @@ async function sendSafariWebPush(subscription: WebPushSubscription, body: string
       },
       body
     );
-  } catch (err) {
-    logger.error('Safari web push send failed', {
-      endpoint: subscription.endpoint,
+    logger.info('[push] Safari web push sent successfully', {
+      endpointPreview: subscription.endpoint.slice(-20)
+    });
+  } catch (err: unknown) {
+    const errorCode = (err as { statusCode?: number })?.statusCode;
+    logger.error('[push] Safari web push send failed', {
+      endpoint: subscription.endpoint.slice(-20),
+      statusCode: errorCode,
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
     });
+    // Status code 410 means the subscription is no longer valid
+    if (errorCode === 410) {
+      logger.warn('[push] Safari subscription expired (410 Gone)', {
+        endpoint: subscription.endpoint.slice(-20)
+      });
+    }
   }
 }
 

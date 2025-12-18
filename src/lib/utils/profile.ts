@@ -1,10 +1,17 @@
-export const DEFAULT_AVATAR_URL = '/default-avatar.svg';
+export const DEFAULT_AVATAR_URL = '/avatars_7H7Gd9DZBCXT9FBg17czyOpAmLn2_google-photo.png';
 
 function cleanUrl(value: unknown): string | null {
 	const str = pickString(value);
 	if (!str) return null;
 	const lowered = str.toLowerCase();
-	if (['undefined', 'null', 'none', 'false', '0'].includes(lowered)) return null;
+	if (['undefined', 'null', 'none', 'false', '0', '?'].includes(lowered)) return null;
+	if (
+		lowered === DEFAULT_AVATAR_URL ||
+		lowered.endsWith(DEFAULT_AVATAR_URL.toLowerCase()) ||
+		lowered.endsWith('/default-avatar.svg')
+	) {
+		return null;
+	}
 	// Filter out placeholder/invalid URLs
 	if (str.startsWith('blob:') && str.includes('undefined')) return null;
 	
@@ -65,7 +72,7 @@ export function resolveProfilePhotoURL(
 		cleanUrl(record?.avatar) ?? cleanUrl(record?.avatarUrl) ?? cleanUrl(record?.avatarURL);
 	if (avatar) return avatar;
 
-	const custom = cleanUrl(record?.customPhotoURL);
+	const custom = cleanUrl(record?.customPhotoURL) ?? cleanUrl(record?.customPhotoUrl);
 	if (custom) return custom;
 
 	// Auth provider photo (Google, etc.) - prefer live over cached
@@ -79,6 +86,17 @@ export function resolveProfilePhotoURL(
 		cleanUrl(record?.photoUri) ??
 		cleanUrl(record?.image);
 
+	// Cached Firebase Storage URL as fallback (if live URLs fail)
+	const cached = cleanUrl(record?.cachedPhotoURL);
+
+	// Back-compat: treat stored photo as a custom override if it isn't auth or cached.
+	const storedOverrides =
+		Boolean(stored) &&
+		!custom &&
+		(!provider || stored !== provider) &&
+		(!cached || stored !== cached);
+	if (storedOverrides) return stored;
+
 	// If preferGooglePhoto is set and we have a Google URL in auth, prioritize it
 	if (preferGooglePhoto && provider && isGooglePhotoUrl(provider)) {
 		return provider;
@@ -88,8 +106,6 @@ export function resolveProfilePhotoURL(
 	if (provider) return provider;
 	if (stored) return stored;
 
-	// Cached Firebase Storage URL as fallback (if live URLs fail)
-	const cached = cleanUrl(record?.cachedPhotoURL);
 	if (cached) return cached;
 
 	const cleanedFallback = cleanUrl(fallback);
@@ -112,9 +128,20 @@ export function getAuthPhotoURL(record: any): string | null {
 export function hasCustomAvatar(record: any): boolean {
 	const avatar =
 		cleanUrl(record?.avatar) ?? cleanUrl(record?.avatarUrl) ?? cleanUrl(record?.avatarURL);
-	const custom = cleanUrl(record?.customPhotoURL);
+	const custom = cleanUrl(record?.customPhotoURL) ?? cleanUrl(record?.customPhotoUrl);
 	const cached = cleanUrl(record?.cachedPhotoURL);
-	return Boolean(avatar || custom || cached);
+	if (avatar || custom || cached) return true;
+
+	const provider =
+		cleanUrl(record?.authPhotoURL) ?? cleanUrl(record?.photo) ?? cleanUrl(record?.picture);
+	const stored =
+		cleanUrl(record?.photoURL) ??
+		cleanUrl(record?.photoUrl) ??
+		cleanUrl(record?.photoUri) ??
+		cleanUrl(record?.image);
+	const storedOverrides =
+		Boolean(stored) && (!provider || stored !== provider) && (!cached || stored !== cached);
+	return storedOverrides;
 }
 
 /**

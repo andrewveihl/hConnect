@@ -223,6 +223,7 @@
 					<SplashEditor
 						config={customization.splash}
 						cachedGifs={customization.splashGifs ?? []}
+						customThemes={customization.customThemes ?? []}
 						user={data.user}
 						onSave={handleSaveSplash}
 						onReset={handleResetSplash}

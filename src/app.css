@@ -12,7 +12,7 @@
   --safe-area-left: max(0px, env(safe-area-inset-left));
   
   /* Mobile dock height - Discord-style compact nav (includes safe area) */
-  --mobile-dock-height: calc(3rem + env(safe-area-inset-bottom, 0px));
+  --mobile-dock-height: calc(6rem + env(safe-area-inset-bottom, 0px));
   
   /* Mobile header height - extends into safe area on iPhone 15+ */
   --mobile-header-height: 3rem;
@@ -255,20 +255,20 @@ body {
   --color-scroll-track: rgba(31, 38, 44, 0.06);
 
   /* Teal accent - slightly darker for better contrast on light backgrounds */
-  --color-accent: #0e9f97;
-  --color-accent-strong: #0a8a83;
-  --color-accent-soft: rgba(14, 159, 151, 0.14);
+  --color-accent: #0b7f78;
+  --color-accent-strong: #096f69;
+  --color-accent-soft: rgba(11, 127, 120, 0.16);
 
   --color-danger: #c9363a;
   --color-warning: #c87f1a;
 
-  --button-primary-bg: #0e9f97;
+  --button-primary-bg: var(--color-accent);
   --button-primary-text: #ffffff;
-  --button-primary-hover: #0a8a83;
+  --button-primary-hover: var(--color-accent-strong);
 
-  --button-ghost-bg: rgba(14, 159, 151, 0.08);
-  --button-ghost-hover: rgba(14, 159, 151, 0.14);
-  --button-ghost-border: rgba(14, 159, 151, 0.24);
+  --button-ghost-bg: rgba(11, 127, 120, 0.08);
+  --button-ghost-hover: rgba(11, 127, 120, 0.14);
+  --button-ghost-border: rgba(11, 127, 120, 0.24);
   --button-ghost-text: var(--color-text-primary);
 
   --chat-safe-area-bottom: env(safe-area-inset-bottom, 0px);
@@ -278,12 +278,12 @@ body {
   --input-border: rgba(13, 20, 26, 0.18);
   --input-placeholder: #7a8a99;
 
-  --ring-color: rgba(14, 159, 151, 0.45);
+  --ring-color: rgba(11, 127, 120, 0.45);
   --shadow-elevated: 0 4px 16px rgba(15, 20, 25, 0.08), 0 12px 32px rgba(15, 20, 25, 0.12);
 
-  --chat-bubble-self-bg: #0e9f97;
+  --chat-bubble-self-bg: var(--color-accent);
   --chat-bubble-self-text: #ffffff;
-  --chat-bubble-self-border: rgba(14, 159, 151, 0.35);
+  --chat-bubble-self-border: rgba(11, 127, 120, 0.35);
   --chat-bubble-other-bg: #e4eaf0;
   --chat-bubble-other-text: #0f1419;
   --chat-bubble-other-border: rgba(13, 20, 26, 0.12);
@@ -625,7 +625,7 @@ body {
   --color-text-primary: #131b3d;
   --color-text-secondary: rgba(19, 27, 61, 0.72);
   --color-text-tertiary: rgba(19, 27, 61, 0.55);
-  --color-text-inverse: #0b1124;
+  --color-text-inverse: #f7f9ff;
 
   --color-scroll-thumb: rgba(40, 82, 255, 0.3);
   --color-scroll-track: rgba(19, 27, 61, 0.12);
@@ -1010,7 +1010,7 @@ body {
 .splash-screen {
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: 999999;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1022,6 +1022,8 @@ body {
   padding-left: env(safe-area-inset-left);
   background: var(--color-app-bg);
   color: var(--color-text-primary);
+  /* Ensure splash completely covers everything underneath */
+  isolation: isolate;
 }
 
 .splash-screen__gif {
@@ -1217,7 +1219,7 @@ body {
 
   .has-mobile-dock {
     /* Discord-style compact bottom nav height - just the visible dock, not including safe area */
-    --mobile-dock-height: 3rem;
+    --mobile-dock-height: 6rem;
     max-height: 100%;
     display: flex;
     flex-direction: column;
@@ -1248,7 +1250,7 @@ body {
   }
 
   .has-mobile-dock:not(.has-mobile-dock--suppressed) {
-    --mobile-dock-height: 3rem;
+    --mobile-dock-height: 6rem;
   }
 
   .has-mobile-dock:not(.has-mobile-dock--suppressed) .app-shell__body {
@@ -1572,6 +1574,16 @@ body {
 
 .message-scroll-region {
   position: relative;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Mobile: ensure message scroll region respects safe areas */
+@media (max-width: 767px) {
+  .message-scroll-region {
+    width: 100%;
+    max-width: calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  }
 }
 
 .message-scroll-region .chat-scroll {

@@ -4,6 +4,7 @@
 	import { page } from '$app/stores';
 	import SplashScreen from '$lib/components/app/SplashScreen.svelte';
 	import { initMobileNavigation } from '$lib/stores/mobileNav';
+	import { splashVisible } from '$lib/stores/splash';
 	import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
 	import TicketFab from '$lib/components/app/TicketFab.svelte';
 	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
@@ -127,6 +128,7 @@
 		if (!isMobile) {
 			isAppReady = true;
 			shouldShowMobileSplash = false;
+			splashVisible.set(false);
 			return () => {
 				teardownNavigation?.();
 				teardownClientErrorReporting();
@@ -136,6 +138,7 @@
 
 		shouldShowMobileSplash = true;
 		isAppReady = false;
+		splashVisible.set(true);
 
 		splashTimer = setTimeout(() => {
 			isAppReady = true;
@@ -144,12 +147,14 @@
 		hardFailSafeTimer = setTimeout(() => {
 			isAppReady = true;
 			shouldShowMobileSplash = false;
+			splashVisible.set(false);
 		}, 5000); // Absolute ceiling so the UI never remains blocked.
 
 		return () => {
 			teardownNavigation?.();
 			teardownClientErrorReporting();
 			detachViewportListeners?.();
+			splashVisible.set(false);
 			if (splashTimer) clearTimeout(splashTimer);
 			if (hardFailSafeTimer) clearTimeout(hardFailSafeTimer);
 		};
@@ -187,13 +192,18 @@
 <div class="app-root">
 	<div class="app-shell">
 		{#if shouldShowMobileSplash}
-			<SplashScreen {isAppReady} on:complete={() => (shouldShowMobileSplash = false)} />
+			<SplashScreen {isAppReady} on:complete={() => { shouldShowMobileSplash = false; splashVisible.set(false); }} />
 		{/if}
-		<div class="app-shell__stage" data-app-ready={isAppReady}>
+		<div 
+			class="app-shell__stage" 
+			data-app-ready={isAppReady}
+			style:visibility={shouldShowMobileSplash && !isAppReady ? 'hidden' : 'visible'}
+			style:opacity={shouldShowMobileSplash && !isAppReady ? '0' : '1'}
+		>
 			{@render children?.()}
 		</div>
 	</div>
-	{#if !hideFloatingDock}
+	{#if !hideFloatingDock && !shouldShowMobileSplash}
 		<FloatingActionDock />
 		<TicketFab />
 		<ThreadsFab />

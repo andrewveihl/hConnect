@@ -222,7 +222,6 @@ export const backfillMyDMRail = onCall(
           otherUid,
           participants,
           lastMessage: dmData.lastMessage ?? null,
-          hidden: false,
           updatedAt: FieldValue.serverTimestamp()
         };
 

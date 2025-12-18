@@ -507,16 +507,6 @@
 					<div class="spinner" aria-hidden="true"></div>
 					<p>Syncing your servers&hellip;</p>
 				</div>
-			{:else if !groupedFeed.length}
-				<div class="activity-empty">
-					<i class="bx bx-inbox"></i>
-					<h2>Nothing needs your attention</h2>
-					<p>Mentions, reactions, and DMs will show up here the moment they ship.</p>
-					<div class="activity-empty__actions">
-						<a class="btn btn-primary" href="/dms">Jump to DMs</a>
-						<a class="btn btn-secondary" href="/servers">Browse servers</a>
-					</div>
-				</div>
 			{:else}
 				<ul class="activity-feed" aria-live="polite">
 					{#each groupedFeed as group (group.key)}

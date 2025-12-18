@@ -91,7 +91,7 @@
 						const customConfig: CustomizationConfig = {
 							themeOverrides: { dark: customTheme.colors },
 							customThemes: [],
-							splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+							splash: { gifUrl: '', gifDuration: 0, themeBackgrounds: { dark: '', light: '', midnight: '' }, enabled: false },
 							splashGifs: [],
 							sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
 						};

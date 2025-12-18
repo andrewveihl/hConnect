@@ -15,7 +15,7 @@
 		removeVoiceDebugSection,
 		setVoiceDebugSection
 	} from '$lib/utils/voiceDebugContext';
-	import { resolveProfilePhotoURL } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
 	import { voiceSession } from '$lib/stores/voice';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
@@ -281,10 +281,12 @@
 				!participant.displayName ||
 				participant.displayName === 'Member' ||
 				participant.displayName === '?';
+			const photo = typeof participant.photoURL === 'string' ? participant.photoURL.trim() : '';
 			const missingPhoto =
-				!participant.photoURL ||
-				participant.photoURL.endsWith('default-avatar.svg') ||
-				participant.photoURL === '?';
+				!photo ||
+				photo === '?' ||
+				photo === DEFAULT_AVATAR_URL ||
+				photo.toLowerCase().endsWith('default-avatar.svg');
 			// Fetch if we don't have a cache yet or if the participant looks incomplete.
 			if (cached && cached.photoURL && !missingDisplay && !missingPhoto) continue;
 			if (pendingVoiceProfiles.has(participant.uid)) continue;

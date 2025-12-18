@@ -3345,7 +3345,7 @@
 											</div>
 											<div class="integration-card__content">
 												<div class="integration-card__header">
-													<span class="integration-card__title">Ticket AI</span>
+													<span class="integration-card__title">Issue Tracker</span>
 													<span
 														class={`integration-card__status ${!ticketAiGloballyEnabled ? 'integration-card__status--off' : ticketAiEnabled ? 'integration-card__status--on' : ''}`}
 													>

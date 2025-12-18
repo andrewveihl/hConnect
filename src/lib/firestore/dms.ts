@@ -258,7 +258,9 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 		const thread = { id: docSnap.id, ...raw, participants } as any;
 		if (actorUid) {
 			try {
-				await upsertDMRailForUid(thread.id, actorUid, participants, thread.lastMessage ?? null);
+				await upsertDMRailForUid(thread.id, actorUid, participants, thread.lastMessage ?? null, undefined, {
+					forceVisible: true
+				});
 			} catch {}
 		}
 		return thread;
@@ -385,7 +387,13 @@ export async function createGroupDM(
 	
 	// Update rail for all participants
 	try {
-		await upsertDMRailForParticipants(docRef.id, normalizedUids, null, { isGroup: true, name: groupName?.trim() || null });
+		await upsertDMRailForParticipants(
+			docRef.id,
+			normalizedUids,
+			null,
+			{ isGroup: true, name: groupName?.trim() || null },
+			{ forceVisible: true }
+		);
 	} catch (err) {
 		console.warn('[dms] createGroupDM: failed to update rail for participants', err);
 	}
@@ -457,7 +465,14 @@ export async function addGroupDMParticipant(
 
 	// Update rail for the new participant
 	try {
-		await upsertDMRailForUid(cleanThreadId, cleanNewUid, newParticipants, data.lastMessage ?? null);
+		await upsertDMRailForUid(
+			cleanThreadId,
+			cleanNewUid,
+			newParticipants,
+			data.lastMessage ?? null,
+			undefined,
+			{ forceVisible: true }
+		);
 	} catch {}
 }
 
@@ -580,7 +595,9 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 	// Update rail mapping for all participants so new DMs appear (and refresh metadata)
 	try {
 		const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
-		await upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta);
+		await upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta, {
+			forceVisible: true
+		});
 	} catch {}
 }
 
@@ -701,16 +718,18 @@ export function streamMyThreads(uid: string, cb: (threads: any[]) => void): Unsu
 
 export async function deleteThreadForUser(threadId: string, uid: string) {
 	const db = getDb();
-	const ref = doc(db, COL_DMS, threadId);
-	await updateDoc(ref, { [`deletedFor.${uid}`]: serverTimestamp() });
-	// Remove from user rail list
+	await setDoc(
+		doc(db, COL_PROFILES, uid, SUB_DM_RAIL, threadId),
+		{ hidden: true, updatedAt: serverTimestamp() },
+		{ merge: true }
+	);
+	// Best-effort marker so fallback thread streams hide it too.
 	try {
-		await setDoc(
-			doc(db, COL_PROFILES, uid, SUB_DM_RAIL, threadId),
-			{ hidden: true, updatedAt: serverTimestamp() },
-			{ merge: true }
-		);
-	} catch {}
+		const ref = doc(db, COL_DMS, threadId);
+		await updateDoc(ref, { [`deletedFor.${uid}`]: serverTimestamp() });
+	} catch (err) {
+		console.warn('[dms] deleteThreadForUser: failed to mark deletedFor', err);
+	}
 }
 
 /* ===========================
@@ -805,14 +824,21 @@ export function streamUnreadCount(
    DM rail mapping (per-user list)
 =========================== */
 
+type RailUpsertOptions = {
+	forceVisible?: boolean;
+};
+
 async function upsertDMRailForParticipants(
 	threadId: string,
 	participants: string[],
 	lastMessage: string | null,
-	threadMeta?: { isGroup?: boolean; name?: string | null }
+	threadMeta?: { isGroup?: boolean; name?: string | null },
+	options?: RailUpsertOptions
 ) {
 	await Promise.all(
-		participants.map((uid) => upsertDMRailForUid(threadId, uid, participants, lastMessage, threadMeta))
+		participants.map((uid) =>
+			upsertDMRailForUid(threadId, uid, participants, lastMessage, threadMeta, options)
+		)
 	);
 }
 
@@ -822,7 +848,8 @@ async function upsertDMRailForUid(
 	uid: string,
 	participants: string[],
 	lastMessage: string | null,
-	threadMeta?: { isGroup?: boolean; name?: string | null }
+	threadMeta?: { isGroup?: boolean; name?: string | null },
+	options?: RailUpsertOptions
 ) {
 	const db = getDb();
 	const now = serverTimestamp();
@@ -834,11 +861,13 @@ async function upsertDMRailForUid(
 		otherUid,
 		participants,
 		lastMessage: lastMessage ?? null,
-		hidden: false,
 		updatedAt: now,
 		isGroup,
 		groupName: isGroup ? (threadMeta?.name ?? null) : null
 	};
+	if (options?.forceVisible) {
+		payload.hidden = false;
+	}
 	if (otherUid && !isGroup) {
 		try {
 			const profSnap = await getDoc(doc(db, COL_PROFILES, otherUid));

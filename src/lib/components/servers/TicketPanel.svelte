@@ -315,7 +315,7 @@
 			class:ticket-fab--active={expanded}
 			class:ticket-fab--disabled={!settings?.enabled}
 			onclick={() => (expanded = !expanded)}
-			aria-label="Toggle ticket panel"
+			aria-label="Toggle issues panel"
 			aria-expanded={expanded}
 		>
 			<i class="bx {expanded ? 'bx-x' : 'bx-support'}"></i>
@@ -328,7 +328,7 @@
 		{#if expanded}
 			<div class="ticket-panel__content">
 				<div class="ticket-panel__header">
-					<h3><i class="bx bx-support"></i> Support Tickets</h3>
+					<h3><i class="bx bx-support"></i> Support Issues</h3>
 					{#if settings?.enabled}
 						<span class="ticket-panel__count">{totalCount} active</span>
 					{:else}
@@ -340,7 +340,7 @@
 					<!-- Show message when Ticket AI is disabled -->
 					<div class="ticket-panel__disabled-notice">
 						<i class="bx bx-info-circle"></i>
-						<p>Ticket AI is not enabled for this server.</p>
+						<p>Issue Tracker is not enabled for this server.</p>
 						<p class="ticket-panel__disabled-hint">Enable it in Server Settings → Integrations</p>
 					</div>
 				{:else}
@@ -377,17 +377,17 @@
 						{#if loading}
 							<div class="ticket-panel__empty">
 								<i class="bx bx-loader-alt bx-spin"></i>
-								<span>Loading tickets…</span>
+								<span>Loading issues…</span>
 							</div>
 						{:else if filteredIssues.length === 0}
 							<div class="ticket-panel__empty">
 								<i class="bx bx-check-circle"></i>
 								<span
 									>{filter === 'all'
-										? 'No active tickets'
+										? 'No active issues'
 										: filter === 'mine'
-											? 'No tickets assigned to you'
-											: 'No unassigned tickets'}</span
+											? 'No issues assigned to you'
+											: 'No unassigned issues'}</span
 								>
 							</div>
 						{:else}
@@ -443,7 +443,7 @@
 												class="ticket-btn ticket-btn--claim"
 												onclick={() => claimIssue(issue)}
 												disabled={claimingId === issue.id}
-												title="Claim this ticket"
+												title="Claim this issue"
 											>
 												{#if claimingId === issue.id}
 													<i class="bx bx-loader-alt bx-spin"></i>

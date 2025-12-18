@@ -10,7 +10,7 @@
 	 * - Optional presence indicator
 	 * - Accessible by default
 	 */
-	import { resolveProfilePhotoURL } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
 	import type { PresenceState } from '$lib/presence/state';
 
 	type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl' | '2xl';
@@ -83,6 +83,69 @@
 		       url.includes('lh4.google.com');
 	}
 
+	const DEFAULT_GOOGLE_AVATAR_REF = '/google-default-avatar.png';
+	let defaultGoogleHash: string | null = null;
+	let defaultGoogleHashPromise: Promise<string | null> | null = null;
+
+	function computeImageHash(img: HTMLImageElement): string | null {
+		if (typeof document === 'undefined') return null;
+		try {
+			const size = 8;
+			const canvas = document.createElement('canvas');
+			canvas.width = size;
+			canvas.height = size;
+			const ctx = canvas.getContext('2d', { willReadFrequently: true });
+			if (!ctx) return null;
+			ctx.drawImage(img, 0, 0, size, size);
+			const data = ctx.getImageData(0, 0, size, size).data;
+			let sum = 0;
+			const values: number[] = [];
+			for (let i = 0; i < data.length; i += 4) {
+				const r = data[i] ?? 0;
+				const g = data[i + 1] ?? 0;
+				const b = data[i + 2] ?? 0;
+				const value = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+				values.push(value);
+				sum += value;
+			}
+			const avg = sum / values.length;
+			let bits = '';
+			for (const value of values) {
+				bits += value >= avg ? '1' : '0';
+			}
+			return bits;
+		} catch {
+			return null;
+		}
+	}
+
+	async function getDefaultGoogleAvatarHash(): Promise<string | null> {
+		if (defaultGoogleHash !== null) return defaultGoogleHash;
+		if (!defaultGoogleHashPromise) {
+			defaultGoogleHashPromise = new Promise((resolve) => {
+				if (typeof document === 'undefined') {
+					resolve(null);
+					return;
+				}
+				const img = new Image();
+				img.crossOrigin = 'anonymous';
+				img.onload = () => resolve(computeImageHash(img));
+				img.onerror = () => resolve(null);
+				img.src = DEFAULT_GOOGLE_AVATAR_REF;
+			});
+		}
+		defaultGoogleHash = await defaultGoogleHashPromise;
+		return defaultGoogleHash;
+	}
+
+	async function isDefaultGoogleAvatar(img: HTMLImageElement): Promise<boolean> {
+		const refHash = await getDefaultGoogleAvatarHash();
+		if (!refHash) return false;
+		const currentHash = computeImageHash(img);
+		if (!currentHash) return false;
+		return currentHash === refHash;
+	}
+
 	// Try to fix Google profile photo URLs that might not load
 	function fixGooglePhotoUrl(url: string): string {
 		if (!isGooglePhotoUrl(url)) return url;
@@ -105,7 +168,7 @@
 		if (!url) return false;
 		const lower = url.toLowerCase();
 		if (['undefined', 'null', 'none', 'false', '0'].includes(lower)) return false;
-		if (lower === '/default-avatar.svg') return false; // Skip default avatar URL
+		if (lower === '/default-avatar.svg') return false; // Skip legacy default avatar URL
 		if (url.startsWith('blob:') && url.includes('undefined')) return false;
 		if (!url.startsWith('http') && !url.startsWith('/') && !url.startsWith('data:')) return false;
 		
@@ -133,30 +196,34 @@
 		// 1. Direct src prop takes highest priority
 		addUrl(src);
 
-		// 2. Custom uploaded avatar (user explicitly set)
+		// 2. Resolved profile photo (keeps priority order consistent)
+		if (userRecord) {
+			const resolved = resolveProfilePhotoURL(userRecord, null, { preferGooglePhoto });
+			addUrl(resolved);
+		}
+
+		// 3. Custom uploaded avatar (user explicitly set)
 		addUrl(getString(userRecord, 'avatar'));
 		addUrl(getString(userRecord, 'avatarUrl'));
 		addUrl(getString(userRecord, 'avatarURL'));
 		addUrl(getString(userRecord, 'customPhotoURL'));
+		addUrl(getString(userRecord, 'customPhotoUrl'));
 
-		// 3. Live auth provider photo (Google, etc.) - prefer over cached
+		// 4. Live auth provider photo (Google, etc.) - prefer over cached
 		addUrl(getString(userRecord, 'authPhotoURL'));
 
-		// 4. Generic photo fields (often same as auth)
+		// 5. Generic photo fields (often same as auth)
 		addUrl(getString(userRecord, 'photoURL'));
 		addUrl(getString(userRecord, 'photoUrl'));
 		addUrl(getString(userRecord, 'photo'));
 		addUrl(getString(userRecord, 'picture'));
 		addUrl(getString(userRecord, 'image'));
 
-		// 5. Cached Firebase Storage URL (fallback if live fails)
+		// 6. Cached Firebase Storage URL (fallback if live fails)
 		addUrl(getString(userRecord, 'cachedPhotoURL'));
 
-		// 6. Try resolveProfilePhotoURL as final attempt
-		if (userRecord && urls.length === 0) {
-			const resolved = resolveProfilePhotoURL(userRecord, null, { preferGooglePhoto });
-			addUrl(resolved);
-		}
+		// 7. Final fallback: app logo
+		addUrl(DEFAULT_AVATAR_URL);
 
 		return urls;
 	});
@@ -252,8 +319,25 @@
 		imgError = true;
 	}
 	
-	function handleImageLoad(event: Event) {
+	async function handleImageLoad(event: Event) {
 		const img = event.target as HTMLImageElement;
+		const loadedSrc = img?.currentSrc || img?.src || '';
+
+		if (loadedSrc && isGooglePhotoUrl(loadedSrc)) {
+			const activeSrc = loadedSrc;
+			const activeIndex = fallbackIndex;
+			const isDefault = await isDefaultGoogleAvatar(img);
+			if (isDefault && currentSrc === activeSrc && fallbackIndex === activeIndex) {
+				const nextIndex = fallbackIndex + 1;
+				if (nextIndex < fallbackUrls.length) {
+					fallbackIndex = nextIndex;
+					return;
+				}
+				imgError = true;
+				return;
+			}
+		}
+
 		console.log('[Avatar] Image loaded successfully:', {
 			src: img?.src?.substring(0, 80) + '...',
 			naturalWidth: img?.naturalWidth,
@@ -279,6 +363,7 @@
 					alt={altText}
 					class="w-full h-full object-cover"
 					draggable="false"
+					crossorigin="anonymous"
 					referrerpolicy="no-referrer"
 					onerror={handleImageError}
 					onload={handleImageLoad}
@@ -324,7 +409,7 @@
 		bottom: -2px;
 		right: -2px;
 		border-radius: 50%;
-		border: 3px solid var(--color-panel, #1e1f22);
+		border: 3px solid var(--presence-dot-border, var(--color-panel, #1e1f22));
 		z-index: 2;
 	}
 

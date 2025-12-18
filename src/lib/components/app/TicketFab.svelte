@@ -2,12 +2,13 @@
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { tick, onDestroy } from 'svelte';
+	import { tick, onDestroy, onMount } from 'svelte';
 	import { getDb } from '$lib/firebase';
 	import { user } from '$lib/stores/user';
-	import { servers, serverMemberships } from '$lib/stores';
-	import type { Server, Membership } from '$lib/types';
+	import { serverMemberships } from '$lib/stores';
+	import type { Membership } from '$lib/types';
 	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
+	import { subscribeUserServers } from '$lib/firestore/servers';
 	import {
 		doc,
 		onSnapshot,
@@ -21,7 +22,7 @@
 		type Timestamp
 	} from 'firebase/firestore';
 	import { toggleChannelReaction } from '$lib/firestore/messages';
-import { createChannelThread } from '$lib/firestore/threads';
+	import { createChannelThread } from '$lib/firestore/threads';
 
 	// Types
 	type IssueStatus = 'opened' | 'in_progress' | 'closed';
@@ -41,9 +42,6 @@ import { createChannelThread } from '$lib/firestore/threads';
 	};
 
 	// State
-	let isStaff = $state(false);
-	let enabled = $state(false);
-	let issues = $state<TicketIssue[]>([]);
 	let loading = $state(true);
 	let expanded = $state(false);
 	let filter = $state<'unassigned' | 'all' | 'assigned' | 'mine'>('unassigned');
@@ -51,8 +49,30 @@ import { createChannelThread } from '$lib/firestore/threads';
 	let claimingId = $state<string | null>(null);
 	let channelNames = $state<Record<string, string>>({});
 
-	let settingsUnsub: Unsubscribe | null = null;
-	let issuesUnsub: Unsubscribe | null = null;
+	// Local servers list - subscribed directly to Firestore
+	type LocalServer = {
+		id: string;
+		name: string;
+		icon?: string | null;
+		position?: number | null;
+		joinedAt?: number | null;
+	};
+	let localServers = $state<LocalServer[]>([]);
+	let serversUnsub: Unsubscribe | null = null;
+
+	// Multi-server support
+	type ServerStaffInfo = {
+		serverId: string;
+		serverName: string;
+		enabled: boolean;
+	};
+	let staffServers = $state<ServerStaffInfo[]>([]);
+	let serverIssuesMap = $state<Record<string, TicketIssue[]>>({});
+	let serverUnsubs: Record<string, { settings: Unsubscribe | null; issues: Unsubscribe | null }> = {};
+
+	// enabled is derived - true if ANY server the user is staff on has Ticket AI enabled
+	let enabled = $derived(staffServers.some(s => s.enabled));
+
 	let currentServerId: string | null = null;
 
 	// Dragging state
@@ -80,18 +100,36 @@ import { createChannelThread } from '$lib/firestore/threads';
 	const PANEL_HEIGHT = 420;
 	const FAB_SIZE = 48; // 3rem - matches rail-button size when snapped
 
-	// Derived
-	let openCount = $derived(issues.length);
-	let myIssues = $derived(issues.filter((i) => i.staffMemberIds?.includes($user?.uid ?? '')));
-	let assignedIssues = $derived(issues.filter((i) => (i.staffMemberIds?.length ?? 0) > 0));
-	let unassignedIssues = $derived(issues.filter((i) => (i.staffMemberIds?.length ?? 0) === 0));
+	// Derived - aggregate all issues across servers
+	let allIssues = $derived.by(() => {
+		const all: TicketIssue[] = [];
+		for (const serverId of Object.keys(serverIssuesMap)) {
+			all.push(...serverIssuesMap[serverId]);
+		}
+		return all;
+	});
+	let openCount = $derived(allIssues.length);
+	let myIssues = $derived(allIssues.filter((i) => i.staffMemberIds?.includes($user?.uid ?? '')));
+	let assignedIssues = $derived(allIssues.filter((i) => (i.staffMemberIds?.length ?? 0) > 0));
+	let unassignedIssues = $derived(allIssues.filter((i) => (i.staffMemberIds?.length ?? 0) === 0));
+
+	// Check if user has staff access to any server
+	let hasAnyStaffAccess = $derived(staffServers.length > 0);
 
 	let filteredIssues = $derived.by(() => {
 		if (filter === 'unassigned') return unassignedIssues;
 		if (filter === 'mine') return myIssues;
 		if (filter === 'assigned') return assignedIssues;
-		return issues;
+		return allIssues;
 	});
+
+	// Helper to get server name from serverId
+	function getServerName(serverId: string): string {
+		const serverInfo = staffServers.find((s) => s.serverId === serverId);
+		if (serverInfo) return serverInfo.serverName;
+		const server = localServers.find((s) => s.id === serverId);
+		return server?.name ?? 'Unknown Server';
+	}
 
 	// Helper to get channel name from channelId (from local cache)
 	function getChannelName(channelId: string): string {
@@ -155,12 +193,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 		return params?.serverID ?? params?.serverId ?? null;
 	}
 
-	// Check if user is server admin/owner
+	// Check if user is server admin/owner (based on membership role)
 	function isServerAdminOrOwner(serverId: string, uid: string): boolean {
-		const serverList = $servers as Server[];
-		const server = serverList.find((s) => s.id === serverId);
-		if (!server) return false;
-		if (server.ownerId === uid) return true;
 		const memberships = $serverMemberships as Membership[];
 		const membership = memberships.find((m) => m.serverId === serverId && m.userId === uid);
 		if (membership?.role === 'admin' || membership?.role === 'owner') return true;
@@ -272,9 +306,13 @@ import { createChannelThread } from '$lib/firestore/threads';
 			return;
 		}
 		// Only allow expanding for staff members
-		if (!isStaff) return;
+		if (!hasAnyStaffAccess) return;
 		// Toggle expanded state
 		expanded = !expanded;
+	}
+
+	function stopTouchPropagation(event: TouchEvent) {
+		event.stopPropagation();
 	}
 
 	function handlePointerDown(event: PointerEvent) {
@@ -359,12 +397,13 @@ import { createChannelThread } from '$lib/firestore/threads';
 
 	// Ticket actions
 	async function markComplete(issue: TicketIssue) {
-		if (!currentServerId || !$user?.uid || completingId) return;
+		const serverId = issue.serverId;
+		if (!serverId || !$user?.uid || completingId) return;
 		completingId = issue.id;
 
 		try {
 			const db = getDb();
-			const issueRef = doc(db, 'servers', currentServerId, 'ticketAiIssues', issue.id);
+			const issueRef = doc(db, 'servers', serverId, 'ticketAiIssues', issue.id);
 
 			await updateDoc(issueRef, {
 				status: 'closed',
@@ -375,7 +414,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 			if (issue.parentMessageId && issue.channelId && $user?.uid) {
 				try {
 					await toggleChannelReaction(
-						currentServerId,
+						serverId,
 						issue.channelId,
 						issue.parentMessageId,
 						$user.uid,
@@ -396,7 +435,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 
 	// Claim ticket and create thread, then open as popup
 	async function createAndOpenThread(issue: TicketIssue) {
-		if (!currentServerId || !$user?.uid || claimingId) return;
+		const serverId = issue.serverId;
+		if (!serverId || !$user?.uid || claimingId) return;
 		claimingId = issue.id;
 
 		try {
@@ -405,7 +445,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 			const displayName = $user.displayName ?? 'Staff';
 
 			// First, claim the ticket
-			const issueRef = doc(db, 'servers', currentServerId, 'ticketAiIssues', issue.id);
+			const issueRef = doc(db, 'servers', serverId, 'ticketAiIssues', issue.id);
 			await updateDoc(issueRef, {
 				staffMemberIds: [uid],
 				status: 'in_progress'
@@ -415,7 +455,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 			let threadId = issue.threadId;
 			if (!threadId && issue.parentMessageId) {
 				threadId = await createChannelThread({
-					serverId: currentServerId,
+					serverId: serverId,
 					channelId: issue.channelId,
 					sourceMessageId: issue.parentMessageId,
 					sourceMessageText: issue.summary?.slice(0, 100),
@@ -434,7 +474,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 			if (threadId) {
 				window.dispatchEvent(new CustomEvent('openFloatingThread', {
 					detail: {
-						serverId: currentServerId,
+						serverId: serverId,
 						channelId: issue.channelId,
 						threadId: threadId
 					}
@@ -448,13 +488,14 @@ import { createChannelThread } from '$lib/firestore/threads';
 	}
 
 	async function deleteIssue(issue: TicketIssue) {
-		if (!currentServerId || deletingId) return;
+		const serverId = issue.serverId;
+		if (!serverId || deletingId) return;
 		deletingId = issue.id;
 
 		try {
 			const db = getDb();
 			const { deleteDoc } = await import('firebase/firestore');
-			const issueRef = doc(db, 'servers', currentServerId, 'ticketAiIssues', issue.id);
+			const issueRef = doc(db, 'servers', serverId, 'ticketAiIssues', issue.id);
 			await deleteDoc(issueRef);
 		} catch (err) {
 			console.error('[TicketFab] Failed to delete issue:', err);
@@ -465,7 +506,8 @@ import { createChannelThread } from '$lib/firestore/threads';
 
 	// Open an existing thread as a popup (for assigned tickets)
 	function openThreadPopup(issue: TicketIssue) {
-		if (!currentServerId || !issue.channelId) return;
+		const serverId = issue.serverId;
+		if (!serverId || !issue.channelId) return;
 		
 		const threadId = issue.threadId || issue.parentMessageId;
 		if (!threadId) {
@@ -478,7 +520,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 		// Dispatch event to open floating thread popup
 		window.dispatchEvent(new CustomEvent('openFloatingThread', {
 			detail: {
-				serverId: currentServerId,
+				serverId: serverId,
 				channelId: issue.channelId,
 				threadId: threadId
 			}
@@ -486,8 +528,9 @@ import { createChannelThread } from '$lib/firestore/threads';
 	}
 
 	function navigateToIssue(issue: TicketIssue) {
-		if (!currentServerId || !issue.channelId) {
-			console.warn('[TicketFab] Missing serverId or channelId', { currentServerId, issue });
+		const serverId = issue.serverId;
+		if (!serverId || !issue.channelId) {
+			console.warn('[TicketFab] Missing serverId or channelId', { serverId, issue });
 			return;
 		}
 		expanded = false;
@@ -495,7 +538,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 		// Build URL - channel is a query param, not a path segment
 		// If there's a thread (staff responded), navigate to thread
 		// Otherwise navigate to the original message
-		let path = `/servers/${currentServerId}?channel=${issue.channelId}`;
+		let path = `/servers/${serverId}?channel=${issue.channelId}`;
 		if (issue.threadId) {
 			path += `&thread=${issue.threadId}`;
 		} else if (issue.parentMessageId) {
@@ -529,35 +572,21 @@ import { createChannelThread } from '$lib/firestore/threads';
 		return text.length > len ? text.slice(0, len) + '…' : text;
 	}
 
-	// Data subscription
-	$effect(() => {
-		if (!browser) return;
+	// Subscribe to a single server's ticketAi settings
+	function subscribeToServerSettings(server: LocalServer, uid: string, email: string) {
+		if (serverUnsubs[server.id]?.settings) return; // Already subscribed
 
-		const serverId = getServerIdFromUrl();
-		currentServerId = serverId;
-
-		if (!serverId || !$user?.uid) {
-			cleanup();
-			return;
-		}
-
-		const uid = $user.uid;
-		const email = $user.email ?? '';
-		const adminOrOwner = isServerAdminOrOwner(serverId, uid);
-
-		settingsUnsub?.();
-		loading = true;
-
+		const adminOrOwner = isServerAdminOrOwner(server.id, uid);
 		const db = getDb();
-		const settingsRef = doc(db, 'servers', serverId, 'ticketAiSettings', 'current');
+		const settingsRef = doc(db, 'servers', server.id, 'ticketAiSettings', 'current');
 
-		settingsUnsub = onSnapshot(
+		const settingsUnsubFn = onSnapshot(
 			settingsRef,
 			(snap) => {
 				const data = snap.data();
 				const staffMemberIds = Array.isArray(data?.staffMemberIds) ? data.staffMemberIds : [];
 				const staffDomains = Array.isArray(data?.staffDomains) ? data.staffDomains : [];
-				enabled = data?.enabled ?? false;
+				const serverEnabled = data?.enabled ?? false;
 
 				let userIsStaff = false;
 				if (adminOrOwner) {
@@ -566,54 +595,164 @@ import { createChannelThread } from '$lib/firestore/threads';
 					userIsStaff = true;
 				} else if (staffDomains.length && email) {
 					const domain = email.split('@')[1]?.toLowerCase();
-					if (
-						domain &&
-						staffDomains.some((d: string) => d.toLowerCase().replace('@', '') === domain)
-					) {
+					if (domain && staffDomains.some((d: string) => d.toLowerCase().replace('@', '') === domain)) {
 						userIsStaff = true;
 					}
 				}
 
-				isStaff = userIsStaff;
-				loading = false;
+				// Update staffServers list
+				if (userIsStaff) {
+					const existing = staffServers.find(s => s.serverId === server.id);
+					if (existing) {
+						existing.enabled = serverEnabled;
+						existing.serverName = server.name ?? 'Unknown';
+						staffServers = [...staffServers];
+					} else {
+						staffServers = [...staffServers, {
+							serverId: server.id,
+							serverName: server.name ?? 'Unknown',
+							enabled: serverEnabled
+						}];
+					}
 
-				if (userIsStaff && enabled) {
-					subscribeToIssues(serverId);
+					// Subscribe to issues if enabled
+					if (serverEnabled && !serverUnsubs[server.id]?.issues) {
+						subscribeToServerIssues(server.id);
+					} else if (!serverEnabled && serverUnsubs[server.id]?.issues) {
+						serverUnsubs[server.id].issues?.();
+						serverUnsubs[server.id].issues = null;
+						serverIssuesMap = { ...serverIssuesMap, [server.id]: [] };
+					}
 				} else {
-					issuesUnsub?.();
-					issuesUnsub = null;
-					issues = [];
+					// Remove from staffServers if no longer staff
+					staffServers = staffServers.filter(s => s.serverId !== server.id);
+					serverUnsubs[server.id]?.issues?.();
+					if (serverUnsubs[server.id]) {
+						serverUnsubs[server.id].issues = null;
+					}
+					const { [server.id]: _, ...rest } = serverIssuesMap;
+					serverIssuesMap = rest;
 				}
 
-				// Always initialize position for dragging/snapping
-				if (!ready) {
+				loading = false;
+
+				// Initialize position if not ready
+				if (!ready && staffServers.length > 0) {
 					initPosition();
 				}
 			},
 			(error) => {
-				console.warn('[TicketFab] Settings error:', error.code);
+				console.warn('[TicketFab] Settings error for server', server.id, ':', error.code);
 				loading = false;
+				// If admin/owner, still show as staff
 				if (adminOrOwner) {
-					isStaff = true;
-					enabled = false;
+					const existing = staffServers.find(s => s.serverId === server.id);
+					if (!existing) {
+						staffServers = [...staffServers, {
+							serverId: server.id,
+							serverName: server.name ?? 'Unknown',
+							enabled: false
+						}];
+					}
 				}
-				// Always initialize position
-				if (!ready) initPosition();
+				if (!ready && staffServers.length > 0) initPosition();
 			}
 		);
+
+		serverUnsubs[server.id] = { settings: settingsUnsubFn, issues: null };
+	}
+
+	// Handle servers and user changes
+	function handleStoreChanges(serverList: LocalServer[], currentUser: { uid: string; email?: string | null } | null) {
+		if (!browser) return;
+		if (!currentUser?.uid) {
+			cleanup();
+			return;
+		}
+
+		const uid = currentUser.uid;
+		const email = currentUser.email ?? '';
+
+		if (serverList.length === 0) {
+			loading = true;
+			return;
+		}
+
+		loading = true;
+
+		// Clean up old subscriptions for servers no longer in list
+		const currentServerIds = new Set(serverList.map(s => s.id));
+		for (const sid of Object.keys(serverUnsubs)) {
+			if (!currentServerIds.has(sid)) {
+				serverUnsubs[sid]?.settings?.();
+				serverUnsubs[sid]?.issues?.();
+				delete serverUnsubs[sid];
+				delete serverIssuesMap[sid];
+				staffServers = staffServers.filter(s => s.serverId !== sid);
+			}
+		}
+
+		// Subscribe to each server's ticketAi settings
+		for (const server of serverList) {
+			subscribeToServerSettings(server, uid, email);
+		}
+
+		// Note: enabled is now derived from staffServers automatically
+	}
+
+	// Initialize with onMount - subscribe to stores
+	onMount(() => {
+		if (!browser) return;
+
+		// Subscribe to user store first
+		const userUnsub = user.subscribe((currentUser) => {
+			// Only set up servers subscription once we have a user
+			if (currentUser?.uid && !serversUnsub) {
+				serversUnsub = subscribeUserServers(currentUser.uid, (serverList) => {
+					localServers = serverList ?? [];
+					handleStoreChanges(localServers, currentUser);
+				});
+			} else if (!currentUser?.uid) {
+				// User logged out - clean up
+				cleanup();
+			}
+		});
+
+		// Listen for snap zone updates
+		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+
+		return () => {
+			userUnsub();
+			serversUnsub?.();
+			cleanup();
+			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		};
 	});
 
-	function subscribeToIssues(serverId: string) {
-		issuesUnsub?.();
+	function handleSnapZoneUpdated() {
+		if (!isSnapped || !snappedZoneId) return;
+		const zones = fabSnapStore.getZones();
+		const zone = zones.find((z) => z.id === snappedZoneId);
+		if (zone) {
+			const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
+			position = clampToViewport(snapPos);
+		}
+	}
+
+	function subscribeToServerIssues(serverId: string) {
 		const db = getDb();
 		const issuesRef = collection(db, 'servers', serverId, 'ticketAiIssues');
 		const q = query(issuesRef, where('status', 'in', ['opened', 'in_progress']));
 
-		issuesUnsub = onSnapshot(
+		const issuesUnsubFn = onSnapshot(
 			q,
 			(snap) => {
-				const loadedIssues = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as TicketIssue);
-				issues = loadedIssues;
+				const loadedIssues = snap.docs.map((d) => ({ 
+					id: d.id, 
+					serverId, // Add serverId to each issue
+					...d.data() 
+				}) as TicketIssue);
+				serverIssuesMap = { ...serverIssuesMap, [serverId]: loadedIssues };
 
 				// Fetch channel names for all issues
 				const uniqueChannelIds = [...new Set(loadedIssues.map((i) => i.channelId))];
@@ -624,26 +763,37 @@ import { createChannelThread } from '$lib/firestore/threads';
 				}
 			},
 			(error) => {
-				console.warn('[TicketFab] Issues error:', error.code);
-				issues = [];
+				console.warn('[TicketFab] Issues error for server', serverId, ':', error.code);
+				serverIssuesMap = { ...serverIssuesMap, [serverId]: [] };
 			}
 		);
+
+		if (serverUnsubs[serverId]) {
+			serverUnsubs[serverId].issues = issuesUnsubFn;
+		}
 	}
 
 	function cleanup() {
-		settingsUnsub?.();
-		issuesUnsub?.();
-		settingsUnsub = null;
-		issuesUnsub = null;
-		isStaff = false;
-		enabled = false;
-		issues = [];
+		// Clean up all server subscriptions
+		for (const sid of Object.keys(serverUnsubs)) {
+			serverUnsubs[sid]?.settings?.();
+			serverUnsubs[sid]?.issues?.();
+		}
+		serverUnsubs = {};
+		serverIssuesMap = {};
+		staffServers = [];
 		loading = true;
 		ready = false;
 		expanded = false;
 	}
 
-	onDestroy(cleanup);
+	onDestroy(() => {
+		cleanup();
+		serversUnsub?.();
+		if (browser) {
+			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		}
+	});
 
 	// Close panel when clicking outside
 	function handleBackdropClick() {
@@ -659,31 +809,10 @@ import { createChannelThread } from '$lib/firestore/threads';
 		window.addEventListener('resize', handleResize);
 		return () => window.removeEventListener('resize', handleResize);
 	});
-
-	// Listen for snap zone position updates (e.g., when DMs come in)
-	$effect(() => {
-		if (!browser) return;
-		
-		const handleSnapZoneUpdated = () => {
-			// Only reposition if we're snapped
-			if (!isSnapped || !snappedZoneId) return;
-			
-			// Find the updated zone position
-			const zones = fabSnapStore.getZones();
-			const zone = zones.find((z) => z.id === snappedZoneId);
-			if (zone) {
-				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
-				position = clampToViewport(snapPos);
-			}
-		};
-		
-		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
-		return () => window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
-	});
 </script>
 
-<!-- Only show FAB for staff members -->
-{#if isStaff}
+<!-- Only show FAB for staff members who have access to at least one server with Ticket AI -->
+{#if hasAnyStaffAccess}
 	<!-- Backdrop when expanded -->
 	{#if expanded}
 		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -707,16 +836,20 @@ import { createChannelThread } from '$lib/firestore/threads';
 			class:ticket-fab--active={expanded}
 			class:ticket-fab--has-issues={openCount > 0 && enabled}
 			class:ticket-fab--snapped={isSnapped}
-			aria-label="Support Tickets"
-			title={enabled ? `Support Tickets (${openCount} open)` : 'Ticket AI (Disabled)'}
+			aria-label="Support Issues"
+			title={enabled ? `Support Issues (${openCount} open)` : 'Issue Tracker (Disabled)'}
 			onclick={handleFabClick}
 			onpointerdown={handlePointerDown}
 			onpointermove={handlePointerMove}
 			onpointerup={handlePointerUp}
 			onpointercancel={handlePointerUp}
+			ontouchstart={stopTouchPropagation}
+			ontouchmove={stopTouchPropagation}
+			ontouchend={stopTouchPropagation}
+			ontouchcancel={stopTouchPropagation}
 		>
 			<i class="bx {expanded ? 'bx-x' : 'bx-support'}" aria-hidden="true"></i>
-			{#if openCount > 0 && enabled && !expanded}
+			{#if openCount > 0 && !expanded}
 				<span class="ticket-fab__badge">{openCount > 99 ? '99+' : openCount}</span>
 			{/if}
 		</button>
@@ -725,24 +858,19 @@ import { createChannelThread } from '$lib/firestore/threads';
 		{#if expanded}
 			<div class="ticket-panel" style={panelStyle}>
 				<div class="ticket-panel__header">
-					<h3><i class="bx bx-support"></i> Support Tickets</h3>
-					{#if enabled}
-						<span class="ticket-panel__count">{openCount} active</span>
-					{:else}
-						<span class="ticket-panel__count ticket-panel__count--disabled">Disabled</span>
-					{/if}
+					<h3><i class="bx bx-support"></i> Support Issues</h3>
+					<span class="ticket-panel__count">{openCount} active</span>
 				</div>
 
-				{#if !enabled}
+				{#if staffServers.length === 0}
 					<div class="ticket-panel__empty">
 						<i class="bx bx-info-circle"></i>
-						<span>Ticket AI is not enabled</span>
-						<p class="ticket-panel__hint">Enable it in Server Settings → Integrations</p>
+						<span>No servers with Issue Tracker access</span>
 					</div>
 				{:else if loading}
 					<div class="ticket-panel__empty">
 						<i class="bx bx-loader-alt bx-spin"></i>
-						<span>Loading tickets…</span>
+						<span>Loading issues…</span>
 					</div>
 				{:else}
 					<!-- Filter Tabs -->
@@ -761,7 +889,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 							class:filter-tab--active={filter === 'all'}
 							onclick={() => (filter = 'all')}
 						>
-							All ({issues.length})
+							All ({allIssues.length})
 						</button>
 						<button
 							type="button"
@@ -811,6 +939,12 @@ import { createChannelThread } from '$lib/firestore/threads';
 										<span class="ticket-card__status ticket-card__status--{issue.status}">
 											{issue.status === 'opened' ? 'Open' : 'In Progress'}
 										</span>
+										{#if staffServers.length > 1}
+											<span class="ticket-card__server" title={getServerName(issue.serverId)}>
+												<i class="bx bx-server"></i>
+												{getServerName(issue.serverId)}
+											</span>
+										{/if}
 										<span class="ticket-card__channel">
 											<i class="bx bx-hash"></i>
 											{getChannelName(issue.channelId)}
@@ -837,7 +971,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 												class="ticket-btn ticket-btn--claim"
 												onclick={() => createAndOpenThread(issue)}
 												disabled={claimingId === issue.id}
-												title="Claim ticket and open thread"
+												title="Claim issue and open thread"
 											>
 												{#if claimingId === issue.id}
 													<i class="bx bx-loader-alt bx-spin"></i>
@@ -899,7 +1033,7 @@ import { createChannelThread } from '$lib/firestore/threads';
 											class="ticket-btn ticket-btn--delete"
 											onclick={() => deleteIssue(issue)}
 											disabled={deletingId === issue.id}
-											title="Delete ticket"
+											title="Delete issue"
 										>
 											{#if deletingId === issue.id}
 												<i class="bx bx-loader-alt bx-spin"></i>
@@ -1184,6 +1318,26 @@ import { createChannelThread } from '$lib/firestore/threads';
 	.ticket-card__status--in_progress {
 		background: rgba(249, 115, 22, 0.15);
 		color: #f97316;
+	}
+
+	.ticket-card__server {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		font-size: 10px;
+		color: var(--color-accent, #5865f2);
+		background: rgba(88, 101, 242, 0.15);
+		padding: 2px 6px;
+		border-radius: 4px;
+		max-width: 80px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.ticket-card__server i {
+		font-size: 10px;
+		opacity: 0.8;
 	}
 
 	.ticket-card__channel {

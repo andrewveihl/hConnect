@@ -40,6 +40,8 @@
 		contentType?: string | null;
 		isImage: boolean;
 		previewUrl: string | null;
+		processing: boolean;
+		progress: number;
 	};
 
 	type PopoverPlacement = {
@@ -236,8 +238,13 @@
 	let rootEl: HTMLDivElement | null = $state(null);
 	let formEl: HTMLFormElement | null = $state(null);
 	let attachments: AttachmentDraft[] = $state([]);
+	let dragActive = $state(false);
+	let dragDepth = 0;
 	let platform: 'desktop' | 'mobile' = $state('desktop');
-	const sendDisabled = $derived.by(() => disabled || (!text.trim() && attachments.length === 0));
+	const attachmentsProcessing = $derived.by(() => attachments.some((item) => item.processing));
+	const sendDisabled = $derived.by(
+		() => disabled || attachmentsProcessing || (!text.trim() && attachments.length === 0)
+	);
 	const showMobileSend = $derived.by(() => platform === 'mobile' && text.trim().length > 0);
 	let inputFocused = false;
 	let keyboardInsetFrame: number | null = null;
@@ -364,6 +371,10 @@
 	const SAFE_AREA_VAR = '--chat-safe-area-bottom';
 	const KEYBOARD_MOBILE_MAX_WIDTH = 900;
 	const KEYBOARD_ACTIVATION_THRESHOLD = 80;
+	const PROCESSING_MIN_MS = 450;
+	const PROCESSING_MAX_MS = 1800;
+	const PROCESSING_BYTES_PER_MS = 1500;
+	const attachmentTimers = new Map<string, ReturnType<typeof setInterval>>();
 	const createAttachmentId = () => {
 		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 			return crypto.randomUUID();
@@ -373,7 +384,7 @@
 			.padStart(4, '0')}`;
 	};
 
-	const buildAttachmentDraft = (file: File): AttachmentDraft => {
+	const buildAttachmentDraft = (file: File, processing = false): AttachmentDraft => {
 		const isImage = looksLikeImage({ name: file?.name, type: file?.type });
 		const previewUrl =
 			isImage && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
@@ -386,7 +397,9 @@
 			size: file?.size,
 			contentType: file?.type ?? null,
 			isImage,
-			previewUrl
+			previewUrl,
+			processing,
+			progress: processing ? 0 : 100
 		};
 	};
 
@@ -400,11 +413,59 @@
 		}
 	};
 
-	function queueAttachments(files: File[]) {
+	const updateAttachment = (
+		id: string,
+		updater: (entry: AttachmentDraft) => AttachmentDraft
+	) => {
+		attachments = attachments.map((entry) => (entry.id === id ? updater(entry) : entry));
+	};
+
+	const stopAttachmentProcessing = (id: string) => {
+		const timer = attachmentTimers.get(id);
+		if (timer) {
+			clearInterval(timer);
+			attachmentTimers.delete(id);
+		}
+	};
+
+	const estimateProcessingDuration = (file: File) => {
+		const size = file?.size ?? 0;
+		if (!size) return PROCESSING_MIN_MS;
+		const raw = Math.round(size / PROCESSING_BYTES_PER_MS);
+		return Math.min(PROCESSING_MAX_MS, Math.max(PROCESSING_MIN_MS, raw));
+	};
+
+	const startAttachmentProcessing = (id: string, durationMs: number) => {
+		stopAttachmentProcessing(id);
+		const started = Date.now();
+		const tick = () => {
+			const elapsed = Date.now() - started;
+			const progress = Math.min(100, Math.round((elapsed / durationMs) * 100));
+			updateAttachment(id, (entry) => ({
+				...entry,
+				progress,
+				processing: progress < 100
+			}));
+			if (progress >= 100) {
+				stopAttachmentProcessing(id);
+			}
+		};
+		tick();
+		const timer = setInterval(tick, 60);
+		attachmentTimers.set(id, timer);
+	};
+
+	function queueAttachments(files: File[], options: { animate?: boolean } = {}) {
 		const selection = files.filter((file): file is File => file instanceof File);
 		if (!selection.length) return;
-		const drafts = selection.map((file) => buildAttachmentDraft(file));
+		const shouldAnimate = Boolean(options.animate);
+		const drafts = selection.map((file) => buildAttachmentDraft(file, shouldAnimate));
 		attachments = [...attachments, ...drafts];
+		if (shouldAnimate) {
+			drafts.forEach((draft) => {
+				startAttachmentProcessing(draft.id, estimateProcessingDuration(draft.file));
+			});
+		}
 	}
 
 	const dedupeFiles = (list: File[]) => {
@@ -422,11 +483,13 @@
 
 	function removeAttachment(id: string) {
 		const target = attachments.find((item) => item.id === id);
+		stopAttachmentProcessing(id);
 		if (target) revokeAttachmentPreview(target);
 		attachments = attachments.filter((item) => item.id !== id);
 	}
 
 	function clearAttachments() {
+		attachments.forEach((entry) => stopAttachmentProcessing(entry.id));
 		attachments.forEach((entry) => revokeAttachmentPreview(entry));
 		attachments = [];
 	}
@@ -468,6 +531,7 @@
 	function submit(e?: Event) {
 		e?.preventDefault();
 		if (disabled) return;
+		if (attachmentsProcessing) return;
 		const trimmed = text.trim();
 		const hasText = Boolean(trimmed);
 		const hasAttachments = attachments.length > 0;
@@ -596,6 +660,78 @@
 		const merged = dedupeFiles([...directFiles, ...itemFiles]);
 		if (!merged.length) return;
 		queueAttachments(merged);
+	}
+
+	const hasFileTransfer = (event: DragEvent) => {
+		const transfer = event.dataTransfer;
+		if (!transfer) return false;
+		if (transfer.files && transfer.files.length > 0) return true;
+		const types = Array.from(transfer.types ?? []);
+		if (types.length === 0) return true;
+		if (types.includes('Files')) return true;
+		if (types.some((type) => type.toLowerCase().includes('file'))) return true;
+		const items = Array.from(transfer.items ?? []);
+		return items.some((item) => item.kind === 'file');
+	};
+
+	function handleDragEnter(event: DragEvent) {
+		if (!isDesktop || disabled) return;
+		if (!hasFileTransfer(event)) return;
+		event.preventDefault();
+		dragDepth += 1;
+		dragActive = true;
+	}
+
+	function handleDragOver(event: DragEvent) {
+		if (!isDesktop || disabled) return;
+		if (!hasFileTransfer(event)) return;
+		event.preventDefault();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		dragActive = true;
+	}
+
+	function handleDragLeave(event: DragEvent) {
+		if (!isDesktop || disabled) return;
+		if (!dragActive) return;
+		event.preventDefault();
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0) {
+			dragActive = false;
+		}
+	}
+
+	function handleDrop(event: DragEvent) {
+		if (!isDesktop || disabled) return;
+		if (!hasFileTransfer(event)) return;
+		event.preventDefault();
+		dragDepth = 0;
+		dragActive = false;
+		const dropped = Array.from(event.dataTransfer?.files ?? []);
+		if (!dropped.length) return;
+		queueAttachments(dedupeFiles(dropped), { animate: true });
+		inputEl?.focus();
+	}
+
+	function handleFieldDragEnter(event: DragEvent) {
+		event.stopPropagation();
+		handleDragEnter(event);
+	}
+
+	function handleFieldDragOver(event: DragEvent) {
+		event.stopPropagation();
+		handleDragOver(event);
+	}
+
+	function handleFieldDragLeave(event: DragEvent) {
+		event.stopPropagation();
+		handleDragLeave(event);
+	}
+
+	function handleFieldDrop(event: DragEvent) {
+		event.stopPropagation();
+		handleDrop(event);
 	}
 
 	function handleInput() {
@@ -769,6 +905,12 @@
 		if (!popOpen && platform === 'mobile' && !inputFocused) {
 			releaseDockSuppression();
 		}
+	});
+
+	$effect(() => {
+		if (isDesktop && !disabled) return;
+		dragDepth = 0;
+		dragActive = false;
 	});
 
 	$effect(() => {
@@ -1951,7 +2093,15 @@
 
 <svelte:window onkeydown={onEsc} />
 
-<div class="chat-input-root" bind:this={rootEl}>
+<div
+	class="chat-input-root"
+	class:chat-input-root--dragging={dragActive}
+	bind:this={rootEl}
+	ondragenter={handleDragEnter}
+	ondragover={handleDragOver}
+	ondragleave={handleDragLeave}
+	ondrop={handleDrop}
+>
 	<div class="chat-input-overlays">
 		{#if showRewriteCoach}
 			<div class="ai-card ai-card--standalone ai-card--rewrite" role="status">
@@ -2006,6 +2156,13 @@
 		{/if}
 	</div>
 
+	{#if dragActive && isDesktop}
+		<div class="chat-input-dropzone" aria-hidden="true">
+			<i class="bx bx-cloud-upload" aria-hidden="true"></i>
+			<span>Drag file here</span>
+		</div>
+	{/if}
+
 	<div class="chat-input-stack">
 		{#if attachments.length}
 			<div class="chat-attachments" role="list">
@@ -2030,6 +2187,18 @@
 									<span>{attachmentSize}</span>
 								{/if}
 							</div>
+							{#if attachment.processing}
+								<div
+									class="chat-attachment__progress"
+									role="progressbar"
+									aria-valuemin="0"
+									aria-valuemax="100"
+									aria-valuenow={attachment.progress}
+								>
+									<span style={`width: ${Math.max(8, attachment.progress)}%`}></span>
+								</div>
+								<div class="chat-attachment__status">Preparing {attachment.progress}%</div>
+							{/if}
 						</div>
 						<button
 							type="button"
@@ -2117,6 +2286,10 @@
 							bind:this={inputEl}
 							bind:value={text}
 							placeholder={showSuggestionGhost ? '' : placeholder}
+							ondragenter={handleFieldDragEnter}
+							ondragover={handleFieldDragOver}
+							ondragleave={handleFieldDragLeave}
+							ondrop={handleFieldDrop}
 							onpointerdown={handleTextareaPointerDown}
 							onkeydown={onKeydown}
 							oninput={handleInput}
@@ -2405,6 +2578,33 @@
 		flex-wrap: wrap;
 	}
 
+	.chat-attachment__progress {
+		width: 100%;
+		height: 0.35rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--color-panel-muted) 60%, transparent);
+		overflow: hidden;
+		margin-top: 0.25rem;
+	}
+
+	.chat-attachment__progress span {
+		display: block;
+		height: 100%;
+		border-radius: inherit;
+		background: linear-gradient(
+			90deg,
+			var(--color-accent),
+			color-mix(in srgb, var(--color-accent) 70%, #fff)
+		);
+		transition: width 60ms linear;
+	}
+
+	.chat-attachment__status {
+		font-size: 0.68rem;
+		color: var(--text-55);
+		margin-top: 0.15rem;
+	}
+
 	.chat-attachment__remove {
 		border: none;
 		background: transparent;
@@ -2558,6 +2758,32 @@
 		display: flex;
 		flex-direction: column;
 		z-index: 10;
+	}
+
+	.chat-input-root--dragging {
+		z-index: 20;
+	}
+
+	.chat-input-dropzone {
+		position: absolute;
+		inset: -0.35rem;
+		border-radius: var(--radius-xl);
+		border: 2px dashed color-mix(in srgb, var(--color-accent) 70%, transparent);
+		background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+		color: var(--color-accent);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
+		font-weight: 600;
+		font-size: 0.85rem;
+		letter-spacing: 0.02em;
+		pointer-events: none;
+		z-index: 30;
+	}
+
+	.chat-input-dropzone i {
+		font-size: 1.15rem;
 	}
 
 	.chat-input-overlays {
@@ -3190,6 +3416,8 @@
 	@media (max-width: 640px) {
 		.chat-input__field {
 			gap: 0.45rem;
+			min-width: 0;
+			max-width: 100%;
 		}
 
 		.chat-input__textarea-wrapper textarea {
@@ -3203,6 +3431,44 @@
 
 		.chat-input__suggested-hint {
 			font-size: 0.7rem;
+		}
+
+		.reply-banner {
+			padding: 0.4rem 0.5rem;
+			gap: 0.45rem;
+			margin-bottom: 0.3rem;
+			border-radius: 0.65rem;
+			max-width: 100%;
+			min-width: 0;
+			overflow: hidden;
+		}
+
+		.reply-banner__body {
+			min-width: 0;
+			overflow: hidden;
+		}
+
+		.reply-banner__label {
+			font-size: 0.6rem;
+		}
+
+		.reply-banner__name {
+			font-size: 0.75rem;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		.reply-banner__preview {
+			font-size: 0.7rem;
+			max-width: 100%;
+		}
+
+		.reply-banner__close {
+			flex-shrink: 0;
+			width: 1.5rem;
+			height: 1.5rem;
+			min-width: 1.5rem;
 		}
 
 		.ai-card {
@@ -3384,53 +3650,52 @@
 
 	.chat-input__mobile-send {
 		position: absolute;
-		top: 50%;
+		bottom: 50%;
 		right: 0.4rem;
-		bottom: auto;
-		width: 1.65rem;
-		height: 1.65rem;
+		top: auto;
+		width: 1.6rem;
+		height: 1.6rem;
 		border-radius: 999px;
 		border: none;
 		background: var(--color-accent);
-		color: var(--color-app-bg, #030712);
+		color: #fff;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 0.95rem;
-		box-shadow:
-			0 10px 20px rgba(6, 10, 20, 0.35),
-			inset 0 1px 0 rgba(255, 255, 255, 0.25);
+		font-size: 1rem;
+		box-shadow: none;
 		transition:
-			transform 140ms ease,
-			box-shadow 140ms ease,
-			opacity 140ms ease;
+			transform 120ms ease,
+			opacity 120ms ease,
+			background 120ms ease;
 		z-index: 3;
 		pointer-events: auto;
-		transform: translateY(calc(-50% - 0.08rem));
+		transform: translateY(40%);
 	}
 
 	.chat-input__mobile-send:disabled {
-		opacity: 0.45;
-		box-shadow: none;
+		opacity: 0.35;
+		background: var(--text-30);
 		cursor: not-allowed;
 	}
 
 	.chat-input__mobile-send--expanded {
-		top: auto;
-		bottom: 0.6rem;
-		transform: translateY(calc(0.25rem - 0.08rem));
+		bottom: 0.8rem;
+		transform: none;
 	}
 
 	.chat-input__mobile-send:not(:disabled):active {
-		transform: translateY(calc(-50% - 0.08rem)) scale(0.95);
+		transform: translateY(40%) scale(0.9);
+		background: color-mix(in srgb, var(--color-accent) 85%, #000 15%);
 	}
 
 	.chat-input__mobile-send--expanded:not(:disabled):active {
-		transform: translateY(calc(0.25rem - 0.08rem)) scale(0.95);
+		transform: scale(0.9);
 	}
 
 	.chat-input__mobile-send i {
 		line-height: 1;
+		font-weight: 700;
 	}
 
 	@media (max-width: 767px) {

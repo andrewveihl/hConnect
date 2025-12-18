@@ -73,7 +73,7 @@ export const serverSettingsSections: ServerSettingsSection[] = [
 		id: 'integrations',
 		group: 'Automation',
 		label: 'Integrations',
-		keywords: ['bots', 'apps', 'webhooks', 'tickets', 'domains']
+		keywords: ['bots', 'apps', 'webhooks', 'issues', 'domains']
 	},
 	{
 		id: 'audit-log',

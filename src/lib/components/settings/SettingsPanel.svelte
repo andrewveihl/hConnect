@@ -21,7 +21,9 @@
 		requestNotificationPermission,
 		getCurrentDeviceId,
 		pingServiceWorker,
-		disablePushForUser
+		disablePushForUser,
+		isIOSPushSupported,
+		getPushSupportMessage
 	} from '$lib/notify/push';
 	import { featureFlag } from '$lib/stores/featureFlags';
 	import type { PushDebugEvent } from '$lib/notify/push';
@@ -990,7 +992,7 @@
 						const customConfig: CustomizationConfig = {
 							themeOverrides: { dark: customTheme.colors },
 							customThemes: [],
-							splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+							splash: { gifUrl: '', gifDuration: 0, themeBackgrounds: { dark: '', light: '', midnight: '' }, enabled: false },
 							splashGifs: [],
 							sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
 						};
@@ -1224,6 +1226,20 @@
 			alert('Push notifications require a browser environment.');
 			return;
 		}
+		
+		// Check if push is supported on this iOS browser (Chrome, Firefox, etc. on iOS don't support push)
+		if (!isIOSPushSupported()) {
+			const supportInfo = getPushSupportMessage();
+			appendPushDebug({
+				tag: 'enable',
+				level: 'error',
+				message: supportInfo.message,
+				details: { userAgent: navigator.userAgent }
+			});
+			alert(supportInfo.message);
+			return;
+		}
+		
 		const deviceId = getCurrentDeviceId();
 		appendPushDebug({
 			tag: 'enable',
@@ -1702,6 +1718,15 @@
 		// Check if it's a built-in theme
 		const isBuiltIn = ['light', 'dark', 'midnight', 'holiday'].includes(themeId);
 
+		// Save custom theme ID to localStorage for splash screen
+		if (typeof window !== 'undefined') {
+			if (!isBuiltIn) {
+				localStorage.setItem('hconnect:customThemeId', themeId);
+			} else {
+				localStorage.removeItem('hconnect:customThemeId');
+			}
+		}
+
 		if (isBuiltIn) {
 			// Set the built-in theme mode
 			setTheme(themeId as ThemeMode, { persist: true });
@@ -1716,7 +1741,7 @@
 				const customConfig: CustomizationConfig = {
 					themeOverrides: { dark: customTheme.colors },
 					customThemes: [],
-					splash: { gifUrl: '', gifDuration: 0, backgroundColor: '', enabled: false },
+					splash: { gifUrl: '', gifDuration: 0, themeBackgrounds: { dark: '', light: '', midnight: '' }, enabled: false },
 					splashGifs: [],
 					sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
 				};
@@ -1759,7 +1784,7 @@
 				<span
 					class={`rounded-full border px-3 py-1 text-xs font-medium ${
 						saveState === 'pending' || saveState === 'saving'
-							? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+							? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]'
 							: saveState === 'saved'
 								? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-100'
 								: 'border-rose-500/60 bg-rose-500/15 text-rose-100'
@@ -2458,7 +2483,7 @@
 						<button
 							class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
 								voiceTab === 'voice'
-									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]'
 									: 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
 							}`}
 							type="button"
@@ -2473,7 +2498,7 @@
 						<button
 							class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
 								voiceTab === 'video'
-									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]'
 									: 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
 							}`}
 							type="button"
@@ -2488,7 +2513,7 @@
 						<button
 							class={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
 								voiceTab === 'debug'
-									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]'
+									? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]'
 									: 'border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]'
 							}`}
 							type="button"
@@ -2616,14 +2641,14 @@
 								<div class="flex flex-wrap gap-2">
 									<button
 										type="button"
-										class={`${pillButtonClasses} ${voicePrefs.inputMode === 'voice' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]' : ''}`}
+										class={`${pillButtonClasses} ${voicePrefs.inputMode === 'voice' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]' : ''}`}
 										onclick={() => updateVoicePref('inputMode', 'voice')}
 									>
 										Voice activity
 									</button>
 									<button
 										type="button"
-										class={`${pillButtonClasses} ${voicePrefs.inputMode === 'ptt' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-text-inverse)]' : ''}`}
+										class={`${pillButtonClasses} ${voicePrefs.inputMode === 'ptt' ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent-strong)]' : ''}`}
 										onclick={() => updateVoicePref('inputMode', 'ptt')}
 									>
 										Push to talk
