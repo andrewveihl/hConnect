@@ -1007,19 +1007,32 @@
 
 	.server-activity-dot {
 		position: absolute;
-		bottom: -2px;
-		right: -2px;
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		background: var(--color-accent);
+		bottom: -3px;
+		right: -3px;
+		width: 14px;
+		height: 14px;
+		border-radius: 999px;
+		background: #22c55e;
 		border: 2.5px solid var(--color-panel);
 		pointer-events: none;
 		z-index: 2;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 	}
 
 	.server-activity-dot--high {
 		background: var(--color-accent);
+		animation: activity-pulse 2s ease-in-out infinite;
+	}
+
+	@keyframes activity-pulse {
+		0%, 100% {
+			transform: scale(1);
+			box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+		}
+		50% {
+			transform: scale(1.1);
+			box-shadow: 0 0 8px var(--color-accent);
+		}
 	}
 
 	@media (max-width: 767px) {
