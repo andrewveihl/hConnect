@@ -186,6 +186,10 @@
 		}
 	}
 
+	function stopTouchPropagation(event: TouchEvent) {
+		event.stopPropagation();
+	}
+
 	function handleSnapZoneUpdated() {
 		if (!isSnapped || !snappedZoneId) return;
 		const zones = fabSnapStore.getZones();
@@ -228,6 +232,10 @@
 			onpointermove={handlePointerMove}
 			onpointerup={handlePointerUp}
 			onpointercancel={handlePointerUp}
+			ontouchstart={stopTouchPropagation}
+			ontouchmove={stopTouchPropagation}
+			ontouchend={stopTouchPropagation}
+			ontouchcancel={stopTouchPropagation}
 			aria-label="Open Super Admin Center"
 			title="Super Admin Center"
 		>

@@ -207,7 +207,7 @@
 
 {#if open}
 	<div
-		class="fixed inset-0 z-50 flex flex-col bg-[color:var(--surface-root)] text-[color:var(--color-text-primary)]"
+		class="server-settings-mobile-shell fixed inset-0 z-50 flex flex-col bg-[color:var(--surface-root)] text-[color:var(--color-text-primary)]"
 		transition:slide={{ duration: 200 }}
 	>
 		<div
@@ -264,7 +264,7 @@
 					</div>
 				</div>
 
-				<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] px-4 pb-6">
+				<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] px-4 pb-28">
 					<div class="pt-3">
 						<label
 							class="flex items-center gap-2 rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] px-3 py-2 text-sm text-[color:var(--color-text-primary)] focus-within:border-[color:var(--color-accent)]"
@@ -333,7 +333,7 @@
 							</p>
 						</div>
 					</header>
-					<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] p-4">
+					<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] p-4 pb-28">
 						<ServerSettingsPanel
 							{serverId}
 							section={mapServerSectionToPanel(detailSection)}
@@ -346,3 +346,9 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	.server-settings-mobile-shell {
+		padding-top: env(safe-area-inset-top, 0px);
+	}
+</style>

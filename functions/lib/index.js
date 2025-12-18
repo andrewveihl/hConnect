@@ -214,7 +214,6 @@ exports.backfillMyDMRail = (0, https_1.onCall)({
                 otherUid,
                 participants,
                 lastMessage: dmData.lastMessage ?? null,
-                hidden: false,
                 updatedAt: firestore_2.FieldValue.serverTimestamp()
             };
             // Fetch other participant's profile for display metadata

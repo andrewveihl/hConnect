@@ -427,6 +427,57 @@ export async function toggleChannelReaction(
 	});
 }
 
+/**
+ * Edit a channel message (text only). Only the original author can edit.
+ */
+export async function editChannelMessage(
+	serverId: string,
+	channelId: string,
+	messageId: string,
+	newText: string
+) {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	const cleanMessage = trimString(messageId);
+	const text = trimString(newText);
+	if (!cleanServer || !cleanChannel || !cleanMessage || !text) {
+		throw new Error('Missing required fields for message edit.');
+	}
+
+	const db = getDb();
+	await updateDoc(
+		doc(db, 'servers', cleanServer, 'channels', cleanChannel, 'messages', cleanMessage),
+		{
+			text,
+			content: text,
+			plainTextContent: text,
+			editedAt: serverTimestamp()
+		}
+	);
+}
+
+/**
+ * Delete a channel message. Only the original author or users with manageMessages permission can delete.
+ */
+export async function deleteChannelMessage(
+	serverId: string,
+	channelId: string,
+	messageId: string
+) {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	const cleanMessage = trimString(messageId);
+	if (!cleanServer || !cleanChannel || !cleanMessage) {
+		throw new Error('Missing required fields for message deletion.');
+	}
+
+	const db = getDb();
+	const { deleteDoc } = await import('firebase/firestore');
+	await deleteDoc(
+		doc(db, 'servers', cleanServer, 'channels', cleanChannel, 'messages', cleanMessage)
+	);
+}
+
 export async function voteOnChannelPoll(
 	serverId: string,
 	channelId: string,

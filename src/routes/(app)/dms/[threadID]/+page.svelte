@@ -36,6 +36,7 @@
 	import { uploadDMFile } from '$lib/firebase/storage';
 	import type { PendingUploadPreview } from '$lib/components/chat/types';
 	import { looksLikeImage } from '$lib/utils/fileType';
+	import { presenceFromSources, type PresenceState } from '$lib/presence/state';
 
 	interface Props {
 		data: { threadID: string };
@@ -139,6 +140,10 @@
 	let otherProfile: any = $state(null);
 	let otherMessageUser: any = $state(null);
 	let metaLoading = $state(true);
+	
+	// Presence tracking for the other user
+	let otherPresence: PresenceState = $state('offline');
+	let presenceUnsub: (() => void) | null = null;
 	
 	// Group chat state
 	let isGroupChat = $state(false);
@@ -804,6 +809,40 @@
 		}
 	});
 
+	// Subscribe to presence updates for the other user
+	$effect(() => {
+		// Cleanup previous subscription
+		presenceUnsub?.();
+		presenceUnsub = null;
+		otherPresence = 'offline';
+		
+		if (!otherUid || !browser) return;
+		
+		try {
+			const database = getDb();
+			const presenceRef = doc(database, 'profiles', otherUid, 'presence', 'status');
+			presenceUnsub = onSnapshot(
+				presenceRef,
+				(snap) => {
+					const data = snap.data();
+					otherPresence = presenceFromSources([data]);
+				},
+				() => {
+					// Error - assume offline
+					otherPresence = 'offline';
+				}
+			);
+		} catch (err) {
+			console.warn('[DM] Failed to subscribe to presence', err);
+			otherPresence = 'offline';
+		}
+		
+		return () => {
+			presenceUnsub?.();
+			presenceUnsub = null;
+		};
+	});
+
 	run(() => {
 		if (threadID && threadID !== lastThreadID) {
 			lastThreadID = threadID;
@@ -1449,7 +1488,7 @@
 								name={displayName}
 								size="sm"
 								showPresence={true}
-								presence={otherProfile?.presence ?? 'offline'}
+								presence={otherPresence}
 							/>
 						{/if}
 					</div>
@@ -1545,7 +1584,7 @@
 							name={displayName}
 							size="xl"
 							showPresence={true}
-							presence={otherProfile?.presence ?? 'offline'}
+							presence={otherPresence}
 						/>
 						<div class="mt-1">
 							<div class="text-base font-semibold">{displayName}</div>
@@ -1643,7 +1682,7 @@
 						name={displayName}
 						size="2xl"
 						showPresence={true}
-						presence={otherProfile?.presence ?? 'offline'}
+						presence={otherPresence}
 					/>
 					<div class="mt-1">
 						<div class="text-lg font-semibold">{displayName}</div>
@@ -1730,6 +1769,7 @@
 	.dm-header__avatar {
 		position: relative;
 		flex-shrink: 0;
+		--presence-dot-border: var(--color-panel);
 	}
 
 	.dm-header__info {

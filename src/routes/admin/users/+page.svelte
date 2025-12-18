@@ -279,7 +279,9 @@
 				const result = await createUserGroup({
 					name: groupEditorName.trim(),
 					description: groupEditorDescription.trim(),
-					serverIds: groupEditorServerIds
+					serverIds: groupEditorServerIds,
+					memberUids: [],
+					memberServers: {}
 				}, data.user);
 				userGroups = [...userGroups, {
 					id: result.groupId,
@@ -1747,9 +1749,8 @@
 																	<div class="flex items-center gap-2 min-w-0">
 																		{#if memberInfo}
 																			<Avatar
-																				uid={memberInfo.uid}
-																				photoURL={memberInfo.photoURL}
-																				displayName={memberInfo.displayName}
+																				src={memberInfo.photoURL}
+																				name={memberInfo.displayName}
 																				size="xs"
 																			/>
 																			<div class="min-w-0">
@@ -1871,9 +1872,8 @@
 														>
 															<div class="relative">
 																<Avatar
-																	uid={user.uid}
-																	photoURL={user.photoURL}
-																	displayName={user.displayName}
+																	src={user.photoURL}
+																	name={user.displayName}
 																	size="xs"
 																/>
 																{#if selectedUsersForGroup.has(user.uid)}

@@ -545,6 +545,8 @@
 	/* ---------------- Long-press delete (mobile) ---------------- */
 	const DM_LONG_PRESS_MS = 600;
 	const SWIPE_DELETE_THRESHOLD = 80;
+	const SWIPE_INTENT_THRESHOLD = 10;
+	const SWIPE_INTENT_RATIO = 1.35;
 
 	let dmLongPressTimer: ReturnType<typeof setTimeout> | null = null;
 	let dmLongPressThreadId: string | null = null;
@@ -553,8 +555,10 @@
 	// Swipe-to-delete state
 	let swipeThreadId: string | null = $state(null);
 	let swipeStartX = 0;
+	let swipeStartY = 0;
 	let swipeDelta = $state(0);
 	let swipeTracking = $state(false);
+	let swipeIntent: 'horizontal' | 'vertical' | null = $state(null);
 
 	function clearDmLongPressTimer() {
 		if (dmLongPressTimer) {
@@ -594,19 +598,38 @@
 		if (event.touches.length !== 1) return;
 		swipeThreadId = threadId;
 		swipeStartX = event.touches[0].clientX;
+		swipeStartY = event.touches[0].clientY;
 		swipeDelta = 0;
-		swipeTracking = true;
+		swipeTracking = false;
+		swipeIntent = null;
 	}
 
 	function handleSwipeMove(event: TouchEvent) {
-		if (!swipeTracking || event.touches.length !== 1) return;
-		const delta = swipeStartX - event.touches[0].clientX;
+		if (!swipeThreadId || event.touches.length !== 1) return;
+		const dx = swipeStartX - event.touches[0].clientX;
+		const dy = swipeStartY - event.touches[0].clientY;
+		const absDx = Math.abs(dx);
+		const absDy = Math.abs(dy);
+		if (!swipeIntent) {
+			if (absDx < SWIPE_INTENT_THRESHOLD && absDy < SWIPE_INTENT_THRESHOLD) return;
+			if (absDy > absDx * SWIPE_INTENT_RATIO) {
+				swipeIntent = 'vertical';
+				return;
+			}
+			swipeIntent = 'horizontal';
+			swipeTracking = true;
+		}
+		if (swipeIntent !== 'horizontal') return;
 		// Only allow swiping left (positive delta)
-		swipeDelta = Math.max(0, Math.min(delta, SWIPE_DELETE_THRESHOLD + 40));
+		swipeDelta = Math.max(0, Math.min(dx, SWIPE_DELETE_THRESHOLD + 40));
 	}
 
 	function handleSwipeEnd() {
-		if (!swipeTracking) return;
+		if (!swipeThreadId) return;
+		if (swipeIntent !== 'horizontal') {
+			resetSwipeState();
+			return;
+		}
 		swipeTracking = false;
 
 		if (swipeDelta >= SWIPE_DELETE_THRESHOLD && swipeThreadId) {
@@ -629,6 +652,7 @@
 		swipeDelta = 0;
 		swipeThreadId = null;
 		swipeTracking = false;
+		swipeIntent = null;
 	}
 
 	function handleThreadClick(event: MouseEvent | PointerEvent, threadId: string) {
@@ -699,7 +723,9 @@
 
 	async function deleteThread(threadId: string) {
 		if (!me?.uid) return;
-		const confirmDelete = window.confirm('Remove this conversation? You can start it again later.');
+		const confirmDelete = window.confirm(
+			'Remove this conversation for you? It will only be hidden from your list.'
+		);
 		if (!confirmDelete) return;
 
 		try {
@@ -901,17 +927,7 @@
 	<!-- Minimalistic header -->
 	<div class="dms-sidebar-header px-4 py-3 flex items-center justify-between gap-2">
 		<div class="text-sm font-semibold tracking-tight text-white/90">Messages</div>
-		<div class="flex items-center gap-1">
-			<button
-				class="dms-sidebar-header__refresh-btn"
-				type="button"
-				aria-label="Refresh conversations"
-				title="Refresh conversations (recover missing DMs)"
-				onclick={refreshConversations}
-				disabled={isRefreshing}
-			>
-				<i class={`bx bx-refresh text-lg ${isRefreshing ? 'animate-spin' : ''}`}></i>
-			</button>
+		<div class="flex items-center">
 			<button
 				class="dms-sidebar-header__new-btn"
 				type="button"
@@ -919,12 +935,12 @@
 				onclick={openPeoplePicker}
 				disabled={showPeoplePicker}
 			>
-				<i class="bx bx-edit-alt text-lg"></i>
+				<i class="bx bx-plus text-xl"></i>
 			</button>
 		</div>
 	</div>
 
-	<div class="flex-1 overflow-y-auto px-2 pb-4 space-y-4 touch-pan-y">
+	<div class="dms-sidebar-scroll flex-1 overflow-y-auto px-2 pb-4 space-y-4 touch-pan-y">
 		{#if showPersonalSection}
 			<section>
 				<ul class="space-y-0.5">
@@ -1115,10 +1131,9 @@
 
 			<div class="p-4 border-b border-subtle space-y-2">
 				<div class="people-picker__input">
-					<i class="bx bx-search people-picker__search-icon"></i>
 					<input
-						class="input input--compact pl-9 pr-3 people-picker__field"
-						placeholder="Search people by name"
+						class="input input--compact px-3 people-picker__field"
+						placeholder="Search for people by name"
 						bind:value={term}
 						oninput={onSearchInput}
 					/>
@@ -1127,8 +1142,6 @@
 					<p class="people-picker__hint text-red-400">{error}</p>
 				{:else if searching}
 					<p class="people-picker__hint">Searching...</p>
-				{:else if term.trim().length < 2 && !isGroupMode}
-					<p class="people-picker__hint">Type at least 2 characters to search.</p>
 				{/if}
 			</div>
 
@@ -1269,14 +1282,13 @@
 		border-bottom: 1px solid var(--color-border-subtle);
 	}
 
-	.dms-sidebar-header__refresh-btn,
 	.dms-sidebar-header__new-btn {
-		width: 2rem;
-		height: 2rem;
-		display: grid;
-		place-items: center;
-		border-radius: 0.5rem;
-		background: transparent;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.35rem 0.6rem;
+		border-radius: 0.6rem;
+		background: rgba(255, 255, 255, 0.08);
 		border: none;
 		color: var(--color-text-secondary);
 		transition:
@@ -1284,13 +1296,11 @@
 			color 150ms ease;
 	}
 
-	.dms-sidebar-header__refresh-btn:hover:not(:disabled),
 	.dms-sidebar-header__new-btn:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.14);
 		color: var(--color-text-primary);
 	}
 
-	.dms-sidebar-header__refresh-btn:disabled,
 	.dms-sidebar-header__new-btn:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
@@ -1340,6 +1350,19 @@
 			padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
 			padding-left: calc(1rem + env(safe-area-inset-left, 0px));
 			padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+		}
+
+		.dms-sidebar-header__new-btn {
+			width: 2.25rem;
+			height: 2.25rem;
+			padding: 0;
+			justify-content: center;
+		}
+
+		.dms-sidebar-scroll {
+			padding-bottom: calc(
+				1rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px)
+			);
 		}
 	}
 
@@ -1458,6 +1481,7 @@
 		border-radius: 0.5rem;
 		background: transparent;
 		will-change: transform;
+		--presence-dot-border: var(--color-sidebar);
 	}
 
 	.dm-thread__row:active {
@@ -1558,6 +1582,8 @@
 		background: var(--color-panel);
 		backdrop-filter: blur(16px);
 		color: var(--color-text-primary);
+		padding-top: env(safe-area-inset-top, 0px);
+		padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
 	}
 
 	.people-picker__subtitle {

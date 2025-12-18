@@ -18,6 +18,7 @@
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
 	import { isMobileViewport } from '$lib/stores/viewport';
+	import { splashVisible } from '$lib/stores/splash';
 	import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
@@ -347,6 +348,7 @@
 	});
 </script>
 
+{#if !$splashVisible}
 <nav class="mobile-dock md:hidden" aria-label="Primary" bind:this={navElement}>
 	<div class="mobile-dock__inner">
 		<a
@@ -426,6 +428,7 @@
 		</a>
 	</div>
 </nav>
+{/if}
 
 <style>
 	.mobile-dock {
@@ -442,7 +445,7 @@
 		padding-bottom: calc(
 			env(safe-area-inset-bottom, 0px) + 0.65rem
 		); /* Nudge nav content further upward */
-		height: var(--mobile-dock-height, calc(3rem + env(safe-area-inset-bottom, 0px)));
+		height: var(--mobile-dock-height, calc(6rem + env(safe-area-inset-bottom, 0px)));
 		/* Ensure no transparency */
 		/* Add a pseudo-element to guarantee flush color under home indicator */
 	}
@@ -465,7 +468,7 @@
 		justify-content: space-around;
 		align-items: center;
 		height: calc(
-			var(--mobile-dock-height, calc(3rem + env(safe-area-inset-bottom, 0px))) -
+			var(--mobile-dock-height, calc(6rem + env(safe-area-inset-bottom, 0px))) -
 				env(safe-area-inset-bottom, 0px) - 0.65rem
 		);
 		width: 100%;
@@ -506,8 +509,8 @@
 
 	.mobile-dock__icon-wrapper {
 		position: relative;
-		width: 1.75rem;
-		height: 1.75rem;
+		width: 2.5rem;
+		height: 2.5rem;
 		border-radius: 0;
 		background: transparent;
 		border: none;
@@ -522,7 +525,7 @@
 	}
 
 	.mobile-dock__icon {
-		font-size: 1.5rem;
+		font-size: 2.25rem;
 		line-height: 1;
 	}
 
@@ -559,16 +562,16 @@
 
 	.mobile-dock__server-icon,
 	.mobile-dock__avatar {
-		width: 1.5rem;
-		height: 1.5rem;
+		width: 2.25rem;
+		height: 2.25rem;
 		border-radius: 50%;
 		object-fit: cover;
 	}
 
 	.mobile-dock__server-fallback,
 	.mobile-dock__server-placeholder {
-		width: 1.5rem;
-		height: 1.5rem;
+		width: 2.25rem;
+		height: 2.25rem;
 		border-radius: 50%;
 		background: var(--color-accent);
 		color: var(--button-primary-text);
@@ -576,7 +579,7 @@
 		align-items: center;
 		justify-content: center;
 		font-weight: 600;
-		font-size: 0.7rem;
+		font-size: 0.9rem;
 	}
 
 	.mobile-dock__server-placeholder {
@@ -617,5 +620,20 @@
 	.mobile-dock__icon-wrapper {
 		background-color: var(--color-panel) !important;
 		box-shadow: none !important;
+	}
+
+	/* Remove the green self-user ring from avatar in mobile nav */
+	.mobile-dock :global(.avatar--self .avatar-inner) {
+		box-shadow: none !important;
+	}
+
+	/* Make avatar same size as server icon (2.25rem) */
+	.mobile-dock :global(.avatar-wrapper) {
+		width: 2.25rem !important;
+		height: 2.25rem !important;
+	}
+
+	.mobile-dock :global(.avatar-inner) {
+		border: none !important;
 	}
 </style>

@@ -630,6 +630,23 @@ service cloud.firestore {
             allow update: if false;
           }
 
+          match /revisions/{revisionId} {
+            allow read: if isSignedIn();
+            allow create, update, delete: if isSignedIn();
+
+            match /offerCandidates/{candidateId} {
+              allow read: if isSignedIn();
+              allow create, delete: if isSignedIn();
+              allow update: if false;
+            }
+
+            match /answerCandidates/{candidateId} {
+              allow read: if isSignedIn();
+              allow create, delete: if isSignedIn();
+              allow update: if false;
+            }
+          }
+
           match /descriptions/{descriptionId} {
             allow read: if isSignedIn();
             allow create, update, delete: if isSignedIn();

@@ -169,7 +169,7 @@
 			settingsLoadedFor = serverId;
 		} catch (err) {
 			console.error('[TicketAIModal] failed to load settings', err);
-			saveError = 'Could not load Ticket AI settings.';
+			saveError = 'Could not load Issue Tracker settings.';;
 		} finally {
 			loadingSettings = false;
 		}
@@ -344,7 +344,7 @@
 			}
 		} catch (err) {
 			console.error('[TicketAIModal] failed to save settings', err);
-			saveError = 'Failed to save Ticket AI settings.';
+			saveError = 'Failed to save Issue Tracker settings.';;
 		} finally {
 			savingSettings = false;
 		}
@@ -684,7 +684,7 @@
 						<i class="bx bx-bot"></i>
 					</div>
 					<div>
-						<h2>Ticket AI</h2>
+						<h2>Issue Tracker</h2>
 						<p class="modal-header__subtitle">{serverName}</p>
 					</div>
 				</div>
@@ -746,7 +746,7 @@
 								on:click={() => (analyticsSubTab = 'tickets')}
 							>
 								<i class="bx bx-receipt"></i>
-								Tickets
+								Issues
 							</button>
 						</div>
 
@@ -1121,7 +1121,7 @@
 											<thead>
 												<tr>
 													<th>Staff Member</th>
-													<th>Tickets Answered</th>
+													<th>Issues Answered</th>
 													<th>Resolved</th>
 													<th>Avg Response Time</th>
 													<th>Avg Resolution Time</th>
@@ -1190,7 +1190,7 @@
 										<i class="bx bx-user-x"></i>
 										<p>No staff activity found for this period</p>
 										<span class="staff-empty__hint"
-											>Staff members will appear here once they respond to tickets</span
+											>Staff members will appear here once they respond to issues</span
 										>
 									</div>
 								{/if}
@@ -1252,7 +1252,7 @@
 										</table>
 									</div>
 									<div class="tickets-footer">
-										<span class="tickets-total">{ticketRowsWithNames.length} tickets total</span>
+										<span class="tickets-total">{ticketRowsWithNames.length} issues total</span>
 										<span class="tickets-resolved"
 											>{ticketRowsWithNames.filter((t) => t.status === 'closed').length} resolved</span
 										>
@@ -1260,7 +1260,7 @@
 								{:else}
 									<div class="tickets-empty">
 										<i class="bx bx-receipt"></i>
-										<p>No tickets found for this period</p>
+										<p>No issues found for this period</p>
 									</div>
 								{/if}
 							</div>
@@ -1273,7 +1273,7 @@
 						<section class="settings-section">
 							<div class="settings-section__header">
 								<div>
-									<h4>Enable Ticket AI</h4>
+									<h4>Enable Issue Tracker</h4>
 									<p>Turn on to start tracking issues in your channels.</p>
 								</div>
 								<label class="toggle-switch">

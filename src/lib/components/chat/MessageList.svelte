@@ -6,9 +6,11 @@
 	import EmojiPicker from './EmojiPicker.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
+	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
 	import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 	import { createTicketFromMessage } from '$lib/firestore/ticketAi';
+	import { editChannelMessage, deleteChannelMessage } from '$lib/firestore/messages';
 
 	const dispatch = createEventDispatcher();
 
@@ -129,6 +131,97 @@
 	let lastScrollToMessageId: string | null = null;
 	let creatingTicketForMessageId = $state<string | null>(null);
 
+	// Message menu state
+	let menuOpenForMessageId = $state<string | null>(null);
+	let editingMessageId = $state<string | null>(null);
+	let editingText = $state('');
+	let deletingMessageId = $state<string | null>(null);
+
+	// Close menu when clicking anywhere outside
+	$effect(() => {
+		if (menuOpenForMessageId) {
+			const handleGlobalClick = () => {
+				menuOpenForMessageId = null;
+			};
+			// Use setTimeout to avoid closing immediately from the same click that opened it
+			const timeoutId = setTimeout(() => {
+				document.addEventListener('click', handleGlobalClick);
+			}, 0);
+			return () => {
+				clearTimeout(timeoutId);
+				document.removeEventListener('click', handleGlobalClick);
+			};
+		}
+	});
+
+	// Close menu when clicking outside
+	function handleMenuBackdropClick() {
+		menuOpenForMessageId = null;
+	}
+
+	// Open the three-dot menu for a message
+	function openMessageMenu(messageId: string) {
+		menuOpenForMessageId = messageId;
+	}
+
+	// Copy message text to clipboard
+	async function copyMessageText(message: ChatMessage) {
+		const text = (message as any).text ?? (message as any).content ?? '';
+		if (text) {
+			try {
+				await navigator.clipboard.writeText(text);
+			} catch (err) {
+				console.warn('[MessageList] Failed to copy text:', err);
+			}
+		}
+		menuOpenForMessageId = null;
+	}
+
+	// Start editing a message
+	function startEditing(message: ChatMessage) {
+		editingMessageId = message.id;
+		editingText = (message as any).text ?? (message as any).content ?? '';
+		menuOpenForMessageId = null;
+	}
+
+	// Cancel editing
+	function cancelEditing() {
+		editingMessageId = null;
+		editingText = '';
+	}
+
+	// Save edited message
+	async function saveEdit() {
+		if (!editingMessageId || !serverId || !channelId || !editingText.trim()) return;
+		
+		try {
+			await editChannelMessage(serverId, channelId, editingMessageId, editingText.trim());
+			dispatch('messageEdited', { messageId: editingMessageId });
+		} catch (err) {
+			console.error('[MessageList] Failed to edit message:', err);
+		} finally {
+			editingMessageId = null;
+			editingText = '';
+		}
+	}
+
+	// Delete a message
+	async function deleteMessage(messageId: string) {
+		if (!serverId || !channelId) return;
+		
+		deletingMessageId = messageId;
+		menuOpenForMessageId = null;
+		
+		try {
+			await deleteChannelMessage(serverId, channelId, messageId);
+			dispatch('messageDeleted', { messageId });
+		} catch (err) {
+			console.error('[MessageList] Failed to delete message:', err);
+		} finally {
+			deletingMessageId = null;
+		}
+	}
+
 	// Handle creating a ticket from a message
 	async function handleCreateTicket(messageId: string) {
 		if (!serverId || !channelId || creatingTicketForMessageId) return;
@@ -228,49 +321,60 @@
 		return fromMap.username || fromMap.handle || uid || 'Unknown';
 	}
 	
-	function avatarUrlFor(m: any) {
-		const uid = m.uid ?? 'unknown';
-		const user = users[uid];
-		const author = m.author ?? {};
+	function isValidAvatarUrl(value: unknown): value is string {
+		if (typeof value !== 'string') return false;
+		const trimmed = value.trim();
+		if (!trimmed) return false;
+		const lowered = trimmed.toLowerCase();
+		if (
+			[
+				'undefined',
+				'null',
+				'none',
+				'false',
+				'0',
+				'?',
+				'/default-avatar.svg',
+				DEFAULT_AVATAR_URL.toLowerCase()
+			].includes(lowered)
+		) {
+			return false;
+		}
+		if (trimmed.includes('storage.googleapis.com/') && !trimmed.includes('token=')) {
+			return false;
+		}
+		return true;
+	}
 
-		// Try all possible photo fields in priority order
-		// Check message fields, nested author object, and user profile
-		const candidates = [
-			m.photoURL,
-			m.avatarUrl,
-			m.avatar,
-			author?.photoURL,
-			author?.avatarUrl,
-			author?.avatar,
-			user?.avatar,
-			user?.avatarUrl,
-			user?.avatarURL,
-			user?.customPhotoURL,
-			user?.authPhotoURL, // Live auth photo from Google
-			user?.photoURL,
-			user?.photoUrl,
-			user?.photo,
-			user?.picture,
-			user?.cachedPhotoURL // Cached as last resort
-		];
-
-		for (const url of candidates) {
-			if (
-				url &&
-				typeof url === 'string' &&
-				url.trim() &&
-				!['undefined', 'null', 'none', '/default-avatar.svg'].includes(url.toLowerCase())
-			) {
-				// Skip unauthenticated Firebase Storage URLs
-				if (url.includes('storage.googleapis.com/') && !url.includes('token=')) {
-					continue;
-				}
-				return url;
+	function firstValidAvatar(candidates: unknown[]): string | null {
+		for (const candidate of candidates) {
+			if (isValidAvatarUrl(candidate)) {
+				return candidate.trim();
 			}
 		}
-
-		// Return null - Avatar component will handle fallback
 		return null;
+	}
+
+	function avatarUrlFor(m: any) {
+		const uid = m.uid ?? 'unknown';
+		const user = users[uid] ?? null;
+		const author = m.author ?? {};
+
+		const fallback = firstValidAvatar([
+			m.avatar,
+			m.avatarUrl,
+			m.photoURL,
+			author?.avatar,
+			author?.avatarUrl,
+			author?.photoURL
+		]);
+
+		const resolved = resolveProfilePhotoURL(user ?? {}, fallback);
+		if (resolved && resolved !== DEFAULT_AVATAR_URL) {
+			return resolved;
+		}
+
+		return fallback;
 	}
 
 	function isMine(m: any) {
@@ -1306,7 +1410,7 @@
 										{/if}
 										{#if currentUserId}
 											<div
-												class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd ? 'is-visible' : ''}`}
+												class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd || menuOpenForMessageId === m.id ? 'is-visible' : ''}`}
 												onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
 												onpointerleave={() => onMessagePointerLeave(m.id, minuteKey)}
 											>
@@ -1358,8 +1462,8 @@
 													<button
 														type="button"
 														class="message-action {hasTicket ? 'message-action--ticket-exists' : 'message-action--ticket'}"
-														aria-label={hasTicket ? 'Ticket exists' : 'Create ticket'}
-														title={hasTicket ? 'Ticket already exists' : 'Create ticket'}
+														aria-label={hasTicket ? 'Issue exists' : 'Create issue'}
+														title={hasTicket ? 'Issue already exists' : 'Create issue'}
 														disabled={hasTicket || creatingTicketForMessageId === m.id}
 														onclick={(event) => {
 															event.stopPropagation();
@@ -1377,6 +1481,73 @@
 														{/if}
 													</button>
 												{/if}
+												<!-- More actions menu -->
+												<div class="message-action-menu-container">
+													<button
+														type="button"
+														class="message-action"
+														aria-label="More actions"
+														title="More actions"
+														onclick={(event) => {
+															event.stopPropagation();
+															event.preventDefault();
+															openMessageMenu(m.id);
+														}}
+														onpointerdown={(event) => event.stopPropagation()}
+													>
+														<i class="bx bx-dots-horizontal-rounded" aria-hidden="true"></i>
+													</button>
+													{#if menuOpenForMessageId === m.id}
+														<!-- svelte-ignore a11y_no_static_element_interactions -->
+														<!-- svelte-ignore a11y_click_events_have_key_events -->
+														<div 
+															class="message-menu-backdrop" 
+															onclick={handleMenuBackdropClick}
+															ontouchstart={(e) => e.stopPropagation()}
+															ontouchmove={(e) => { e.stopPropagation(); e.preventDefault(); }}
+															onpointerdown={(e) => e.stopPropagation()}
+														></div>
+														<!-- svelte-ignore a11y_no_static_element_interactions -->
+														<!-- svelte-ignore a11y_click_events_have_key_events -->
+														<div 
+															class="message-menu" 
+															role="menu" 
+															onclick={(e) => e.stopPropagation()}
+															ontouchstart={(e) => e.stopPropagation()}
+															onpointerdown={(e) => e.stopPropagation()}
+														>
+															<button
+																type="button"
+																class="message-menu__item"
+																role="menuitem"
+																onclick={() => copyMessageText(m)}
+															>
+																<i class="bx bx-copy" aria-hidden="true"></i>
+																<span>Copy text</span>
+															</button>
+															{#if mine}
+																<button
+																	type="button"
+																	class="message-menu__item"
+																	role="menuitem"
+																	onclick={() => startEditing(m)}
+																>
+																	<i class="bx bx-edit" aria-hidden="true"></i>
+																	<span>Edit message</span>
+																</button>
+																<button
+																	type="button"
+																	class="message-menu__item message-menu__item--danger"
+																	role="menuitem"
+																	onclick={() => deleteMessage(m.id)}
+																>
+																	<i class="bx bx-trash" aria-hidden="true"></i>
+																	<span>Delete message</span>
+																</button>
+															{/if}
+														</div>
+													{/if}
+												</div>
 											</div>
 										{/if}
 										<div
@@ -1386,9 +1557,34 @@
 										>
 											{#if !m.type || m.type === 'text' || String(m.type) === 'normal'}
 												{@const compactBubble = shouldCenterBubble(m)}
-												<div
-													class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${compactBubble ? 'message-bubble--compact' : ''}`}
-												>{#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}{#if isMentionSegment(segment)}<span class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}>@{segment.data?.label ?? segment.value.replace(/^@/, '')}</span>{:else}{#each linkifyText(segment.value) as chunk}{#if chunk.type === 'link'}<a class="chat-link" href={chunk.href} target="_blank" rel="noreferrer noopener nofollow">{chunk.value}</a>{:else}{chunk.value}{/if}{/each}{/if}{/each}</div>
+												{#if editingMessageId === m.id}
+													<div class={`message-edit-container ${mine ? 'message-edit-container--mine' : ''}`}>
+														<textarea
+															class="message-edit-input"
+															bind:value={editingText}
+															onkeydown={(event) => {
+																if (event.key === 'Escape') {
+																	cancelEditing();
+																} else if (event.key === 'Enter' && !event.shiftKey) {
+																	event.preventDefault();
+																	saveEdit();
+																}
+															}}
+														></textarea>
+														<div class="message-edit-actions">
+															<button type="button" class="message-edit-btn message-edit-btn--cancel" onclick={cancelEditing}>
+																Cancel
+															</button>
+															<button type="button" class="message-edit-btn message-edit-btn--save" onclick={saveEdit} disabled={!editingText.trim()}>
+																Save
+															</button>
+														</div>
+													</div>
+												{:else}
+													<div
+														class={`message-bubble ${mine ? 'message-bubble--mine' : 'message-bubble--other'} ${compactBubble ? 'message-bubble--compact' : ''}`}
+													>{#each mentionSegments((m as any).text ?? (m as any).content ?? '', (m as any).mentions) as segment, segIdx (segIdx)}{#if isMentionSegment(segment)}<span class={`chat-mention ${mine ? 'chat-mention--mine' : 'chat-mention--other'} ${segment.data?.kind === 'role' ? 'chat-mention--role' : ''}`}>@{segment.data?.label ?? segment.value.replace(/^@/, '')}</span>{:else}{#each linkifyText(segment.value) as chunk}{#if chunk.type === 'link'}<a class="chat-link" href={chunk.href} target="_blank" rel="noreferrer noopener nofollow">{chunk.value}</a>{:else}{chunk.value}{/if}{/each}{/if}{/each}{#if (m as any).editedAt}<span class="message-edited-indicator">(edited)</span>{/if}</div>
+												{/if}
 											{:else if m.type === 'gif' && (m as any).url}
 												<img
 													class={`chat-gif ${mine ? 'mine' : ''}`}
@@ -1434,7 +1630,15 @@
 															</div>
 														{/if}
 														<div class="chat-file__details">
-															<div class="chat-file__name">{file.name ?? 'Download file'}</div>
+															<div class="chat-file__name-row">
+																<div class="chat-file__name">{file.name ?? 'Download file'}</div>
+																<span
+																	class="chat-file__download-icon"
+																	aria-hidden="true"
+																>
+																	<i class="bx bx-download"></i>
+																</span>
+															</div>
 															<div class="chat-file__subtext">
 																{#if file.contentType}<span>{file.contentType}</span>{/if}
 																{#if file.contentType && file.size}
@@ -1446,9 +1650,7 @@
 																{/if}
 															</div>
 														</div>
-														<span class="chat-file__cta"
-															>{isImageFile ? 'Preview' : 'Download'}</span
-														>
+														<span class="chat-file__cta">{isImageFile ? 'Preview' : 'Open'}</span>
 													</a>
 												</div>
 											{:else if m.type === 'poll' && (m as any).poll}
@@ -1817,6 +2019,8 @@
 		overscroll-behavior-x: contain;
 		-ms-overflow-style: none;
 		scrollbar-width: none;
+		max-width: 100%;
+		box-sizing: border-box;
 	}
 	.chat-scroll::-webkit-scrollbar {
 		display: none;
@@ -1878,6 +2082,7 @@
 
 	.message-row {
 		width: 100%;
+		max-width: 100%;
 		transition: background-color 0.3s ease;
 	}
 
@@ -2091,6 +2296,8 @@
 		flex-direction: column;
 		gap: 0;
 		max-width: 100%;
+		min-width: 0;
+		overflow: visible;
 		align-items: flex-start;
 		align-self: stretch;
 	}
@@ -2173,6 +2380,154 @@
 	.message-action--ticket-exists:disabled {
 		opacity: 0.7;
 		pointer-events: none;
+	}
+
+	/* Message menu container and dropdown */
+	.message-action-menu-container {
+		position: relative;
+	}
+
+	.message-menu-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 9998;
+		background: transparent;
+		pointer-events: auto;
+		touch-action: none;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.message-menu {
+		position: absolute;
+		bottom: 100%;
+		top: auto;
+		right: 0;
+		z-index: 9999;
+		min-width: 160px;
+		background: var(--color-panel);
+		border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.12));
+		border-radius: 0.5rem;
+		box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+		padding: 0.25rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+		pointer-events: auto;
+		touch-action: manipulation;
+		margin-bottom: 0.25rem;
+	}
+
+	.message-menu__item {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		border: none;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-size: 0.875rem;
+		border-radius: 0.375rem;
+		cursor: pointer;
+		transition: background 100ms ease;
+		text-align: left;
+		touch-action: manipulation;
+		-webkit-tap-highlight-color: transparent;
+		user-select: none;
+	}
+
+	.message-menu__item:hover {
+		background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+	}
+
+	.message-menu__item--danger {
+		color: #f87171;
+	}
+
+	.message-menu__item--danger:hover {
+		background: color-mix(in srgb, #f87171 15%, transparent);
+	}
+
+	.message-menu__item i {
+		font-size: 1rem;
+		opacity: 0.8;
+	}
+
+	/* Edit message styles */
+	.message-edit-container {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		width: 100%;
+		max-width: 400px;
+	}
+
+	.message-edit-container--mine {
+		margin-left: auto;
+	}
+
+	.message-edit-input {
+		width: 100%;
+		min-height: 60px;
+		padding: 0.5rem 0.75rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--color-border-subtle);
+		background: var(--color-panel);
+		color: var(--color-text-primary);
+		font-size: 0.9rem;
+		resize: vertical;
+		font-family: inherit;
+	}
+
+	.message-edit-input:focus {
+		outline: none;
+		border-color: var(--color-accent);
+	}
+
+	.message-edit-actions {
+		display: flex;
+		gap: 0.5rem;
+		justify-content: flex-end;
+	}
+
+	.message-edit-btn {
+		padding: 0.375rem 0.75rem;
+		border-radius: 0.375rem;
+		border: none;
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: opacity 100ms ease, background 100ms ease;
+	}
+
+	.message-edit-btn--cancel {
+		background: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	.message-edit-btn--cancel:hover {
+		color: var(--color-text-primary);
+	}
+
+	.message-edit-btn--save {
+		background: var(--color-accent);
+		color: white;
+	}
+
+	.message-edit-btn--save:hover:not(:disabled) {
+		opacity: 0.9;
+	}
+
+	.message-edit-btn--save:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Edited indicator */
+	.message-edited-indicator {
+		font-size: 0.7rem;
+		color: var(--color-text-tertiary);
+		margin-left: 0.35rem;
+		font-style: italic;
 	}
 
 	.message-body--continued {
@@ -2390,15 +2745,17 @@
 		}
 
 		.reply-inline {
-			padding: 0.2rem 0.45rem;
+			padding: 0.35rem 0.5rem;
 			margin: 0;
 			font-size: 0.75rem;
-			background: color-mix(in srgb, var(--color-panel-muted) 80%, var(--color-accent) 10%);
-			border-radius: 0.45rem;
-			border: 1px solid color-mix(in srgb, var(--color-accent) 25%, var(--color-border-subtle) 40%);
+			background: color-mix(in srgb, var(--color-panel-muted) 85%, var(--color-accent) 8%);
+			border-radius: 0.5rem;
+			border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-border-subtle) 30%);
+			border-left: 2px solid var(--color-accent);
 			box-shadow: none;
 			max-width: calc(100% - 0.5rem);
 			color: var(--text-100);
+			gap: 0.3rem;
 		}
 
 		.reply-inline:active {
@@ -2448,9 +2805,26 @@
 			font-size: 0.7rem;
 		}
 
+		.reply-inline__text {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 0.1rem;
+		}
+
+		.reply-inline__snippet {
+			max-width: 100%;
+			white-space: normal;
+			display: -webkit-box;
+			-webkit-line-clamp: 2;
+			-webkit-box-orient: vertical;
+			overflow: hidden;
+			line-height: 1.3;
+			font-size: 0.7rem;
+			color: var(--text-70);
+		}
+
 		.reply-thread--mine .reply-inline__snippet {
-			color: var(--text-80);
-			max-width: 16ch;
+			color: var(--text-70);
 		}
 
 		.reply-thread:not(.reply-thread--mine) .reply-inline__author {
@@ -2459,8 +2833,7 @@
 		}
 
 		.reply-thread:not(.reply-thread--mine) .reply-inline__snippet {
-			color: var(--text-80);
-			max-width: 16ch;
+			color: var(--text-70);
 		}
 
 		.reply-inline__avatar {
@@ -2574,24 +2947,41 @@
 	}
 
 	@media (max-width: 640px) {
+		/* Reduce spacing for continued messages from the same user */
+		.message-row--continued {
+			margin-top: -0.7rem;
+		}
+
 		.message-payload {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+			min-width: 0;
 		}
 
 		.message-layout {
 			gap: 0.45rem;
-			align-items: flex-end;
+			align-items: flex-start;
 			width: 100%;
+			min-width: 0;
 			box-sizing: border-box;
 		}
 
 		.message-layout--continued {
-			padding-left: 1.9rem;
+			padding-left: calc(2.05rem + 0.45rem); /* avatar width + gap */
 		}
 
 		.message-layout--mine.message-layout--continued {
-			padding-right: 1.1rem;
+			padding-right: 0;
 			padding-left: 0;
+		}
+
+		/* Hide avatar for continued messages on mobile */
+		.message-layout--continued .message-avatar {
+			display: none;
+		}
+
+		/* Hide header (author name + timestamp) for continued messages on mobile */
+		.message-layout--continued .message-header {
+			display: none;
 		}
 
 		.message-layout--mine .message-avatar {
@@ -2632,11 +3022,13 @@
 
 		.message-content {
 			padding-bottom: 0.35rem;
-			max-width: calc(100vw - 1.25rem);
+			max-width: calc(100vw - 1.25rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+			min-width: 0;
 		}
 
 		.message-bubble {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+			min-width: 0;
 			padding: 0.8rem 1rem !important;
 			border-radius: 1.2rem;
 			box-shadow: 0 10px 20px rgba(0, 0, 0, 0.12);
@@ -2739,13 +3131,13 @@
 		}
 
 		.chat-gif {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
 			border-radius: 1.1rem;
 			border-color: rgba(15, 23, 42, 0.08);
 		}
 
 		.chat-file {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
 		}
 
 		.chat-file__card {
@@ -2774,7 +3166,7 @@
 		}
 
 		.reply-inline {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
 		}
 
 		.reply-inline__snippet {
@@ -2786,6 +3178,11 @@
 		.message-row--mine,
 		.message-row--other {
 			justify-content: flex-start;
+		}
+
+		/* Reduce spacing for continued messages on desktop */
+		.message-row--continued {
+			margin-top: -0.65rem;
 		}
 
 		.message-block {
@@ -2802,6 +3199,7 @@
 
 		.message-layout--mine.message-layout--continued {
 			padding-right: 0;
+			padding-left: 0;
 		}
 
 		.message-layout--continued .message-avatar {
@@ -2991,7 +3389,7 @@
 	/* Mobile: Constrain GIF and image sizes */
 	@media (max-width: 767px) {
 		.chat-gif {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
 			border-radius: 1.1rem;
 		}
 	}
@@ -3002,12 +3400,39 @@
 
 	.chat-file {
 		max-width: min(400px, 100%);
+		width: 100%;
+		overflow: hidden;
 	}
 
-	/* Mobile: Constrain file cards */
+	/* Mobile: Constrain file cards and thread previews */
 	@media (max-width: 767px) {
 		.chat-file {
-			max-width: calc(100vw - 3.4rem);
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+			width: 100%;
+			min-width: 0;
+		}
+
+		.chat-file__card {
+			max-width: 100%;
+			width: 100%;
+			min-width: 0;
+		}
+
+		.chat-file__preview {
+			max-width: 100%;
+			width: 100%;
+			min-width: 0;
+		}
+
+		.chat-file__preview img {
+			max-width: 100%;
+			width: 100%;
+			height: auto;
+			min-width: 0;
+		}
+
+		.thread-preview {
+			max-width: calc(100vw - 3.4rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
 		}
 	}
 
@@ -3021,6 +3446,11 @@
 		padding: 0.95rem;
 		text-decoration: none;
 		color: inherit;
+		max-width: 100%;
+		width: 100%;
+		min-width: 0;
+		overflow: hidden;
+		box-sizing: border-box;
 		transition:
 			transform 120ms ease,
 			border 140ms ease,
@@ -3049,13 +3479,18 @@
 		overflow: hidden;
 		border: 1px solid color-mix(in srgb, var(--chat-bubble-other-border) 70%, transparent);
 		background: color-mix(in srgb, var(--chat-bubble-other-bg) 60%, transparent);
+		max-width: 100%;
+		width: 100%;
+		min-width: 0;
 	}
 
 	.chat-file__preview img {
 		width: 100%;
-		height: 100%;
+		height: auto;
+		max-width: 100%;
+		min-width: 0;
 		display: block;
-		object-fit: cover;
+		object-fit: contain;
 	}
 
 	.chat-file__preview-overlay {
@@ -3108,6 +3543,52 @@
 		font-weight: 600;
 		color: var(--color-accent);
 		margin-left: auto;
+	}
+
+	.chat-file__name-row {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.chat-file__download-icon {
+		width: 1.6rem;
+		height: 1.6rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		background: transparent;
+		color: var(--text-55);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		text-decoration: none;
+		flex-shrink: 0;
+		transition:
+			background 120ms ease,
+			border 120ms ease,
+			color 120ms ease,
+			transform 120ms ease;
+	}
+
+	.chat-file__download-icon:hover,
+	.chat-file__download-icon:focus-visible {
+		background: color-mix(in srgb, var(--chat-bubble-other-bg) 80%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+		color: var(--color-accent);
+		transform: translateY(-1px);
+		outline: none;
+	}
+
+	.chat-file--mine .chat-file__download-icon {
+		background: color-mix(in srgb, var(--chat-bubble-self-bg) 80%, transparent);
+		border-color: color-mix(in srgb, var(--chat-bubble-self-border) 60%, transparent);
+		color: var(--chat-bubble-self-text);
+	}
+
+	.chat-file--mine .chat-file__download-icon:hover,
+	.chat-file--mine .chat-file__download-icon:focus-visible {
+		border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+		color: var(--color-accent);
 	}
 
 	.chat-file--mine .chat-file__card {
@@ -3441,6 +3922,8 @@
 		flex-direction: column;
 		gap: 0.45rem;
 		position: relative;
+		max-width: 100%;
+		min-width: 0;
 	}
 
 	.message-thread-stack--mine {
@@ -3850,6 +4333,120 @@
 		.image-preview-button {
 			width: 100%;
 			flex: none;
+		}
+
+		/* Mobile message menu - icon-only style */
+		.message-menu-backdrop {
+			background: rgba(0, 0, 0, 0.5);
+			touch-action: none;
+			-webkit-touch-callout: none;
+		}
+
+		.message-menu {
+			position: fixed !important;
+			top: auto !important;
+			bottom: 0 !important;
+			left: 50% !important;
+			right: auto !important;
+			transform: translateX(-50%);
+			width: auto !important;
+			max-width: calc(100% - 2rem) !important;
+			min-width: unset !important;
+			margin: 0 !important;
+			background: var(--color-panel);
+			border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.1));
+			border-radius: 1rem;
+			padding: 0.5rem;
+			margin-bottom: calc(1rem + env(safe-area-inset-bottom, 0px)) !important;
+			box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+			animation: slideUpMenu 150ms ease-out;
+			z-index: 9999;
+			pointer-events: auto;
+			touch-action: manipulation;
+			-webkit-touch-callout: none;
+			box-sizing: border-box;
+			flex-direction: row;
+			gap: 0.25rem;
+		}
+
+		/* Hide handle bar on mobile */
+		.message-menu::before {
+			display: none;
+		}
+
+		@keyframes slideUpMenu {
+			from {
+				transform: translateX(-50%) translateY(100%);
+				opacity: 0;
+			}
+			to {
+				transform: translateX(-50%) translateY(0);
+				opacity: 1;
+			}
+		}
+
+		.message-menu__item {
+			width: 48px;
+			height: 48px;
+			padding: 0;
+			font-size: 0;
+			gap: 0;
+			min-height: unset;
+			border-radius: 0.75rem;
+			font-weight: 500;
+			justify-content: center;
+			align-items: center;
+			margin-bottom: 0;
+		}
+
+		/* Hide text labels on mobile */
+		.message-menu__item span {
+			display: none;
+		}
+
+		.message-menu__item:active {
+			background: color-mix(in srgb, var(--color-accent) 25%, transparent);
+		}
+
+		.message-menu__item--danger:active {
+			background: color-mix(in srgb, #f87171 25%, transparent);
+		}
+
+		.message-menu__item i {
+			font-size: 1.375rem;
+			opacity: 1;
+			width: auto;
+			text-align: center;
+		}
+
+		/* Mobile edit container */
+		.message-edit-container {
+			max-width: 100%;
+			padding: 0.25rem;
+		}
+
+		.message-edit-input {
+			min-height: 100px;
+			font-size: 1rem;
+			padding: 0.875rem;
+			border-radius: 0.75rem;
+			line-height: 1.5;
+		}
+
+		.message-edit-actions {
+			gap: 0.75rem;
+			padding-top: 0.25rem;
+		}
+
+		.message-edit-btn {
+			padding: 0.75rem 1.25rem;
+			font-size: 1rem;
+			border-radius: 0.625rem;
+			min-height: 44px;
+		}
+
+		.message-edit-btn--cancel {
+			background: color-mix(in srgb, var(--color-text-secondary) 15%, transparent);
 		}
 	}
 </style>

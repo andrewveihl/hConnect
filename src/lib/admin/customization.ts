@@ -33,7 +33,13 @@ export interface CustomTheme {
 export interface SplashConfig {
 	gifUrl: string;
 	gifDuration: number; // milliseconds
-	backgroundColor: string;
+	// Per-theme background colors
+	themeBackgrounds: {
+		dark: string;
+		light: string;
+		midnight: string;
+		[key: string]: string;
+	};
 	enabled: boolean;
 }
 
@@ -69,7 +75,11 @@ export interface CustomizationConfig {
 const DEFAULT_SPLASH: SplashConfig = {
 	gifUrl: '/HS_splash_reveal.gif',
 	gifDuration: 2600,
-	backgroundColor: '#0a0f14',
+	themeBackgrounds: {
+		dark: '#0e1317',
+		light: '#f3f6f8',
+		midnight: '#070a0d'
+	},
 	enabled: true
 };
 
@@ -84,40 +94,40 @@ const DEFAULT_CONFIG: CustomizationConfig = {
 // Base theme colors for reference/reset
 export const BASE_THEME_COLORS: Record<'dark' | 'light' | 'midnight', ThemeColors> = {
 	dark: {
-		colorAccent: '#3fd4cb',
-		colorAccentStrong: '#44d8cf',
-		colorAccentSoft: 'rgba(63, 212, 203, 0.14)',
-		colorAppBg: '#0e1317',
-		colorSidebar: '#141a1f',
-		colorPanel: '#1b2228',
-		colorTextPrimary: 'rgba(242, 245, 246, 0.94)',
-		colorTextSecondary: 'rgba(242, 245, 246, 0.68)',
-		colorDanger: '#d05353',
-		colorWarning: '#e3a23c'
+		colorAccent: '#33c8bf',
+		colorAccentStrong: '#28b9b0',
+		colorAccentSoft: 'rgba(51, 200, 191, 0.18)',
+		colorAppBg: '#404549',
+		colorSidebar: '#363a40',
+		colorPanel: '#444950',
+		colorTextPrimary: '#f2f5f6',
+		colorTextSecondary: 'rgba(242, 245, 246, 0.75)',
+		colorDanger: '#df5f5f',
+		colorWarning: '#f1b45a'
 	},
 	light: {
-		colorAccent: '#33c8bf',
-		colorAccentStrong: '#28b0a8',
-		colorAccentSoft: 'rgba(40, 178, 168, 0.18)',
-		colorAppBg: '#f3f6f8',
+		colorAccent: '#0b7f78',
+		colorAccentStrong: '#096f69',
+		colorAccentSoft: 'rgba(11, 127, 120, 0.16)',
+		colorAppBg: '#f5f8fa',
 		colorSidebar: '#ffffff',
 		colorPanel: '#ffffff',
-		colorTextPrimary: '#1f262c',
-		colorTextSecondary: 'rgba(31, 38, 44, 0.72)',
-		colorDanger: '#c04b4b',
-		colorWarning: '#d79739'
+		colorTextPrimary: '#0f1419',
+		colorTextSecondary: '#3d4d5c',
+		colorDanger: '#c9363a',
+		colorWarning: '#c87f1a'
 	},
 	midnight: {
-		colorAccent: '#3fd4cb',
-		colorAccentStrong: '#44d8cf',
-		colorAccentSoft: 'rgba(63, 212, 203, 0.14)',
-		colorAppBg: '#070a0d',
-		colorSidebar: '#0c1014',
-		colorPanel: '#10161b',
-		colorTextPrimary: 'rgba(230, 235, 240, 0.92)',
-		colorTextSecondary: 'rgba(230, 235, 240, 0.62)',
-		colorDanger: '#d05353',
-		colorWarning: '#e3a23c'
+		colorAccent: '#14e5c9',
+		colorAccentStrong: '#09c8b0',
+		colorAccentSoft: 'rgba(20, 229, 201, 0.2)',
+		colorAppBg: '#000000',
+		colorSidebar: '#010101',
+		colorPanel: '#020202',
+		colorTextPrimary: '#ebfffe',
+		colorTextSecondary: 'rgba(235, 255, 254, 0.82)',
+		colorDanger: '#ff6f7b',
+		colorWarning: '#f5be5c'
 	}
 };
 

@@ -60,7 +60,10 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
   try {
     if (deviceId) {
       const docSnap = await db.doc(`profiles/${uid}/devices/${deviceId}`).get();
-      if (!docSnap.exists) return [];
+      if (!docSnap.exists) {
+        console.info('[fetchDeviceTokens] Device doc not found', { uid, deviceId });
+        return [];
+      }
       const doc = docSnap.data() as DeviceDoc | undefined;
       if (
         doc &&
@@ -76,11 +79,37 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
           }
         ];
       }
+      console.info('[fetchDeviceTokens] Device filtered out', {
+        uid,
+        deviceId,
+        hasToken: hasValidToken(doc),
+        hasSubscription: hasSafariSubscription(doc),
+        permission: doc?.permission,
+        enabled: doc?.enabled
+      });
       return [];
     }
     const snap = await db.collection(`profiles/${uid}/devices`).get();
-    return snap.docs
-      .map((docSnap: QueryDocumentSnapshot) => docSnap.data() as DeviceDoc)
+    const allDocs = snap.docs.map((docSnap: QueryDocumentSnapshot) => ({
+      id: docSnap.id,
+      ...(docSnap.data() as DeviceDoc)
+    }));
+    
+    // Log all devices found for debugging
+    console.info('[fetchDeviceTokens] All devices for user', {
+      uid,
+      totalDevices: allDocs.length,
+      devices: allDocs.map((d) => ({
+        id: d.id,
+        platform: d.platform,
+        hasToken: hasValidToken(d),
+        hasSubscription: hasSafariSubscription(d),
+        permission: d.permission,
+        enabled: d.enabled
+      }))
+    });
+
+    const filtered = allDocs
       .filter(
         (doc) =>
           (hasValidToken(doc) || hasSafariSubscription(doc)) &&
@@ -92,6 +121,14 @@ export async function fetchDeviceTokens(uid: string, deviceId?: string): Promise
         platform: doc.platform ?? null,
         subscription: doc.subscription ?? null
       }));
+
+    console.info('[fetchDeviceTokens] Filtered devices', {
+      uid,
+      filteredCount: filtered.length,
+      platforms: filtered.map((d) => d.platform ?? 'unknown')
+    });
+
+    return filtered;
   } catch (err) {
     console.warn('Failed to fetch device tokens', uid, err);
     return [];

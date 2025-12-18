@@ -201,7 +201,7 @@
 
 {#if open}
 	<div
-		class="fixed inset-0 z-50 flex flex-col bg-[color:var(--surface-root)] text-[color:var(--color-text-primary)]"
+		class="settings-mobile-shell fixed inset-0 z-50 flex flex-col bg-[color:var(--surface-root)] text-[color:var(--color-text-primary)]"
 		ontouchstart={handleTouchStart}
 		ontouchmove={handleTouchMove}
 		ontouchend={handleTouchEnd}
@@ -253,7 +253,7 @@
 					</div>
 				</div>
 
-				<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] px-4 pb-6">
+				<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] px-4 pb-28">
 					<div class="pt-3">
 						<label
 							class="flex items-center gap-2 rounded-md border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] px-3 py-2 text-sm text-[color:var(--color-text-primary)] focus-within:border-[color:var(--color-accent)]"
@@ -323,7 +323,7 @@
 							</p>
 						</div>
 					</header>
-					<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] p-4">
+					<div class="flex-1 overflow-y-auto bg-[color:var(--surface-root)] p-4 pb-28">
 						<SettingsPanel {serverId} activeSection={detailSection} />
 					</div>
 				</div>
@@ -333,6 +333,9 @@
 {/if}
 
 <style>
+	.settings-mobile-shell {
+		padding-top: env(safe-area-inset-top, 0px);
+	}
 	.mobile-settings-panel {
 		transition: transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
 		will-change: transform;

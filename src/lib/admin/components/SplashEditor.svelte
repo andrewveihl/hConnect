@@ -1,11 +1,12 @@
 <script lang="ts">
-	import type { SplashConfig, CachedSplashGif } from '$lib/admin/customization';
-	import { uploadSplashGif, deleteSplashGif } from '$lib/admin/customization';
+	import type { SplashConfig, CachedSplashGif, CustomTheme } from '$lib/admin/customization';
+	import { uploadSplashGif, deleteSplashGif, BASE_THEME_COLORS } from '$lib/admin/customization';
 	import type { User } from 'firebase/auth';
 
 	interface Props {
 		config: SplashConfig;
 		cachedGifs: CachedSplashGif[];
+		customThemes?: CustomTheme[];
 		user: User;
 		onSave: (config: Partial<SplashConfig>) => Promise<void>;
 		onReset: () => Promise<void>;
@@ -13,7 +14,36 @@
 		onGifDeleted: () => void;
 	}
 
-	let { config, cachedGifs, user, onSave, onReset, onGifUploaded, onGifDeleted }: Props = $props();
+	let { config, cachedGifs, customThemes = [], user, onSave, onReset, onGifUploaded, onGifDeleted }: Props = $props();
+
+	const DEFAULT_BACKGROUNDS: Record<string, string> = {
+		dark: BASE_THEME_COLORS.dark.colorAppBg,
+		light: BASE_THEME_COLORS.light.colorAppBg,
+		midnight: BASE_THEME_COLORS.midnight.colorAppBg
+	};
+
+	// Built-in theme labels
+	const builtInThemes = [
+		{ id: 'dark', label: 'Dark' },
+		{ id: 'light', label: 'Light' },
+		{ id: 'midnight', label: 'Midnight' }
+	];
+
+	// Combine built-in and custom themes
+	const allThemes = $derived([
+		...builtInThemes,
+		...customThemes.map(t => ({ id: t.id, label: t.name }))
+	]);
+
+	// Get default background for any theme (use custom theme's colorAppBg if available)
+	function getDefaultBg(themeId: string): string {
+		if (themeId in DEFAULT_BACKGROUNDS) {
+			return DEFAULT_BACKGROUNDS[themeId];
+		}
+		// For custom themes, use their colorAppBg
+		const custom = customThemes.find(t => t.id === themeId);
+		return custom?.colors?.colorAppBg ?? DEFAULT_BACKGROUNDS.dark;
+	}
 
 	let saving = $state(false);
 	let uploading = $state(false);
@@ -22,36 +52,67 @@
 	let showGifLibrary = $state(false);
 	let dragOver = $state(false);
 	let uploadError = $state<string | null>(null);
+	let selectedTheme = $state<string>('dark');
+
+	// Initialize theme backgrounds including custom themes
+	function initThemeBackgrounds() {
+		const backgrounds: Record<string, string> = {
+			dark: config.themeBackgrounds?.dark ?? DEFAULT_BACKGROUNDS.dark,
+			light: config.themeBackgrounds?.light ?? DEFAULT_BACKGROUNDS.light,
+			midnight: config.themeBackgrounds?.midnight ?? DEFAULT_BACKGROUNDS.midnight
+		};
+		// Add custom theme backgrounds
+		for (const theme of customThemes) {
+			backgrounds[theme.id] = config.themeBackgrounds?.[theme.id] ?? theme.colors.colorAppBg;
+		}
+		return backgrounds;
+	}
 
 	// Editable values
 	let gifUrl = $state(config.gifUrl);
 	let gifDuration = $state(config.gifDuration);
-	let backgroundColor = $state(config.backgroundColor);
+	let themeBackgrounds = $state<Record<string, string>>(initThemeBackgrounds());
 	let enabled = $state(config.enabled);
 
 	// Sync with prop changes
 	$effect(() => {
 		gifUrl = config.gifUrl;
 		gifDuration = config.gifDuration;
-		backgroundColor = config.backgroundColor;
+		themeBackgrounds = initThemeBackgrounds();
 		enabled = config.enabled;
 	});
 
-	// Track modifications
-	const hasChanges = $derived(
-		gifUrl !== config.gifUrl ||
-			gifDuration !== config.gifDuration ||
-			backgroundColor !== config.backgroundColor ||
-			enabled !== config.enabled
-	);
+	// Track modifications - compare all backgrounds using JSON
+	const hasChanges = $derived(() => {
+		if (gifUrl !== config.gifUrl || gifDuration !== config.gifDuration || enabled !== config.enabled) {
+			return true;
+		}
+		// Compare each theme background
+		for (const theme of allThemes) {
+			const currentBg = themeBackgrounds[theme.id];
+			const savedBg = config.themeBackgrounds?.[theme.id] ?? getDefaultBg(theme.id);
+			if (currentBg !== savedBg) return true;
+		}
+		return false;
+	});
+
+	// Get current preview background
+	const previewBackground = $derived(themeBackgrounds[selectedTheme] ?? getDefaultBg(selectedTheme));
 
 	async function handleSave() {
 		saving = true;
 		try {
+			// Ensure required keys are present for the type
+			const backgrounds = {
+				dark: themeBackgrounds.dark ?? DEFAULT_BACKGROUNDS.dark,
+				light: themeBackgrounds.light ?? DEFAULT_BACKGROUNDS.light,
+				midnight: themeBackgrounds.midnight ?? DEFAULT_BACKGROUNDS.midnight,
+				...themeBackgrounds
+			};
 			await onSave({
 				gifUrl,
 				gifDuration,
-				backgroundColor,
+				themeBackgrounds: backgrounds,
 				enabled
 			});
 		} finally {
@@ -66,6 +127,13 @@
 		} finally {
 			saving = false;
 		}
+	}
+
+	function matchThemeBackground(themeId: string) {
+		themeBackgrounds = {
+			...themeBackgrounds,
+			[themeId]: getDefaultBg(themeId)
+		};
 	}
 
 	function playPreview() {
@@ -158,7 +226,7 @@
 <div class="splash-editor">
 	<div class="editor-content">
 		<!-- Preview area -->
-		<div class="preview-container" style="background: {backgroundColor}">
+		<div class="preview-container" style="background: {previewBackground}">
 			{#if showPreview}
 				{#key previewKey}
 					<img src={gifUrl} alt="Splash preview" class="preview-gif" />
@@ -279,34 +347,69 @@
 				</label>
 			</div>
 
-			<div class="setting-row">
-				<label class="setting-field compact">
-					<span class="setting-label">Duration</span>
-					<div class="number-input-wrapper">
-						<input
-							type="number"
-							bind:value={gifDuration}
-							min="500"
-							max="10000"
-							step="100"
-							class="text-input"
-						/>
-						<span class="unit">ms</span>
-					</div>
-				</label>
+			<label class="setting-field compact">
+				<span class="setting-label">Duration</span>
+				<div class="number-input-wrapper">
+					<input
+						type="number"
+						bind:value={gifDuration}
+						min="500"
+						max="10000"
+						step="100"
+						class="text-input"
+					/>
+					<span class="unit">ms</span>
+				</div>
+			</label>
 
-				<label class="setting-field compact">
-					<span class="setting-label">Background</span>
+			<!-- Per-theme backgrounds -->
+			<div class="theme-backgrounds-section">
+				<span class="section-label">Background Colors</span>
+				<span class="section-desc">Set a background color for each theme{customThemes.length > 0 ? ' (including custom themes)' : ''}</span>
+				
+				<div class="theme-tabs">
+					{#each allThemes as theme (theme.id)}
+						<button
+							type="button"
+							class="theme-tab"
+							class:active={selectedTheme === theme.id}
+							onclick={() => (selectedTheme = theme.id)}
+						>
+							{theme.label}
+						</button>
+					{/each}
+				</div>
+
+				<div class="theme-color-editor">
 					<div class="color-input-wrapper">
-						<input type="color" bind:value={backgroundColor} class="color-picker" />
+						<input 
+							type="color" 
+							value={themeBackgrounds[selectedTheme]} 
+							onchange={(e) => {
+								themeBackgrounds = { ...themeBackgrounds, [selectedTheme]: e.currentTarget.value };
+							}}
+							class="color-picker" 
+						/>
 						<input
 							type="text"
-							bind:value={backgroundColor}
-							placeholder="#0a0f14"
+							value={themeBackgrounds[selectedTheme]}
+							onchange={(e) => {
+								themeBackgrounds = { ...themeBackgrounds, [selectedTheme]: e.currentTarget.value };
+							}}
+							placeholder={DEFAULT_BACKGROUNDS[selectedTheme]}
 							class="text-input color-text"
 						/>
 					</div>
-				</label>
+					<button
+						type="button"
+						class="match-theme-btn"
+						onclick={() => matchThemeBackground(selectedTheme)}
+						title="Match this theme's default background"
+					>
+						<i class="bx bx-palette"></i>
+						Match Theme
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -652,11 +755,6 @@
 		padding: 0.625rem 0.75rem;
 	}
 
-	.setting-row {
-		display: flex;
-		gap: 0.5rem;
-	}
-
 	.setting-info {
 		display: flex;
 		flex-direction: column;
@@ -831,13 +929,104 @@
 		cursor: not-allowed;
 	}
 
-	@media (max-width: 640px) {
-		.setting-row {
-			flex-direction: column;
-		}
+	/* Theme Backgrounds Section */
+	.theme-backgrounds-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		padding: 0.75rem;
+		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+		border-radius: 10px;
+	}
 
+	.section-label {
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.section-desc {
+		font-size: 0.6875rem;
+		color: var(--color-text-secondary);
+	}
+
+	.theme-tabs {
+		display: flex;
+		gap: 0.375rem;
+		background: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+		padding: 0.25rem;
+		border-radius: 8px;
+	}
+
+	.theme-tab {
+		flex: 1;
+		padding: 0.5rem 0.75rem;
+		border: none;
+		background: transparent;
+		color: var(--color-text-secondary);
+		font-size: 0.75rem;
+		font-weight: 500;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: all 0.2s;
+		text-transform: capitalize;
+	}
+
+	.theme-tab:hover {
+		color: var(--color-text-primary);
+		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+	}
+
+	.theme-tab.active {
+		background: var(--color-bg-primary);
+		color: var(--color-text-primary);
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+	}
+
+	.theme-color-editor {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.match-theme-btn {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid color-mix(in srgb, var(--color-text-primary) 15%, transparent);
+		background: transparent;
+		color: var(--color-text-secondary);
+		font-size: 0.6875rem;
+		font-weight: 500;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: all 0.2s;
+		white-space: nowrap;
+	}
+
+	.match-theme-btn:hover {
+		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+		color: var(--color-text-primary);
+		border-color: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
+	}
+
+	.match-theme-btn i {
+		font-size: 0.875rem;
+	}
+
+	@media (max-width: 640px) {
 		.gif-library {
 			grid-template-columns: repeat(3, 1fr);
+		}
+
+		.theme-color-editor {
+			flex-wrap: wrap;
+		}
+
+		.match-theme-btn {
+			flex: 1;
+			justify-content: center;
 		}
 	}
 </style>

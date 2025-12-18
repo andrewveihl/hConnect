@@ -191,8 +191,8 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
 	},
 	{
 		key: 'enableTicketAI',
-		label: 'Ticket AI',
-		description: 'Allow servers to enable AI-powered ticket analytics.'
+		label: 'Issue Tracker',
+		description: 'Allow servers to enable AI-powered issue analytics.'
 	},
 	{
 		key: 'enableTypingIndicators',

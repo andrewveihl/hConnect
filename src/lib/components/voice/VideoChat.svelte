@@ -47,9 +47,11 @@
 		getDoc,
 		getDocs,
 		onSnapshot,
+		runTransaction,
 		serverTimestamp,
 		setDoc,
 		updateDoc,
+		writeBatch,
 		type CollectionReference,
 		type DocumentReference,
 		type Unsubscribe
@@ -322,6 +324,12 @@
 	let lastSuccessfulConnectionTime = 0;
 	let consecutiveHealthCheckFailures = 0;
 	const MAX_HEALTH_CHECK_FAILURES = 3;
+	const MEDIA_RECOVERY_DELAY_MS = 6000;
+	const MEDIA_RECOVERY_COOLDOWN_MS = 12000;
+	const MAX_MEDIA_RECOVERY_ATTEMPTS = 2;
+	let mediaRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+	let mediaRecoveryAttempts = 0;
+	let lastMediaRecoveryAt = 0;
 
 	function readUiPrefs(): VoiceUiPrefs {
 		if (!browser) return { gridMode: 'equal', showSelfInGrid: true };
@@ -390,9 +398,10 @@
 	let voiceWarnCount = $state(0);
 	const remoteCandidateKeys = new Set<string>();
 	type QueuedRemoteCandidate = {
-		candidate: RTCIceCandidateInit & { candidate?: string | null };
+		candidate: RTCIceCandidateInit & { candidate?: string | null; revision?: number };
 		role: 'offerer' | 'answerer';
 		fallback?: boolean;
+		revision: number;
 	};
 	const pendingRemoteCandidateKeys = new Set<string>();
 	let pendingRemoteIceCandidates: QueuedRemoteCandidate[] = [];
@@ -472,6 +481,7 @@
 	let renegotiationSignalClearTimer: ReturnType<typeof setTimeout> | null = null;
 	let consumedOfferCandidateIds = new Set<string>();
 	let consumedAnswerCandidateIds = new Set<string>();
+	let activeCandidateRevision = 0;
 	const MAX_REMOTE_ICE_LOGS = 25;
 	let remoteIceLogCountOfferer = 0;
 	let remoteIceLogCountAnswerer = 0;
@@ -496,7 +506,10 @@
 				pendingReasons: [...pendingRenegotiationReasons]
 			});
 			isOfferer = true;
-			lastOfferRevision = Math.max(lastOfferRevision, lastAnswerRevision);
+			setActiveOfferRevision(
+				Math.max(lastOfferRevision, lastAnswerRevision),
+				'renegotiation-promote'
+			);
 			attachOffererIceHandlers(pc);
 		}
 		renegotiationNeedsPromotion = false;
@@ -1364,6 +1377,64 @@
 
 	function remoteCandidateKey(candidate: RTCIceCandidateInit & { candidate?: string | null }) {
 		return `${candidate.sdpMid ?? ''}|${candidate.sdpMLineIndex ?? ''}|${candidate.candidate ?? ''}`;
+	}
+
+	function candidateRevisionValue(candidateData: { revision?: number | null }) {
+		return typeof candidateData.revision === 'number' ? candidateData.revision : 0;
+	}
+
+	function setCandidateRefsForRevision(revision: number, reason: string) {
+		if (!callRef || revision <= 0) {
+			if (activeCandidateRevision !== 0) {
+				voiceDebug('Clearing candidate references (no active revision)', {
+					revision,
+					reason
+				});
+			}
+			activeCandidateRevision = 0;
+			offerCandidatesRef = null;
+			answerCandidatesRef = null;
+			return;
+		}
+		const revisionRef = doc(callRef, 'revisions', String(revision));
+		offerCandidatesRef = collection(revisionRef, 'offerCandidates');
+		answerCandidatesRef = collection(revisionRef, 'answerCandidates');
+		if (activeCandidateRevision !== revision) {
+			voiceDebug('Active candidate revision updated', {
+				from: activeCandidateRevision,
+				to: revision,
+				reason
+			});
+		}
+		activeCandidateRevision = revision;
+	}
+
+	function resetCandidateState(reason: string) {
+		clearPendingRemoteCandidates();
+		remoteCandidateKeys.clear();
+		consumedOfferCandidateIds.clear();
+		consumedAnswerCandidateIds.clear();
+		voiceDebug('Candidate state reset', {
+			reason,
+			activeRevision: lastOfferRevision
+		});
+	}
+
+	function setActiveOfferRevision(
+		revision: number,
+		reason: string,
+		options: { resetCandidates?: boolean } = {}
+	) {
+		const { resetCandidates = true } = options;
+		const previous = lastOfferRevision;
+		lastOfferRevision = revision;
+		if (previous !== revision) {
+			voiceDebug('Active offer revision updated', { from: previous, to: revision, reason });
+		}
+		setCandidateRefsForRevision(revision, reason);
+		if (resetCandidates) {
+			resetCandidateState(`offer-revision:${reason}`);
+		}
 	}
 
 	function updatePeerConnectionStateSnapshot(connection: RTCPeerConnection | null = pc) {
@@ -2332,6 +2403,10 @@
 		}
 	}
 
+	function orphanAudioUid(streamId: string) {
+		return `stream:${streamId}`;
+	}
+
 	function applyOutputDeviceAll() {
 		if (!currentPrefs.outputDeviceId) return;
 		audioRefs.forEach((audio) => {
@@ -2415,7 +2490,11 @@
 		if (!stream) return;
 
 		// Find which participant this stream belongs to
-		const participant = participants.find((p) => p.streamId === streamId);
+		const participant =
+			participants.find((p) => p.streamId === streamId) ??
+			participantMedia.find(
+				(tile) => tile.stream?.id === streamId || tile.streamId === streamId
+			);
 		if (!participant) {
 			voiceDebug('refreshRemoteMediaElements: no participant found for stream', { streamId });
 			return;
@@ -2630,6 +2709,77 @@
 		};
 	}
 
+	function hasLiveRemoteMedia(): boolean {
+		for (const stream of remoteStreams.values()) {
+			const tracks = stream.getTracks();
+			if (tracks.some((track) => track.readyState === 'live' || track.readyState === 'new')) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	function clearMediaRecoveryTimer() {
+		if (mediaRecoveryTimer) {
+			clearTimeout(mediaRecoveryTimer);
+			mediaRecoveryTimer = null;
+		}
+	}
+
+	function resetMediaRecovery(reason: string) {
+		if (mediaRecoveryAttempts || mediaRecoveryTimer) {
+			voiceDebug('Media recovery reset', {
+				reason,
+				attempts: mediaRecoveryAttempts
+			});
+		}
+		mediaRecoveryAttempts = 0;
+		lastMediaRecoveryAt = 0;
+		clearMediaRecoveryTimer();
+	}
+
+	function scheduleMediaRecovery(reason: string) {
+		if (!browser || !isJoined || isConnecting) return;
+		if (!pc || pc.signalingState === 'closed') return;
+		if (mediaRecoveryAttempts >= MAX_MEDIA_RECOVERY_ATTEMPTS) return;
+		if (mediaRecoveryTimer) return;
+
+		mediaRecoveryTimer = setTimeout(() => {
+			mediaRecoveryTimer = null;
+			if (!isJoined || isConnecting) return;
+			if (!pc || pc.signalingState === 'closed') return;
+
+			const currentUid = get(user)?.uid ?? null;
+			const hasRemoteParticipants = participants.some((p) => p.uid !== currentUid);
+			if (!hasRemoteParticipants) {
+				resetMediaRecovery('no-remote-participants');
+				return;
+			}
+
+			if (hasLiveRemoteMedia()) {
+				resetMediaRecovery('remote-media-present');
+				return;
+			}
+
+			const now = Date.now();
+			if (now - lastMediaRecoveryAt < MEDIA_RECOVERY_COOLDOWN_MS) {
+				return;
+			}
+
+			mediaRecoveryAttempts += 1;
+			lastMediaRecoveryAt = now;
+			voiceDebug('Media recovery triggered', {
+				reason,
+				attempt: mediaRecoveryAttempts,
+				isOfferer,
+				signalingState: pc.signalingState,
+				remoteStreams: remoteStreams.size,
+				participants: participants.length
+			});
+			scheduleRenegotiation(`media-recovery:${reason}`, { requireOfferer: true });
+		}, MEDIA_RECOVERY_DELAY_MS);
+	}
+
 	function updateRemoteStreams(
 		mutator: (draft: Map<string, MediaStream>) => void,
 		reason = 'remote-streams'
@@ -2638,6 +2788,9 @@
 		const draft = new Map(remoteStreams);
 		mutator(draft);
 		remoteStreams = draft;
+		if (hasLiveRemoteMedia()) {
+			resetMediaRecovery('remote-streams-updated');
+		}
 		const next = Array.from(remoteStreams.keys());
 		voiceDebug('Remote streams updated', {
 			reason,
@@ -2965,7 +3118,10 @@
 			} else {
 				voiceDebug('Promoting to offerer for renegotiation', options);
 				isOfferer = true;
-				lastOfferRevision = Math.max(lastOfferRevision, lastAnswerRevision);
+				setActiveOfferRevision(
+					Math.max(lastOfferRevision, lastAnswerRevision),
+					'renegotiation-promote'
+				);
 				attachOffererIceHandlers(pc);
 			}
 		}
@@ -3185,11 +3341,22 @@
 
 	function applyRemoteIceCandidate(
 		connection: RTCPeerConnection | null,
-		candidateData: RTCIceCandidateInit & { candidate?: string | null },
+		candidateData: RTCIceCandidateInit & { candidate?: string | null; revision?: number },
 		role: 'offerer' | 'answerer',
 		options: { fallback?: boolean; fromQueue?: boolean } = {}
 	) {
 		const { fallback = false, fromQueue = false } = options;
+		const candidateRevision = candidateRevisionValue(candidateData);
+		if (candidateRevision <= 0 || candidateRevision !== lastOfferRevision) {
+			voiceDebug('Dropping remote ICE candidate (revision mismatch)', {
+				role,
+				candidateRevision,
+				activeRevision: lastOfferRevision,
+				fallback,
+				fromQueue
+			});
+			return;
+		}
 		
 		// Validate connection state
 		if (!connection) {
@@ -3207,7 +3374,7 @@
 			return;
 		}
 		
-		const key = remoteCandidateKey(candidateData);
+		const key = `${candidateRevision}:${remoteCandidateKey(candidateData)}`;
 		if (remoteCandidateKeys.has(key)) {
 			// Only log occasionally to reduce noise
 			if (appliedCandidateCount < 20) {
@@ -3229,7 +3396,12 @@
 		// Check if we need to queue the candidate
 		if (!connection.remoteDescription) {
 			pendingRemoteCandidateKeys.add(key);
-			pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+			pendingRemoteIceCandidates.push({
+				candidate: candidateData,
+				role,
+				fallback,
+				revision: candidateRevision
+			});
 			voiceDebug('Queued remote ICE candidate (awaiting remote description)', {
 				role,
 				queueLength: pendingRemoteIceCandidates.length,
@@ -3242,7 +3414,12 @@
 		// Also check signaling state - some browsers need offer/answer exchange complete
 		if (connection.signalingState !== 'stable' && connection.signalingState !== 'have-local-offer' && connection.signalingState !== 'have-remote-offer') {
 			pendingRemoteCandidateKeys.add(key);
-			pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+			pendingRemoteIceCandidates.push({
+				candidate: candidateData,
+				role,
+				fallback,
+				revision: candidateRevision
+			});
 			voiceDebug('Queued remote ICE candidate (signaling not ready)', {
 				role,
 				signalingState: connection.signalingState,
@@ -3282,7 +3459,12 @@
 					// Only re-queue if not already pending
 					if (!pendingRemoteCandidateKeys.has(key)) {
 						pendingRemoteCandidateKeys.add(key);
-						pendingRemoteIceCandidates.push({ candidate: candidateData, role, fallback });
+						pendingRemoteIceCandidates.push({
+							candidate: candidateData,
+							role,
+							fallback,
+							revision: candidateRevision
+						});
 						voiceDebug('Re-queued failed ICE candidate for retry', { role });
 					}
 				}
@@ -3311,6 +3493,14 @@
 		
 		// Process candidates in order with small delay between to avoid overwhelming
 		queued.forEach((entry, index) => {
+			if (entry.revision !== lastOfferRevision) {
+				voiceDebug('Dropping queued ICE candidate (revision mismatch)', {
+					role: entry.role,
+					candidateRevision: entry.revision,
+					activeRevision: lastOfferRevision
+				});
+				return;
+			}
 			// Small staggered delay to prevent race conditions
 			setTimeout(() => {
 				applyRemoteIceCandidate(connection, entry.candidate, entry.role, {
@@ -3338,12 +3528,22 @@
 				return;
 			}
 			if (localCandidatesRef) {
+				const candidateRevision = lastOfferRevision;
+				if (candidateRevision <= 0) {
+					voiceDebug('Skipping ICE candidate publish (no active revision)', {
+						role: 'offerer'
+					});
+					return;
+				}
 				const info = describeIceCandidate(event.candidate.candidate);
 				voiceDebug('Publishing ICE candidate', { role: 'offerer', ...info });
 				publishedCandidateCount += 1;
-				addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
-					console.warn('Failed to save ICE candidate', err)
-				);
+				addDoc(localCandidatesRef, {
+					...event.candidate.toJSON(),
+					revision: candidateRevision
+				}).catch((err) => {
+					console.warn('Failed to save ICE candidate', err);
+				});
 			}
 		};
 
@@ -3360,7 +3560,17 @@
 						consumedAnswerCandidateIds.add(docId);
 						const candidateData = change.doc.data() as RTCIceCandidateInit & {
 							candidate?: string | null;
+							revision?: number;
 						};
+						const candidateRevision = candidateRevisionValue(candidateData);
+						if (candidateRevision <= 0 || candidateRevision !== lastOfferRevision) {
+							voiceDebug('Dropping answer ICE candidate (revision mismatch)', {
+								docId,
+								candidateRevision,
+								activeRevision: lastOfferRevision
+							});
+							return;
+						}
 						applyRemoteIceCandidate(connection, candidateData, 'offerer');
 					}
 				});
@@ -3378,7 +3588,17 @@
 					consumedAnswerCandidateIds.add(docId);
 					const candidateData = change.doc.data() as RTCIceCandidateInit & {
 						candidate?: string | null;
+						revision?: number;
 					};
+					const candidateRevision = candidateRevisionValue(candidateData);
+					if (candidateRevision <= 0 || candidateRevision !== lastOfferRevision) {
+						voiceDebug('Dropping fallback ICE candidate (revision mismatch)', {
+							docId,
+							candidateRevision,
+							activeRevision: lastOfferRevision
+						});
+						return;
+					}
 					applyRemoteIceCandidate(connection, candidateData, 'offerer', { fallback: true });
 				}
 			});
@@ -3402,12 +3622,22 @@
 				return;
 			}
 			if (localCandidatesRef) {
+				const candidateRevision = lastOfferRevision;
+				if (candidateRevision <= 0) {
+					voiceDebug('Skipping ICE candidate publish (no active revision)', {
+						role: 'answerer'
+					});
+					return;
+				}
 				const info = describeIceCandidate(event.candidate.candidate);
 				voiceDebug('Publishing ICE candidate', { role: 'answerer', ...info });
 				publishedCandidateCount += 1;
-				addDoc(localCandidatesRef, event.candidate.toJSON()).catch((err) =>
-					console.warn('Failed to save ICE candidate', err)
-				);
+				addDoc(localCandidatesRef, {
+					...event.candidate.toJSON(),
+					revision: candidateRevision
+				}).catch((err) => {
+					console.warn('Failed to save ICE candidate', err);
+				});
 			}
 		};
 
@@ -3424,7 +3654,17 @@
 						consumedOfferCandidateIds.add(docId);
 						const candidateData = change.doc.data() as RTCIceCandidateInit & {
 							candidate?: string | null;
+							revision?: number;
 						};
+						const candidateRevision = candidateRevisionValue(candidateData);
+						if (candidateRevision <= 0 || candidateRevision !== lastOfferRevision) {
+							voiceDebug('Dropping offer ICE candidate (revision mismatch)', {
+								docId,
+								candidateRevision,
+								activeRevision: lastOfferRevision
+							});
+							return;
+						}
 						applyRemoteIceCandidate(connection, candidateData, 'answerer');
 					}
 				});
@@ -3532,7 +3772,18 @@
 		const data = snap.data() as any;
 		const type = (data.type ?? 'offer') as RTCSdpType;
 		const sdp = data.sdp ?? '';
-		const actualRevision = data.revision ?? revision;
+		const actualRevision = data.revision ?? 0;
+		if (actualRevision !== revision) {
+			voiceDebug('Offer description revision mismatch', {
+				expected: revision,
+				actual: actualRevision
+			});
+			if (fallback?.sdp) {
+				latestOfferDescription = { revision, type: fallback.type ?? 'offer', sdp: fallback.sdp };
+				return { type: fallback.type ?? 'offer', sdp: fallback.sdp };
+			}
+			return null;
+		}
 		latestOfferDescription = { revision: actualRevision, type, sdp };
 		return { type, sdp };
 	}
@@ -3586,7 +3837,22 @@
 		const data = snap.data() as any;
 		const type = (data.type ?? 'answer') as RTCSdpType;
 		const sdp = data.sdp ?? '';
-		const actualRevision = data.revision ?? revision;
+		const actualRevision = data.revision ?? 0;
+		if (actualRevision !== revision) {
+			voiceDebug('Answer description revision mismatch', {
+				expected: revision,
+				actual: actualRevision
+			});
+			if (fallback?.sdp) {
+				latestAnswerDescription = {
+					revision,
+					type: fallback.type ?? 'answer',
+					sdp: fallback.sdp
+				};
+				return { type: fallback.type ?? 'answer', sdp: fallback.sdp };
+			}
+			return null;
+		}
 		latestAnswerDescription = { revision: actualRevision, type, sdp };
 		return { type, sdp };
 	}
@@ -3768,6 +4034,38 @@
 					: `Unable to access ${kind === 'audio' ? 'microphone' : 'camera'}.`;
 			errorMessage = msg;
 			return false;
+		}
+	}
+
+	async function prepareInitialLocalTracks(reason: string) {
+		const hasAudio = !!localStream?.getAudioTracks().length;
+		const hasVideo = !!localStream?.getVideoTracks().length;
+		const shouldAcquireAudio = !isMicMuted && !hasAudio;
+		const shouldAcquireVideo = !isCameraOff && !hasVideo;
+		voiceDebug('Preparing initial local tracks', {
+			reason,
+			shouldAcquireAudio,
+			shouldAcquireVideo,
+			hasAudio,
+			hasVideo,
+			isMicMuted,
+			isCameraOff
+		});
+
+		if (shouldAcquireAudio) {
+			const audioOk = await acquireTrack('audio');
+			if (!audioOk) {
+				isMicMuted = true;
+				voiceDebug('Initial audio acquisition failed, setting muted', { reason });
+			}
+		}
+
+		if (shouldAcquireVideo) {
+			const videoOk = await acquireTrack('video');
+			if (!videoOk) {
+				isCameraOff = true;
+				voiceDebug('Initial video acquisition failed, setting camera off', { reason });
+			}
 		}
 	}
 
@@ -4145,6 +4443,7 @@
 					consecutiveHealthCheckFailures = 0;
 					// Start health monitoring once connected
 					startConnectionHealthCheck();
+					scheduleMediaRecovery('connected');
 					
 					// Re-verify track states and refresh media after connection established
 					setTimeout(() => {
@@ -4324,13 +4623,15 @@
 			return;
 		}
 		const currentUser = get(user);
+		const previousRevision = lastOfferRevision;
 		try {
 			applyTrackStates();
-			const revision = lastOfferRevision + 1;
-			voiceDebug('Creating renegotiation offer', { revision });
+			const revision = previousRevision + 1;
+			voiceDebug('Creating renegotiation offer', { revision, previousRevision });
+			setActiveOfferRevision(revision, 'renegotiate-offer');
+			attachOffererIceHandlers(connection);
 			const offerDescription = await connection.createOffer();
 			await connection.setLocalDescription(offerDescription);
-			let storedInDescriptions = false;
 			if (descriptionStorageEnabled && offerDescriptionRef) {
 				try {
 					await setDoc(
@@ -4345,7 +4646,6 @@
 						},
 						{ merge: true }
 					);
-					storedInDescriptions = true;
 				} catch (err) {
 					console.warn('Failed to persist offer description doc', err);
 					voiceDebug('Failed to persist offer description doc', err);
@@ -4369,50 +4669,39 @@
 			if (offerDescription.sdp) {
 				offerPayload.sdp = offerDescription.sdp;
 			}
-			try {
-				await updateDoc(callRef, {
+			const batch = writeBatch(getDb());
+			batch.set(
+				callRef,
+				{
 					offer: offerPayload,
-					answer: deleteField()
-				});
-			} catch (err: any) {
-				const code = err?.code ?? err?.message ?? 'unknown';
-				if (code === 'not-found' || code === 'not-found: Document does not exist') {
-					voiceDebug('Call doc missing during renegotiation; recreating before publish', {
-						revision
-					});
-					await setDoc(
-						callRef,
-						{
-							offer: offerPayload,
-							createdAt: serverTimestamp(),
-							createdBy: currentUser?.uid ?? null
-						},
-						{ merge: true }
-					);
-				} else {
-					throw err;
-				}
-			}
+					answer: deleteField(),
+					answeredAt: deleteField(),
+					answeredBy: deleteField()
+				},
+				{ merge: true }
+			);
+			lastAnswerRevision = 0;
+			batch.set(
+				doc(callRef, 'revisions', String(revision)),
+				{
+					revision,
+					updatedAt: serverTimestamp(),
+					updatedBy: currentUser?.uid ?? null
+				},
+				{ merge: true }
+			);
 			if (answerDescriptionRef) {
-				await deleteDoc(answerDescriptionRef).catch(() => {});
+				batch.delete(answerDescriptionRef);
 				latestAnswerDescription = null;
 			}
-			// Also clear stale answer ICE candidates to ensure fresh exchange
-			if (answerCandidatesRef) {
-				try {
-					const staleCandidates = await getDocs(answerCandidatesRef);
-					const deletePromises = staleCandidates.docs.map(d => deleteDoc(d.ref));
-					await Promise.all(deletePromises);
-					consumedAnswerCandidateIds.clear();
-					voiceDebug('Cleared stale answer ICE candidates for fresh renegotiation', {
-						count: staleCandidates.size
-					});
-				} catch (err) {
-					voiceDebug('Failed to clear stale answer candidates', err);
-				}
-			}
-			lastOfferRevision = revision;
-			voiceDebug('Renegotiation offer published', { revision });
+			const legacyDeletes = await queueLegacyCandidateDeletes(batch, callRef);
+			const revisionDeletes = await queueRevisionCandidateDeletes(batch, callRef, previousRevision);
+			await batch.commit();
+			voiceDebug('Renegotiation offer published', {
+				revision,
+				legacyDeletes,
+				revisionDeletes
+			});
 		} catch (err) {
 			console.warn('Failed to renegotiate offer', err);
 			voiceDebug('Renegotiation offer failed', err);
@@ -4533,6 +4822,7 @@
 					
 					setTimeout(refreshParticipants, 3000);
 					setTimeout(refreshParticipants, 5000);
+					scheduleMediaRecovery('participant-joined');
 				}
 				
 				// Detect participants who left (for cleanup)
@@ -4677,26 +4967,156 @@
 		}, 250);
 	}
 
-	async function purgeCallArtifacts(targetRef: DocumentReference | null = callRef) {
+	type PurgeOptions = {
+		includeDescriptions?: boolean;
+		includeLegacyCandidates?: boolean;
+		includeRevisionCandidates?: boolean;
+	};
+
+	async function purgeCallArtifacts(
+		targetRef: DocumentReference | null = callRef,
+		options: PurgeOptions = {}
+	) {
 		if (!targetRef) return;
-		const offerSnap = await getDocs(collection(targetRef, 'offerCandidates'));
-		for (const snap of offerSnap.docs) {
-			await deleteDoc(snap.ref);
-		}
-		const answerSnap = await getDocs(collection(targetRef, 'answerCandidates'));
-		for (const snap of answerSnap.docs) {
-			await deleteDoc(snap.ref);
-		}
-		try {
-			const descriptionSnap = await getDocs(collection(targetRef, 'descriptions'));
-			for (const snap of descriptionSnap.docs) {
+		const {
+			includeDescriptions = true,
+			includeLegacyCandidates = true,
+			includeRevisionCandidates = true
+		} = options;
+		voiceDebug('purgeCallArtifacts start', {
+			includeDescriptions,
+			includeLegacyCandidates,
+			includeRevisionCandidates
+		});
+		let legacyOfferCount = 0;
+		let legacyAnswerCount = 0;
+		let revisionOfferCount = 0;
+		let revisionAnswerCount = 0;
+		let revisionDocs = 0;
+		let descriptionCount = 0;
+		if (includeLegacyCandidates) {
+			const offerSnap = await getDocs(collection(targetRef, 'offerCandidates'));
+			legacyOfferCount = offerSnap.size;
+			for (const snap of offerSnap.docs) {
 				await deleteDoc(snap.ref);
 			}
-		} catch (err) {
-			if (!isPermissionError(err)) {
-				console.warn('Failed to purge call descriptions', err);
-				voiceDebug('Failed to purge call descriptions', err);
+			const answerSnap = await getDocs(collection(targetRef, 'answerCandidates'));
+			legacyAnswerCount = answerSnap.size;
+			for (const snap of answerSnap.docs) {
+				await deleteDoc(snap.ref);
 			}
+		}
+		if (includeRevisionCandidates) {
+			const revisionsSnap = await getDocs(collection(targetRef, 'revisions'));
+			revisionDocs = revisionsSnap.size;
+			for (const revisionDoc of revisionsSnap.docs) {
+				const offerSnap = await getDocs(collection(revisionDoc.ref, 'offerCandidates'));
+				revisionOfferCount += offerSnap.size;
+				for (const snap of offerSnap.docs) {
+					await deleteDoc(snap.ref);
+				}
+				const answerSnap = await getDocs(collection(revisionDoc.ref, 'answerCandidates'));
+				revisionAnswerCount += answerSnap.size;
+				for (const snap of answerSnap.docs) {
+					await deleteDoc(snap.ref);
+				}
+				await deleteDoc(revisionDoc.ref).catch(() => {});
+			}
+		}
+		if (includeDescriptions) {
+			try {
+				const descriptionSnap = await getDocs(collection(targetRef, 'descriptions'));
+				descriptionCount = descriptionSnap.size;
+				for (const snap of descriptionSnap.docs) {
+					await deleteDoc(snap.ref);
+				}
+			} catch (err) {
+				if (!isPermissionError(err)) {
+					console.warn('Failed to purge call descriptions', err);
+					voiceDebug('Failed to purge call descriptions', err);
+				}
+			}
+		}
+		voiceDebug('purgeCallArtifacts complete', {
+			legacyOfferCount,
+			legacyAnswerCount,
+			revisionOfferCount,
+			revisionAnswerCount,
+			revisionDocs,
+			descriptionCount
+		});
+	}
+
+	async function queueLegacyCandidateDeletes(
+		batch: ReturnType<typeof writeBatch>,
+		targetRef: DocumentReference
+	) {
+		const [offerSnap, answerSnap] = await Promise.all([
+			getDocs(collection(targetRef, 'offerCandidates')),
+			getDocs(collection(targetRef, 'answerCandidates'))
+		]);
+		offerSnap.docs.forEach((snap) => batch.delete(snap.ref));
+		answerSnap.docs.forEach((snap) => batch.delete(snap.ref));
+		return { offerCount: offerSnap.size, answerCount: answerSnap.size };
+	}
+
+	async function queueRevisionCandidateDeletes(
+		batch: ReturnType<typeof writeBatch>,
+		targetRef: DocumentReference,
+		revision: number
+	) {
+		if (revision <= 0) {
+			return { offerCount: 0, answerCount: 0 };
+		}
+		const revisionRef = doc(targetRef, 'revisions', String(revision));
+		const [offerSnap, answerSnap] = await Promise.all([
+			getDocs(collection(revisionRef, 'offerCandidates')),
+			getDocs(collection(revisionRef, 'answerCandidates'))
+		]);
+		offerSnap.docs.forEach((snap) => batch.delete(snap.ref));
+		answerSnap.docs.forEach((snap) => batch.delete(snap.ref));
+		if (!offerSnap.empty || !answerSnap.empty) {
+			batch.delete(revisionRef);
+		}
+		return { offerCount: offerSnap.size, answerCount: answerSnap.size };
+	}
+
+	async function publishAnswerForRevision(
+		docRef: DocumentReference,
+		answerData: Record<string, unknown>,
+		revision: number,
+		currentUid: string | null
+	) {
+		try {
+			await runTransaction(getDb(), async (transaction) => {
+				const snap = await transaction.get(docRef);
+				if (!snap.exists()) {
+					throw new Error('offer-missing');
+				}
+				const data = snap.data() as any;
+				const currentRevision = data?.offer?.revision ?? 0;
+				if (currentRevision !== revision) {
+					throw new Error('offer-revision-mismatch');
+				}
+				transaction.update(docRef, {
+					answer: answerData,
+					answeredAt: serverTimestamp(),
+					answeredBy: currentUid
+				});
+			});
+			return { published: true };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (message === 'offer-revision-mismatch' || message === 'offer-missing') {
+				const latestSnap = await getDoc(docRef);
+				const latestRevision = latestSnap.data()?.offer?.revision ?? 0;
+				voiceDebug('Answer write blocked due to revision mismatch', {
+					expectedRevision: revision,
+					latestRevision
+				});
+				return { published: false, latestRevision };
+			}
+			throw err;
 		}
 	}
 
@@ -4725,23 +5145,28 @@
 		const currentUid = currentUser?.uid ?? null;
 		isOfferer = true;
 		processedRenegotiationSignals.clear();
-		lastOfferRevision = existingData?.offer?.revision ?? 0;
+		const previousOfferRevision = existingData?.offer?.revision ?? 0;
 		lastAnswerRevision = existingData?.answer?.revision ?? 0;
-		voiceDebug('Joining voice channel as offerer', { lastOfferRevision, lastAnswerRevision });
+		voiceDebug('Joining voice channel as offerer', {
+			lastOfferRevision: previousOfferRevision,
+			lastAnswerRevision
+		});
 		const activeParticipants = await hasActiveParticipants(docRef);
 		if (activeParticipants) {
 			voiceDebug('Skipping purgeCallArtifacts (active participants present)');
 		} else {
-			await purgeCallArtifacts();
+			await purgeCallArtifacts(docRef, { includeDescriptions: false });
 		}
+		const offerRevision = previousOfferRevision + 1;
+		setActiveOfferRevision(offerRevision, 'start-offerer');
 		attachOffererIceHandlers(connection);
+
+		syncLocalTracksToPeer();
+		applyTrackStates();
 
 		const offerDescription = await connection.createOffer();
 		await connection.setLocalDescription(offerDescription);
 
-		const offerRevision = lastOfferRevision + 1;
-		lastOfferRevision = offerRevision;
-		let storedInDescriptions = false;
 		if (descriptionStorageEnabled && offerDescriptionRef) {
 			try {
 				await setDoc(
@@ -4756,7 +5181,6 @@
 					},
 					{ merge: true }
 				);
-				storedInDescriptions = true;
 			} catch (err) {
 				console.warn('Failed to persist offer description doc', err);
 				voiceDebug('Failed to persist offer description doc', err);
@@ -4780,22 +5204,41 @@
 		if (offerDescription.sdp) {
 			offerData.sdp = offerDescription.sdp;
 		}
-		await setDoc(
+		const batch = writeBatch(getDb());
+		batch.set(
 			docRef,
 			{
 				offer: offerData,
+				answer: deleteField(),
+				answeredAt: deleteField(),
+				answeredBy: deleteField(),
 				createdAt: existingData?.createdAt ?? serverTimestamp(),
 				createdBy: existingData?.createdBy ?? currentUid
 			},
 			{ merge: true }
 		);
+		lastAnswerRevision = 0;
+		batch.set(
+			doc(docRef, 'revisions', String(offerRevision)),
+			{
+				revision: offerRevision,
+				updatedAt: serverTimestamp(),
+				updatedBy: currentUid
+			},
+			{ merge: true }
+		);
 		if (answerDescriptionRef) {
-			await deleteDoc(answerDescriptionRef).catch(() => {});
+			batch.delete(answerDescriptionRef);
 			latestAnswerDescription = null;
 		}
+		const legacyDeletes = await queueLegacyCandidateDeletes(batch, docRef);
+		const revisionDeletes = await queueRevisionCandidateDeletes(batch, docRef, previousOfferRevision);
+		await batch.commit();
 		voiceDebug('Published initial offer', {
 			offerRevision,
-			length: offerDescription.sdp?.length ?? 0
+			length: offerDescription.sdp?.length ?? 0,
+			legacyDeletes,
+			revisionDeletes
 		});
 	}
 
@@ -4830,6 +5273,7 @@
 
 		try {
 			await ensureMediaPermissions();
+			await prepareInitialLocalTracks('join');
 			const connection = createPeerConnection();
 			if (!connection) throw new Error('Failed to create peer connection.');
 
@@ -4844,8 +5288,7 @@
 			);
 			callRef = docRef;
 
-			offerCandidatesRef = collection(docRef, 'offerCandidates');
-			answerCandidatesRef = collection(docRef, 'answerCandidates');
+			setCandidateRefsForRevision(0, 'join-init');
 			localCandidatesRef = null;
 			participantsCollectionRef = collection(docRef, 'participants');
 			subscribeParticipants();
@@ -4853,8 +5296,7 @@
 			offerDescriptionRef = doc(callDescriptionsRef, 'offer');
 			answerDescriptionRef = doc(callDescriptionsRef, 'answer');
 			descriptionStorageEnabled = true;
-			consumedOfferCandidateIds.clear();
-			consumedAnswerCandidateIds.clear();
+			resetCandidateState('join-init');
 			remoteIceLogCountOfferer = 0;
 			remoteIceLogCountAnswerer = 0;
 
@@ -4893,7 +5335,7 @@
 			} else {
 				isOfferer = false;
 				processedRenegotiationSignals.clear();
-				lastOfferRevision = existingData?.offer?.revision ?? 1;
+				const initialOfferRevision = existingData?.offer?.revision ?? 1;
 				
 				const offerUpdatedBy = existingData?.offer?.updatedBy ?? null;
 				const answerUpdatedBy = existingData?.answer?.updatedBy ?? null;
@@ -4912,7 +5354,11 @@
 					lastAnswerRevision = existingData?.answer?.revision ?? 0;
 				}
 				
-				voiceDebug('Joining voice channel as answerer', { lastOfferRevision, lastAnswerRevision });
+				setActiveOfferRevision(initialOfferRevision, 'join-answerer');
+				voiceDebug('Joining voice channel as answerer', {
+					lastOfferRevision,
+					lastAnswerRevision
+				});
 				attachAnswererIceHandlers(connection);
 
 				const selfAuthored =
@@ -4936,40 +5382,85 @@
 				}
 				
 				if (!promoteToOfferer) {
-					const initialFallbackOffer =
-						typeof existingData.offer?.sdp === 'string'
-							? ({
-									type: existingData.offer.type ?? 'offer',
-									sdp: existingData.offer.sdp
-								} as RTCSessionDescriptionInit)
-							: null;
-					const offerDescription = await ensureOfferDescription(
-						lastOfferRevision,
-						initialFallbackOffer
-					);
-					if (!offerDescription?.sdp) {
-						voiceDebug('Offer description missing; promoting to offerer role.');
-						try {
-							await purgeCallArtifacts();
-							await deleteDoc(docRef);
-						} catch (err) {
-							console.warn('Failed to reset call while taking over as offerer', err);
-							voiceDebug('Failed to reset call while taking over as offerer', err);
+					let attemptData = existingData;
+					let answered = false;
+					let attempt = 0;
+					const maxAttempts = 2;
+					while (!answered && attempt < maxAttempts) {
+						const offerRevision = attemptData?.offer?.revision ?? 0;
+						if (!offerRevision) {
+							voiceDebug('Missing offer revision while joining as answerer', { attempt });
+							promoteToOfferer = true;
+							break;
 						}
-						promoteToOfferer = true;
-					} else {
+						setActiveOfferRevision(offerRevision, `join-answerer-attempt-${attempt + 1}`);
+						attachAnswererIceHandlers(connection);
+						const attemptFallbackOffer =
+							typeof attemptData.offer?.sdp === 'string'
+								? ({
+										type: attemptData.offer.type ?? 'offer',
+										sdp: attemptData.offer.sdp
+									} as RTCSessionDescriptionInit)
+								: null;
+						const offerDescription = await ensureOfferDescription(
+							offerRevision,
+							attemptFallbackOffer
+						);
+						if (!offerDescription?.sdp) {
+							voiceDebug('Offer description missing; promoting to offerer role.');
+							try {
+								await purgeCallArtifacts();
+								await deleteDoc(docRef);
+							} catch (err) {
+								console.warn('Failed to reset call while taking over as offerer', err);
+								voiceDebug('Failed to reset call while taking over as offerer', err);
+							}
+							promoteToOfferer = true;
+							break;
+						}
 						await connection.setRemoteDescription(new RTCSessionDescription(offerDescription));
 						flushPendingRemoteIceCandidates(connection);
 						voiceDebug('Applied existing offer', {
-							revision: lastOfferRevision,
+							revision: offerRevision,
 							length: offerDescription.sdp?.length ?? 0
 						});
+
+						syncLocalTracksToPeer();
+						applyTrackStates();
 
 						const answerDescription = await connection.createAnswer();
 						await connection.setLocalDescription(answerDescription);
 
-						const answerRevision = lastAnswerRevision + 1;
-						lastAnswerRevision = answerRevision;
+						const answerRevision = offerRevision;
+						const answerData: Record<string, unknown> = {
+							type: answerDescription.type,
+							revision: answerRevision,
+							length: answerDescription.sdp?.length ?? 0,
+							updatedAt: serverTimestamp(),
+							updatedBy: current.uid
+						};
+						if (answerDescription.sdp) {
+							answerData.sdp = answerDescription.sdp;
+						}
+						const publishResult = await publishAnswerForRevision(
+							docRef,
+							answerData,
+							answerRevision,
+							current.uid
+						);
+						if (!publishResult.published) {
+							const latestSnap = await getDoc(docRef);
+							attemptData = latestSnap.exists() ? ((latestSnap.data() as any) ?? null) : null;
+							const latestRevision = attemptData?.offer?.revision ?? 0;
+							voiceDebug('Restarting answerer join with latest offer revision', {
+								expectedRevision: offerRevision,
+								latestRevision,
+								attempt
+							});
+							attempt += 1;
+							continue;
+						}
+
 						if (descriptionStorageEnabled && answerDescriptionRef) {
 							try {
 								await setDoc(
@@ -4998,40 +5489,14 @@
 							type: answerDescription.type,
 							sdp: answerDescription.sdp ?? ''
 						};
-						const answerData: Record<string, unknown> = {
-							type: answerDescription.type,
-							revision: answerRevision,
-							length: answerDescription.sdp?.length ?? 0,
-							updatedAt: serverTimestamp(),
-							updatedBy: current.uid
-						};
-						if (answerDescription.sdp) {
-							answerData.sdp = answerDescription.sdp;
-						}
-						try {
-							await updateDoc(docRef, {
-								answer: answerData,
-								answeredAt: serverTimestamp(),
-								answeredBy: current.uid
-							});
-						} catch (err: any) {
-							const code = err?.code ?? err?.message ?? 'unknown';
-							if (code === 'not-found') {
-								await setDoc(
-									docRef,
-									{
-										answer: answerData,
-										answeredAt: serverTimestamp(),
-										answeredBy: current.uid
-									},
-									{ merge: true }
-								);
-							} else {
-								throw err;
-							}
-						}
+						lastAnswerRevision = answerRevision;
 						voiceDebug('Published initial answer', { answerRevision });
 						joinRole = 'answerer';
+						answered = true;
+					}
+					if (!answered && !promoteToOfferer) {
+						voiceDebug('Answerer join attempts exhausted; promoting to offerer');
+						promoteToOfferer = true;
 					}
 				}
 			}
@@ -5049,6 +5514,7 @@
 			await updateParticipantPresence({ joinedAt: serverTimestamp(), status: 'active' as const });
 			console.log('[JOIN] Setting isJoined = true');
 			isJoined = true;
+			scheduleMediaRecovery('join-complete');
 			console.log('[JOIN] isJoined is now:', isJoined);
 			startCallTimer();
 			emitVoiceActivity('joined');
@@ -5056,43 +5522,6 @@
 			startInactivityHeartbeat();
 			console.log('[JOIN] joinChannel complete', { joinRole, isOfferer });
 			voiceDebug('joinChannel ready', { joinRole, isOfferer });
-
-			// Acquire initial media tracks based on join preferences
-			// This ensures buttons reflect actual track state immediately
-			const shouldAcquireAudio = !isMicMuted;
-			const shouldAcquireVideo = !isCameraOff;
-			voiceDebug('joinChannel acquiring initial tracks', {
-				shouldAcquireAudio,
-				shouldAcquireVideo,
-				isMicMuted,
-				isCameraOff
-			});
-
-			if (shouldAcquireAudio) {
-				const audioOk = await acquireTrack('audio');
-				if (!audioOk) {
-					// If audio acquisition fails, update state to reflect reality
-					isMicMuted = true;
-					voiceDebug('Initial audio acquisition failed, setting muted');
-				}
-			}
-
-			if (shouldAcquireVideo) {
-				const videoOk = await acquireTrack('video');
-				if (!videoOk) {
-					// If video acquisition fails, update state to reflect reality
-					isCameraOff = true;
-					voiceDebug('Initial video acquisition failed, setting camera off');
-				}
-			}
-
-			// Update presence after acquiring tracks
-			if (shouldAcquireAudio || shouldAcquireVideo) {
-				await updateParticipantPresence();
-				if (!isMicMuted || !isCameraOff) {
-					scheduleRenegotiation('initial-media-acquired', { requireOfferer: true });
-				}
-			}
 
 			// Start thumbnail publishing if camera is on
 			if (!isCameraOff) {
@@ -5147,16 +5576,10 @@
 									return;
 								}
 
-								lastOfferRevision = revision;
-
+								setActiveOfferRevision(revision, 'remote-offer');
 								isOfferer = false;
-
 								processedRenegotiationSignals.clear();
-								
-								// Clear consumed ICE candidate IDs to receive fresh candidates
-								consumedOfferCandidateIds.clear();
-
-								localCandidatesRef = answerCandidatesRef;
+								attachAnswererIceHandlers(connection);
 
 								sessionQueue = sessionQueue
 
@@ -5177,58 +5600,11 @@
 
 											await pc.setLocalDescription(answerDescription);
 
-											const nextRevision = lastAnswerRevision + 1;
-
-											lastAnswerRevision = nextRevision;
-
-											let storedAnswerDoc = false;
-
-											if (descriptionStorageEnabled && answerDescriptionRef) {
-												try {
-													await setDoc(
-														answerDescriptionRef,
-
-														{
-															type: answerDescription.type,
-
-															revision: nextRevision,
-
-															sdp: answerDescription.sdp,
-
-															length: answerDescription.sdp?.length ?? 0,
-
-															updatedAt: serverTimestamp(),
-
-															updatedBy: currentUidValue
-														},
-
-														{ merge: true }
-													);
-
-													storedAnswerDoc = true;
-												} catch (err) {
-													console.warn('Failed to persist fallback answer description doc', err);
-
-													voiceDebug('Failed to persist fallback answer description doc', err);
-
-													if (isPermissionError(err)) {
-														disableDescriptionStorage(err);
-													}
-												}
-											}
-
-											latestAnswerDescription = {
-												revision: nextRevision,
-
-												type: answerDescription.type,
-
-												sdp: answerDescription.sdp ?? ''
-											};
-
+											const answerRevision = revision;
 											const answerUpdate: Record<string, unknown> = {
 												type: answerDescription.type,
 
-												revision: nextRevision,
+												revision: answerRevision,
 
 												length: answerDescription.sdp?.length ?? 0,
 
@@ -5241,30 +5617,63 @@
 												answerUpdate.sdp = answerDescription.sdp;
 											}
 
-											try {
-												await updateDoc(callRef!, {
-													answer: answerUpdate,
-													answeredAt: serverTimestamp(),
-													answeredBy: currentUidValue
+											const publishResult = await publishAnswerForRevision(
+												callRef!,
+												answerUpdate,
+												answerRevision,
+												currentUidValue
+											);
+											if (!publishResult.published) {
+												voiceDebug('Fallback answer blocked due to revision mismatch', {
+													revision: answerRevision,
+													latestRevision: publishResult.latestRevision ?? null
 												});
-											} catch (err: any) {
-												const code = err?.code ?? err?.message ?? 'unknown';
-												if (code === 'not-found') {
+												return;
+											}
+
+											if (descriptionStorageEnabled && answerDescriptionRef) {
+												try {
 													await setDoc(
-														callRef!,
+														answerDescriptionRef,
+
 														{
-															answer: answerUpdate,
-															answeredAt: serverTimestamp(),
-															answeredBy: currentUidValue
+															type: answerDescription.type,
+
+															revision: answerRevision,
+
+															sdp: answerDescription.sdp,
+
+															length: answerDescription.sdp?.length ?? 0,
+
+															updatedAt: serverTimestamp(),
+
+															updatedBy: currentUidValue
 														},
+
 														{ merge: true }
 													);
-												} else {
-													throw err;
+												} catch (err) {
+													console.warn('Failed to persist fallback answer description doc', err);
+
+													voiceDebug('Failed to persist fallback answer description doc', err);
+
+													if (isPermissionError(err)) {
+														disableDescriptionStorage(err);
+													}
 												}
 											}
 
-											voiceDebug('Published fallback answer', { revision: nextRevision });
+											latestAnswerDescription = {
+												revision: answerRevision,
+
+												type: answerDescription.type,
+
+												sdp: answerDescription.sdp ?? ''
+											};
+
+											lastAnswerRevision = answerRevision;
+
+											voiceDebug('Published fallback answer', { revision: answerRevision });
 											
 											// After answering a new offer, refresh audio for all remote participants
 											// since the media may have changed
@@ -5304,7 +5713,24 @@
 						if (answer) {
 							const revision = answer.revision ?? 1;
 
-							if (revision > lastAnswerRevision) {
+							if (revision !== lastOfferRevision) {
+								voiceDebug('Ignoring remote answer (revision mismatch)', {
+									revision,
+									activeRevision: lastOfferRevision
+								});
+								return;
+							}
+							const hasRemoteDescription = !!connection.currentRemoteDescription;
+							if (revision <= lastAnswerRevision && hasRemoteDescription) {
+								return;
+							}
+							if (revision <= lastAnswerRevision && !hasRemoteDescription) {
+								voiceDebug('Re-applying remote answer (missing remote description)', {
+									revision,
+									lastAnswerRevision
+								});
+							}
+							{
 								const fallbackAnswer =
 									typeof answer.sdp === 'string'
 										? ({
@@ -5425,6 +5851,7 @@
 
 		clearReconnectTimer();
 		clearIceRestartTimer();
+		resetMediaRecovery('hangup');
 		stopConnectionHealthCheck();
 		clearInactivityTimer();
 		stopInactivityHeartbeat();
@@ -5567,6 +5994,7 @@
 		callRef = null;
 		offerCandidatesRef = null;
 		answerCandidatesRef = null;
+		activeCandidateRevision = 0;
 		localCandidatesRef = null;
 		participantsCollectionRef = null;
 		callDescriptionsRef = null;
@@ -5592,18 +6020,7 @@
 			try {
 				const remaining = await getDocs(collection(cleanupRef, 'participants'));
 				if (remaining.empty) {
-					const offers = await getDocs(collection(cleanupRef, 'offerCandidates'));
-					for (const snap of offers.docs) {
-						await deleteDoc(snap.ref);
-					}
-					const answers = await getDocs(collection(cleanupRef, 'answerCandidates'));
-					for (const snap of answers.docs) {
-						await deleteDoc(snap.ref);
-					}
-					const descriptions = await getDocs(collection(cleanupRef, 'descriptions'));
-					for (const snap of descriptions.docs) {
-						await deleteDoc(snap.ref);
-					}
+					await purgeCallArtifacts(cleanupRef);
 					await deleteDoc(cleanupRef);
 				}
 			} catch (err) {
@@ -6772,10 +7189,7 @@
 				};
 			});
 
-			if (
-				tiles.some((tile) => !tile.isSelf && (tile.hasVideo || tile.hasAudio) && !tile.stream) &&
-				remoteStreams.size
-			) {
+			if (tiles.some((tile) => !tile.isSelf && !tile.stream) && remoteStreams.size) {
 				const availableStreams = Array.from(remoteStreams.entries());
 				for (const tile of tiles) {
 					if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
@@ -6799,6 +7213,16 @@
 					}
 
 					if (!fallbackEntry) continue;
+					const [fallbackId, fallbackStream] = fallbackEntry;
+					tile.streamId = tile.streamId ?? fallbackId;
+					tile.stream = fallbackStream;
+					usedStreamIds.add(fallbackId);
+				}
+
+				for (const tile of tiles) {
+					if (tile.isSelf || tile.stream) continue;
+					const fallbackEntry = availableStreams.find(([id]) => !usedStreamIds.has(id)) ?? null;
+					if (!fallbackEntry) break;
 					const [fallbackId, fallbackStream] = fallbackEntry;
 					tile.streamId = tile.streamId ?? fallbackId;
 					tile.stream = fallbackStream;
@@ -6909,6 +7333,30 @@
 			if (audio && audio.srcObject && audio.paused) {
 				audio.play?.().catch(() => {});
 			}
+		});
+
+		const attachedStreamIds = new Set(
+			participantMedia
+				.filter((tile) => !tile.isSelf && tile.stream)
+				.map((tile) => tile.stream!.id)
+		);
+		const orphanPrefix = 'stream:';
+		audioPlayback.forEach((_, uid) => {
+			if (!uid.startsWith(orphanPrefix)) return;
+			const streamId = uid.slice(orphanPrefix.length);
+			if (!remoteStreams.has(streamId) || attachedStreamIds.has(streamId)) {
+				destroyAudioPlayback(uid);
+			}
+		});
+		remoteStreams.forEach((stream, streamId) => {
+			if (attachedStreamIds.has(streamId)) return;
+			const hasAudio = stream
+				.getAudioTracks()
+				.some((track) => track.readyState !== 'ended');
+			if (!hasAudio) return;
+			const shouldMute = isPlaybackMuted;
+			const volume = DEFAULT_VOLUME;
+			ensureAudioPlayback(orphanAudioUid(streamId), stream, shouldMute, shouldMute ? 0 : volume);
 		});
 	});
 	// Cleanup audio playback and moderation when participants leave
