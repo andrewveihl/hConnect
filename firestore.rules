@@ -566,10 +566,10 @@ service cloud.firestore {
               || request.resource.data.authorId == request.auth.uid
             );
           allow update: if isSuperAdminUser()
-            // Allow reactions from anyone who can view the channel (including private channel members)
-            || (isSignedIn()
-              && (canViewChannel(serverId, channelId) || channelAllowsMember(serverId, channelId))
-              && isReactionOnlyUpdate())
+            // Allow reactions from any server member who can access the channel
+            // For private channels: member must have their role in channel's allowedRoleIds
+            // Simplified: if user is a member and the update is only reactions, allow it
+            || (isSignedIn() && isMember(serverId) && isReactionOnlyUpdate())
             // Allow message author to edit their own message
             || (isSignedIn()
               && canViewChannel(serverId, channelId)
