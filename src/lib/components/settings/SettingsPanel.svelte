@@ -33,6 +33,7 @@
 		type VoicePreferences
 	} from '$lib/stores/voicePreferences';
 	import { playSound, type SoundEffect } from '$lib/utils/sounds';
+	import { updateNotificationSettings } from '$lib/firebase/notifications';
 
 	import SignOutButton from '$lib/components/auth/SignOutButton.svelte';
 	import InvitePanel from '$lib/components/app/InvitePanel.svelte';
@@ -1049,6 +1050,12 @@
 			'settings.theme': themeMode,
 			'settings.aiAssist': aiAssist
 		});
+		// Sync notification preferences to the Cloud Functions-readable location
+		await updateNotificationSettings($user.uid, {
+			allowChannelMessagePush: notif.allMessages,
+			allowMentionPush: notif.mentions,
+			muteDMs: !notif.dms
+		});
 	}
 
 	function queueAutoSave() {
@@ -1939,6 +1946,103 @@
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
 									{notif.desktopEnabled ? 'Desktop alerts enabled' : 'Enable desktop alerts'}
+								</span>
+							</label>
+						</div>
+					</div>
+
+					<!-- Push notification preferences -->
+					<div class="space-y-3">
+						<div>
+							<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+								Push Notification Types
+							</h3>
+							<p class={mutedTextClasses}>Choose which messages trigger push notifications.</p>
+						</div>
+
+						<div
+							class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+						>
+							<div class="space-y-1">
+								<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+									All channel messages
+								</h3>
+								<p class={mutedTextClasses}>Get notified for every message in channels you're in.</p>
+							</div>
+							<label class="flex items-center gap-3">
+								<input
+									type="checkbox"
+									class="peer sr-only"
+									checked={notif.allMessages}
+									onchange={() => {
+										notif.allMessages = !notif.allMessages;
+										queueAutoSave();
+									}}
+								/>
+								<span
+									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+								>
+									<span
+										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+									></span>
+								</span>
+							</label>
+						</div>
+
+						<div
+							class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+						>
+							<div class="space-y-1">
+								<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+									@ mentions
+								</h3>
+								<p class={mutedTextClasses}>Get notified when someone mentions you directly.</p>
+							</div>
+							<label class="flex items-center gap-3">
+								<input
+									type="checkbox"
+									class="peer sr-only"
+									checked={notif.mentions}
+									onchange={() => {
+										notif.mentions = !notif.mentions;
+										queueAutoSave();
+									}}
+								/>
+								<span
+									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+								>
+									<span
+										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+									></span>
+								</span>
+							</label>
+						</div>
+
+						<div
+							class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+						>
+							<div class="space-y-1">
+								<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+									Direct messages
+								</h3>
+								<p class={mutedTextClasses}>Get notified for new DMs.</p>
+							</div>
+							<label class="flex items-center gap-3">
+								<input
+									type="checkbox"
+									class="peer sr-only"
+									checked={notif.dms}
+									onchange={() => {
+										notif.dms = !notif.dms;
+										queueAutoSave();
+									}}
+								/>
+								<span
+									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+								>
+									<span
+										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+									></span>
 								</span>
 							</label>
 						</div>

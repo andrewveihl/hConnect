@@ -218,13 +218,11 @@ service cloud.firestore {
     }
 
     // Member list visibility is permissioned; public servers stay readable by signed-in users.
+    // Any server member can view the member list.
     function canViewMembers(serverId) {
       return isSuperAdminUser()
         || (isSignedIn() && serverIsPublic(serverId))
-        || (
-          isMember(serverId)
-            && (hasPerm(serverId, "viewMembers") || hasPerm(serverId, "viewMemberList") || hasPerm(serverId, "viewChannels"))
-        );
+        || isMember(serverId);
     }
 
     // Baseline visibility: signed-in users can see public servers; members/admins see their servers.
@@ -451,12 +449,13 @@ service cloud.firestore {
       allow delete: if false;
 
       match /servers/{serverId} {
-        allow read, write: if isSignedIn() && request.auth.uid == uid;
+        allow read, write: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
         allow delete: if isSignedIn()
           && (
             request.auth.uid == uid ||
             isServerOwner(serverId) ||
-            isServerAdmin(serverId)
+            isServerAdmin(serverId) ||
+            isSuperAdminUser()
           );
       }
 
@@ -531,9 +530,10 @@ service cloud.firestore {
         // Read: members can see other members, users can always read their own doc (even if it doesn't exist)
         allow read: if isSignedIn() && (request.auth.uid == uid || canViewMembers(serverId));
         // Create/Update own membership: user can join a server if they're signed in
-        allow create: if isSignedIn() && request.auth.uid == uid;
-        allow update: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId));
-        allow delete: if isServerAdmin(serverId);
+        // Super admins can force-add any user to any server
+        allow create: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
+        allow update: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId) || isSuperAdminUser());
+        allow delete: if isServerAdmin(serverId) || isSuperAdminUser();
       }
 
       match /presence/{uid} {
@@ -566,10 +566,14 @@ service cloud.firestore {
               || request.resource.data.authorId == request.auth.uid
             );
           allow update: if isSuperAdminUser()
+            // Allow reactions from anyone who can view the channel (including private channel members)
+            || (isSignedIn()
+              && (canViewChannel(serverId, channelId) || channelAllowsMember(serverId, channelId))
+              && isReactionOnlyUpdate())
+            // Allow message author to edit their own message
             || (isSignedIn()
               && canViewChannel(serverId, channelId)
-              && request.auth.uid == resource.data.uid
-              && isReactionOnlyUpdate())
+              && request.auth.uid == resource.data.uid)
             || (isSignedIn() && hasPerm(serverId, "manageMessages"));
           allow delete: if isSuperAdminUser()
             || (isSignedIn() && hasPerm(serverId, "manageMessages"))
@@ -801,6 +805,11 @@ service cloud.firestore {
       // Allow all signed-in users to read customization (themes, splash) and featureFlags so they apply globally
       allow read: if isSignedIn() && (configId == "superAdmins" || configId == "customization" || configId == "featureFlags" || isSuperAdminUser());
       allow write: if isSuperAdminUser();
+
+      // User Groups subcollection for bulk server assignments
+      match /groups/{groupId} {
+        allow read, write: if isSuperAdminUser();
+      }
     }
 
     /* ---------------- Announcements ---------------- */

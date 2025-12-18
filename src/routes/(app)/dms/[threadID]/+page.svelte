@@ -29,6 +29,7 @@
 		submitDMForm,
 		toggleDMReaction
 	} from '$lib/firestore/dms';
+	import { markDMActivityRead } from '$lib/stores/activityFeed';
 	import type { ReplyReferenceInput } from '$lib/firestore/messages';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
@@ -426,6 +427,8 @@
 			lastMessageId: opts?.lastMessageId ?? null
 		};
 		markThreadRead(threadID, me.uid, payload).catch(() => {});
+		// Also mark activity feed entries for this DM as read
+		void markDMActivityRead(threadID);
 	}
 
 	function canonical(value: unknown): string {

@@ -22,6 +22,7 @@ export type NotificationSettings = {
 	allowRoleMentionPush: boolean;
 	allowHereMentionPush: boolean;
 	allowEveryoneMentionPush: boolean;
+	allowChannelMessagePush: boolean;
 	doNotDisturbUntil: number | null;
 };
 
@@ -41,6 +42,7 @@ export const defaultNotificationSettings: NotificationSettings = {
 	allowRoleMentionPush: true,
 	allowHereMentionPush: true,
 	allowEveryoneMentionPush: true,
+	allowChannelMessagePush: true,
 	doNotDisturbUntil: null
 };
 

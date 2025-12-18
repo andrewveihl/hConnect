@@ -606,7 +606,8 @@
 <style>
 	.activity-shell {
 		display: flex;
-		min-height: 100dvh;
+		height: 100dvh;
+		max-height: 100dvh;
 		align-items: stretch;
 		background: var(--surface-root, var(--color-panel));
 		color: var(--text-100);
@@ -617,7 +618,8 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		min-height: 100dvh;
+		height: 100%;
+		min-height: 0;
 		background: transparent;
 		color: var(--text-100);
 		overflow: hidden;
@@ -631,8 +633,7 @@
 		gap: clamp(1rem, 3vw, 2rem);
 		align-items: flex-start;
 		background: var(--color-panel);
-		position: sticky;
-		top: 0;
+		flex-shrink: 0;
 		z-index: 5;
 	}
 
@@ -760,10 +761,12 @@
 
 	.activity-main {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
+		overflow-x: hidden;
 		padding: clamp(1rem, 3vw, 1.6rem);
 		padding-bottom: calc(
-			clamp(1rem, 3vw, 1.6rem) + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px)
+			4rem + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px)
 		);
 		display: flex;
 		flex-direction: column;
@@ -858,6 +861,8 @@
 			transform 120ms ease,
 			border-color 120ms ease,
 			background 120ms ease;
+		overflow: hidden;
+		max-width: 100%;
 	}
 
 	.activity-item__content {
@@ -865,6 +870,8 @@
 		grid-template-columns: 1fr auto;
 		gap: 0.65rem;
 		align-items: start;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.activity-item__hit {
@@ -878,6 +885,8 @@
 		padding: 0;
 		width: 100%;
 		cursor: pointer;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.activity-item:hover {
@@ -923,22 +932,27 @@
 	.activity-item__body {
 		display: grid;
 		gap: 0.45rem;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.activity-item__header {
 		display: flex;
 		justify-content: space-between;
-		gap: 0.75rem;
+		gap: 0.5rem;
 		flex-wrap: wrap;
 		align-items: flex-start;
+		min-width: 0;
 	}
 
 	.activity-item__origin {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 0.6rem;
+		gap: 0.45rem;
 		min-width: 0;
+		overflow: hidden;
+		max-width: 100%;
 	}
 
 	.activity-item__badge {
@@ -990,6 +1004,8 @@
 		flex-direction: column;
 		gap: 0.15rem;
 		min-width: 0;
+		max-width: 100%;
+		overflow: hidden;
 	}
 
 	.activity-item__location strong {
@@ -1017,12 +1033,21 @@
 		margin: 0;
 		font-size: 1rem;
 		line-height: 1.2;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.activity-item__body p {
 		margin: 0;
 		color: var(--text-80);
 		line-height: 1.35;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 
 	.activity-item__stack {
@@ -1043,10 +1068,11 @@
 	.activity-item__meta {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.6rem;
-		font-size: 0.8rem;
+		gap: 0.4rem;
+		font-size: 0.78rem;
 		color: var(--text-60);
 		align-items: center;
+		min-width: 0;
 	}
 
 	.activity-item__reason {
@@ -1104,6 +1130,21 @@
 
 	@media (max-width: 768px) {
 		.activity-shell {
+			position: fixed;
+			top: 0;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			flex-direction: column;
+			overflow: hidden;
+			z-index: 1;
+		}
+
+		.activity-surface {
+			flex: 1;
+			overflow: hidden;
+			min-height: 0;
+			display: flex;
 			flex-direction: column;
 		}
 
@@ -1112,9 +1153,15 @@
 		}
 
 		.activity-main {
-			padding: 0.85rem 0.7rem
-				calc(0.85rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
+			flex: 1;
+			overflow-y: auto;
+			overflow-x: hidden;
+			-webkit-overflow-scrolling: touch;
+			overscroll-behavior-y: contain;
+			padding: calc(0.85rem + env(safe-area-inset-top, 0px)) 0.7rem
+				calc(4rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 80px));
 			gap: 0.85rem;
+			min-height: 0;
 		}
 
 		.activity-mobile-hero {
@@ -1128,17 +1175,152 @@
 
 	@media (max-width: 520px) {
 		.activity-item {
+			padding: 0.75rem 0.85rem;
+			border-radius: 0.85rem;
+		}
+
+		.activity-item__content {
+			grid-template-columns: 1fr;
+			gap: 0.5rem;
+		}
+
+		.activity-item__hit {
 			grid-template-columns: auto 1fr;
-			padding: 0.85rem 0.95rem;
+			gap: 0.6rem;
 		}
 
 		.activity-item__icon {
-			width: 2.3rem;
-			height: 2.3rem;
+			width: 2.2rem;
+			height: 2.2rem;
+			font-size: 0.7rem;
+			border-radius: 0.7rem;
 		}
 
 		.activity-item__header {
 			flex-direction: column;
+			gap: 0.35rem;
+		}
+
+		.activity-item__origin {
+			gap: 0.35rem;
+		}
+
+		.activity-item__badge {
+			font-size: 0.65rem;
+			padding: 0.15rem 0.45rem;
+		}
+
+		.activity-item__bundle {
+			font-size: 0.68rem;
+			padding: 0.15rem 0.45rem;
+		}
+
+		.activity-item__location strong {
+			font-size: 0.85rem;
+		}
+
+		.activity-item__location span {
+			font-size: 0.75rem;
+		}
+
+		.activity-item__body h3 {
+			font-size: 0.92rem;
+		}
+
+		.activity-item__body p {
+			font-size: 0.85rem;
+		}
+
+		.activity-item__meta {
+			font-size: 0.72rem;
+			gap: 0.35rem;
+		}
+
+		.activity-item__dismiss {
+			width: 100%;
+			text-align: center;
+			padding: 0.5rem 0.65rem;
+			font-size: 0.75rem;
+		}
+
+		.activity-item__stack {
+			font-size: 0.78rem;
+			padding-left: 0.9rem;
+		}
+
+		.activity-mobile-hero {
+			padding: 0.75rem 0.85rem;
+		}
+
+		.activity-title-row h2 {
+			font-size: 1.1rem;
+		}
+
+		.activity-chip {
+			font-size: 0.72rem;
+			padding: 0.15rem 0.55rem;
+		}
+
+		.activity-header__stats {
+			font-size: 0.78rem;
+		}
+
+		.activity-header__stats span {
+			padding: 0.2rem 0.7rem;
+		}
+
+		.activity-toolbar {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.activity-toolbar__label {
+			text-align: center;
+		}
+
+		.clear-feed-btn {
+			width: 100%;
+			padding: 0.5rem 1rem;
+			font-size: 0.85rem;
+		}
+
+		.activity-description {
+			font-size: 0.85rem;
+		}
+
+		.activity-banner {
+			flex-direction: column;
+			gap: 0.6rem;
+			text-align: center;
+			padding: 0.65rem 0.8rem;
+		}
+
+		.activity-banner__copy {
+			text-align: center;
+		}
+
+		.enable-push-btn--inline {
+			width: 100%;
+		}
+	}
+
+	@media (max-width: 380px) {
+		.activity-main {
+			padding: calc(0.65rem + env(safe-area-inset-top, 0px)) 0.5rem
+				calc(4rem + env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 80px));
+		}
+
+		.activity-item {
+			padding: 0.65rem 0.7rem;
+		}
+
+		.activity-item__icon {
+			width: 2rem;
+			height: 2rem;
+		}
+
+		.activity-mobile-hero {
+			padding: 0.65rem 0.7rem;
 		}
 	}
 </style>
