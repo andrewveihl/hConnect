@@ -120,8 +120,15 @@
 	let channelDragCandidateType: Chan['type'] | null = null;
 	let channelDragPointerId: number | null = null;
 	let channelDragStartY = 0;
+	let channelDragStartX = 0;
+	let channelDragCurrentY = 0; // Tracks current position during long-press
+	let channelDragCurrentX = 0; // Tracks current position during long-press
 	let channelDragMoved = false;
+	let channelLongPressTimer: number | null = null;
+	let channelDragArmed = false; // True after long-press completes
 	const CHANNEL_DRAG_THRESHOLD_PX = 6;
+	const CHANNEL_LONG_PRESS_MS = 500; // Long-press duration for mobile
+	const CHANNEL_LONG_PRESS_MOVE_THRESHOLD_PX = 10; // Max movement during long-press
 	const channelRowRefs = new Map<string, HTMLElement>();
 	let suppressChannelClick = false;
 	let serverIcon: string | null = $state(null);
@@ -571,6 +578,10 @@
 	}
 
 	function resetDragState() {
+		if (channelLongPressTimer !== null) {
+			clearTimeout(channelLongPressTimer);
+			channelLongPressTimer = null;
+		}
 		draggingChannelId = null;
 		draggingChannelType = null;
 		dragOverChannelId = null;
@@ -579,7 +590,11 @@
 		channelDragCandidateType = null;
 		channelDragPointerId = null;
 		channelDragStartY = 0;
+		channelDragStartX = 0;
+		channelDragCurrentY = 0;
+		channelDragCurrentX = 0;
 		channelDragMoved = false;
+		channelDragArmed = false;
 		suppressChannelClick = false;
 	}
 
@@ -608,11 +623,59 @@
 		if (!canManageChannels && !canReorderPersonal) return;
 		orderError = null;
 		suppressChannelClick = false;
-		channelDragCandidateId = id;
-		channelDragCandidateType = type;
 		channelDragPointerId = event.pointerId;
 		channelDragStartY = event.clientY;
+		channelDragStartX = event.clientX;
 		channelDragMoved = false;
+
+		// Clear any existing timer
+		if (channelLongPressTimer !== null) {
+			clearTimeout(channelLongPressTimer);
+		}
+
+		const isTouchEvent = event.pointerType === 'touch';
+
+		if (isTouchEvent) {
+			// Mobile: Require long-press before allowing drag
+			channelDragArmed = false;
+
+			// Store the initial position for long-press cancellation check
+			const startY = event.clientY;
+			const startX = event.clientX;
+
+			// Start long-press timer
+			channelLongPressTimer = window.setTimeout(() => {
+				channelLongPressTimer = null;
+
+				// Long-press completed - arm the drag and trigger haptic feedback
+				channelDragArmed = true;
+				channelDragCandidateId = id;
+				channelDragCandidateType = type;
+
+				// Set up reorder mode immediately so drag can start
+				if (!ensureWorkingOrder(type)) {
+					// Permission check failed
+					resetDragState();
+					resetReorderState();
+					return;
+				}
+
+				// Reset drag start position to CURRENT position (where finger is now)
+				// This ensures user gets a fresh start for dragging from their current finger position
+				channelDragStartY = channelDragCurrentY || startY;
+				channelDragStartX = channelDragCurrentX || startX;
+
+				// Haptic feedback (vibration)
+				if ('vibrate' in navigator) {
+					navigator.vibrate(50); // 50ms vibration
+				}
+			}, CHANNEL_LONG_PRESS_MS);
+		} else {
+			// Desktop: Immediate drag activation (old behavior)
+			channelDragArmed = true;
+			channelDragCandidateId = id;
+			channelDragCandidateType = type;
+		}
 	}
 
 	function updateChannelOrderFromPointer(clientY: number, sourceId: string, type: Chan['type']) {
@@ -646,11 +709,34 @@
 	}
 
 	function handleChannelPointerMove(event: PointerEvent) {
-		if (reorderMode === 'none' && !channelDragCandidateId) return;
-		if (savingOrder) return;
 		if (channelDragPointerId !== event.pointerId) return;
-		const delta = Math.abs(event.clientY - channelDragStartY);
-		if (!draggingChannelId && channelDragCandidateId && delta >= CHANNEL_DRAG_THRESHOLD_PX) {
+		if (savingOrder) return;
+
+		const deltaY = Math.abs(event.clientY - channelDragStartY);
+		const deltaX = Math.abs(event.clientX - channelDragStartX);
+		const totalDelta = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+		// If long-press timer is still running, track current position and check if user moved too far
+		if (channelLongPressTimer !== null) {
+			// Track current position for use when long-press completes
+			channelDragCurrentY = event.clientY;
+			channelDragCurrentX = event.clientX;
+
+			if (totalDelta > CHANNEL_LONG_PRESS_MOVE_THRESHOLD_PX) {
+				// User moved too much during long-press - cancel it (likely scrolling)
+				resetDragState();
+				resetReorderState();
+			}
+			// Don't start drag yet - wait for long-press to complete
+			return;
+		}
+
+		// If drag not armed (long-press didn't complete), don't allow drag
+		if (!channelDragArmed) return;
+
+		if (reorderMode === 'none' && !channelDragCandidateId) return;
+
+		if (!draggingChannelId && channelDragCandidateId && deltaY >= CHANNEL_DRAG_THRESHOLD_PX) {
 			if (
 				!ensureWorkingOrder(
 					channelDragCandidateType ?? channelTypeById(channelDragCandidateId) ?? 'text'
