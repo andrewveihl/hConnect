@@ -583,6 +583,11 @@
 		suppressChannelClick = false;
 	}
 
+	function resetReorderState() {
+		reorderMode = 'none';
+		workingOrder = [];
+	}
+
 	function ensureWorkingOrder(type: Chan['type']): boolean {
 		if (reorderMode !== 'none' && workingOrder.length) return true;
 		if (canManageChannels) {
@@ -652,6 +657,7 @@
 				)
 			) {
 				resetDragState();
+				resetReorderState(); // Reset reorder state when permission check fails
 				return;
 			}
 			draggingChannelId = channelDragCandidateId;
@@ -667,20 +673,28 @@
 	}
 
 	async function handleChannelPointerUp(event: PointerEvent) {
-		if (channelDragPointerId !== event.pointerId) return;
+		// Check if this was our pointer
+		const wasOurPointer = channelDragPointerId === event.pointerId;
+		const hadDraggingChannel = draggingChannelId;
+		const hadDragMoved = channelDragMoved;
+
+		// Reset pointer tracking state immediately (but not reorder state yet)
 		channelDragPointerId = null;
 		channelDragCandidateId = null;
 		channelDragCandidateType = null;
 		dragOverChannelId = null;
 		dragOverAfter = false;
-		if (draggingChannelId && channelDragMoved) {
-			event.preventDefault();
-			await saveReorder();
+
+		// If not our pointer or not dragging, clean up completely and exit
+		if (!wasOurPointer || !hadDraggingChannel || !hadDragMoved) {
+			resetDragState();
+			resetReorderState();
+			return;
 		}
-		draggingChannelId = null;
-		draggingChannelType = null;
-		suppressChannelClick = false;
-		channelDragMoved = false;
+
+		// Save the reorder (saveReorder() will reset state in its finally block)
+		event.preventDefault();
+		await saveReorder();
 	}
 
 	function watchServerMeta(server: string) {
@@ -1678,6 +1692,8 @@
 	onpointermove={handleChannelPointerMove}
 	onpointerup={handleChannelPointerUp}
 	onpointercancel={handleChannelPointerUp}
+	onblur={() => { resetDragState(); resetReorderState(); }}
+	onvisibilitychange={() => { resetDragState(); resetReorderState(); }}
 />
 
 <style>

@@ -265,6 +265,8 @@
 	const THUMBNAIL_INTERVAL_MS = 2500; // Capture thumbnail every 2.5 seconds
 	const THUMBNAIL_QUALITY = 0.55; // JPEG quality
 	const THUMBNAIL_MAX_SIZE = 140; // Max width/height in pixels
+	let streamIdSyncInterval: ReturnType<typeof setInterval> | null = null;
+	const STREAM_ID_SYNC_INTERVAL_MS = 10000; // Sync streamId every 10 seconds
 	let voiceActivityUnsub: (() => void) | null = null;
 	let visibilityUnsub: (() => void) | null = null;
 	interface Props {
@@ -4948,12 +4950,23 @@
 			}
 		};
 
-		if (extra.joinedAt) {
+		// Immediate write for initial join or media state changes (hasVideo, hasAudio, screenSharing, streamId)
+		const isMediaStateChange =
+			extra.joinedAt ||
+			(lastPresencePayload && (
+				lastPresencePayload.hasVideo !== payload.hasVideo ||
+				lastPresencePayload.hasAudio !== payload.hasAudio ||
+				lastPresencePayload.screenSharing !== payload.screenSharing ||
+				lastPresencePayload.streamId !== payload.streamId
+			));
+
+		if (isMediaStateChange) {
 			lastPresencePayload = comparable;
 			await performWrite();
 			return;
 		}
 
+		// Debounce non-critical updates (speaking indicator, etc.)
 		if (presenceDebounce) {
 			clearTimeout(presenceDebounce);
 		}
@@ -5520,6 +5533,7 @@
 			emitVoiceActivity('joined');
 			playSound('call-join');
 			startInactivityHeartbeat();
+			startStreamIdSync(); // Start periodic streamId validation
 			console.log('[JOIN] joinChannel complete', { joinRole, isOfferer });
 			voiceDebug('joinChannel ready', { joinRole, isOfferer });
 
@@ -5857,6 +5871,7 @@
 		stopInactivityHeartbeat();
 		stopCallTimer();
 		stopThumbnailPublishing();
+		stopStreamIdSync(); // Stop periodic streamId validation
 		lastPresencePayload = null;
 		lastParticipantsSnapshot = null;
 		if (presenceDebounce) {
@@ -6901,6 +6916,43 @@
 		}
 	}
 
+	function startStreamIdSync() {
+		stopStreamIdSync();
+		// Sync immediately, then on interval
+		syncStreamIdToFirestore();
+		streamIdSyncInterval = setInterval(syncStreamIdToFirestore, STREAM_ID_SYNC_INTERVAL_MS);
+	}
+
+	function stopStreamIdSync() {
+		if (streamIdSyncInterval) {
+			clearInterval(streamIdSyncInterval);
+			streamIdSyncInterval = null;
+		}
+	}
+
+	function syncStreamIdToFirestore() {
+		if (!isJoined || !localStream || !participantDocRef) return;
+
+		const currentStreamId = localStream.id;
+
+		// Check if Firestore streamId matches current stream
+		getDoc(participantDocRef).then(doc => {
+			if (doc.exists()) {
+				const firestoreStreamId = doc.data()?.streamId;
+				if (firestoreStreamId !== currentStreamId) {
+					voiceDebug('StreamId mismatch detected, syncing to Firestore', {
+						firestore: firestoreStreamId,
+						current: currentStreamId
+					});
+					// Update presence to sync the new streamId
+					updateParticipantPresence().catch(() => {});
+				}
+			}
+		}).catch(err => {
+			voiceDebug('Failed to check streamId sync', err);
+		});
+	}
+
 	function handleFullscreenChange() {
 		if (typeof document === 'undefined') return;
 		if (!document.fullscreenElement) {
@@ -7192,7 +7244,10 @@
 			if (tiles.some((tile) => !tile.isSelf && !tile.stream) && remoteStreams.size) {
 				const availableStreams = Array.from(remoteStreams.entries());
 				for (const tile of tiles) {
-					if (tile.isSelf || tile.stream || (!tile.hasAudio && !tile.hasVideo)) continue;
+					// Skip self or tiles that already have a stream
+					if (tile.isSelf || tile.stream) continue;
+
+					// Try to match based on expected media type
 					const preferVideo = tile.hasVideo;
 					const matchesVideo = (stream: MediaStream) => streamHasLiveVideo(stream);
 					const matchesAudio = (stream: MediaStream) =>
@@ -7204,11 +7259,22 @@
 							return preferVideo ? matchesVideo(stream) : matchesAudio(stream);
 						}) ?? null;
 
+					// If no video match found but video was preferred, try audio
 					if (!fallbackEntry && preferVideo) {
 						fallbackEntry =
 							availableStreams.find(([id, stream]) => {
 								if (usedStreamIds.has(id)) return false;
 								return matchesAudio(stream);
+							}) ?? null;
+					}
+
+					// If still no match and hasAudio/hasVideo are both false, try any available stream
+					// This handles the case where Firestore state is stale but WebRTC tracks exist
+					if (!fallbackEntry && !tile.hasAudio && !tile.hasVideo) {
+						fallbackEntry =
+							availableStreams.find(([id, stream]) => {
+								if (usedStreamIds.has(id)) return false;
+								return matchesVideo(stream) || matchesAudio(stream);
 							}) ?? null;
 					}
 
