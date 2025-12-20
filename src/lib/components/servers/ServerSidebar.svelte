@@ -2030,10 +2030,22 @@
 		cursor: grabbing !important;
 	}
 
+	/* Disable pointer events on button when armed for drag */
+	.channel-row--armed .channel-row__button,
+	.channel-row--armed .channel-row__button * {
+		pointer-events: none !important;
+	}
+
 	.channel-row--dragging {
 		opacity: 0.5;
 		transform: scale(1.03);
 		transition: opacity 0.2s ease;
+	}
+
+	/* Disable pointer events on button during drag so finger can move anywhere */
+	.channel-row--dragging .channel-row__button,
+	.channel-row--dragging .channel-row__button * {
+		pointer-events: none !important;
 	}
 
 	.channel-row--drop-before::before,
