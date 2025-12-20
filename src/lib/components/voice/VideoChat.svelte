@@ -4930,11 +4930,20 @@
 		const comparable: Record<string, unknown> = { ...payload };
 		delete comparable.updatedAt;
 
+		// Check for media state changes BEFORE updating lastPresencePayload
+		const isMediaStateChange =
+			extra.joinedAt ||
+			(lastPresencePayload && (
+				lastPresencePayload.hasVideo !== payload.hasVideo ||
+				lastPresencePayload.hasAudio !== payload.hasAudio ||
+				lastPresencePayload.screenSharing !== payload.screenSharing ||
+				lastPresencePayload.streamId !== payload.streamId
+			));
+
 		if (!extra.joinedAt) {
 			if (lastPresencePayload && shallowEqual(lastPresencePayload, comparable)) {
 				return;
 			}
-			lastPresencePayload = comparable;
 		}
 
 		const performWrite = async () => {
@@ -4950,21 +4959,15 @@
 			}
 		};
 
-		// Immediate write for initial join or media state changes (hasVideo, hasAudio, screenSharing, streamId)
-		const isMediaStateChange =
-			extra.joinedAt ||
-			(lastPresencePayload && (
-				lastPresencePayload.hasVideo !== payload.hasVideo ||
-				lastPresencePayload.hasAudio !== payload.hasAudio ||
-				lastPresencePayload.screenSharing !== payload.screenSharing ||
-				lastPresencePayload.streamId !== payload.streamId
-			));
-
+		// Immediate write for media state changes
 		if (isMediaStateChange) {
 			lastPresencePayload = comparable;
 			await performWrite();
 			return;
 		}
+
+		// If nothing changed, return early (already handled by shallowEqual above)
+		lastPresencePayload = comparable;
 
 		// Debounce non-critical updates (speaking indicator, etc.)
 		if (presenceDebounce) {
@@ -5533,7 +5536,8 @@
 			emitVoiceActivity('joined');
 			playSound('call-join');
 			startInactivityHeartbeat();
-			startStreamIdSync(); // Start periodic streamId validation
+			// TEMPORARILY DISABLED - Testing if this causes Members pane flickering
+			// startStreamIdSync(); // Start periodic streamId validation
 			console.log('[JOIN] joinChannel complete', { joinRole, isOfferer });
 			voiceDebug('joinChannel ready', { joinRole, isOfferer });
 
