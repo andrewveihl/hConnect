@@ -125,7 +125,7 @@
 	let channelDragCurrentX = 0; // Tracks current position during long-press
 	let channelDragMoved = false;
 	let channelLongPressTimer: number | null = null;
-	let channelDragArmed = false; // True after long-press completes
+	let channelDragArmed = false; // NOT reactive - updated via draggingChannelId instead
 	const CHANNEL_DRAG_THRESHOLD_PX = 6;
 	const CHANNEL_LONG_PRESS_MS = 500; // Long-press duration for mobile
 	const CHANNEL_LONG_PRESS_MOVE_THRESHOLD_PX = 10; // Max movement during long-press
@@ -660,15 +660,19 @@
 					return;
 				}
 
-				// Reset drag start position to CURRENT position (where finger is now)
-				// This ensures user gets a fresh start for dragging from their current finger position
-				channelDragStartY = channelDragCurrentY || startY;
-				channelDragStartX = channelDragCurrentX || startX;
-
 				// Haptic feedback (vibration)
 				if ('vibrate' in navigator) {
 					navigator.vibrate(50); // 50ms vibration
 				}
+
+				// Immediately start dragging mode - no need to wait for more movement
+				draggingChannelId = id;
+				draggingChannelType = type;
+
+				// Set drag start position to CURRENT position (where finger is now)
+				// Any further movement will reorder channels
+				channelDragStartY = channelDragCurrentY || startY;
+				channelDragStartX = channelDragCurrentX || startX;
 			}, CHANNEL_LONG_PRESS_MS);
 		} else {
 			// Desktop: Immediate drag activation (old behavior)
@@ -731,11 +735,10 @@
 			return;
 		}
 
-		// If drag not armed (long-press didn't complete), don't allow drag
+		// If drag not armed (long-press didn't complete on mobile), don't allow drag
 		if (!channelDragArmed) return;
 
-		if (reorderMode === 'none' && !channelDragCandidateId) return;
-
+		// For desktop, check if we need to start dragging after threshold is crossed
 		if (!draggingChannelId && channelDragCandidateId && deltaY >= CHANNEL_DRAG_THRESHOLD_PX) {
 			if (
 				!ensureWorkingOrder(
@@ -2011,8 +2014,26 @@
 		background: transparent;
 	}
 
+	.channel-row--armed {
+		transform: scale(1.06) translateY(-2px);
+		transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+		z-index: 100;
+		position: relative;
+	}
+
+	.channel-row--armed .channel-row__button {
+		background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+		box-shadow:
+			0 6px 16px color-mix(in srgb, var(--color-accent) 40%, transparent),
+			0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
+		cursor: grabbing !important;
+	}
+
 	.channel-row--dragging {
-		opacity: 0.45;
+		opacity: 0.5;
+		transform: scale(1.03);
+		transition: opacity 0.2s ease;
 	}
 
 	.channel-row--drop-before::before,
