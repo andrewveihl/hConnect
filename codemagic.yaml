@@ -1,0 +1,64 @@
+workflows:
+  ios-capacitor:
+    name: iOS Capacitor Build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    
+    environment:
+      groups:
+        - ios_credentials  # Add your signing credentials in Codemagic UI
+      vars:
+        BUNDLE_ID: "app.hconnect.ios"
+      node: 20
+      xcode: latest
+      cocoapods: default
+    
+    scripts:
+      - name: Install dependencies
+        script: |
+          npm install -g pnpm
+          pnpm install
+          
+      - name: Build web app
+        script: |
+          pnpm build
+          
+      - name: Sync Capacitor
+        script: |
+          npx cap sync ios
+          
+      - name: Install CocoaPods
+        script: |
+          cd ios/App && pod install
+          
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE
+          keychain add-certificates
+          xcode-project use-profiles
+          
+      - name: Build iOS app
+        script: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -archivePath build/App.xcarchive \
+            archive
+            
+      - name: Export IPA
+        script: |
+          cd ios/App
+          xcodebuild -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist exportOptions.plist
+    
+    artifacts:
+      - ios/App/build/export/*.ipa
+      
+    publishing:
+      app_store_connect:
+        auth: integration  # Set up in Codemagic UI
+        submit_to_testflight: true
