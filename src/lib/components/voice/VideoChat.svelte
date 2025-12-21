@@ -1895,6 +1895,8 @@
 	let callDuration = $state('00:00');
 	let callTimer: ReturnType<typeof setInterval> | null = null;
 	const RECONNECT_DELAY_MS = 3500;
+	const ANSWER_WAIT_TIMEOUT_MS = 6500;
+	let answerWaitTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastPresencePayload: Record<string, unknown> | null = null;
 	let presenceDebounce: ReturnType<typeof setTimeout> | null = null;
 	let lastParticipantsSnapshot: ParticipantState[] | null = $state(null);
@@ -2010,14 +2012,23 @@
 	let lastPresenceSignature: string | null = null;
 
 	onMount(() => {
-		const onUnload = () => {
+		let unloadGuarded = false;
+		const forceHangUp = (reason: string) => {
+			if (unloadGuarded) return;
+			unloadGuarded = true;
+			if (!isJoined && !isConnecting) return;
+			voiceDebug('Lifecycle hang up', { reason });
 			voiceSession.leave();
-			hangUp({ cleanupDoc: true }).catch(() => {});
+			hangUp({ cleanupDoc: true, resetError: false }).catch(() => {});
 		};
-		const onPageHide = () => {
-			voiceSession.leave();
-			hangUp({ cleanupDoc: true }).catch(() => {});
+		const onUnload = () => forceHangUp('beforeunload');
+		const onPageHide = () => forceHangUp('pagehide');
+		const onVisibilityHide = () => {
+			if (document.visibilityState !== 'hidden') return;
+			if (!isTouchDevice) return;
+			forceHangUp('visibilitychange');
 		};
+		const onFreeze = () => forceHangUp('freeze');
 		const onPointerDown = (event: PointerEvent) => {
 			trackUserActivity('pointer');
 			if (!(event.target instanceof HTMLElement)) {
@@ -2104,6 +2115,7 @@
 			window.addEventListener('beforeunload', onUnload);
 			window.addEventListener('pagehide', onPageHide);
 			window.addEventListener('unload', onPageHide);
+			window.addEventListener('freeze', onFreeze);
 			window.addEventListener('pointerdown', onPointerDown);
 			window.addEventListener('keydown', onKeyDown);
 			window.addEventListener('resize', onResize);
@@ -2115,9 +2127,14 @@
 			};
 			if (typeof document !== 'undefined') {
 				document.addEventListener('visibilitychange', onVisibilityChange);
+				document.addEventListener('visibilitychange', onVisibilityHide);
 				document.addEventListener('fullscreenchange', onFullscreenChange);
-				visibilityUnsub = () =>
+				document.addEventListener('freeze', onFreeze);
+				visibilityUnsub = () => {
 					document.removeEventListener('visibilitychange', onVisibilityChange);
+					document.removeEventListener('visibilitychange', onVisibilityHide);
+					document.removeEventListener('freeze', onFreeze);
+				};
 			}
 			compactMediaQuery = window.matchMedia('(max-width: 780px)');
 			handleCompactChange = (event: MediaQueryListEvent) => {
@@ -2131,6 +2148,7 @@
 				window.removeEventListener('beforeunload', onUnload);
 				window.removeEventListener('pagehide', onPageHide);
 				window.removeEventListener('unload', onPageHide);
+				window.removeEventListener('freeze', onFreeze);
 				window.removeEventListener('pointerdown', onPointerDown);
 				window.removeEventListener('keydown', onKeyDown);
 				window.removeEventListener('resize', onResize);
@@ -2561,7 +2579,10 @@
 		
 		const tile = participantMedia.find((t) => t.uid === uid);
 		if (!tile || !tile.stream) {
-			voiceDebug('refreshAudioForParticipant: no stream found for participant', { uid });
+			voiceDebug('refreshAudioForParticipant: no stream found for participant', {
+				uid,
+				remoteStreamIds: Array.from(remoteStreams.keys())
+			});
 			return;
 		}
 		
@@ -2620,6 +2641,46 @@
 				registerAudioRef(uid, null);
 			}
 		};
+	}
+
+	function logCallSyncSnapshot(label: string, extra: Record<string, unknown> = {}) {
+		const localAudio =
+			localStream?.getAudioTracks().map((track) => describeTrack(track)).filter(Boolean) ?? [];
+		const localVideo =
+			localStream?.getVideoTracks().map((track) => describeTrack(track)).filter(Boolean) ?? [];
+		const trxSummary =
+			typeof pc?.getTransceivers === 'function'
+				? pc.getTransceivers().map((trx) => {
+						const anyTrx = trx as any;
+						return {
+							mid: trx.mid ?? null,
+							dir: trx.direction ?? null,
+							currentDir: anyTrx?.currentDirection ?? null,
+							sender: describeTrack(trx.sender?.track ?? null),
+							receiver: describeTrack(trx.receiver?.track ?? null)
+						};
+					})
+				: [];
+
+		voiceDebug('Call sync snapshot', {
+			label,
+			offerRevision: lastOfferRevision,
+			answerRevision: lastAnswerRevision,
+			signalingState: pc?.signalingState ?? null,
+			connectionState: pc?.connectionState ?? null,
+			iceState: pc?.iceConnectionState ?? null,
+			remoteStreams: Array.from(remoteStreams.keys()),
+			participantMedia: participants.map((p) => ({
+				uid: p.uid,
+				hasAudio: p.hasAudio,
+				hasVideo: p.hasVideo,
+				streamId: p.streamId,
+				status: p.status ?? 'active'
+			})),
+			localTracks: { audio: localAudio, video: localVideo },
+			transceivers: trxSummary,
+			...extra
+		});
 	}
 
 	async function unlockAudioPlayback() {
@@ -2777,6 +2838,10 @@
 				signalingState: pc.signalingState,
 				remoteStreams: remoteStreams.size,
 				participants: participants.length
+			});
+			logCallSyncSnapshot('media-recovery-start', {
+				reason,
+				attempt: mediaRecoveryAttempts
 			});
 			scheduleRenegotiation(`media-recovery:${reason}`, { requireOfferer: true });
 		}, MEDIA_RECOVERY_DELAY_MS);
@@ -3713,6 +3778,7 @@
 				const sdp = data.sdp ?? '';
 				const type = (data.type ?? 'answer') as RTCSdpType;
 				latestAnswerDescription = { revision, sdp, type };
+				markAnswerReceived();
 				voiceDebug('answer description updated', { revision, type, length: sdp?.length ?? 0 });
 			},
 			(err) => {
@@ -3802,6 +3868,7 @@
 					type,
 					sdp: fallback.sdp
 				};
+				markAnswerReceived();
 				return { type, sdp: fallback.sdp };
 			}
 			return null;
@@ -3824,6 +3891,7 @@
 			if (fallback?.sdp) {
 				const type = fallback.type ?? 'answer';
 				latestAnswerDescription = { revision, type, sdp: fallback.sdp };
+				markAnswerReceived();
 				return { type, sdp: fallback.sdp };
 			}
 			return null;
@@ -3832,6 +3900,7 @@
 			if (fallback?.sdp) {
 				const type = fallback.type ?? 'answer';
 				latestAnswerDescription = { revision, type, sdp: fallback.sdp };
+				markAnswerReceived();
 				return { type, sdp: fallback.sdp };
 			}
 			return null;
@@ -3851,11 +3920,13 @@
 					type: fallback.type ?? 'answer',
 					sdp: fallback.sdp
 				};
+				markAnswerReceived();
 				return { type: fallback.type ?? 'answer', sdp: fallback.sdp };
 			}
 			return null;
 		}
 		latestAnswerDescription = { revision: actualRevision, type, sdp };
+		markAnswerReceived();
 		return { type, sdp };
 	}
 
@@ -4446,6 +4517,11 @@
 					// Start health monitoring once connected
 					startConnectionHealthCheck();
 					scheduleMediaRecovery('connected');
+					if (remoteStreams.size === 0 && participants.length > 1) {
+						logCallSyncSnapshot('connected-no-remote-media', {
+							participantsCount: participants.length
+						});
+					}
 					
 					// Re-verify track states and refresh media after connection established
 					setTimeout(() => {
@@ -4497,6 +4573,7 @@
 			if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
 				clearReconnectTimer();
 				clearIceRestartTimer();
+				clearAnswerWaitTimer();
 				consecutiveIceErrors = 0;
 				lastIceErrorTimestamp = 0;
 				lastSuccessfulConnectionTime = Date.now();
@@ -5505,6 +5582,7 @@
 							type: answerDescription.type,
 							sdp: answerDescription.sdp ?? ''
 						};
+						markAnswerReceived();
 						lastAnswerRevision = answerRevision;
 						voiceDebug('Published initial answer', { answerRevision });
 						joinRole = 'answerer';
@@ -5540,6 +5618,9 @@
 			// startStreamIdSync(); // Start periodic streamId validation
 			console.log('[JOIN] joinChannel complete', { joinRole, isOfferer });
 			voiceDebug('joinChannel ready', { joinRole, isOfferer });
+			if (isOfferer) {
+				scheduleAnswerWaitGuard();
+			}
 
 			// Start thumbnail publishing if camera is on
 			if (!isCameraOff) {
@@ -5689,6 +5770,7 @@
 												sdp: answerDescription.sdp ?? ''
 											};
 
+											markAnswerReceived();
 											lastAnswerRevision = answerRevision;
 
 											voiceDebug('Published fallback answer', { revision: answerRevision });
@@ -5733,6 +5815,10 @@
 
 							if (revision !== lastOfferRevision) {
 								voiceDebug('Ignoring remote answer (revision mismatch)', {
+									revision,
+									activeRevision: lastOfferRevision
+								});
+								logCallSyncSnapshot('answer-revision-mismatch', {
 									revision,
 									activeRevision: lastOfferRevision
 								});
@@ -5793,6 +5879,10 @@
 										lastAnswerRevision = revision;
 
 										voiceDebug('Remote answer applied', { revision });
+										logCallSyncSnapshot('answer-applied', {
+											revision,
+											offerRevision: lastOfferRevision
+										});
 
 										flushPendingRemoteIceCandidates(connection);
 										
@@ -5868,6 +5958,7 @@
 		}
 
 		clearReconnectTimer();
+		clearAnswerWaitTimer();
 		clearIceRestartTimer();
 		resetMediaRecovery('hangup');
 		stopConnectionHealthCheck();
@@ -6620,6 +6711,50 @@
 		} finally {
 			copyInFlight = false;
 		}
+	}
+
+	function clearAnswerWaitTimer() {
+		if (answerWaitTimer) {
+			clearTimeout(answerWaitTimer);
+			answerWaitTimer = null;
+		}
+	}
+
+	function scheduleAnswerWaitGuard() {
+		clearAnswerWaitTimer();
+		if (!isOfferer) return;
+		answerWaitTimer = setTimeout(() => {
+			answerWaitTimer = null;
+			const connectionState = pc?.connectionState ?? null;
+			const iceState = pc?.iceConnectionState ?? null;
+			const hasAnswer = latestAnswerDescription != null;
+			const hasRemote = remoteStreams.size > 0;
+			if (
+				connectionState === 'connected' ||
+				iceState === 'connected' ||
+				hasAnswer ||
+				hasRemote
+			) {
+				return;
+			}
+			voiceDebug('Answer wait timeout - forcing reconnect', {
+				connectionState,
+				iceState,
+				hasAnswer,
+				remoteStreamCount: remoteStreams.size
+			});
+			logCallSyncSnapshot('answer-wait-timeout', {
+				connectionState,
+				iceState,
+				hasAnswer
+			});
+			statusMessage = 'Rejoining to recover audio...';
+			scheduleReconnect('Rejoining call...', true);
+		}, ANSWER_WAIT_TIMEOUT_MS);
+	}
+
+	function markAnswerReceived() {
+		clearAnswerWaitTimer();
 	}
 
 	function handleResetIceStrategy() {

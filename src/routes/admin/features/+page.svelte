@@ -1,14 +1,22 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import { browser } from '$app/environment';
-	import { FEATURE_FLAGS, type FeatureFlagKey, type FeatureFlagMeta } from '$lib/admin/types';
-	import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
-	import { showAdminToast } from '$lib/admin/stores/toast';
-	import type { ServerInvite } from '$lib/firestore/invites';
-	import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
-	import { triggerTestPush } from '$lib/notify/testPush';
-	import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
-	import { isMobileViewport } from '$lib/stores/viewport';
+import { FEATURE_FLAGS, type FeatureFlagKey, type FeatureFlagMeta } from '$lib/admin/types';
+import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
+import { showAdminToast } from '$lib/admin/stores/toast';
+import type { ServerInvite } from '$lib/firestore/invites';
+import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
+import { triggerTestPush } from '$lib/notify/testPush';
+import { getDb } from '$lib/firebase';
+import {
+	addVoiceDebugAssignee,
+	removeVoiceDebugAssignee,
+	setVoiceDebugEnabled,
+	voiceDebugConfigStore
+} from '$lib/admin/voiceDebug';
+import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+import { isMobileViewport } from '$lib/stores/viewport';
+import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt } from 'firebase/firestore';
 
 	interface Props {
 		data: PageData;
@@ -26,6 +34,29 @@
 		'hconnect:voice:debug',
 		'hconnect:voice:debug.quickstats'
 	];
+	const voiceDebugConfig = voiceDebugConfigStore();
+	const voiceDebugEnabled = $derived(Boolean($voiceDebugConfig?.enabled));
+	const voiceDebugAssignees = $derived(
+		Object.values($voiceDebugConfig?.assignedEmails ?? {}).sort((a, b) =>
+			(a.email ?? '').localeCompare(b.email ?? '')
+		)
+	);
+	type VoiceDebugSearchResult = {
+		uid: string;
+		email: string | null;
+		displayName: string | null;
+		photoURL: string | null;
+	};
+	let voiceDebugEmail = $state('');
+	let voiceDebugNote = $state('');
+	let voiceDebugBusy = $state(false);
+	let voiceDebugToggleBusy = $state(false);
+	let removingVoiceEmail = $state<string | null>(null);
+	let voiceDebugQuery = $state('');
+	let voiceDebugResults = $state<VoiceDebugSearchResult[]>([]);
+	let voiceDebugSelected: VoiceDebugSearchResult | null = $state(null);
+	let voiceDebugSearching = $state(false);
+	let voiceDebugSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	let previewInvite: ServerInvite | null = $state(null);
 	let testPushLoading = $state(false);
 
@@ -306,6 +337,154 @@
 			showAdminToast({ type: 'error', message: 'Unable to clear voice debug state.' });
 		}
 	};
+
+	const selectVoiceDebugUser = (user: VoiceDebugSearchResult) => {
+		voiceDebugSelected = user;
+		voiceDebugEmail = user.email ?? '';
+		voiceDebugQuery = user.displayName ?? user.email ?? user.uid;
+	};
+
+	const searchVoiceDebugUsers = async (term: string) => {
+		const value = term.trim();
+		if (!value) {
+			voiceDebugResults = [];
+			voiceDebugSelected = null;
+			return;
+		}
+		if (!browser) {
+			showAdminToast({
+				type: 'info',
+				message: 'Voice user search is available in-browser only.'
+			});
+			return;
+		}
+		voiceDebugSearching = true;
+		try {
+			const db = getDb();
+			const results: VoiceDebugSearchResult[] = [];
+			const seen = new Set<string>();
+			const limitCount = 12;
+			const lower = value.toLowerCase();
+
+			const runQuery = async (field: 'email' | 'displayName') => {
+				const snap = await getDocs(
+					query(
+						collection(db, 'profiles'),
+						orderBy(field),
+						startAt(field === 'email' ? lower : value),
+						endAt((field === 'email' ? lower : value) + '\uf8ff'),
+						fbLimit(limitCount)
+					)
+				);
+				snap.forEach((docSnap) => {
+					if (seen.has(docSnap.id)) return;
+					const data = docSnap.data() as Record<string, any>;
+					results.push({
+						uid: docSnap.id,
+						email: data.email ?? null,
+						displayName: data.displayName ?? data.name ?? null,
+						photoURL: data.photoURL ?? data.cachedPhotoURL ?? data.authPhotoURL ?? null
+					});
+					seen.add(docSnap.id);
+				});
+			};
+
+			await runQuery('email');
+			if (results.length < 8) {
+				await runQuery('displayName');
+			}
+			voiceDebugResults = results;
+		} catch (err) {
+			console.error('searchVoiceDebugUsers failed', err);
+			showAdminToast({
+				type: 'error',
+				message: 'Unable to search users. Try an exact email.'
+			});
+		} finally {
+			voiceDebugSearching = false;
+		}
+	};
+
+	const handleVoiceDebugQueryInput = (value: string) => {
+		voiceDebugQuery = value;
+		voiceDebugSelected = null;
+		if (voiceDebugSearchTimer) clearTimeout(voiceDebugSearchTimer);
+		if (!value.trim()) {
+			voiceDebugResults = [];
+			return;
+		}
+		voiceDebugSearchTimer = setTimeout(() => {
+			void searchVoiceDebugUsers(value);
+		}, 220);
+	};
+
+	const toggleVoiceDebugBubble = async () => {
+		const next = !voiceDebugEnabled;
+		voiceDebugToggleBusy = true;
+		try {
+			await setVoiceDebugEnabled(next, data.user);
+			showAdminToast({
+				type: 'success',
+				message: `Voice debug bubble ${next ? 'enabled' : 'disabled'}.`
+			});
+		} catch (err) {
+			console.error('toggleVoiceDebugBubble failed', err);
+			showAdminToast({
+				type: 'error',
+				message: (err as Error)?.message ?? 'Unable to update voice debug bubble.'
+			});
+		} finally {
+			voiceDebugToggleBusy = false;
+		}
+	};
+
+	const addVoiceDebugUser = async () => {
+		const targetEmail = (voiceDebugSelected?.email ?? voiceDebugEmail ?? voiceDebugQuery).trim();
+		if (!targetEmail) {
+			showAdminToast({ type: 'warning', message: 'Search or enter a user email to assign the bubble.' });
+			return;
+		}
+		voiceDebugBusy = true;
+		try {
+			await addVoiceDebugAssignee(targetEmail, data.user, voiceDebugNote || null);
+			showAdminToast({
+				type: 'success',
+				message: `Assigned voice debug bubble to ${targetEmail}.`
+			});
+			voiceDebugEmail = '';
+			voiceDebugNote = '';
+			voiceDebugQuery = '';
+			voiceDebugSelected = null;
+			voiceDebugResults = [];
+		} catch (err) {
+			console.error('addVoiceDebugUser failed', err);
+			showAdminToast({
+				type: 'error',
+				message: (err as Error)?.message ?? 'Unable to assign bubble.'
+			});
+		} finally {
+			voiceDebugBusy = false;
+		}
+	};
+
+	const removeVoiceDebugUser = async (email: string) => {
+		removingVoiceEmail = email;
+		try {
+			await removeVoiceDebugAssignee(email, data.user);
+			showAdminToast({
+				type: 'success',
+				message: `Removed ${email} from voice debug bubble access.`
+			});
+		} catch (err) {
+			console.error('removeVoiceDebugUser failed', err);
+			showAdminToast({
+				type: 'error',
+				message: (err as Error)?.message ?? 'Unable to remove assignment.'
+			});
+		} finally {
+			removingVoiceEmail = null;
+		}
+	};
 </script>
 
 <section class="features-page">
@@ -538,6 +717,141 @@
 								Reset debug
 							</button>
 						</div>
+					</article>
+
+					<!-- Voice debug bubble assignment -->
+					<article class="test-card voice-debug-card">
+						<div class="test-icon voice">
+							<i class="bx bx-podcast"></i>
+						</div>
+						<div class="test-content">
+							<h4>Voice debug bubble</h4>
+							<p>
+								Show the floating voice debug bubble for specific users to surface call stats and
+								copyable diagnostics.
+							</p>
+							<div class="voice-debug-status">
+								<span class:enabled={voiceDebugEnabled}>
+									{voiceDebugEnabled ? 'Enabled' : 'Disabled'}
+								</span>
+								<button
+									type="button"
+									class="btn outline"
+									onclick={toggleVoiceDebugBubble}
+									disabled={voiceDebugToggleBusy}
+								>
+									{#if voiceDebugToggleBusy}
+										<i class="bx bx-loader-alt bx-spin"></i>
+										Saving...
+									{:else}
+										<i class="bx {voiceDebugEnabled ? 'bx-toggle-right' : 'bx-toggle-left'}"></i>
+										{voiceDebugEnabled ? 'Disable bubble' : 'Enable bubble'}
+									{/if}
+								</button>
+							</div>
+						</div>
+
+						<div class="voice-debug-form">
+							<label for="voice-debug-search">Assign bubble to user</label>
+							<div class="voice-debug-search">
+								<i class="bx bx-search"></i>
+								<input
+									id="voice-debug-search"
+									type="search"
+									placeholder="Search by name or email"
+									bind:value={voiceDebugQuery}
+									oninput={(event) => handleVoiceDebugQueryInput(event.currentTarget.value)}
+								/>
+								{#if voiceDebugSearching}
+									<i class="bx bx-loader-alt bx-spin loader"></i>
+								{/if}
+							</div>
+							{#if voiceDebugResults.length}
+								<ul class="voice-debug-results">
+									{#each voiceDebugResults as user (user.uid)}
+										<li
+											class:selected={voiceDebugSelected?.uid === user.uid}
+											onclick={() => selectVoiceDebugUser(user)}
+										>
+											<div class="pill-avatar">
+												<i class="bx bx-user"></i>
+											</div>
+											<div class="result-meta">
+												<p>{user.displayName ?? user.email ?? 'User'}</p>
+												<small>{user.email ?? 'No email'} · {user.uid}</small>
+											</div>
+											{#if voiceDebugSelected?.uid === user.uid}
+												<i class="bx bx-check"></i>
+											{/if}
+										</li>
+									{/each}
+								</ul>
+							{/if}
+							<div class="voice-debug-inputs">
+								<input
+									id="voice-debug-email"
+									type="email"
+									placeholder="Or enter email manually"
+									bind:value={voiceDebugEmail}
+								/>
+								<input
+									id="voice-debug-note"
+									type="text"
+									placeholder="Optional note (region, device, etc.)"
+									bind:value={voiceDebugNote}
+								/>
+								<button
+									type="button"
+									class="btn primary"
+									onclick={addVoiceDebugUser}
+									disabled={voiceDebugBusy}
+								>
+									{#if voiceDebugBusy}
+										<i class="bx bx-loader-alt bx-spin"></i>
+										Adding...
+									{:else}
+										<i class="bx bx-plus"></i>
+										Assign
+									{/if}
+								</button>
+							</div>
+							<p class="helper-text">
+								Search for anyone who has logged in (profiles collection) or paste an email directly,
+								then assign the bubble so it auto-opens for them.
+							</p>
+						</div>
+
+						{#if voiceDebugAssignees.length}
+							<div class="voice-debug-list">
+								<p class="list-title">Assigned users</p>
+								<ul>
+									{#each voiceDebugAssignees as assignee (assignee.email)}
+										<li>
+											<div>
+												<p>{assignee.email}</p>
+												{#if assignee.note}
+													<small>{assignee.note}</small>
+												{/if}
+											</div>
+											<button
+												type="button"
+												class="remove-btn"
+												onclick={() => removeVoiceDebugUser(assignee.email)}
+												disabled={removingVoiceEmail === assignee.email}
+											>
+												{#if removingVoiceEmail === assignee.email}
+													<i class="bx bx-loader-alt bx-spin"></i>
+												{:else}
+													Remove
+												{/if}
+											</button>
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{:else}
+							<p class="helper-text">No users assigned yet.</p>
+						{/if}
 					</article>
 				</div>
 			</div>
@@ -1109,5 +1423,217 @@
 	.btn.outline:hover {
 		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
 		border-color: color-mix(in srgb, var(--color-text-primary) 30%, transparent);
+	}
+
+	/* Voice debug bubble */
+	.voice-debug-card {
+		gap: 1rem;
+	}
+
+	.voice-debug-status {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+		margin-top: 0.25rem;
+	}
+
+	.voice-debug-status span {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.3rem 0.6rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+		color: var(--color-text-secondary);
+		font-size: 0.75rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.voice-debug-status span.enabled {
+		background: color-mix(in srgb, #10b981 16%, transparent);
+		color: #059669;
+	}
+
+	.voice-debug-form {
+		display: grid;
+		gap: 0.45rem;
+	}
+
+	.voice-debug-form label {
+		font-size: 0.78rem;
+		color: var(--color-text-secondary);
+		font-weight: 600;
+	}
+
+	.voice-debug-inputs {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.5rem;
+		align-items: center;
+	}
+
+	.voice-debug-inputs input {
+		width: 100%;
+		height: 38px;
+		border-radius: 10px;
+		border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+		background: color-mix(in srgb, var(--surface-panel) 90%, transparent);
+		color: var(--color-text-primary);
+		padding: 0 0.65rem;
+		font-size: 0.85rem;
+	}
+
+	.voice-debug-list {
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.voice-debug-search {
+		position: relative;
+		display: flex;
+		align-items: center;
+		border: 1px solid color-mix(in srgb, var(--color-text-primary) 12%, transparent);
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--surface-panel) 90%, transparent);
+		padding: 0 0.65rem;
+		gap: 0.45rem;
+	}
+
+	.voice-debug-search i {
+		color: var(--color-text-secondary);
+	}
+
+	.voice-debug-search .loader {
+		margin-left: auto;
+	}
+
+	.voice-debug-search input {
+		flex: 1;
+		height: 40px;
+		background: transparent;
+		border: none;
+		color: var(--color-text-primary);
+		font-size: 0.9rem;
+		outline: none;
+	}
+
+	.voice-debug-results {
+		list-style: none;
+		margin: 0.4rem 0 0;
+		padding: 0;
+		display: grid;
+		gap: 0.35rem;
+		max-height: 180px;
+		overflow-y: auto;
+	}
+
+	.voice-debug-results li {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.55rem 0.65rem;
+		border-radius: 10px;
+		border: 1px solid color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+		background: color-mix(in srgb, var(--surface-panel) 85%, transparent);
+		cursor: pointer;
+		transition: border-color 120ms ease, background 120ms ease;
+	}
+
+	.voice-debug-results li.selected {
+		border-color: color-mix(in srgb, var(--accent-primary) 35%, transparent);
+		background: color-mix(in srgb, var(--accent-primary) 10%, var(--surface-panel));
+	}
+
+	.voice-debug-results li:hover {
+		border-color: color-mix(in srgb, var(--accent-primary) 25%, transparent);
+	}
+
+	.pill-avatar {
+		width: 32px;
+		height: 32px;
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--color-text-primary) 12%, transparent);
+		display: grid;
+		place-items: center;
+		color: var(--color-text-primary);
+	}
+
+	.result-meta p {
+		margin: 0;
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.result-meta small {
+		display: block;
+		color: var(--color-text-secondary);
+	}
+
+	.voice-debug-list .list-title {
+		margin: 0;
+		font-size: 0.8rem;
+		font-weight: 700;
+		color: var(--color-text-primary);
+	}
+
+	.voice-debug-list ul {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.voice-debug-list li {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.6rem 0.75rem;
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--surface-panel) 80%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+	}
+
+	.voice-debug-list p {
+		margin: 0;
+		color: var(--color-text-primary);
+		font-weight: 600;
+	}
+
+	.voice-debug-list small {
+		display: block;
+		margin-top: 0.1rem;
+		color: var(--color-text-secondary);
+	}
+
+	.voice-debug-list .remove-btn {
+		border: none;
+		background: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+		color: var(--color-text-primary);
+		padding: 0.35rem 0.75rem;
+		border-radius: 8px;
+		cursor: pointer;
+		font-weight: 600;
+		transition: background 0.2s ease, color 0.2s ease;
+	}
+
+	.voice-debug-list .remove-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, #ef4444 20%, transparent);
+		color: #fca5a5;
+	}
+
+	.voice-debug-list .remove-btn:disabled {
+		opacity: 0.65;
+		cursor: not-allowed;
+	}
+
+	.helper-text {
+		margin: 0;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
 	}
 </style>

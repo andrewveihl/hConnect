@@ -340,7 +340,7 @@
 						<li class="invite-item">
 							<div class="invite-item__info">
 								{#if inv.serverIcon}
-									<img alt="" src={inv.serverIcon} class="invite-item__icon" />
+									<img alt="" src={inv.serverIcon} class="invite-item__icon" loading="lazy" />
 								{:else}
 									<div class="invite-item__icon invite-item__icon--placeholder">
 										{serverInitial(inv)}

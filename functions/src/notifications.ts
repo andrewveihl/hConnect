@@ -144,8 +144,11 @@ const mentionLabel = (type: MentionType, roleName?: string | null) => {
     case 'here':
       return '[here]';
     case 'everyone':
-    default:
       return '[everyone]';
+    case 'channel':
+      return '';  // No prefix for regular channel messages
+    default:
+      return '';
   }
 };
 
@@ -457,20 +460,85 @@ function respectsSettings(
   }
 }
 
+function getFilterReason(
+  settings: NotificationSettings,
+  candidate: CandidateTarget,
+  opts: { serverId?: string; channelId?: string; threadId?: string | null; isDM?: boolean }
+): string | null {
+  if (settings.globalMute) return 'globalMute';
+  if (settings.doNotDisturbUntil && settings.doNotDisturbUntil > Date.now()) return 'doNotDisturb';
+  if (opts.isDM) {
+    if (settings.muteDMs) return 'muteDMs';
+    return null;
+  }
+  if (!opts.serverId || !opts.channelId) return 'missing_server_or_channel';
+  if (settings.muteServerIds?.includes(opts.serverId)) return 'server_muted';
+  if (settings.perChannelMute?.[perChannelKey(opts.serverId, opts.channelId)]) return 'channel_muted';
+  if (opts.threadId && settings.allowThreadPush === false) return 'threads_disabled';
+
+  switch (candidate.mentionType) {
+    case 'direct':
+      if (settings.allowMentionPush === false) return 'mentions_disabled';
+      return null;
+    case 'role':
+      if (!settings.allowMentionPush) return 'mentions_disabled';
+      if (settings.allowRoleMentionPush === false) return 'role_mentions_disabled';
+      if (candidate.roleId && settings.perRoleMute?.[perRoleKey(opts.serverId!, candidate.roleId)]) {
+        return 'role_muted';
+      }
+      return null;
+    case 'here':
+      if (!settings.allowMentionPush) return 'mentions_disabled';
+      if (settings.allowHereMentionPush === false) return 'here_mentions_disabled';
+      return null;
+    case 'everyone':
+      if (!settings.allowMentionPush) return 'mentions_disabled';
+      if (settings.allowEveryoneMentionPush === false) return 'everyone_mentions_disabled';
+      return null;
+    case 'channel':
+      if (settings.allowChannelMessagePush === false) return 'channel_push_disabled';
+      return null;
+    default:
+      return null;
+  }
+}
+
 async function filterCandidates(
   candidates: CandidateTarget[],
   opts: { serverId?: string; channelId?: string; threadId?: string | null; isDM?: boolean }
 ): Promise<DeliveryTarget[]> {
   const deliveries: DeliveryTarget[] = [];
+  const filtered: { uid: string; reason: string }[] = [];
+  
   for (const candidate of candidates) {
     const settings = await fetchNotificationSettings(candidate.uid);
-    if (!respectsSettings(settings, candidate, opts)) continue;
+    const filterReason = getFilterReason(settings, candidate, opts);
+    if (filterReason) {
+      filtered.push({ uid: candidate.uid, reason: filterReason });
+      continue;
+    }
+    if (!respectsSettings(settings, candidate, opts)) {
+      filtered.push({ uid: candidate.uid, reason: 'unknown_settings_filter' });
+      continue;
+    }
     if (candidate.requirePresence) {
       const presence = await fetchPresence(candidate.uid);
-      if (!presenceAllowsHere(presence)) continue;
+      if (!presenceAllowsHere(presence)) {
+        filtered.push({ uid: candidate.uid, reason: 'presence_not_active' });
+        continue;
+      }
     }
     deliveries.push({ ...candidate, settings });
   }
+
+  if (filtered.length > 0) {
+    logger.info('[notify] Candidates filtered out', {
+      filteredCount: filtered.length,
+      filtered: filtered.slice(0, 10), // Limit to first 10 for log size
+      opts
+    });
+  }
+
   return deliveries;
 }
 
@@ -577,7 +645,14 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
   });
   const tasks: Promise<unknown>[] = [];
   if (fcmTokens.length) {
-    // Send to FCM tokens with notification payload for mobile devices
+    // Generate a unique collapse key for grouping similar notifications
+    const collapseKey = payload.data?.dmId 
+      ? `dm-${payload.data.dmId}`
+      : payload.data?.channelId 
+        ? `channel-${payload.data.serverId}-${payload.data.channelId}`
+        : 'hconnect-message';
+
+    // Send to FCM tokens with enhanced iOS/APNS configuration
     const fcmTask = messaging.sendEachForMulticast({
       tokens: fcmTokens,
       data: payload.data,
@@ -585,16 +660,43 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
         title: payload.title,
         body: payload.body
       },
+      // Android-specific configuration
+      android: {
+        priority: 'high',
+        notification: {
+          title: payload.title,
+          body: payload.body,
+          priority: 'high',
+          defaultSound: true,
+          channelId: 'hconnect_messages'
+        },
+        collapseKey
+      },
+      // Web push configuration
       webpush: {
+        headers: {
+          Urgency: 'high',
+          TTL: '86400'  // 24 hours
+        },
         fcmOptions: {
           link: payload.data.targetUrl
         },
         notification: {
           title: payload.title,
-          body: payload.body
+          body: payload.body,
+          requireInteraction: true,
+          renotify: true,
+          tag: collapseKey
         }
       },
+      // iOS/APNS configuration - CRITICAL for reliability
       apns: {
+        headers: {
+          'apns-priority': '10',  // Maximum priority - wakes device immediately
+          'apns-push-type': 'alert',  // Alert type ensures notification is displayed
+          'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400),  // 24 hour expiration
+          'apns-collapse-id': collapseKey.slice(0, 64)  // iOS collapse ID max 64 chars
+        },
         payload: {
           aps: {
             alert: {
@@ -602,8 +704,18 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
               body: payload.body
             },
             sound: 'default',
-            badge: 1
-          }
+            badge: 1,
+            'mutable-content': 1,  // Allows notification service extension to modify
+            'content-available': 1,  // Enables background processing
+            'interruption-level': 'time-sensitive'  // iOS 15+ - breaks through Focus mode
+          },
+          // Custom data for the app
+          messageId: payload.data?.messageId ?? null,
+          targetUrl: payload.data?.targetUrl ?? null,
+          mentionType: payload.data?.mentionType ?? null,
+          serverId: payload.data?.serverId ?? null,
+          channelId: payload.data?.channelId ?? null,
+          dmId: payload.data?.dmId ?? null
         }
       }
     }).then((response) => {
@@ -639,10 +751,21 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
         count: safariSubscriptions.length
       });
     } else {
+      // Enhanced Safari/iOS Web Push payload
       const safariPayload = JSON.stringify({
         notification: {
           title: payload.title,
-          body: payload.body
+          body: payload.body,
+          icon: '/Logo_transparent.png',
+          badge: '/Logo_transparent.png',
+          tag: payload.data?.dmId 
+            ? `dm-${payload.data.dmId}`
+            : payload.data?.channelId 
+              ? `channel-${payload.data.serverId}-${payload.data.channelId}`
+              : 'hconnect-message',
+          renotify: true,
+          requireInteraction: true,
+          silent: false
         },
         data: payload.data
       });
@@ -680,6 +803,14 @@ async function sendSafariWebPush(subscription: WebPushSubscription, body: string
     logger.info('[push] Sending Safari web push', {
       endpointPreview: subscription.endpoint.slice(0, 50) + '...'
     });
+    
+    // Use high urgency and long TTL for iOS reliability
+    const pushOptions = {
+      TTL: 86400, // 24 hours
+      urgency: 'high' as const,
+      topic: 'app.hconnect.messages' // Optional: helps with iOS grouping
+    };
+    
     await webpush.sendNotification(
       {
         endpoint: subscription.endpoint,
@@ -689,7 +820,8 @@ async function sendSafariWebPush(subscription: WebPushSubscription, body: string
         },
         expirationTime: subscription.expirationTime ?? null
       },
-      body
+      body,
+      pushOptions
     );
     logger.info('[push] Safari web push sent successfully', {
       endpointPreview: subscription.endpoint.slice(-20)
@@ -719,15 +851,31 @@ async function deliverToRecipients(
   const authorName = pickAuthorName(message);
   const preview = previewFromMessage(message);
 
+  logger.info('[notify] deliverToRecipients', {
+    recipientCount: recipients.length,
+    messageId: context.messageId,
+    serverId: context.serverId ?? null,
+    channelId: context.channelId ?? null,
+    dmId: context.dmId ?? null
+  });
+
   await Promise.all(
     recipients.map(async (recipient) => {
       const deviceTokens = await fetchDeviceTokens(recipient.uid);
+      
+      logger.info('[notify] Processing recipient', {
+        uid: recipient.uid,
+        mentionType: recipient.mentionType,
+        deviceTokenCount: deviceTokens.length,
+        messageId: context.messageId
+      });
+
       const title = context.dmId
         ? describeDmTitle(context.dm ?? null, authorName)
         : describeTitle(context);
       const roleName = recipient.roleId ? roleNames[recipient.roleId] : null;
       const label = mentionLabel(recipient.mentionType, roleName);
-      const body = `${label} ${authorName}: ${preview}`;
+      const body = label ? `${label} ${authorName}: ${preview}` : `${authorName}: ${preview}`;
       const activityId = await writeActivityEntry(
         recipient.uid,
         recipient,
@@ -737,7 +885,14 @@ async function deliverToRecipients(
         body,
         deviceTokens.length > 0
       );
-      if (!deviceTokens.length) return;
+      if (!deviceTokens.length) {
+        logger.info('[notify] No device tokens for recipient', {
+          uid: recipient.uid,
+          mentionType: recipient.mentionType,
+          messageId: context.messageId
+        });
+        return;
+      }
       const data: Record<string, string> = {
         title,
         body,
@@ -828,12 +983,22 @@ export async function handleServerMessage(event: ChannelMessageEvent) {
   const authorId = normalizeUid(message.authorId || message.uid);
   if (!authorId) return;
 
+  logger.info('[notify] handleServerMessage triggered', {
+    serverId,
+    channelId,
+    messageId,
+    authorId
+  });
+
   const [serverSnap, channelSnap] = await Promise.all([
     db.doc(`servers/${serverId}`).get(),
     db.doc(`servers/${serverId}/channels/${channelId}`).get()
   ]);
   const channel = (channelSnap.data() as ChannelDoc | undefined) ?? null;
-  if (channel?.type === 'voice') return;
+  if (channel?.type === 'voice') {
+    logger.info('[notify] Skipping voice channel', { serverId, channelId });
+    return;
+  }
   const server = (serverSnap.data() as ServerDoc | undefined) ?? null;
 
   // Get channel access info for filtering members
@@ -850,7 +1015,19 @@ export async function handleServerMessage(event: ChannelMessageEvent) {
     channelAllowedRoleIds,
     defaultRoleId
   });
-  if (!candidates.length) return;
+
+  logger.info('[notify] Candidates computed', {
+    serverId,
+    channelId,
+    messageId,
+    candidateCount: candidates.length,
+    mentionTypes: candidates.map(c => c.mentionType)
+  });
+
+  if (!candidates.length) {
+    logger.info('[notify] No candidates found', { serverId, channelId, messageId });
+    return;
+  }
   const roleIds = candidates
     .map((candidate) => candidate.roleId)
     .filter((value): value is string => Boolean(value));
@@ -861,7 +1038,20 @@ export async function handleServerMessage(event: ChannelMessageEvent) {
     threadId: null,
     isDM: false
   });
-  if (!recipients.length) return;
+
+  logger.info('[notify] Recipients after filtering', {
+    serverId,
+    channelId,
+    messageId,
+    candidateCount: candidates.length,
+    recipientCount: recipients.length,
+    recipientTypes: recipients.map(r => r.mentionType)
+  });
+
+  if (!recipients.length) {
+    logger.info('[notify] No recipients after filtering', { serverId, channelId, messageId });
+    return;
+  }
 
   await deliverToRecipients(recipients, message, {
     serverId,
@@ -881,6 +1071,14 @@ export async function handleThreadMessage(event: ThreadMessageEvent) {
   if (!message) return;
   const authorId = normalizeUid(message.authorId || message.uid);
   if (!authorId) return;
+
+  logger.info('[notify] handleThreadMessage triggered', {
+    serverId,
+    channelId,
+    threadId,
+    messageId,
+    authorId
+  });
 
   const [serverSnap, channelSnap, threadSnap] = await Promise.all([
     db.doc(`servers/${serverId}`).get(),
@@ -906,7 +1104,19 @@ export async function handleThreadMessage(event: ThreadMessageEvent) {
     channelAllowedRoleIds,
     defaultRoleId
   });
-  if (!candidates.length) return;
+
+  logger.info('[notify] Thread candidates computed', {
+    serverId,
+    channelId,
+    threadId,
+    messageId,
+    candidateCount: candidates.length
+  });
+
+  if (!candidates.length) {
+    logger.info('[notify] No thread candidates found', { serverId, channelId, threadId, messageId });
+    return;
+  }
   const roleIds = candidates
     .map((candidate) => candidate.roleId)
     .filter((value): value is string => Boolean(value));
@@ -917,7 +1127,20 @@ export async function handleThreadMessage(event: ThreadMessageEvent) {
     threadId,
     isDM: false
   });
-  if (!recipients.length) return;
+
+  logger.info('[notify] Thread recipients after filtering', {
+    serverId,
+    channelId,
+    threadId,
+    messageId,
+    candidateCount: candidates.length,
+    recipientCount: recipients.length
+  });
+
+  if (!recipients.length) {
+    logger.info('[notify] No thread recipients after filtering', { serverId, channelId, threadId, messageId });
+    return;
+  }
 
   await deliverToRecipients(recipients, message, {
     serverId,
@@ -1034,11 +1257,34 @@ export async function handleDmMessage(event: DmMessageEvent) {
 
   // Proceed with notification delivery
   const candidates = computeDmCandidates(dm, authorId);
-  if (!candidates.length) return;
+  
+  logger.info('[notify] handleDmMessage candidates', {
+    dmId,
+    messageId,
+    authorId,
+    candidateCount: candidates.length,
+    candidateUids: candidates.map(c => c.uid)
+  });
+
+  if (!candidates.length) {
+    logger.info('[notify] No DM candidates found', { dmId, messageId });
+    return;
+  }
   const recipients = await filterCandidates(candidates, {
     isDM: true
   });
-  if (!recipients.length) return;
+
+  logger.info('[notify] handleDmMessage recipients after filtering', {
+    dmId,
+    messageId,
+    candidateCount: candidates.length,
+    recipientCount: recipients.length
+  });
+
+  if (!recipients.length) {
+    logger.info('[notify] No DM recipients after filtering', { dmId, messageId });
+    return;
+  }
 
   await deliverToRecipients(recipients, message, {
     dmId,

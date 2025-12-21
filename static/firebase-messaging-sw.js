@@ -6,7 +6,7 @@
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/12.0.0/firebase-messaging-compat.js');
 
-const SW_VERSION = '2025-EDGE-DEBUG-02';
+const SW_VERSION = '2025-IOS-PUSH-FIX-01';
 const DEFAULT_ICON = '/Logo_transparent.png';
 const CLIENT_MESSAGE = 'HCONNECT_PUSH_DEEP_LINK';
 const PUSH_CHANNEL_NAME = 'hconnect-push-events';
@@ -43,17 +43,86 @@ const swWarn = (message, payload) => {
 };
 
 self.addEventListener('install', (event) => {
+  swInfo('Service worker installing', { version: SW_VERSION });
   event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-  swInfo('Service worker activated', { version: SW_VERSION });
+  swInfo('Service worker activating', { version: SW_VERSION });
+  event.waitUntil(
+    Promise.all([
+      self.clients.claim(),
+      // Clear old caches if any
+      caches.keys().then((names) => {
+        return Promise.all(
+          names.filter((name) => name.startsWith('hconnect-')).map((name) => caches.delete(name))
+        );
+      })
+    ]).then(() => {
+      swInfo('Service worker activated and claimed clients', { version: SW_VERSION });
+    })
+  );
+});
+
+// Fetch handler - important for iOS PWA to keep service worker alive
+self.addEventListener('fetch', (event) => {
+  // Only handle navigation requests and push-related URLs
+  const url = new URL(event.request.url);
+  
+  // Don't intercept cross-origin requests or Firebase SDK
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.includes('firebasejs')) return;
+  if (url.pathname.includes('__')) return; // Firebase hosting internal paths
+  
+  // For navigation requests, let the browser handle it but ensure SW stays active
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(() => {
+        // Fallback for offline - return cached app shell if available
+        return caches.match('/') || new Response('Offline', { status: 503 });
+      })
+    );
+    return;
+  }
+  
+  // Let other requests pass through normally
 });
 
 let initialized = false;
 let messagingInstance = null;
 swInfo('Service worker bootstrapped', { version: SW_VERSION });
+
+// Set up Firebase Messaging background message handler early
+// This ensures FCM can deliver messages even before full init
+async function setupBackgroundMessageHandler() {
+  try {
+    await ensureFirebaseInit();
+    if (!initialized) return;
+    if (messagingInstance) return;
+    
+    messagingInstance = firebase.messaging();
+    
+    // Handle background messages from FCM
+    messagingInstance.onBackgroundMessage((payload) => {
+      swInfo('onBackgroundMessage received', {
+        hasNotification: Boolean(payload?.notification),
+        hasData: Boolean(payload?.data),
+        title: payload?.notification?.title ?? payload?.data?.title ?? null
+      });
+      
+      // If FCM already showed a notification (notification key present), we may skip
+      // But on iOS, we want to ensure it shows, so always call showNotification
+      return showNotification(payload);
+    });
+    
+    swInfo('onBackgroundMessage handler registered');
+  } catch (err) {
+    swWarn('setupBackgroundMessageHandler failed', { error: err?.message ?? String(err) });
+  }
+}
+
+// Call setup immediately and also on push events
+Promise.resolve().then(() => setupBackgroundMessageHandler()).catch(() => {});
 
 async function ensureFirebaseInit() {
   if (initialized) return;
@@ -295,26 +364,71 @@ async function showNotification(payload) {
   const body = data.body || '';
   const mentionType = data.mentionType || 'direct';
   const icon = data.icon || DEFAULT_ICON;
-  const badgeCount = Number(data.badge ?? 0);
+  const badgeCount = Number(data.badge ?? 1);
   const tagParts = [data.serverId, data.channelId, data.threadId, data.dmId, mentionType].filter(Boolean);
   const tag = tagParts.length ? tagParts.join(':') : `hconnect:${mentionType}`;
+  
+  // iOS PWA specific: always renotify and require interaction for reliability
+  const isIOSPWA = /iPhone|iPad|iPod/.test(self.navigator?.userAgent || '') ||
+    (self.navigator?.standalone === true);
+  
   const options = {
     body,
     icon,
-    badge: data.badgeIcon || undefined,
+    badge: data.badgeIcon || DEFAULT_ICON,
     image: data.image || undefined,
     tag,
-    renotify: mentionType === 'direct' || mentionType === 'dm',
-    requireInteraction: mentionType !== 'ambient',
+    // For iOS: always renotify to ensure the notification shows even with same tag
+    renotify: true,
+    // Require interaction on all platforms for better visibility
+    requireInteraction: true,
+    // Silent false to ensure sound plays
+    silent: false,
     data,
-    actions: Array.isArray(data.actions) ? data.actions : undefined
+    actions: Array.isArray(data.actions) ? data.actions : undefined,
+    // iOS 16.4+ supports vibration pattern
+    vibrate: [200, 100, 200]
   };
-  await self.registration.showNotification(title, options);
-  if (typeof self.registration.setAppBadge === 'function' && badgeCount >= 0) {
+  
+  swInfo('showNotification options', {
+    title,
+    bodyLength: body.length,
+    tag,
+    mentionType,
+    isIOSPWA,
+    hasIcon: Boolean(options.icon)
+  });
+  
+  try {
+    await self.registration.showNotification(title, options);
+    swInfo('showNotification succeeded', { tag, title });
+  } catch (err) {
+    swWarn('showNotification error', { error: err?.message ?? String(err) });
+    // Fallback: try with minimal options for iOS compatibility
+    try {
+      await self.registration.showNotification(title, {
+        body,
+        icon: DEFAULT_ICON,
+        tag,
+        data
+      });
+      swInfo('showNotification fallback succeeded');
+    } catch (fallbackErr) {
+      swWarn('showNotification fallback also failed', { 
+        error: fallbackErr?.message ?? String(fallbackErr) 
+      });
+      throw fallbackErr;
+    }
+  }
+  
+  // Set app badge for iOS
+  if (typeof self.registration.setAppBadge === 'function') {
     Promise.resolve()
       .then(() => self.registration.setAppBadge(badgeCount || 1))
-      .catch(() => {});
+      .then(() => swInfo('App badge set', { count: badgeCount }))
+      .catch((err) => swWarn('setAppBadge failed', { error: err?.message ?? String(err) }));
   }
+  
   return {
     title,
     body,
@@ -626,16 +740,51 @@ self.addEventListener('pushsubscriptionchange', (event) => {
 });
 
 self.addEventListener('notificationclick', (event) => {
+  swInfo('notificationclick event', {
+    tag: event.notification?.tag ?? null,
+    action: event.action ?? null,
+    hasData: Boolean(event.notification?.data)
+  });
+  
   event.notification.close();
   const data = event.notification?.data || {};
+  
   event.waitUntil(
     (async () => {
-      await focusOrOpenClient(data);
+      try {
+        await focusOrOpenClient(data);
+        swInfo('notificationclick handled, focused/opened client');
+      } catch (err) {
+        swWarn('notificationclick focusOrOpenClient failed', { 
+          error: err?.message ?? String(err) 
+        });
+        // Fallback: try to open the URL directly
+        const targetUrl = data.targetUrl || deriveDeepLink(data);
+        try {
+          await self.clients.openWindow(targetUrl);
+          swInfo('notificationclick fallback openWindow succeeded');
+        } catch (e) {
+          swWarn('notificationclick fallback openWindow failed', {
+            error: e?.message ?? String(e)
+          });
+        }
+      }
+      
+      // Clear badge
       if (typeof self.registration.clearAppBadge === 'function') {
         try {
           await self.registration.clearAppBadge();
-        } catch {}
+          swInfo('App badge cleared');
+        } catch (err) {
+          swWarn('clearAppBadge failed', { error: err?.message ?? String(err) });
+        }
       }
     })()
   );
 });
+
+// Handle notification close (user dismissed)
+self.addEventListener('notificationclose', (event) => {
+  swInfo('notificationclose event', {
+    tag: event.notification?.tag ?? null
+  });
