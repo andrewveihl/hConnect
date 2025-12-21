@@ -37,8 +37,19 @@ export interface Channel {
 	topic?: string;
 	type: 'text' | 'voice';
 	category?: string;
+	categoryId?: string | null;
 	createdAt: number;
 	updatedAt: number;
+}
+
+export interface ChannelCategory {
+	id: string;
+	serverId: string;
+	name: string;
+	position: number;
+	collapsed?: boolean;
+	createdAt: number;
+	updatedAt?: number;
 }
 
 export interface Message {

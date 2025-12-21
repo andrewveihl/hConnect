@@ -842,12 +842,12 @@ body {
   --color-card: #1d2c4d;
 
   --color-border-subtle: rgba(235, 84, 119, 0.22);
-  --color-border-strong: rgba(107, 219, 183, 0.32);
+  --color-border-strong: rgba(235, 84, 119, 0.34);
 
   --color-text-primary: #f7f9ff;
   --color-text-secondary: rgba(247, 249, 255, 0.82);
   --color-text-tertiary: rgba(247, 249, 255, 0.58);
-  --color-text-inverse: #120408;
+  --color-text-inverse: #0b1020;
 
   --color-scroll-thumb: rgba(235, 84, 119, 0.32);
   --color-scroll-track: rgba(5, 8, 18, 0.5);
@@ -1170,9 +1170,7 @@ body {
   --mobile-dock-height: 0px;
 }
 
-.has-mobile-dock--suppressed .mobile-dock {
-  display: none !important;
-}
+/* Move suppression display rule inside mobile media query so it only affects mobile */
 
 @media (max-width: 767px) {
   /* iPhone / Mobile breakpoint - Maximize screen real estate */
@@ -1274,14 +1272,25 @@ body {
     padding-bottom: 0;
   }
 
-  /* Ensure nav bar is visible and accessible */
+  /* Ensure nav bar is visible and accessible on mobile */
   .mobile-dock {
     display: block !important;
     visibility: visible !important;
   }
 
   .mobile-dock.md\:hidden {
-    display: block;
+    display: block !important;
+  }
+
+  /* Hide dock when keyboard is open (typing in chat input) */
+  .has-mobile-dock--suppressed .mobile-dock {
+    display: none !important;
+    visibility: hidden !important;
+  }
+
+  /* Mobile: keep self bubbles readable on dark theme */
+  :root[data-theme='dark'] {
+    --chat-bubble-self-text: #ffffff;
   }
 }
 

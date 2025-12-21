@@ -4,6 +4,12 @@
 	import { createEventDispatcher, onMount } from 'svelte';
 	import { EMOJI, searchEmoji, type EmojiEntry } from '$lib/data/emoji';
 
+	type PickerVariant = 'default' | 'compact';
+
+	interface Props {
+		variant?: PickerVariant;
+	}
+
 	const dispatch = createEventDispatcher();
 	const MAX_RESULTS = 160;
 
@@ -129,6 +135,8 @@
 		}
 	];
 
+	let { variant = 'default' }: Props = $props();
+
 	let search = $state('');
 	let filtered: EmojiEntry[] = $state(EMOJI);
 	let visible: EmojiEntry[] = $state(EMOJI.slice(0, MAX_RESULTS));
@@ -171,7 +179,12 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="emoji-panel" role="dialog" aria-label="Emoji picker">
+<div
+	class="emoji-panel"
+	class:emoji-panel--compact={variant === 'compact'}
+	role="dialog"
+	aria-label="Emoji picker"
+>
 	<div class="emoji-layout">
 		<div class="emoji-category-bar" aria-label="Emoji categories">
 			{#each CATEGORIES as category}
@@ -235,10 +248,11 @@
 
 <style>
 	.emoji-panel {
-		--emoji-cell-size: clamp(44px, 10vw, 54px);
-		width: min(420px, 80vw);
-		max-height: min(440px, 65vh);
+		width: 100%;
+		box-sizing: border-box;
+		--emoji-cell-size: clamp(40px, 9vw, 50px);
 		height: 100%;
+		max-height: 100%;
 		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
 		border-radius: 1rem;
 		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
@@ -248,27 +262,41 @@
 		flex-direction: column;
 	}
 
+	.emoji-panel--compact {
+		--emoji-cell-size: clamp(38px, 9vw, 48px);
+		width: 100%;
+		box-shadow: 0 16px 42px rgba(4, 8, 16, 0.28);
+	}
+
 	.emoji-layout {
-		display: flex;
-		gap: 0.65rem;
+		display: grid;
+		grid-template-columns: 70px 1fr;
+		gap: 0.6rem;
 		height: 100%;
 		min-height: 0;
+	}
+
+	.emoji-panel--compact .emoji-layout {
+		grid-template-columns: 60px 1fr;
 	}
 
 	.emoji-category-bar {
 		display: flex;
 		flex-direction: column;
+		align-items: center;
 		gap: 0.35rem;
-		padding: 0.35rem 0.25rem;
+		padding: 0.4rem 0.3rem;
 		border-right: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+		overflow-y: auto;
 	}
 
 	.emoji-category {
 		width: 2.4rem;
 		height: 2.4rem;
-		border-radius: var(--radius-md);
-		border: 1px solid transparent;
-		background: transparent;
+		border-radius: 0.8rem;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 92%, transparent);
 		color: inherit;
 		display: inline-flex;
 		align-items: center;
@@ -278,12 +306,14 @@
 		transition:
 			background 120ms ease,
 			border 120ms ease,
-			transform 120ms ease;
+			transform 120ms ease,
+			color 120ms ease;
 	}
 
 	.emoji-category.is-active {
-		border-color: color-mix(in srgb, var(--color-accent) 80%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 70%, transparent);
 		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+		color: var(--color-accent);
 	}
 
 	.emoji-category:not(.is-active):hover,
@@ -298,8 +328,8 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
-		padding-left: 0.25rem;
+		gap: 0.55rem;
+		padding: 0.6rem 0.55rem 0.6rem 0.25rem;
 		min-height: 0;
 	}
 
@@ -315,10 +345,43 @@
 		font-size: 1.15rem;
 	}
 
+	.emoji-header,
+	.emoji-search {
+		position: sticky;
+		top: 0;
+		background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+		z-index: 1;
+		padding-top: 0.1rem;
+	}
+
 	.emoji-close {
-		min-width: 2.4rem;
-		height: 2.4rem;
-		border-radius: var(--radius-pill);
+		min-width: 2.5rem;
+		height: 2.5rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
+		background: color-mix(in srgb, var(--color-panel-muted) 70%, transparent);
+		color: var(--color-text-primary);
+		display: grid;
+		place-items: center;
+		transition:
+			background 140ms ease,
+			border 140ms ease,
+			color 140ms ease,
+			transform 120ms ease;
+	}
+
+	.emoji-close:hover,
+	.emoji-close:focus-visible {
+		background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+		color: var(--color-text-primary);
+		outline: none;
+		transform: translateY(-1px);
+	}
+
+	.emoji-close i {
+		font-size: 1.15rem;
+		line-height: 1;
 	}
 
 	.emoji-search {
@@ -354,7 +417,7 @@
 		grid-template-columns: repeat(auto-fit, minmax(var(--emoji-cell-size), var(--emoji-cell-size)));
 		gap: 0.25rem;
 		overflow-y: auto;
-		padding: 0.2rem 0.35rem 0.1rem 0;
+		padding: 0.15rem 0.4rem 0.15rem 0;
 		scrollbar-width: none;
 		-ms-overflow-style: none;
 		flex: 1;

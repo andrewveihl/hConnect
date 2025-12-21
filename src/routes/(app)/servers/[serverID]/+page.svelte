@@ -69,7 +69,7 @@
 	import { looksLikeImage } from '$lib/utils/fileType';
 	import type { PendingUploadPreview } from '$lib/components/chat/types';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
-	import { openOverlay, closeOverlay } from '$lib/stores/mobileNav';
+	import { openOverlay, closeOverlay, mobileSwipeProgress } from '$lib/stores/mobileNav';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 
@@ -1077,6 +1077,7 @@
 
 	// listeners
 	let messagesUnsub: (() => void) | null = null;
+	let messagesSubscriptionVersion = 0; // Track subscription version to prevent stale updates
 	function clearMessagesUnsub() {
 		messagesUnsub?.();
 		messagesUnsub = null;
@@ -1123,6 +1124,8 @@
 	}
 
 	function resetChannelState() {
+		// Increment subscription version to invalidate any pending subscriptions
+		messagesSubscriptionVersion++;
 		clearMessagesUnsub();
 		clearPopoutMessagesUnsub();
 		cleanupPopoutProfileSubscriptions();
@@ -1264,6 +1267,10 @@
 			messagesLoadError = 'You do not have permission to view messages in this channel.';
 			return;
 		}
+		
+		// Increment subscription version to track this subscription
+		const subscriptionVersion = ++messagesSubscriptionVersion;
+		
 		if (memberEnsurePromise) {
 			try {
 				await memberEnsurePromise;
@@ -1273,6 +1280,10 @@
 		}
 		// Guard: if context changed while awaiting membership, abort
 		if (serverId !== currServerId || activeChannel?.id !== channelId) {
+			return;
+		}
+		// Guard: if a newer subscription was started, abort this one
+		if (subscriptionVersion !== messagesSubscriptionVersion) {
 			return;
 		}
 		const database = db();
@@ -1295,6 +1306,10 @@
 		messagesUnsub = onSnapshot(
 			q,
 			(snap) => {
+				// Guard: ignore updates from stale subscriptions
+				if (subscriptionVersion !== messagesSubscriptionVersion) {
+					return;
+				}
 				const nextMessages: any[] = [];
 				const seen = new Set<string>();
 
@@ -1334,6 +1349,10 @@
 				} catch {}
 			},
 			(error) => {
+				// Guard: ignore errors from stale subscriptions
+				if (subscriptionVersion !== messagesSubscriptionVersion) {
+					return;
+				}
 				console.error('Failed to load channel messages', error);
 				messagesLoadError =
 					(error as any)?.code === 'permission-denied'
@@ -1716,6 +1735,7 @@
 			// Voice channels do not stream messages; just toggle voice UI visibility.
 			showMembers = false;
 			desktopMembersVisible = false;
+			desktopMembersPreferred = false;
 			if (voiceState && voiceState.serverId === serverId && voiceState.channelId === next.id) {
 				voiceSession.setVisible(true);
 			} else if (voiceState) {
@@ -1959,25 +1979,15 @@
 		routerReady = true;
 	});
 
-	// Hide the mobile dock while a channel is open (list closed) to maximize chat space
-	$effect(() => {
-		if (!isMobile) {
-			releaseChannelDockSuppression();
-			return;
-		}
-		if (channelPanelShowing) {
-			releaseChannelDockSuppression();
-			return;
-		}
-		if (!dockClaimedForChannel) {
-			mobileDockSuppressed.claim();
-			dockClaimedForChannel = true;
-		}
+	// Reset mobile dock suppression when entering server page
+	// This ensures the dock is visible even if a previous page (like DMs) left it suppressed
+	onMount(() => {
+		mobileDockSuppressed.reset();
 	});
 
 	// Sync showChannels/showMembers with global overlay stack so mobile nav can hide/show properly
 	$effect(() => {
-		if (!isMobile || !routerReady) return;
+		if (!isMobile) return;
 		if (showChannels) {
 			openOverlay('channel-list');
 		} else {
@@ -1985,7 +1995,7 @@
 		}
 	});
 	$effect(() => {
-		if (!isMobile || !routerReady) return;
+		if (!isMobile) return;
 		if (showMembers) {
 			openOverlay('members-pane');
 		} else {
@@ -2758,6 +2768,11 @@
 					}
 				}
 				channelSwipeDelta = dx;
+				// Report swipe progress for smooth dock animation
+				if (channelSwipeMode === 'open' && channelSwipeWidth > 0) {
+					const progress = clamp(dx / channelSwipeWidth, 0, 1);
+					mobileSwipeProgress.set('channels', progress);
+				}
 			} else if (swipeTarget === 'members') {
 				if (!memberSwipeActive) {
 					memberSwipeActive = true;
@@ -2778,6 +2793,9 @@
 		};
 
 		const onTouchEnd = () => {
+			// Reset swipe progress first
+			mobileSwipeProgress.reset();
+			
 			if (swipeTarget === 'channels' && channelSwipeMode && channelSwipeWidth > 0) {
 				const traveled =
 					channelSwipeMode === 'close'
@@ -4582,11 +4600,8 @@
 			resetThreadState({ resetCache: true });
 		}
 	});
-	run(() => {
-		if (isMobile) {
-			closeFloatingThread();
-		}
-	});
+	// Note: We no longer auto-close floating threads on mobile
+	// Instead, they render fullscreen with the mobile-specific styles
 	run(() => {
 		const currentFloating = untrack(() => floatingThread);
 		if (!currentFloating?.thread) return;
@@ -5108,8 +5123,9 @@
 								showMembers = true;
 								showChannels = false;
 							} else if (!activeThread) {
-								desktopMembersPreferred = !desktopMembersPreferred;
-								desktopMembersVisible = desktopMembersWideEnough ? desktopMembersPreferred : false;
+								const nextVisible = !desktopMembersVisible;
+								desktopMembersPreferred = nextVisible;
+								desktopMembersVisible = desktopMembersWideEnough ? nextVisible : false;
 							}
 						}}
 						onOpenMessages={openChannelMessages}
@@ -5641,12 +5657,13 @@
 
 {#if floatingThreads.length > 0}
 	{#each floatingThreads as fThread (fThread.id)}
-		<div class="thread-popout-overlay" style="pointer-events: none;">
+		<div class="thread-popout-overlay" class:thread-popout-overlay--mobile={isMobile} style="pointer-events: none;">
 			<div
 				class="thread-popout-window"
-				style={`--thread-popout-x:${fThread.position.x}px; --thread-popout-y:${fThread.position.y}px; pointer-events: auto;`}
+				class:thread-popout-window--mobile={isMobile}
+				style={isMobile ? '' : `--thread-popout-x:${fThread.position.x}px; --thread-popout-y:${fThread.position.y}px; pointer-events: auto;`}
 			>
-				<div class="thread-popout-header" onpointerdown={(e) => handleFloatingHeaderPointerDown(fThread.id, e)}>
+				<div class="thread-popout-header" onpointerdown={(e) => !isMobile && handleFloatingHeaderPointerDown(fThread.id, e)}>
 					<div class="thread-popout-title">
 						<i class="bx bx-message-square-detail"></i>
 						<span
@@ -5656,15 +5673,17 @@
 						>
 					</div>
 					<div class="thread-popout-actions">
-						<button
-							type="button"
-							class="thread-popout-action"
-							aria-label="Open in new window"
-							title="Open in separate window"
-							onclick={() => openThreadInWindow(fThread.id)}
-						>
-							<i class="bx bx-link-external"></i>
-						</button>
+						{#if !isMobile}
+							<button
+								type="button"
+								class="thread-popout-action"
+								aria-label="Open in new window"
+								title="Open in separate window"
+								onclick={() => openThreadInWindow(fThread.id)}
+							>
+								<i class="bx bx-link-external"></i>
+							</button>
+						{/if}
 						<button
 							type="button"
 							class="thread-popout-close"
@@ -6213,6 +6232,12 @@
 		pointer-events: none;
 	}
 
+	.thread-popout-overlay--mobile {
+		z-index: 9999;
+		pointer-events: auto;
+		background: var(--color-bg);
+	}
+
 	.thread-popout-window {
 		width: 400px;
 		height: 520px;
@@ -6228,6 +6253,39 @@
 		left: 50%;
 		top: 50%;
 		transform: translate(calc(-50% + var(--thread-popout-x, 0px)), calc(-50% + var(--thread-popout-y, 0px)));
+	}
+
+	.thread-popout-window--mobile {
+		position: fixed;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		border: none;
+		border-radius: 0;
+		box-shadow: none;
+		left: 0;
+		top: 0;
+		transform: none;
+	}
+
+	.thread-popout-window--mobile .thread-popout-header {
+		cursor: default;
+		padding: 0.875rem 1rem;
+		padding-top: max(0.875rem, env(safe-area-inset-top));
+	}
+
+	.thread-popout-window--mobile .thread-popout-title {
+		font-size: 1rem;
+	}
+
+	.thread-popout-window--mobile .thread-popout-close {
+		width: 36px;
+		height: 36px;
+		font-size: 1.5rem;
+	}
+
+	.thread-popout-window--mobile :global(.thread-pane__composer) {
+		padding-bottom: max(0px, env(safe-area-inset-bottom));
 	}
 
 	.thread-popout-window :global(.thread-pane) {

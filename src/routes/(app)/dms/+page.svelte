@@ -2,6 +2,13 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
+	import { mobileDockSuppressed } from '$lib/stores/ui';
+
+	// Reset mobile dock suppression when entering DMs list page
+	// This ensures the dock is visible even if a previous page (like a DM conversation) left it suppressed
+	onMount(() => {
+		mobileDockSuppressed.reset();
+	});
 
 	let showThreads = $state(false);
 	let gestureSurface: HTMLDivElement | null = null;
@@ -173,6 +180,7 @@
 			}
 		}
 		const cleanupGestures = setupGestures(gestureSurface);
+		
 		return () => {
 			cleanupGestures?.();
 		};

@@ -788,7 +788,7 @@
 		pushEnabled: false,
 		dms: true,
 		mentions: true,
-		allMessages: false
+		allMessages: true
 	});
 
 	// Sound preferences
@@ -968,7 +968,8 @@
 			pushEnabled: !!prefs.pushEnabled,
 			dms: prefs.dms ?? true,
 			mentions: prefs.mentions ?? true,
-			allMessages: !!prefs.allMessages
+			// Default to on so channel messages send push notifications unless explicitly disabled.
+			allMessages: prefs.allMessages ?? true
 		};
 
 		const aiPrefs = (settings.aiAssist ?? {}) as any;

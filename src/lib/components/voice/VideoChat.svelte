@@ -2714,7 +2714,7 @@
 	function hasLiveRemoteMedia(): boolean {
 		for (const stream of remoteStreams.values()) {
 			const tracks = stream.getTracks();
-			if (tracks.some((track) => track.readyState === 'live' || track.readyState === 'new')) {
+			if (tracks.some((track) => track.readyState === 'live')) {
 				return true;
 			}
 		}

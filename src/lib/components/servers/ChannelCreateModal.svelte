@@ -28,21 +28,26 @@
 	);
 
 	type Role = { id: string; name?: string };
+	type Category = { id: string; name: string; position: number };
 
 	let chName = $state('');
 	let chType: 'text' | 'voice' = $state('text');
 	let chPrivate = $state(false);
+	let chCategoryId: string | null = $state(null);
 	let busy = $state(false);
 	let errorMsg = $state('');
 	let selectedRoleIds: string[] = $state([]);
 	let roleOptions: Role[] = $state([]);
+	let categoryOptions: Category[] = $state([]);
 	let roleStop: Unsubscribe | null = $state(null);
+	let categoryStop: Unsubscribe | null = $state(null);
 	let roleWatcherServerId: string | null = $state(null);
 
 	function reset() {
 		chName = '';
 		chType = 'text';
 		chPrivate = false;
+		chCategoryId = null;
 		busy = false;
 		errorMsg = '';
 		selectedRoleIds = [];
@@ -68,7 +73,8 @@
 				name,
 				chType,
 				chPrivate,
-				chPrivate ? selectedRoleIds : []
+				chPrivate ? selectedRoleIds : [],
+				chCategoryId
 			);
 			onCreated(id);
 			close();
@@ -88,11 +94,22 @@
 			roleStop?.();
 			roleStop = null;
 			roleOptions = [];
+			categoryStop?.();
+			categoryStop = null;
+			categoryOptions = [];
 			if (browser && nextId) {
 				const db = getDb();
 				const q = query(collection(db, 'servers', nextId, 'roles'), orderBy('position'));
 				roleStop = onSnapshot(q, (snap) => {
 					roleOptions = snap.docs.map((docSnap) => ({
+						id: docSnap.id,
+						...(docSnap.data() as any)
+					}));
+				});
+				// Watch categories
+				const catQ = query(collection(db, 'servers', nextId, 'categories'), orderBy('position'));
+				categoryStop = onSnapshot(catQ, (snap) => {
+					categoryOptions = snap.docs.map((docSnap) => ({
 						id: docSnap.id,
 						...(docSnap.data() as any)
 					}));
@@ -123,6 +140,8 @@
 	onDestroy(() => {
 		roleStop?.();
 		roleStop = null;
+		categoryStop?.();
+		categoryStop = null;
 	});
 </script>
 
@@ -181,6 +200,22 @@
 							</div>
 						</div>
 					</fieldset>
+
+					{#if categoryOptions.length > 0}
+						<div>
+							<label class="block text-sm mb-1" for="chCategory">Folder (optional)</label>
+							<select
+								id="chCategory"
+								class="input w-full"
+								bind:value={chCategoryId}
+							>
+								<option value={null}>No folder</option>
+								{#each categoryOptions as cat}
+									<option value={cat.id}>{cat.name}</option>
+								{/each}
+							</select>
+						</div>
+					{/if}
 
 					<div>
 						<div class="block text-sm mb-1">Visibility</div>

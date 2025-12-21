@@ -33,6 +33,7 @@
 	import ServerSettingsModal from '$lib/components/servers/ServerSettingsModal.svelte';
 	import { voiceSession } from '$lib/stores/voice';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
+	import { clearAllOverlays } from '$lib/stores/mobileNav';
 	import { user, startProfileListener, userProfile } from '$lib/stores/user';
 	import {
 		acceptInvite,
@@ -70,47 +71,75 @@
 	});
 
 	// Sync theme from user profile on initial load
-	let themeInitialized = false;
-	const customization = customizationConfigStore();
-	const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
-		if (!browser || !profile || themeInitialized) return;
-		
-		const themePref = profile.settings?.theme;
-		const customThemeId = profile.settings?.customThemeId;
-		
-		// Handle custom themes
-		if (customThemeId && customThemeId.startsWith('custom-')) {
-			themeInitialized = true;
-			// Apply custom theme after customization config loads
-			const waitForConfig = () => {
-				const config = customization ? $customization : null;
-				if (config?.customThemes?.length) {
-					const customTheme = config.customThemes.find((t) => t.id === customThemeId);
-					if (customTheme) {
-						setTheme('dark', { persist: true });
-						const customConfig: CustomizationConfig = {
-							themeOverrides: { dark: customTheme.colors },
-							customThemes: [],
-							splash: { gifUrl: '', gifDuration: 0, themeBackgrounds: { dark: '', light: '', midnight: '' }, enabled: false },
-							splashGifs: [],
-							sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
-						};
-						applyThemeOverrides(customConfig, 'dark');
-					}
-				} else {
-					// Config not loaded yet, wait a bit
-					setTimeout(waitForConfig, 100);
-				}
-			};
-			waitForConfig();
-		} else if (themePref === 'seasonal' || themePref === 'holiday') {
-			themeInitialized = true;
-			setTheme('holiday', { persist: true });
-		} else if (themePref === 'light' || themePref === 'dark' || themePref === 'midnight') {
-			themeInitialized = true;
-			setTheme(themePref as ThemeMode, { persist: true });
-		}
-	});
+const customization = customizationConfigStore();
+let lastAppliedThemeId: string | null = null;
+
+const applyBuiltInTheme = (themeId: ThemeMode | 'holiday') => {
+	if (themeId === lastAppliedThemeId) return;
+	const tone: 'dark' | 'light' | 'midnight' =
+		themeId === 'light' ? 'light' : themeId === 'midnight' ? 'midnight' : 'dark';
+	setTheme(themeId === 'holiday' ? 'holiday' : (themeId as ThemeMode), { persist: true });
+	applyThemeOverrides(null, tone);
+	if (browser) localStorage.removeItem('hconnect:customThemeId');
+	lastAppliedThemeId = themeId;
+};
+
+const applyCustomTheme = (customThemeId: string) => {
+	const config = customization ? $customization : null;
+	if (!config) {
+		// Config not loaded yet, retry shortly so other sessions stay in sync once data arrives
+		setTimeout(() => applyCustomTheme(customThemeId), 120);
+		return;
+	}
+	const customTheme = config.customThemes?.find((t) => t.id === customThemeId);
+	if (!customTheme) {
+		applyBuiltInTheme('dark');
+		return;
+	}
+	if (browser) localStorage.setItem('hconnect:customThemeId', customThemeId);
+	setTheme('dark', { persist: true });
+	const customConfig: CustomizationConfig = {
+		themeOverrides: { dark: customTheme.colors },
+		customThemes: [],
+		splash: {
+			gifUrl: '',
+			gifDuration: 0,
+			themeBackgrounds: { dark: '', light: '', midnight: '' },
+			enabled: false
+		},
+		splashGifs: [],
+		sounds: { notificationUrl: '', callJoinUrl: '', callLeaveUrl: '', messageSendUrl: '' }
+	};
+	applyThemeOverrides(customConfig, 'dark');
+	lastAppliedThemeId = customThemeId;
+};
+
+const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
+	if (!browser) return;
+	if (!profile) {
+		lastAppliedThemeId = null;
+		return;
+	}
+
+	const themePref = profile.settings?.theme;
+	const customThemeId = profile.settings?.customThemeId;
+	const desiredThemeId =
+		customThemeId && customThemeId.startsWith('custom-')
+			? customThemeId
+			: themePref === 'seasonal'
+				? 'holiday'
+				: themePref;
+
+	if (!desiredThemeId || desiredThemeId === lastAppliedThemeId) return;
+
+	if (desiredThemeId.startsWith('custom-')) {
+		applyCustomTheme(desiredThemeId);
+	} else if (desiredThemeId === 'holiday') {
+		applyBuiltInTheme('holiday');
+	} else if (desiredThemeId === 'light' || desiredThemeId === 'dark' || desiredThemeId === 'midnight') {
+		applyBuiltInTheme(desiredThemeId as ThemeMode);
+	}
+});
 
 	let hasAttemptedRestore = false;
 	let pendingInitialUrl: URL | null = null;
@@ -396,6 +425,8 @@
 	afterNavigate(({ to }) => {
 		if (typeof document !== 'undefined') document.title = APP_TITLE;
 		if (!browser || !to?.url) return;
+		// Ensure any mobile overlays from the previous route are cleared so chat input isn't suppressed
+		clearAllOverlays({ notify: false });
 		if (!hasAttemptedRestore) {
 			pendingInitialUrl = to.url;
 			return;

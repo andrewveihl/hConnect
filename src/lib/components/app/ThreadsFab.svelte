@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { user } from '$lib/stores/user';
 	import { getDb } from '$lib/firebase';
@@ -9,12 +10,20 @@
 		query,
 		onSnapshot,
 		Timestamp,
+		doc,
+		getDoc,
 		type Unsubscribe
 	} from 'firebase/firestore';
 	import type { ChannelThread } from '$lib/firestore/threads';
-	import { leaveThread } from '$lib/firestore/threads';
+	import { leaveThread, getThread, streamThreadMessages, type ThreadMessage } from '$lib/firestore/threads';
+	import { markThreadRead as markThreadReadThread } from '$lib/firestore/threads';
 	import { threadUnreadCount, threadUnreadById } from '$lib/stores/notifications';
 	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
+	import MessageList from '$lib/components/chat/MessageList.svelte';
+	import ChatInput from '$lib/components/chat/ChatInput.svelte';
+	import type { ReplyReferenceInput } from '$lib/firestore/messages';
+	import { sendThreadMessage } from '$lib/firestore/threads';
+	import type { PendingUploadPreview } from '$lib/components/chat/types';
 
 	type ThreadWithMeta = ChannelThread & {
 		serverName?: string;
@@ -48,6 +57,119 @@
 	let threadsUnsub: Unsubscribe | null = null;
 	let navigationHistory = $state<ThreadWithMeta[]>([]);
 	let dismissedThreadIds = $state<Set<string>>(new Set());
+	let searchQuery = $state('');
+
+	// Floating thread popup state (for when not on server page)
+	type FloatingThreadState = {
+		thread: ChannelThread;
+		root: any;
+		messages: ThreadMessage[];
+		replyTarget: ReplyReferenceInput | null;
+		pendingUploads: PendingUploadPreview[];
+		position: { x: number; y: number };
+		stream: Unsubscribe | null;
+	};
+	let floatingThread = $state<FloatingThreadState | null>(null);
+	let floatingThreadProfiles = $state<Record<string, any>>({});
+	let floatingDragging = $state(false);
+	let floatingDragOffset = { x: 0, y: 0 };
+	let floatingDragPointerId: number | null = null;
+	
+	// Check if we're on a server page (which handles floating threads itself)
+	const isOnServerPage = $derived($page?.url?.pathname?.startsWith('/servers/') ?? false);
+	
+	// Mobile detection for fullscreen mode - initialize synchronously
+	let isMobile = $state(browser ? window.matchMedia('(max-width: 768px)').matches : false);
+	$effect(() => {
+		if (!browser) return;
+		const mq = window.matchMedia('(max-width: 768px)');
+		isMobile = mq.matches;
+		const handler = (e: MediaQueryListEvent) => { isMobile = e.matches; };
+		mq.addEventListener('change', handler);
+		return () => mq.removeEventListener('change', handler);
+	});
+	
+	// Swipe-to-dismiss state for mobile floating thread
+	const SWIPE_THRESHOLD = 80;
+	const SWIPE_VELOCITY_THRESHOLD = 0.5;
+	let swipeTracking = $state(false);
+	let swipeStartX = 0;
+	let swipeStartY = 0;
+	let swipeStartTime = 0;
+	let swipeDeltaX = $state(0);
+	let swipeActive = $state(false);
+
+	function handleSwipeTouchStart(e: TouchEvent) {
+		if (!isMobile || !floatingThread || e.touches.length !== 1) return;
+		e.stopPropagation();
+		const touch = e.touches[0];
+		swipeStartX = touch.clientX;
+		swipeStartY = touch.clientY;
+		swipeStartTime = Date.now();
+		swipeTracking = true;
+		swipeActive = false;
+		swipeDeltaX = 0;
+	}
+
+	function handleSwipeTouchMove(e: TouchEvent) {
+		if (!swipeTracking || e.touches.length !== 1) return;
+		e.stopPropagation();
+		const touch = e.touches[0];
+		const dx = touch.clientX - swipeStartX;
+		const dy = touch.clientY - swipeStartY;
+
+		// Only activate swipe if horizontal movement is dominant and rightward
+		if (!swipeActive) {
+			if (Math.abs(dy) > Math.abs(dx) * 1.2) {
+				// Vertical scroll - cancel swipe tracking
+				swipeTracking = false;
+				return;
+			}
+			if (dx > 10) {
+				swipeActive = true;
+			}
+		}
+
+		if (swipeActive) {
+			// Only allow rightward swipe (positive dx)
+			swipeDeltaX = Math.max(0, dx);
+			// Prevent scrolling while swiping
+			e.preventDefault();
+		}
+	}
+
+	function handleSwipeTouchEnd(e?: TouchEvent) {
+		e?.stopPropagation();
+		if (!swipeTracking) return;
+		
+		if (swipeActive && swipeDeltaX > 0) {
+			const elapsed = Date.now() - swipeStartTime;
+			const velocity = swipeDeltaX / elapsed;
+			const shouldDismiss = swipeDeltaX >= SWIPE_THRESHOLD || velocity >= SWIPE_VELOCITY_THRESHOLD;
+			
+			if (shouldDismiss) {
+				closeFloatingThread();
+			}
+		}
+		
+		swipeTracking = false;
+		swipeActive = false;
+		swipeDeltaX = 0;
+	}
+
+	// Computed swipe transform for the floating popup
+	const swipeTransform = $derived.by(() => {
+		if (!isMobile || !swipeActive || swipeDeltaX <= 0) return '';
+		// Calculate opacity based on swipe progress
+		const progress = Math.min(swipeDeltaX / (window.innerWidth * 0.5), 1);
+		return `translate3d(${swipeDeltaX}px, 0, 0)`;
+	});
+
+	const swipeOpacity = $derived.by(() => {
+		if (!isMobile || !swipeActive || swipeDeltaX <= 0) return 1;
+		const progress = Math.min(swipeDeltaX / (window.innerWidth * 0.4), 1);
+		return 1 - progress * 0.5;
+	});
 
 	// Position persistence functions
 	function loadSavedPosition(): Position | null {
@@ -375,22 +497,202 @@
 	}
 
 	function navigateToThread(thread: ThreadWithMeta) {
-		console.log('[ThreadsFab] navigateToThread called for:', thread.id, thread.name);
+		console.log('[ThreadsFab] navigateToThread called for:', thread.id, thread.name, 'isOnServerPage:', isOnServerPage);
 		// Add current thread to history before navigating
 		if (navigationHistory.length === 0 || navigationHistory[navigationHistory.length - 1]?.id !== thread.id) {
 			navigationHistory = [...navigationHistory.slice(-9), thread]; // Keep last 10
 		}
 		closePopover();
 		
-		// Dispatch event to open the floating thread popup
-		console.log('[ThreadsFab] Dispatching openFloatingThread event');
-		window.dispatchEvent(new CustomEvent('openFloatingThread', {
-			detail: {
-				serverId: thread.serverId,
-				channelId: thread.parentChannelId,
-				threadId: thread.id
+		// If on server page, dispatch event to let the server page handle it
+		// Otherwise, open floating popup directly here
+		if (isOnServerPage) {
+			console.log('[ThreadsFab] Dispatching openFloatingThread event to server page');
+			window.dispatchEvent(new CustomEvent('openFloatingThread', {
+				detail: {
+					serverId: thread.serverId,
+					channelId: thread.parentChannelId,
+					threadId: thread.id
+				}
+			}));
+		} else {
+			console.log('[ThreadsFab] Opening floating thread popup directly');
+			openFloatingThreadPopup(thread);
+		}
+	}
+	
+	// Open a floating thread popup (when not on server page)
+	async function openFloatingThreadPopup(thread: ThreadWithMeta) {
+		try {
+			// Close any existing floating thread
+			closeFloatingThread();
+			
+			const db = getDb();
+			
+			// Fetch the full thread data
+			const fullThread = await getThread(thread.serverId, thread.parentChannelId, thread.id);
+			if (!fullThread) {
+				console.warn('[ThreadsFab] Thread not found:', thread.id);
+				return;
 			}
-		}));
+			
+			// Fetch the root message
+			let root = null;
+			if (fullThread.createdFromMessageId) {
+				try {
+					const snap = await getDoc(
+						doc(db, 'servers', thread.serverId, 'channels', thread.parentChannelId, 'messages', fullThread.createdFromMessageId)
+					);
+					if (snap.exists()) {
+						const data = snap.data();
+						root = {
+							id: snap.id,
+							uid: data.authorId,
+							text: data.text || data.content,
+							displayName: data.displayName,
+							createdAt: data.createdAt,
+							...data
+						};
+					}
+				} catch (err) {
+					console.warn('[ThreadsFab] Failed to load root message:', err);
+				}
+			}
+			
+			// Calculate initial position (centered)
+			const popupWidth = 400;
+			const popupHeight = 500;
+			const x = Math.max(20, (window.innerWidth - popupWidth) / 2);
+			const y = Math.max(20, (window.innerHeight - popupHeight) / 2);
+			
+			floatingThread = {
+				thread: fullThread,
+				root,
+				messages: [],
+				replyTarget: null,
+				pendingUploads: [],
+				position: { x, y },
+				stream: null
+			};
+			
+			// Start streaming messages
+			const unsubscribe = streamThreadMessages(
+				thread.serverId,
+				thread.parentChannelId,
+				thread.id,
+				(list) => {
+					if (floatingThread) {
+						floatingThread = { ...floatingThread, messages: list };
+						
+						// Mark as read
+						if ($user?.uid && list.length > 0) {
+							const last = list[list.length - 1];
+							const at = last?.createdAt ?? null;
+							const lastId = last?.id ?? null;
+							void markThreadReadThread($user.uid, thread.serverId, thread.parentChannelId, thread.id, {
+								at,
+								lastMessageId: lastId
+							});
+						}
+					}
+				},
+				{
+					onError: (err) => {
+						console.error('[ThreadsFab] Failed to load thread messages:', err);
+					}
+				}
+			);
+			
+			floatingThread = { ...floatingThread, stream: unsubscribe };
+		} catch (err) {
+			console.error('[ThreadsFab] Failed to open floating thread:', err);
+		}
+	}
+	
+	function closeFloatingThread() {
+		if (floatingThread?.stream) {
+			floatingThread.stream();
+		}
+		floatingThread = null;
+		floatingThreadProfiles = {};
+	}
+	
+	// Floating thread drag handlers
+	function handleFloatingPointerDown(event: PointerEvent) {
+		if (!floatingThread) return;
+		event.stopPropagation();
+		floatingDragOffset = {
+			x: event.clientX - floatingThread.position.x,
+			y: event.clientY - floatingThread.position.y
+		};
+		floatingDragPointerId = event.pointerId;
+		floatingDragging = true;
+		(event.target as HTMLElement).setPointerCapture(event.pointerId);
+	}
+	
+	function handleFloatingPointerMove(event: PointerEvent) {
+		if (!floatingDragging || !floatingThread || event.pointerId !== floatingDragPointerId) return;
+		event.stopPropagation();
+		event.preventDefault();
+		const x = Math.max(0, Math.min(window.innerWidth - 400, event.clientX - floatingDragOffset.x));
+		const y = Math.max(0, Math.min(window.innerHeight - 100, event.clientY - floatingDragOffset.y));
+		floatingThread = { ...floatingThread, position: { x, y } };
+	}
+	
+	function handleFloatingPointerUp(event: PointerEvent) {
+		if (!floatingDragging || event.pointerId !== floatingDragPointerId) return;
+		event.stopPropagation();
+		floatingDragging = false;
+		floatingDragPointerId = null;
+		(event.target as HTMLElement).releasePointerCapture(event.pointerId);
+	}
+	
+	// Handle sending messages in floating thread
+	async function handleFloatingThreadSend(event: CustomEvent<{ text: string; mentions?: any[] }>) {
+		if (!floatingThread || !$user?.uid) return;
+		
+		const { text, mentions } = event.detail;
+		const thread = floatingThread.thread;
+		
+		try {
+			await sendThreadMessage({
+				serverId: thread.serverId,
+				channelId: thread.parentChannelId || thread.channelId,
+				threadId: thread.id,
+				message: {
+					text,
+					uid: $user.uid,
+					mentions: mentions || []
+				}
+			});
+			
+			// Clear reply target after sending
+			if (floatingThread?.replyTarget) {
+				floatingThread = { ...floatingThread, replyTarget: null };
+			}
+		} catch (err) {
+			console.error('[ThreadsFab] Failed to send message:', err);
+		}
+	}
+	
+	function handleFloatingReply(event: CustomEvent<{ message: any }>) {
+		if (!floatingThread) return;
+		const msg = event.detail?.message;
+		if (!msg) return;
+		floatingThread = {
+			...floatingThread,
+			replyTarget: {
+				messageId: msg.id,
+				authorId: msg.uid || msg.authorId,
+				authorName: msg.displayName,
+				preview: msg.text?.slice(0, 100) || null
+			}
+		};
+	}
+	
+	function clearFloatingReplyTarget() {
+		if (!floatingThread) return;
+		floatingThread = { ...floatingThread, replyTarget: null };
 	}
 
 	function goBackToThread() {
@@ -534,12 +836,35 @@
 		const _ = now;
 		return recentThreads.filter(t => !dismissedThreadIds.has(t.id) && !isThreadExpired(t));
 	});
+	const filteredThreads = $derived.by(() => {
+		const query = searchQuery.trim().toLowerCase();
+		if (!query) return visibleThreads;
+		return visibleThreads.filter((thread) => {
+			const haystack = [
+				thread.name,
+				thread.serverName,
+				thread.channelName,
+				thread.lastMessagePreview
+			]
+				.filter(Boolean)
+				.join(' ')
+				.toLowerCase();
+			return haystack.includes(query);
+		});
+	});
 	const hasThreads = $derived(visibleThreads.length > 0);
 	// Use notification store for total unread - this tracks real-time thread message counts
 	const totalUnread = $derived($threadUnreadCount);
 	// Get per-thread unreads from notification store
 	const threadUnreads = $derived($threadUnreadById);
 	const canGoBack = $derived(navigationHistory.length > 1);
+	const popoverSubtitle = $derived.by(() => {
+		const query = searchQuery.trim();
+		if (query) {
+			return `${filteredThreads.length} match${filteredThreads.length === 1 ? '' : 'es'}`;
+		}
+		return `${visibleThreads.length} active`;
+	});
 	
 	// Compute popover position based on FAB location
 	const popoverPosition = $derived.by(() => {
@@ -621,7 +946,7 @@
 						</button>
 					{/if}
 					<h3>Recent Threads</h3>
-					<span class="threads-popover__subtitle">{visibleThreads.length} active</span>
+					<span class="threads-popover__subtitle">{popoverSubtitle}</span>
 				</div>
 				<button
 					type="button"
@@ -633,8 +958,28 @@
 				</button>
 			</div>
 
+			<div class="threads-popover__search">
+				<i class="bx bx-search" aria-hidden="true"></i>
+				<input
+					type="search"
+					placeholder="Search DMs and threads"
+					bind:value={searchQuery}
+					aria-label="Search direct messages"
+				/>
+				{#if searchQuery}
+					<button
+						type="button"
+						class="threads-popover__clear-btn"
+						onclick={() => (searchQuery = '')}
+						title="Clear search"
+					>
+						<i class="bx bx-x" aria-hidden="true"></i>
+					</button>
+				{/if}
+			</div>
+
 			<div class="threads-popover__list">
-				{#each visibleThreads as thread (thread.id)}
+				{#each filteredThreads as thread (thread.id)}
 					{@const unreadCount = threadUnreads[thread.id] || 0}
 					<div class="thread-item" class:thread-item--unread={unreadCount > 0}>
 						<button
@@ -679,13 +1024,118 @@
 				{:else}
 					<div class="threads-popover__empty">
 						<i class="bx bx-message-square-x" aria-hidden="true"></i>
-						<span>No recent threads</span>
+						{#if searchQuery}
+							<span>No conversations match your search</span>
+						{:else}
+							<span>No recent threads</span>
+						{/if}
 					</div>
 				{/each}
 			</div>
 		</div>
 	{/if}
 </div>
+
+<!-- Floating Thread Popup (for when not on server page) -->
+{#if floatingThread}
+	{@const thread = floatingThread.thread}
+	<!-- Backdrop to capture touches and prevent interaction with elements behind -->
+	{#if isMobile}
+		<div 
+			class="floating-thread-backdrop"
+			ontouchstart={(e) => { e.stopPropagation(); closeFloatingThread(); }}
+			ontouchmove={(e) => e.stopPropagation()}
+			ontouchend={(e) => e.stopPropagation()}
+			role="button"
+			tabindex="-1"
+			aria-label="Close thread"
+		></div>
+	{/if}
+	<div
+		class="floating-thread-popup"
+		class:floating-thread-popup--mobile={isMobile}
+		class:floating-thread-popup--swiping={swipeActive}
+		style={isMobile 
+			? `transform: ${swipeTransform}; opacity: ${swipeOpacity};` 
+			: `left: ${floatingThread.position.x}px; top: ${floatingThread.position.y}px;`}
+		ontouchstart={isMobile ? handleSwipeTouchStart : undefined}
+		ontouchmove={isMobile ? handleSwipeTouchMove : undefined}
+		ontouchend={isMobile ? handleSwipeTouchEnd : undefined}
+		ontouchcancel={isMobile ? handleSwipeTouchEnd : undefined}
+	>
+		{#if isMobile}
+			<!-- Swipe indicator pill -->
+			<div class="floating-thread-popup__swipe-indicator">
+				<div class="floating-thread-popup__swipe-pill"></div>
+			</div>
+		{/if}
+		<div
+			class="floating-thread-popup__header"
+			onpointerdown={isMobile ? undefined : handleFloatingPointerDown}
+			onpointermove={isMobile ? undefined : handleFloatingPointerMove}
+			onpointerup={isMobile ? undefined : handleFloatingPointerUp}
+			role="button"
+			tabindex="0"
+		>
+			<div class="floating-thread-popup__header-left">
+				<i class="bx bx-conversation" aria-hidden="true"></i>
+				<span class="floating-thread-popup__title">{thread.name || 'Thread'}</span>
+			</div>
+			<button
+				type="button"
+				class="floating-thread-popup__close-btn"
+				onclick={closeFloatingThread}
+				title="Close thread"
+			>
+				<i class="bx bx-x" aria-hidden="true"></i>
+			</button>
+		</div>
+		
+		{#if floatingThread.root}
+			<div class="floating-thread-popup__root">
+				<div class="floating-thread-popup__root-author">
+					{floatingThread.root.displayName || 'Unknown'}
+				</div>
+				<div class="floating-thread-popup__root-text">
+					{floatingThread.root.text || ''}
+				</div>
+			</div>
+		{/if}
+		
+		<div class="floating-thread-popup__messages">
+			<MessageList
+				messages={floatingThread.messages as any}
+				currentUserId={$user?.uid ?? ''}
+				users={floatingThreadProfiles}
+				on:reply={handleFloatingReply}
+			/>
+		</div>
+		
+		{#if floatingThread.replyTarget}
+			<div class="floating-thread-popup__reply-bar">
+				<span class="floating-thread-popup__reply-label">
+					Replying to <strong>{floatingThread.replyTarget.authorName}</strong>
+				</span>
+				<button
+					type="button"
+					class="floating-thread-popup__reply-cancel"
+					onclick={clearFloatingReplyTarget}
+					title="Cancel reply"
+				>
+					<i class="bx bx-x" aria-hidden="true"></i>
+				</button>
+			</div>
+		{/if}
+		
+		<div class="floating-thread-popup__input">
+			<ChatInput
+				placeholder="Reply in thread..."
+				suppressDockOnFocus={false}
+				on:send={handleFloatingThreadSend}
+			/>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.threads-fab-wrapper {
@@ -865,6 +1315,64 @@
 		flex: 1;
 		overflow-y: auto;
 		padding: 8px;
+	}
+
+	.threads-popover__search {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 12px;
+		border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+		position: sticky;
+		top: 0;
+		z-index: 2;
+	}
+
+	.threads-popover__search input {
+		flex: 1;
+		height: 36px;
+		border-radius: 8px;
+		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--text-primary, #f8fafc);
+		padding: 0 10px;
+		font-size: 0.85rem;
+		outline: none;
+		transition:
+			border-color 150ms ease,
+			box-shadow 150ms ease,
+			background 150ms ease;
+	}
+
+	.threads-popover__search input:focus {
+		border-color: rgba(168, 85, 247, 0.6);
+		box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.16);
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.threads-popover__search i {
+		color: var(--text-muted, rgba(255, 255, 255, 0.5));
+	}
+
+	.threads-popover__clear-btn {
+		width: 28px;
+		height: 28px;
+		display: grid;
+		place-items: center;
+		border: none;
+		background: rgba(255, 255, 255, 0.04);
+		border-radius: 6px;
+		color: var(--text-muted, rgba(255, 255, 255, 0.5));
+		cursor: pointer;
+		transition:
+			background 150ms ease,
+			color 150ms ease;
+	}
+
+	.threads-popover__clear-btn:hover {
+		background: rgba(239, 68, 68, 0.16);
+		color: rgb(239, 68, 68);
 	}
 
 	.thread-item {
@@ -1048,5 +1556,330 @@
 		width: 3rem;
 		height: 3rem;
 		box-shadow: 0 0 0 2px var(--color-accent, #a855f7);
+	}
+
+	@media (max-width: 640px) {
+		.threads-fab-wrapper {
+			--floating-fab-size: 3.25rem;
+		}
+
+		.threads-popover {
+			width: min(360px, calc(100vw - 24px));
+			max-height: calc(100vh - 140px);
+		}
+
+		.threads-popover__header h3 {
+			font-size: 0.95rem;
+		}
+
+		.threads-popover__subtitle {
+			font-size: 0.72rem;
+		}
+
+		.thread-item__main {
+			padding: 12px 10px;
+		}
+
+		.thread-item__meta-row {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+	}
+
+	/* Floating Thread Backdrop - captures touches on mobile */
+	.floating-thread-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		z-index: 99999;
+		touch-action: none;
+	}
+
+	/* Floating Thread Popup Styles */
+	.floating-thread-popup {
+		position: fixed;
+		width: 400px;
+		max-width: calc(100vw - 32px);
+		height: 500px;
+		max-height: calc(100vh - 100px);
+		background: var(--panel-bg, #1e1e2e);
+		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		border-radius: 12px;
+		box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+		display: flex;
+		flex-direction: column;
+		z-index: 100000;
+		overflow: hidden;
+		touch-action: pan-y;
+	}
+
+	.floating-thread-popup__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 12px;
+		background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(139, 92, 246, 0.1));
+		border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		cursor: grab;
+		user-select: none;
+		touch-action: none;
+	}
+
+	.floating-thread-popup__header:active {
+		cursor: grabbing;
+	}
+
+	.floating-thread-popup__header-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-primary, #f8fafc);
+	}
+
+	.floating-thread-popup__header-left i {
+		font-size: 1.1rem;
+		color: rgb(168, 85, 247);
+	}
+
+	.floating-thread-popup__title {
+		font-size: 0.9rem;
+		font-weight: 600;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 280px;
+	}
+
+	.floating-thread-popup__close-btn {
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		border: none;
+		background: transparent;
+		color: var(--text-muted, rgba(255, 255, 255, 0.5));
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 1.3rem;
+		transition: background 150ms ease, color 150ms ease;
+	}
+
+	.floating-thread-popup__close-btn:hover {
+		background: rgba(239, 68, 68, 0.2);
+		color: rgb(239, 68, 68);
+	}
+
+	.floating-thread-popup__root {
+		padding: 10px 12px;
+		background: rgba(0, 0, 0, 0.2);
+		border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+	}
+
+	.floating-thread-popup__root-author {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: rgb(168, 85, 247);
+		margin-bottom: 4px;
+	}
+
+	.floating-thread-popup__root-text {
+		font-size: 0.85rem;
+		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.floating-thread-popup__messages {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
+
+	.floating-thread-popup__reply-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 12px;
+		background: rgba(168, 85, 247, 0.1);
+		border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		font-size: 0.8rem;
+		color: var(--text-muted, rgba(255, 255, 255, 0.6));
+	}
+
+	.floating-thread-popup__reply-label strong {
+		color: rgb(168, 85, 247);
+	}
+
+	.floating-thread-popup__reply-cancel {
+		width: 22px;
+		height: 22px;
+		border-radius: 4px;
+		border: none;
+		background: transparent;
+		color: var(--text-muted, rgba(255, 255, 255, 0.5));
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 1.1rem;
+		transition: background 150ms ease, color 150ms ease;
+	}
+
+	.floating-thread-popup__reply-cancel:hover {
+		background: rgba(239, 68, 68, 0.2);
+		color: rgb(239, 68, 68);
+	}
+
+	.floating-thread-popup__input {
+		border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: rgba(0, 0, 0, 0.1);
+		flex-shrink: 0;
+		min-height: 56px;
+		display: block !important;
+	}
+
+	/* Ensure ChatInput renders inside the container */
+	.floating-thread-popup__input :global(.chat-input-root) {
+		display: flex !important;
+		flex-direction: column;
+		position: relative;
+	}
+
+	/* Mobile fullscreen mode */
+	.floating-thread-popup--mobile {
+		position: fixed;
+		inset: 0;
+		width: 100vw;
+		max-width: 100vw;
+		height: 100vh;
+		max-height: 100vh;
+		border-radius: 0;
+		z-index: 100000;
+		transition: transform 200ms ease-out, opacity 200ms ease-out;
+		will-change: transform, opacity;
+		touch-action: pan-y;
+		/* Prevent any background interaction */
+		isolation: isolate;
+	}
+
+	.floating-thread-popup--mobile.floating-thread-popup--swiping {
+		transition: none;
+		touch-action: none;
+	}
+
+	/* Swipe indicator pill at top of mobile popup */
+	.floating-thread-popup__swipe-indicator {
+		display: none;
+	}
+
+	.floating-thread-popup--mobile .floating-thread-popup__swipe-indicator {
+		display: flex;
+		justify-content: center;
+		padding: 8px 0 4px;
+		background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(139, 92, 246, 0.1));
+	}
+
+	.floating-thread-popup__swipe-pill {
+		width: 36px;
+		height: 4px;
+		border-radius: 2px;
+		background: rgba(255, 255, 255, 0.3);
+	}
+
+	.floating-thread-popup--mobile .floating-thread-popup__header {
+		cursor: default;
+		padding: 12px 16px;
+		padding-top: max(12px, env(safe-area-inset-top));
+	}
+
+	.floating-thread-popup--mobile .floating-thread-popup__title {
+		max-width: none;
+		font-size: 1rem;
+	}
+
+	.floating-thread-popup--mobile .floating-thread-popup__close-btn {
+		width: 36px;
+		height: 36px;
+		font-size: 1.5rem;
+	}
+
+	.floating-thread-popup--mobile .floating-thread-popup__input {
+		padding-bottom: max(12px, env(safe-area-inset-bottom));
+		background: var(--color-panel, rgba(30, 31, 34, 1));
+	}
+
+	/* CSS media query fallback for mobile - ensures mobile styles apply even if JS isMobile fails */
+	@media (max-width: 768px) {
+		.floating-thread-popup {
+			position: fixed !important;
+			top: 0 !important;
+			left: 0 !important;
+			right: 0 !important;
+			bottom: 0 !important;
+			width: 100vw !important;
+			max-width: 100vw !important;
+			height: 100vh !important;
+			max-height: 100vh !important;
+			border-radius: 0 !important;
+			z-index: 100000 !important;
+			display: flex !important;
+			flex-direction: column !important;
+			transform: none !important;
+		}
+
+		.floating-thread-popup .floating-thread-popup__header {
+			cursor: default;
+			padding: 12px 16px;
+			padding-top: max(12px, env(safe-area-inset-top));
+			flex-shrink: 0;
+		}
+		
+		.floating-thread-popup .floating-thread-popup__root {
+			flex-shrink: 0;
+		}
+
+		.floating-thread-popup .floating-thread-popup__title {
+			max-width: none;
+			font-size: 1rem;
+		}
+
+		.floating-thread-popup .floating-thread-popup__close-btn {
+			width: 36px;
+			height: 36px;
+			font-size: 1.5rem;
+		}
+		
+		.floating-thread-popup .floating-thread-popup__messages {
+			flex: 1;
+			min-height: 0;
+			overflow-y: auto;
+		}
+
+		.floating-thread-popup .floating-thread-popup__input {
+			flex-shrink: 0;
+			min-height: 60px;
+			padding: 8px 12px;
+			padding-bottom: max(12px, env(safe-area-inset-bottom));
+			background: var(--color-panel, rgba(30, 31, 34, 1));
+			border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		}
+		
+		/* Ensure ChatInput inside the floating popup is visible */
+		.floating-thread-popup .floating-thread-popup__input :global(.chat-input-root) {
+			display: block !important;
+		}
+
+		/* Force hide mobile dock when floating popup is visible */
+		:global(.mobile-dock) {
+			display: none !important;
+		}
+	}
+
+	/* Also target specific mobile dock component when popup exists */
+	.floating-thread-popup ~ :global(.mobile-dock),
+	:global(body:has(.floating-thread-popup) .mobile-dock) {
+		display: none !important;
 	}
 </style>

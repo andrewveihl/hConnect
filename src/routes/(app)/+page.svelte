@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import { channelUnreadCount, dmUnreadCount } from '$lib/stores/notifications';
 	import {
@@ -12,6 +13,13 @@
 	import { enablePushForUser } from '$lib/notify/push';
 	import { handleDeepLinkPayload, type DeepLinkPayload } from '$lib/notify/deepLink';
 	import { user } from '$lib/stores/user';
+	import { mobileDockSuppressed } from '$lib/stores/ui';
+
+	// Reset mobile dock suppression when entering Activity page
+	// This ensures the dock is visible even if a previous page left it suppressed
+	onMount(() => {
+		mobileDockSuppressed.reset();
+	});
 
 	const formatCount = (value: number): string => {
 		if (!Number.isFinite(value)) return '0';

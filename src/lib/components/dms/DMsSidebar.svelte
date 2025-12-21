@@ -99,10 +99,12 @@
 	let error: string | null = $state(null);
 	let searchTimer: any;
 	let showPeoplePicker = $state(false);
+	let threadSearch = $state('');
 	let searchVisibleCount = $state(SEARCH_PAGE_SIZE);
 	let peopleVisibleCount = $state(PEOPLE_PAGE_SIZE);
 	let visibleSearchResults: any[] = $state([]);
 	let visiblePeopleList: any[] = $state([]);
+	let filteredThreads: any[] = $state([]);
 
 	// Group DM creation state
 	let isGroupMode = $state(false);
@@ -919,6 +921,18 @@
 	run(() => {
 		visiblePeopleList = people.slice(0, Math.min(peopleVisibleCount, people.length));
 	});
+	run(() => {
+		const query = threadSearch.trim().toLowerCase();
+		if (!query) {
+			filteredThreads = sortedThreads;
+			return;
+		}
+		filteredThreads = sortedThreads.filter((t) => {
+			const name = threadDisplayName(t)?.toLowerCase?.() ?? '';
+			const preview = previewTextFor(t)?.toLowerCase?.() ?? '';
+			return name.includes(query) || preview.includes(query);
+		});
+	});
 </script>
 
 <aside
@@ -941,6 +955,28 @@
 	</div>
 
 	<div class="dms-sidebar-scroll flex-1 overflow-y-auto px-2 pb-4 space-y-4 touch-pan-y">
+		<div class="dm-search">
+			<i class="bx bx-search dm-search__icon" aria-hidden="true"></i>
+			<input
+				type="search"
+				placeholder="Search DMs"
+				aria-label="Search direct messages"
+				bind:value={threadSearch}
+				class="dm-search__input"
+			/>
+			{#if threadSearch}
+				<button
+					type="button"
+					class="dm-search__clear"
+					onclick={() => (threadSearch = '')}
+					aria-label="Clear search"
+					title="Clear search"
+				>
+					<i class="bx bx-x"></i>
+				</button>
+			{/if}
+		</div>
+
 		{#if showPersonalSection}
 			<section>
 				<ul class="space-y-0.5">
@@ -977,7 +1013,7 @@
 					{/each}
 					<li class="sr-only" aria-live="polite">Loading conversations...</li>
 				{:else}
-					{#each sortedThreads as t}
+					{#each filteredThreads as t}
 						{@const isActive = activeThreadId === t.id}
 						{@const otherUid = resolveOtherUid(t)}
 						{@const isGroup = isGroupThread(t)}
@@ -1054,8 +1090,14 @@
 							</div>
 						</li>
 					{/each}
-					{#if sortedThreads.length === 0}
-						<li class="px-2 py-2 text-sm text-white/60">No conversations yet.</li>
+					{#if filteredThreads.length === 0}
+						<li class="px-2 py-2 text-sm text-white/60">
+							{#if threadSearch.trim().length > 0}
+								No conversations match your search.
+							{:else}
+								No conversations yet.
+							{/if}
+						</li>
 					{/if}
 				{/if}
 			</ul>
@@ -1794,5 +1836,66 @@
 	.people-picker__create-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	/* Thread search */
+	.dm-search {
+		display: grid;
+		grid-template-columns: auto 1fr auto;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.35rem 0.75rem;
+		background: color-mix(in srgb, var(--color-sidebar) 90%, rgba(255, 255, 255, 0.06));
+		border: 1px solid var(--color-border-subtle);
+		border-radius: 0.65rem;
+		backdrop-filter: blur(8px);
+	}
+
+	.dm-search__input {
+		width: 100%;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--color-text-primary);
+		font-size: 0.9rem;
+	}
+
+	.dm-search__input::placeholder {
+		color: var(--color-text-tertiary);
+	}
+
+	.dm-search__icon {
+		color: var(--color-text-tertiary);
+		font-size: 1.05rem;
+	}
+
+	.dm-search__clear {
+		width: 1.9rem;
+		height: 1.9rem;
+		display: grid;
+		place-items: center;
+		border: none;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+		color: var(--color-text-tertiary);
+		cursor: pointer;
+		transition: background 140ms ease, color 140ms ease;
+	}
+
+	.dm-search__clear:hover,
+	.dm-search__clear:focus-visible {
+		background: rgba(220, 38, 38, 0.15);
+		color: #f87171;
+	}
+
+	@media (max-width: 767px) {
+		.dm-search {
+			padding: 0.45rem 0.85rem;
+			border-radius: 0.75rem;
+		}
+
+		.dm-search__input {
+			font-size: 1rem;
+		}
 	}
 </style>

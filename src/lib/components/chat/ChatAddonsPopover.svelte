@@ -18,6 +18,7 @@
 	export type PopoverPlacement = {
 		left: string;
 		bottom: string;
+		top?: string;
 		width: string;
 		maxHeight: string;
 	};
@@ -141,7 +142,8 @@
 		bind:this={popoverEl}
 		role="menu"
 		style:left={placement.left}
-		style:bottom={placement.bottom}
+		style:bottom={placement.bottom ?? 'auto'}
+		style:top={placement.top ?? 'auto'}
 		style:width={placement.width}
 		style:max-height={placement.maxHeight}
 	>

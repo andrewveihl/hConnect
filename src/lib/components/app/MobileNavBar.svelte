@@ -17,8 +17,8 @@
 	import { defaultSettingsSection } from '$lib/settings/sections';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
-	import { isMobileViewport } from '$lib/stores/viewport';
 	import { splashVisible } from '$lib/stores/splash';
+	import { mobileOverlayStack, mobileSwipeProgress } from '$lib/stores/mobileNav';
 	import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
@@ -110,8 +110,44 @@
 		isSettingsOpen || (currentPath?.startsWith('/settings') ?? false)
 	);
 	const dockSuppressed = $derived(settingsActive);
-	const mobileViewportStore = isMobileViewport;
-	const mobileViewport = $derived($mobileViewportStore);
+	
+	// Check if channel-list overlay is open (user swiped to see channels)
+	const channelListOpen = $derived($mobileOverlayStack.some(entry => entry.id === 'channel-list'));
+	
+	// Track swipe progress for smooth dock animation
+	const swipeProgress = $derived($mobileSwipeProgress);
+	const isSwipingChannels = $derived(swipeProgress.target === 'channels' && swipeProgress.progress > 0);
+	
+	// Calculate dock visibility based on swipe progress or overlay state
+	// During swipe: use progress to smoothly animate dock
+	// After swipe: use channelListOpen state
+	const dockRevealProgress = $derived.by(() => {
+		const path = currentPath ?? '';
+		if (!path.startsWith('/servers/')) return 1; // Always visible on non-server pages
+		
+		// If actively swiping to open channels, use swipe progress
+		if (isSwipingChannels) {
+			return swipeProgress.progress;
+		}
+		
+		// Otherwise use overlay state
+		return channelListOpen ? 1 : 0;
+	});
+	
+	// Check if we're on a page where the dock should be hidden on mobile
+	// - Inside a DM conversation (has its own mobile shell)
+	// - Viewing a server channel chat (full screen chat experience) - BUT show if channel list is open or swiping
+	const shouldHideDock = $derived.by(() => {
+		const path = currentPath ?? '';
+		// Inside DM conversation
+		if (path.startsWith('/dms/') && path !== '/dms') return true;
+		// On a server page - hide unless channel list sidebar is open or actively swiping
+		if (path.startsWith('/servers/')) {
+			return !channelListOpen && !isSwipingChannels;
+		}
+		return false;
+	});
+	
 	let navElement: HTMLElement | null = null;
 	let detachSwipeGestures: (() => void) | null = null;
 
@@ -311,8 +347,12 @@
 		return navLinks.filter((link) => link.key !== 'dms' || enableDMs);
 	}
 
+	function isMobile() {
+		return typeof window !== 'undefined' && window.innerWidth < 768;
+	}
+
 	function handleSwipe(direction: 'left' | 'right') {
-		if (!mobileViewport || dockSuppressed) return;
+		if (!isMobile() || dockSuppressed) return;
 		const links = getVisibleNavLinks();
 		if (links.length < 2) return;
 
@@ -329,7 +369,7 @@
 	$effect(() => {
 		detachSwipeGestures?.();
 		detachSwipeGestures = null;
-		if (!browser || !mobileViewport || dockSuppressed || !navElement) return;
+		if (!browser || !isMobile() || dockSuppressed || !navElement) return;
 		const links = getVisibleNavLinks();
 		if (links.length < 2) return;
 
@@ -348,8 +388,14 @@
 	});
 </script>
 
-{#if !$splashVisible}
-<nav class="mobile-dock md:hidden" aria-label="Primary" bind:this={navElement}>
+<nav 
+	class="mobile-dock md:hidden" 
+	class:mobile-dock--hidden={shouldHideDock || $splashVisible}
+	class:mobile-dock--swiping={isSwipingChannels}
+	style:--dock-reveal-progress={dockRevealProgress}
+	aria-label="Primary" 
+	bind:this={navElement}
+>
 	<div class="mobile-dock__inner">
 		<a
 			href={serverHref}
@@ -428,7 +474,6 @@
 		</a>
 	</div>
 </nav>
-{/if}
 
 <style>
 	.mobile-dock {
@@ -611,8 +656,26 @@
 		opacity: 0;
 		pointer-events: none;
 		transition:
-			transform 0.2s ease,
-			opacity 0.2s ease;
+			transform 0.15s ease-out,
+			opacity 0.15s ease-out;
+	}
+	
+	/* During swipe: use progress-based transform, no transition */
+	.mobile-dock--swiping {
+		transform: translateY(calc(100% * (1 - var(--dock-reveal-progress, 0))));
+		opacity: var(--dock-reveal-progress, 0);
+		pointer-events: none;
+		transition: none;
+	}
+	
+	/* When dock becomes visible (not hidden, not swiping), animate in quickly */
+	.mobile-dock:not(.mobile-dock--hidden):not(.mobile-dock--swiping) {
+		transform: translateY(0);
+		opacity: 1;
+		pointer-events: auto;
+		transition:
+			transform 0.1s ease-out,
+			opacity 0.1s ease-out;
 	}
 
 	/* Keep nav + children matching the dock background to prevent artifacts */
@@ -635,5 +698,12 @@
 
 	.mobile-dock :global(.avatar-inner) {
 		border: none !important;
+	}
+
+	/* Hide on desktop screens */
+	@media (min-width: 768px) {
+		.mobile-dock {
+			display: none !important;
+		}
 	}
 </style>
