@@ -384,16 +384,81 @@ export async function registerFirebaseMessagingSW() {
 }
 
 export async function requestNotificationPermission(): Promise<boolean> {
-	if (!browser || !('Notification' in window)) return false;
+	if (!browser) return false;
+	
+	logPushDebug('requestNotificationPermission starting');
+	
+	// Check if Notification API exists
+	if (!('Notification' in window)) {
+		logPushDebug('requestNotificationPermission: Notification API not available');
+		// On iOS PWA, we might need to use PushManager directly
+		if ('serviceWorker' in navigator && 'PushManager' in window) {
+			logPushDebug('requestNotificationPermission: trying PushManager approach for iOS');
+			try {
+				const registration = await navigator.serviceWorker.ready;
+				const permState = await registration.pushManager.permissionState({ userVisibleOnly: true });
+				logPushDebug('requestNotificationPermission: PushManager permissionState', { permState });
+				if (permState === 'granted') return true;
+				if (permState === 'denied') return false;
+				// For 'prompt', we'll try to subscribe which triggers the permission
+				return true; // Let the subscription flow handle the prompt
+			} catch (err) {
+				logPushDebug('requestNotificationPermission: PushManager check failed', { 
+					error: err instanceof Error ? err.message : String(err) 
+				});
+			}
+		}
+		return false;
+	}
+	
 	const initial = await getEffectiveNotificationPermission();
+	logPushDebug('requestNotificationPermission: initial permission', { initial });
 	if (initial === 'granted') return true;
 	if (initial === 'denied') return false;
+	
 	try {
-		const res = await Notification.requestPermission();
+		logPushDebug('requestNotificationPermission: calling Notification.requestPermission()');
+		
+		// Add timeout to prevent hanging on mobile browsers - increased to 15s for iOS
+		const timeoutPromise = new Promise<NotificationPermission>((resolve) => {
+			setTimeout(() => {
+				logPushDebug('requestNotificationPermission: timeout reached');
+				resolve('default');
+			}, 15000);
+		});
+		
+		// Notification.requestPermission can return a promise or use callback (legacy)
+		let permissionPromise: Promise<NotificationPermission>;
+		try {
+			const result = Notification.requestPermission();
+			if (result instanceof Promise) {
+				permissionPromise = result;
+			} else {
+				// Old callback style - wrap in promise
+				permissionPromise = new Promise((resolve) => {
+					Notification.requestPermission(resolve);
+				});
+			}
+		} catch {
+			// Fallback for very old browsers
+			permissionPromise = new Promise((resolve) => {
+				Notification.requestPermission(resolve);
+			});
+		}
+		
+		const res = await Promise.race([permissionPromise, timeoutPromise]);
+		logPushDebug('requestNotificationPermission: result', { res });
+		
 		if (res === 'granted') return true;
+		
+		// Double-check the final state
 		const finalState = await getEffectiveNotificationPermission();
+		logPushDebug('requestNotificationPermission: final state check', { finalState });
 		return finalState === 'granted';
-	} catch {
+	} catch (err) {
+		logPushDebug('requestNotificationPermission: exception', { 
+			error: err instanceof Error ? err.message : String(err) 
+		});
 		const fallback = await getEffectiveNotificationPermission();
 		return fallback === 'granted';
 	}
@@ -434,7 +499,8 @@ export async function syncDeviceRegistration(uid: string) {
 		return;
 	}
 	await registerFirebaseMessagingSW();
-	await persistDeviceDoc(uid, { permission });
+	// Non-blocking persist
+	persistDeviceDoc(uid, { permission }).catch(() => {});
 }
 
 export type EnablePushOptions = {
@@ -467,29 +533,41 @@ export async function enablePushForUser(
 		return null;
 	}
 	
+	// Detect if we're on iOS PWA
+	const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+	const isIOSPWA = isIOSDevice && isStandalone();
+	
 	emitPushDebug(debug, {
 		step: 'enable.start',
 		message: 'Attempting to enable push for user.',
-		context: { uid, prompt }
+		context: { uid, prompt, isIOSPWA }
 	});
+	
 	let permission = resolvePermission();
 	emitPushDebug(debug, {
 		step: 'permission.resolve',
-		context: { permission }
+		context: { permission, isIOSPWA }
 	});
+	
 	if (permission === 'denied') {
 		emitPushDebug(debug, {
-			step: 'permission.denied',
-			message: 'Notification permission previously denied; persisting state.'
+			step: 'fail.permission_denied',
+			message: 'Notification permission previously denied in browser settings.'
 		});
-		emitPushDebug(debug, {
-			step: 'device.persist',
-			context: { reason: 'permission_denied', permission }
-		});
-		await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+		// Non-blocking persist
+		persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 		return null;
 	}
-	if (permission === 'default' && prompt) {
+	
+	// On iOS PWA, skip the Notification.requestPermission() and let PushManager.subscribe() 
+	// handle the permission prompt natively - this works more reliably on iOS
+	if (isIOSPWA && permission === 'default' && prompt) {
+		emitPushDebug(debug, {
+			step: 'ios.skip_notification_api',
+			message: 'iOS PWA: skipping Notification API, will prompt via PushManager'
+		});
+		// Don't request permission here - let ensureSafariSubscription handle it
+	} else if (permission === 'default' && prompt) {
 		emitPushDebug(debug, {
 			step: 'permission.request',
 			message: 'Requesting notification permission from the browser.'
@@ -502,26 +580,25 @@ export async function enablePushForUser(
 		});
 		if (!granted) {
 			emitPushDebug(debug, {
-				step: 'device.persist',
-				context: { reason: 'permission_not_granted', permission }
+				step: 'fail.permission_not_granted',
+				message: 'User did not grant notification permission.',
+				context: { permission }
 			});
-			await persistDeviceDoc(uid, {
+			// Non-blocking persist
+			persistDeviceDoc(uid, {
 				permission: permission ?? 'default',
 				token: null,
 				subscription: null
-			});
+			}).catch(() => {});
 			return null;
 		}
-	} else if (permission === 'default') {
+	} else if (permission === 'default' && !isIOSPWA) {
 		emitPushDebug(debug, {
-			step: 'permission.default_skip',
-			message: 'Permission still default but prompting disabled; persisting snapshot.'
+			step: 'fail.prompt_skipped',
+			message: 'Permission is default but prompting was disabled and not iOS PWA.'
 		});
-		emitPushDebug(debug, {
-			step: 'device.persist',
-			context: { reason: 'prompt_skipped', permission }
-		});
-		await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+		// Non-blocking persist
+		persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 		return null;
 	}
 
@@ -540,10 +617,11 @@ export async function enablePushForUser(
 	});
 	if (!sw) {
 		emitPushDebug(debug, {
-			step: 'device.persist',
-			context: { reason: 'sw_missing', permission }
+			step: 'fail.sw_missing',
+			message: 'Service worker registration failed or returned null.'
 		});
-		await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+		// Non-blocking persist
+		persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 		return null;
 	}
 
@@ -559,7 +637,8 @@ export async function enablePushForUser(
 				step: 'safari.subscription.error',
 				message: 'Failed to obtain Safari Web Push subscription.'
 			});
-			await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+			// Non-blocking persist for error case
+			persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 			return null;
 		}
 		const previewEndpoint =
@@ -571,16 +650,21 @@ export async function enablePushForUser(
 			context: { endpointPreview: previewEndpoint }
 		});
 		permission = 'granted';
-		await persistDeviceDoc(uid, {
-			permission: 'granted',
-			subscription,
-			token: null,
-			enabled: true
-		});
+		
+		// Non-blocking persist - don't wait for Firestore, return token immediately
 		emitPushDebug(debug, {
 			step: 'device.persist',
 			context: { reason: 'safari_subscription', permission: 'granted' }
 		});
+		persistDeviceDoc(uid, {
+			permission: 'granted',
+			subscription,
+			token: null,
+			enabled: true
+		}).catch((err) => {
+			console.warn('[push] Safari subscription persist failed (non-blocking):', err);
+		});
+		
 		const endpointPreview =
 			typeof subscription.endpoint === 'string'
 				? `safari:${subscription.endpoint.slice(-12)}`
@@ -600,7 +684,8 @@ export async function enablePushForUser(
 				step: 'messaging.vapid.missing',
 				message: 'No VAPID key configured for FCM token collection.'
 			});
-			await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+			// Non-blocking persist
+			persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 			return null;
 		}
 		const messagingSdk = await import('firebase/messaging');
@@ -621,18 +706,22 @@ export async function enablePushForUser(
 				step: 'device.persist',
 				context: { reason: 'token_missing', permission }
 			});
-			await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+			// Non-blocking persist
+			persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 			return null;
 		}
 		emitPushDebug(debug, {
 			step: 'device.persist',
 			context: { reason: 'token_success', permission: 'granted' }
 		});
-		await persistDeviceDoc(uid, {
+		// Non-blocking persist - return token immediately
+		persistDeviceDoc(uid, {
 			permission: 'granted',
 			token,
 			subscription: null,
 			enabled: true
+		}).catch((err) => {
+			console.warn('[push] FCM token persist failed (non-blocking):', err);
 		});
 		emitPushDebug(debug, {
 			step: 'enable.success',
@@ -651,7 +740,8 @@ export async function enablePushForUser(
 			step: 'device.persist',
 			context: { reason: 'token_error', permission }
 		});
-		await persistDeviceDoc(uid, { permission, token: null, subscription: null });
+		// Non-blocking persist
+		persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
 		return null;
 	}
 }
@@ -848,6 +938,22 @@ async function ensureSafariSubscription(
 		logPushDebug('ensureSafariSubscription: pushManager unavailable');
 		return null;
 	}
+	
+	// Check permission state first
+	try {
+		const permState = await sw.pushManager.permissionState({ userVisibleOnly: true });
+		logPushDebug('ensureSafariSubscription: permissionState', { permState });
+		if (permState === 'denied') {
+			logPushDebug('ensureSafariSubscription: permission denied by user');
+			return null;
+		}
+	} catch (err) {
+		logPushDebug('ensureSafariSubscription: permissionState check failed', {
+			error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+		});
+		// Continue anyway - some browsers don't support permissionState
+	}
+	
 	try {
 		const existing = await sw.pushManager.getSubscription();
 		if (existing) {
@@ -859,22 +965,47 @@ async function ensureSafariSubscription(
 			error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
 		});
 	}
+	
 	if (!PUBLIC_FCM_VAPID_KEY) {
 		logPushDebug('ensureSafariSubscription aborted (missing VAPID key)');
 		return null;
 	}
+	
 	try {
+		logPushDebug('ensureSafariSubscription: calling pushManager.subscribe() - this should trigger iOS prompt');
 		const convertedKey = urlBase64ToUint8Array(PUBLIC_FCM_VAPID_KEY);
-		const subscription = await sw.pushManager.subscribe({
+		
+		// Add a timeout for the subscribe call as it may hang on iOS
+		const timeoutPromise = new Promise<PushSubscription | null>((resolve) => {
+			setTimeout(() => {
+				logPushDebug('ensureSafariSubscription: subscribe timeout after 20s');
+				resolve(null);
+			}, 20000);
+		});
+		
+		const subscribePromise = sw.pushManager.subscribe({
 			userVisibleOnly: true,
 			applicationServerKey: convertedKey
 		});
-		logPushDebug('ensureSafariSubscription created new subscription');
-		return subscription.toJSON();
+		
+		const subscription = await Promise.race([subscribePromise, timeoutPromise]);
+		
+		if (subscription) {
+			logPushDebug('ensureSafariSubscription created new subscription');
+			return subscription.toJSON();
+		} else {
+			logPushDebug('ensureSafariSubscription: subscribe returned null or timed out');
+			return null;
+		}
 	} catch (err) {
-		logPushDebug('ensureSafariSubscription subscribe failed', {
-			error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
-		});
+		const errorMsg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+		logPushDebug('ensureSafariSubscription subscribe failed', { error: errorMsg });
+		
+		// Check if it's a permission error
+		if (errorMsg.includes('permission') || errorMsg.includes('denied') || errorMsg.includes('NotAllowedError')) {
+			logPushDebug('ensureSafariSubscription: likely a permission denial');
+		}
+		
 		return null;
 	}
 }
@@ -883,38 +1014,58 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
 	const deviceId = ensureDeviceId();
 	if (!deviceId) return;
 	postDeviceIdToServiceWorker(deviceId);
-	await ensureFirebaseReady();
-	const db = getDb();
-	const now = serverTimestamp();
-	const ref = doc(collection(db, 'profiles', uid, DEVICE_COLLECTION), deviceId);
-	logPushDebug('persistDeviceDoc invoked', {
-		uid,
-		deviceId,
-		hasTokenUpdate: update.token !== undefined,
-		hasPermissionUpdate: update.permission !== undefined,
-		enabled: update.enabled
-	});
-	const payload: Record<string, unknown> = {
-		deviceId,
-		platform: detectPlatform(),
-		isStandalone: isStandalone(),
-		userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
-		permission: update.permission ?? resolvePermission(),
-		lastSeen: now,
-		updatedAt: now
-	};
-	if (update.token !== undefined) {
-		payload.token = update.token || null;
-		payload.tokenUpdatedAt = now;
+	
+	logPushDebug('persistDeviceDoc starting', { uid, deviceId });
+	
+	// Add timeout to prevent hanging on Firestore operations
+	const timeoutMs = 10000;
+	const timeoutPromise = new Promise<void>((_, reject) => 
+		setTimeout(() => reject(new Error('persistDeviceDoc timeout')), timeoutMs)
+	);
+	
+	try {
+		await Promise.race([
+			(async () => {
+				logPushDebug('persistDeviceDoc: awaiting ensureFirebaseReady');
+				await ensureFirebaseReady();
+				logPushDebug('persistDeviceDoc: firebase ready, getting db');
+				const db = getDb();
+				const now = serverTimestamp();
+				const ref = doc(collection(db, 'profiles', uid, DEVICE_COLLECTION), deviceId);
+				logPushDebug('persistDeviceDoc: preparing payload');
+				const payload: Record<string, unknown> = {
+					deviceId,
+					platform: detectPlatform(),
+					isStandalone: isStandalone(),
+					userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+					permission: update.permission ?? resolvePermission(),
+					lastSeen: now,
+					updatedAt: now
+				};
+				if (update.token !== undefined) {
+					payload.token = update.token || null;
+					payload.tokenUpdatedAt = now;
+				}
+				if (update.subscription !== undefined) {
+					payload.subscription = update.subscription || null;
+					payload.subscriptionUpdatedAt = now;
+				}
+				if (update.enabled !== undefined) {
+					payload.enabled = update.enabled;
+				}
+				logPushDebug('persistDeviceDoc: calling setDoc');
+				await setDoc(ref, payload, { merge: true });
+				logPushDebug('persistDeviceDoc: setDoc complete');
+			})(),
+			timeoutPromise
+		]);
+	} catch (err) {
+		// Log but don't throw - we don't want to block the push enable flow
+		console.warn('[push] persistDeviceDoc failed:', err instanceof Error ? err.message : err);
+		logPushDebug('persistDeviceDoc error', { 
+			error: err instanceof Error ? err.message : String(err) 
+		});
 	}
-	if (update.subscription !== undefined) {
-		payload.subscription = update.subscription || null;
-		payload.subscriptionUpdatedAt = now;
-	}
-	if (update.enabled !== undefined) {
-		payload.enabled = update.enabled;
-	}
-	await setDoc(ref, payload, { merge: true });
 }
 
 export function getCurrentDeviceId(): string | null {
