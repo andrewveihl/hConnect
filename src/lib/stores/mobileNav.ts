@@ -98,6 +98,13 @@ export function closeOverlay(id: MobileOverlayId) {
 		stackStore.update((stack) => stack.filter((entry) => entry.id !== id));
 		return;
 	}
+	const currentEntryId = window.history.state?.[STATE_KEY] ?? null;
+	if (currentEntryId !== top.entryId) {
+		// The overlay entry was replaced (e.g. via replaceState); just drop our stack entry to avoid popping real pages.
+		entryDirectory.delete(top.entryId);
+		stackStore.update((stack) => stack.filter((entry) => entry.entryId !== top.entryId));
+		return;
+	}
 	window.history.back();
 }
 

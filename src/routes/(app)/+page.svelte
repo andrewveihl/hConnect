@@ -10,7 +10,7 @@
 		type ActivityEntry
 	} from '$lib/stores/activityFeed';
 	import type { NotificationItem } from '$lib/stores/notifications';
-	import { enablePushForUser } from '$lib/notify/push';
+	import { enablePushForUser, isIOSPushSupported, getPushSupportMessage } from '$lib/notify/push';
 	import { handleDeepLinkPayload, type DeepLinkPayload } from '$lib/notify/deepLink';
 	import { user } from '$lib/stores/user';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
@@ -285,18 +285,73 @@
 			pushError = 'Sign in to enable push notifications.';
 			return;
 		}
+		
+		// Check if iOS push is supported - show helpful message if not
+		if (!isIOSPushSupported()) {
+			const supportInfo = getPushSupportMessage();
+			pushRequestState = 'error';
+			pushError = supportInfo.message;
+			return;
+		}
+		
 		pushRequestState = 'loading';
 		pushError = null;
-		const token = await enablePushForUser($user.uid, { prompt: true });
-		pushPermission = detectPermission();
-		if (token) {
-			pushRequestState = 'success';
-		} else {
+		
+		// Track progress for debugging
+		let lastStep = 'starting';
+		const debugLog: string[] = [];
+		const debug = (event: { step: string; message?: string; error?: string }) => {
+			lastStep = event.step;
+			debugLog.push(`${event.step}: ${event.message || event.error || 'ok'}`);
+			console.info('[push-enable]', event.step, event.message || event.error || '');
+		};
+		
+		try {
+			// Add timeout to prevent hanging forever on mobile
+			const timeoutPromise = new Promise<null>((resolve) => {
+				setTimeout(() => {
+					console.warn('[push-enable] Timeout reached at step:', lastStep);
+					resolve(null);
+				}, 20000);
+			});
+			const enablePromise = enablePushForUser($user.uid, { prompt: true, debug });
+			const token = await Promise.race([enablePromise, timeoutPromise]);
+			
+			pushPermission = detectPermission();
+			if (token) {
+				pushRequestState = 'success';
+				console.info('[push-enable] Success! Token received');
+			} else {
+				pushRequestState = 'error';
+				console.warn('[push-enable] Failed at step:', lastStep, 'Debug log:', debugLog);
+				if (pushPermission === 'denied') {
+					pushError = 'Notifications are blocked in your browser settings.';
+				} else if (lastStep.includes('fail.permission_denied')) {
+					pushError = 'Notifications blocked. Go to Settings → Safari → Advanced → Website Data, delete this site, then re-add to Home Screen.';
+				} else if (lastStep.includes('fail.permission_not_granted')) {
+					pushError = 'You must tap Allow when prompted. Close app completely and try again.';
+				} else if (lastStep.includes('fail.prompt_skipped')) {
+					pushError = 'Not detected as iOS PWA. Delete app, clear Safari data, re-add to Home Screen.';
+				} else if (lastStep.includes('fail.sw_missing')) {
+					pushError = 'Service worker failed. Close app completely, wait 10 seconds, then reopen.';
+				} else if (lastStep.includes('permission.request')) {
+					pushError = 'Permission prompt failed. Close this app completely, then reopen and try again.';
+				} else if (lastStep.includes('safari.subscription')) {
+					pushError = 'Safari push subscription failed. Try closing and reopening the app.';
+				} else if (lastStep.includes('sw.register')) {
+					pushError = 'Service worker registration failed. Try refreshing.';
+				} else if (lastStep.includes('timeout') || lastStep === 'starting') {
+					pushError = 'Request timed out. Check your internet connection and try again.';
+				} else if (lastStep.includes('device.persist')) {
+					pushError = 'Push setup incomplete. Try closing the app completely and reopening.';
+				} else {
+					pushError = `Push setup failed (${lastStep}). Try refreshing.`;
+				}
+			}
+		} catch (err) {
+			console.error('[push-enable] Exception:', err, 'Last step:', lastStep);
 			pushRequestState = 'error';
-			pushError =
-				pushPermission === 'denied'
-					? 'Notifications are blocked in your browser settings.'
-					: 'Could not enable push notifications on this device.';
+			pushError = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
 		}
 	}
 
