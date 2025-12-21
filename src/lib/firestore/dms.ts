@@ -15,9 +15,12 @@ import {
 	updateDoc,
 	where,
 	limit,
+	limitToLast,
+	endBefore,
 	deleteField,
 	runTransaction,
-	type Unsubscribe
+	type Unsubscribe,
+	type DocumentSnapshot
 } from 'firebase/firestore';
 import {
 	buildMessageDocument,
@@ -694,21 +697,58 @@ export async function submitDMForm(
 	});
 }
 
-export function streamDMMessages(threadId: string, cb: (msgs: any[]) => void): Unsubscribe {
+const DM_PAGE_SIZE = 50;
+
+/**
+ * Subscribe to the latest DM messages (paginated).
+ * Returns the newest PAGE_SIZE messages in real-time.
+ * Callback receives messages and optionally the first doc snapshot for pagination.
+ */
+export function streamDMMessages(
+	threadId: string,
+	cb: (msgs: any[], firstDoc?: DocumentSnapshot) => void,
+	pageSize = DM_PAGE_SIZE
+): Unsubscribe {
 	const db = getDb();
-	const q1 = query(collection(db, COL_DMS, threadId, SUB_MESSAGES), orderBy('createdAt', 'asc'));
+	const q1 = query(
+		collection(db, COL_DMS, threadId, SUB_MESSAGES),
+		orderBy('createdAt', 'asc'),
+		limitToLast(pageSize)
+	);
 	return onSnapshot(q1, (snap) => {
-		cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+		const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+		const firstDoc = snap.docs[0] ?? undefined;
+		cb(msgs, firstDoc);
 	});
 }
 
-/** Live list of my threads (most recent first). */
+/**
+ * Load older DM messages before a given document snapshot (for scroll-up pagination).
+ */
+export async function loadOlderDMMessages(
+	threadId: string,
+	oldestDoc: DocumentSnapshot,
+	pageSize = DM_PAGE_SIZE
+): Promise<{ id: string; [key: string]: any }[]> {
+	const db = getDb();
+	const q = query(
+		collection(db, COL_DMS, threadId, SUB_MESSAGES),
+		orderBy('createdAt', 'asc'),
+		endBefore(oldestDoc),
+		limitToLast(pageSize)
+	);
+	const snap = await getDocs(q);
+	return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+/** Live list of my threads (most recent first). Limited to newest 50 for performance. */
 export function streamMyThreads(uid: string, cb: (threads: any[]) => void): Unsubscribe {
 	const db = getDb();
 	const q1 = query(
 		collection(db, COL_DMS),
 		where('participants', 'array-contains', uid),
-		orderBy('updatedAt', 'desc')
+		orderBy('updatedAt', 'desc'),
+		limit(50)
 	);
 	return onSnapshot(q1, (snap) => {
 		const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
@@ -958,11 +998,11 @@ export async function seedDMRailFromThreads(uid: string, { limitTo = 50 } = {}) 
 
 /**
  * Fallback live stream of my DMs without orderBy to avoid index requirements.
- * Client-sorts by updatedAt and filters deletedFor.
+ * Client-sorts by updatedAt and filters deletedFor. Limited to 100 for performance.
  */
 export function streamMyThreadsLoose(uid: string, cb: (threads: any[]) => void): Unsubscribe {
 	const db = getDb();
-	const q1 = query(collection(db, COL_DMS), where('participants', 'array-contains', uid));
+	const q1 = query(collection(db, COL_DMS), where('participants', 'array-contains', uid), limit(100));
 	return onSnapshot(q1, (snap) => {
 		const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
 		const filtered = rows.filter((row) => !row?.deletedFor?.[uid]);

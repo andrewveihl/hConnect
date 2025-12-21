@@ -9,6 +9,7 @@
 	import TicketFab from '$lib/components/app/TicketFab.svelte';
 	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
 	import SuperAdminFab from '$lib/components/app/SuperAdminFab.svelte';
+	import VoiceDebugFab from '$lib/components/app/VoiceDebugFab.svelte';
 	import {
 		initClientErrorReporting,
 		teardownClientErrorReporting
@@ -207,6 +208,7 @@
 		<FloatingActionDock />
 		<TicketFab />
 		<ThreadsFab />
+		<VoiceDebugFab />
 		{#if !isAdminPage}
 			<SuperAdminFab />
 		{/if}

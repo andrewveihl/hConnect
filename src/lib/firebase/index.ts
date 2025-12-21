@@ -25,7 +25,9 @@ import {
 	signOut
 } from 'firebase/auth';
 import {
-	getFirestore,
+	initializeFirestore,
+	persistentLocalCache,
+	persistentMultipleTabManager,
 	doc,
 	getDoc,
 	setDoc,
@@ -143,7 +145,22 @@ export async function ensureFirebaseReady() {
 		}
 	}
 	if (!db) {
-		db = getFirestore(_app);
+		try {
+			// Enable offline persistence for faster reloads (reads from local cache first)
+			db = initializeFirestore(_app, {
+				localCache: persistentLocalCache({
+					tabManager: persistentMultipleTabManager()
+				})
+			});
+		} catch (e: any) {
+			// If Firestore was already initialized (e.g., hot reload), get existing instance
+			if (e?.code === 'failed-precondition' || e?.message?.includes('already been called')) {
+				const { getFirestore } = await import('firebase/firestore');
+				db = getFirestore(_app);
+			} else {
+				throw e;
+			}
+		}
 	}
 	if (!storage) {
 		storage = storageBucketUrl ? getStorage(_app, storageBucketUrl) : getStorage(_app);

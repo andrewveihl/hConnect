@@ -6,7 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { user } from '$lib/stores/user';
 	import { getDb } from '$lib/firebase';
-	import { doc, getDoc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+	import { doc, getDoc, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
@@ -24,6 +24,7 @@
 	import {
 		sendDMMessage,
 		streamDMMessages,
+		loadOlderDMMessages,
 		markThreadRead,
 		voteOnDMPoll,
 		submitDMForm,
@@ -78,6 +79,7 @@
 	let mentionOptions: MentionOption[] = $state([]);
 	let resumeDmScroll = false;
 	let scrollResumeSignal = $state(0);
+	let earliestLoadedDoc: any = $state(null); // Track oldest message doc for pagination
 	let composerFocusSignal = $state(0);
 	const combinedScrollSignal = $derived(scrollResumeSignal + composerFocusSignal);
 	let lastPendingThreadId: string | null = null;
@@ -1128,9 +1130,14 @@
 	run(() => {
 		if (mounted && threadID) {
 			messagesLoading = true;
+			earliestLoadedDoc = null;
 			unsub?.();
-			unsub = streamDMMessages(threadID, async (msgs) => {
+			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
 				messages = msgs.map((row: any) => toChatMessage(row.id, row));
+				// Only set earliestLoadedDoc on initial load (when it's null)
+				if (!earliestLoadedDoc && firstDoc) {
+					earliestLoadedDoc = firstDoc;
+				}
 				messagesLoading = false;
 				if (messages.length > 0) {
 					scrollResumeSignal = Date.now();
@@ -1146,9 +1153,33 @@
 			unsub?.();
 			unsub = null;
 			messages = [];
+			earliestLoadedDoc = null;
 			messagesLoading = false;
 		}
 	});
+
+	async function handleLoadOlderMessages() {
+		if (!threadID || !earliestLoadedDoc) return;
+		try {
+			const olderMsgs = await loadOlderDMMessages(threadID, earliestLoadedDoc);
+			if (olderMsgs.length > 0) {
+				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
+				messages = [...olderConverted, ...messages];
+				// Update earliest doc reference for next pagination
+				const db = getDb();
+				const firstOlderId = olderMsgs[0]?.id;
+				if (firstOlderId) {
+					const docRef = doc(db, 'dms', threadID, 'messages', firstOlderId);
+					const docSnap = await getDoc(docRef);
+					if (docSnap.exists()) {
+						earliestLoadedDoc = docSnap;
+					}
+				}
+			}
+		} catch (err) {
+			console.error('[DM] Failed to load older messages:', err);
+		}
+	}
 
 	async function handleSend(
 		payload:
@@ -1533,6 +1564,7 @@
 							on:submitForm={handleFormSubmit}
 							on:react={handleReaction}
 							on:reply={handleReplyRequest}
+							on:loadMore={handleLoadOlderMessages}
 						/>
 					{/key}
 				</div>

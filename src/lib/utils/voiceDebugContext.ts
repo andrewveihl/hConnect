@@ -186,6 +186,14 @@ export function formatVoiceDebugContext(options: { maxEvents?: number } = {}): s
 	return lines.join('\n');
 }
 
+export function clearVoiceDebugEvents(options: { clearSections?: boolean } = {}): void {
+	events = [];
+	sequence = 0;
+	if (options.clearSections) {
+		sections.clear();
+	}
+}
+
 export async function buildVoiceDebugAggregate(
 	options: {
 		includeLogs?: number;

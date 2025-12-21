@@ -52,7 +52,7 @@
 			<div class="domain-invite-body">
 				<div class="domain-invite-icon" aria-hidden="true">
 					{#if invite.serverIcon}
-						<img src={invite.serverIcon} alt="" />
+						<img src={invite.serverIcon} alt="" loading="lazy" />
 					{:else}
 						<span>{initialFor(invite)}</span>
 					{/if}
