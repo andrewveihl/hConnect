@@ -59,6 +59,9 @@ workflows:
       - ios/App/build/export/*.ipa
       
     publishing:
-      app_store_connect:
-        auth: integration  # Set up in Codemagic UI
-        submit_to_testflight: true
+      email:
+        recipients:
+          - andrewveihl@gmail.com
+        notify:
+          success: true
+          failure: true
