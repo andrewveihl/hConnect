@@ -25,7 +25,7 @@
 		active?: boolean;
 		options?: MentionCandidate[];
 		selectedIndex?: number;
-		position?: { left: string; bottom: string; maxHeight: string };
+		position?: { left: string; bottom?: string; top?: string; maxHeight: string };
 		specialMentionIds?: { EVERYONE: string; HERE: string };
 		onSelect?: (option: MentionCandidate) => void;
 		onHover?: (index: number) => void;
@@ -35,7 +35,7 @@
 		active = false,
 		options = [],
 		selectedIndex = 0,
-		position = { left: '0px', bottom: '5rem', maxHeight: '16rem' },
+		position = { left: '0px', bottom: '5rem', top: 'auto', maxHeight: '16rem' },
 		specialMentionIds = { EVERYONE: '', HERE: '' },
 		onSelect = () => {},
 		onHover = () => {}
@@ -47,7 +47,8 @@
 		class="mention-menu"
 		role="listbox"
 		style:left={position.left}
-		style:bottom={position.bottom}
+		style:bottom={position.bottom ?? 'auto'}
+		style:top={position.top ?? 'auto'}
 		style:max-height={position.maxHeight}
 	>
 		<div class="mention-menu__header">Tag someone or a role</div>

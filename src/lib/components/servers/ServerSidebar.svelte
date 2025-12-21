@@ -10,6 +10,7 @@
 	import { getDb } from '$lib/firebase';
 	import { user } from '$lib/stores/user';
 	import ChannelCreateModal from '$lib/components/servers/ChannelCreateModal.svelte';
+	import { reorderCategories } from '$lib/firestore/channels';
 	import {
 		appendVoiceDebugEvent,
 		removeVoiceDebugSection,
@@ -82,6 +83,14 @@
 		position?: number;
 		isPrivate?: boolean;
 		allowedRoleIds?: string[];
+		categoryId?: string | null;
+	};
+
+	type Category = {
+		id: string;
+		name: string;
+		position: number;
+		collapsed?: boolean;
 	};
 
 	const CALL_DOC_ID = 'live';
@@ -139,6 +148,17 @@
 	let channelVisibilityHint: string | null = $state(null);
 	let currentChannelServer: string | null = null;
 	let lastChannelRoleKey: string | null = null;
+
+	// Categories (folders) for channel grouping
+	let categories: Category[] = $state([]);
+	let collapsedCategories: Set<string> = $state(new Set());
+	let unsubCategories: Unsubscribe | null = null;
+
+	// Category drag-and-drop state
+	let draggingCategoryId: string | null = $state(null);
+	let categoryDropTarget: { type: 'before-item' | 'end'; itemIndex?: number } | null = $state(null);
+	let categoryDragStartY = 0;
+	let categoryDragMoved = false;
 
 	let voicePresence: Record<string, VoiceParticipant[]> = $state({});
 	const voiceUnsubs = new Map<string, Unsubscribe>();
@@ -922,6 +942,146 @@
 		);
 	}
 
+	function watchCategories(server: string) {
+		unsubCategories?.();
+		categories = [];
+		const db = getDb();
+		const catCol = collection(db, 'servers', server, 'categories');
+		const qRef = query(catCol, orderBy('position'));
+		unsubCategories = onSnapshot(qRef, (snap) => {
+			categories = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as Category[];
+		});
+	}
+
+	function toggleCategoryCollapse(categoryId: string) {
+		if (collapsedCategories.has(categoryId)) {
+			collapsedCategories.delete(categoryId);
+		} else {
+			collapsedCategories.add(categoryId);
+		}
+		collapsedCategories = new Set(collapsedCategories); // trigger reactivity
+	}
+
+	// Category drag-and-drop handlers
+	function startCategoryDrag(event: DragEvent, categoryId: string) {
+		if (!canManageChannels) {
+			console.log('[CategoryDrag] Cannot manage channels - aborting drag');
+			return;
+		}
+		if (!event.dataTransfer) {
+			console.log('[CategoryDrag] No dataTransfer - aborting drag');
+			return;
+		}
+		console.log('[CategoryDrag] Starting drag for category:', categoryId);
+		event.dataTransfer.setData('text/plain', categoryId);
+		event.dataTransfer.effectAllowed = 'move';
+		draggingCategoryId = categoryId;
+		categoryDragStartY = event.clientY;
+		categoryDragMoved = false;
+	}
+
+	function handleCategoryDragLeave(event: DragEvent) {
+		// Only clear if we're leaving to something outside the channel list
+		const relatedTarget = event.relatedTarget as HTMLElement | null;
+		if (!relatedTarget?.closest('.channel-list')) {
+			categoryDropTarget = null;
+		}
+	}
+
+	async function handleCategoryDrop(event: DragEvent) {
+		event.preventDefault();
+		console.log('[CategoryDrop] Drop event, draggingCategoryId:', draggingCategoryId, 'target:', categoryDropTarget);
+		if (!canManageChannels || !draggingCategoryId || !categoryDropTarget || !computedServerId) {
+			console.log('[CategoryDrop] Aborting - missing data:', { canManageChannels, draggingCategoryId, categoryDropTarget, computedServerId });
+			resetCategoryDragState();
+			return;
+		}
+
+		const draggedId = draggingCategoryId;
+		const target = categoryDropTarget;
+		resetCategoryDragState();
+
+		// Calculate new position for the dragged category based on where it's dropped
+		let newPosition = 0;
+
+		if (target.type === 'before-item' && typeof target.itemIndex === 'number') {
+			const itemIndex = target.itemIndex;
+			
+			if (itemIndex === 0) {
+				// Dropping at the very beginning
+				const firstItem = unifiedDisplayList[0];
+				if (firstItem) {
+					if (firstItem.type === 'channel') {
+						const pos = firstItem.channel.position;
+						newPosition = typeof pos === 'number' ? pos - 1 : -1;
+					} else {
+						newPosition = firstItem.category.position - 1;
+					}
+				} else {
+					newPosition = 0;
+				}
+			} else {
+				// Dropping between two items - get position between prev and current
+				const prevItem = unifiedDisplayList[itemIndex - 1];
+				const currentItem = unifiedDisplayList[itemIndex];
+				
+				let prevPos = 0;
+				if (prevItem) {
+					if (prevItem.type === 'channel') {
+						prevPos = typeof prevItem.channel.position === 'number' ? prevItem.channel.position : 0;
+					} else {
+						prevPos = prevItem.category.position;
+					}
+				}
+				
+				let currentPos = prevPos + 2;
+				if (currentItem) {
+					if (currentItem.type === 'channel') {
+						currentPos = typeof currentItem.channel.position === 'number' ? currentItem.channel.position : prevPos + 2;
+					} else {
+						currentPos = currentItem.category.position;
+					}
+				}
+				
+				newPosition = (prevPos + currentPos) / 2;
+			}
+		} else if (target.type === 'end') {
+			// Dropping at the end of the list
+			const lastItem = unifiedDisplayList[unifiedDisplayList.length - 1];
+			if (lastItem) {
+				if (lastItem.type === 'channel') {
+					const pos = lastItem.channel.position;
+					newPosition = typeof pos === 'number' ? pos + 1 : 1;
+				} else {
+					newPosition = lastItem.category.position + 1;
+				}
+			} else {
+				newPosition = 0;
+			}
+		}
+
+		// Update the category position in Firestore
+		try {
+			const db = getDb();
+			const { doc, updateDoc } = await import('firebase/firestore');
+			await updateDoc(doc(db, 'servers', computedServerId, 'categories', draggedId), {
+				position: newPosition
+			});
+		} catch (err) {
+			console.error('Failed to reorder category:', err);
+		}
+	}
+
+	function handleCategoryDragEnd() {
+		resetCategoryDragState();
+	}
+
+	function resetCategoryDragState() {
+		draggingCategoryId = null;
+		categoryDropTarget = null;
+		categoryDragMoved = false;
+	}
+
 	function mergeChannelSnapshots(list: Chan[]) {
 		const map = new Map<string, Chan>();
 		channels.forEach((c) => map.set(c.id, c));
@@ -1083,6 +1243,74 @@
 	let orderedChannels: Chan[] = $state([]);
 	let visibleChannels: Chan[] = $state([]);
 
+	// Create a unified display list that interleaves categories with channels by position
+	// Categories can be positioned anywhere in the channel list
+	type DisplayItem = 
+		| { type: 'channel'; channel: Chan }
+		| { type: 'category'; category: Category; channels: Chan[] };
+
+	let unifiedDisplayList: DisplayItem[] = $derived.by(() => {
+		// Group channels by category
+		const uncategorized: Chan[] = [];
+		const byCategory = new Map<string, Chan[]>();
+
+		for (const ch of visibleChannels) {
+			if (ch.categoryId) {
+				const arr = byCategory.get(ch.categoryId) || [];
+				arr.push(ch);
+				byCategory.set(ch.categoryId, arr);
+			} else {
+				uncategorized.push(ch);
+			}
+		}
+
+		// Create display items for categories with their position
+		const categoryItems: { position: number; item: DisplayItem }[] = categories.map(cat => ({
+			position: cat.position,
+			item: { type: 'category', category: cat, channels: byCategory.get(cat.id) || [] }
+		}));
+
+		// Create display items for uncategorized channels with their position
+		const channelItems: { position: number; item: DisplayItem }[] = uncategorized.map(ch => ({
+			position: typeof ch.position === 'number' ? ch.position : Number.MAX_SAFE_INTEGER,
+			item: { type: 'channel', channel: ch }
+		}));
+
+		// Combine and sort by position
+		const allItems = [...categoryItems, ...channelItems].sort((a, b) => a.position - b.position);
+
+		return allItems.map(i => i.item);
+	});
+
+	// Keep groupedChannels for backwards compatibility (used elsewhere)
+	let groupedChannels: { category: Category | null; channels: Chan[] }[] = $derived.by(() => {
+		const uncategorized: Chan[] = [];
+		const byCategory = new Map<string, Chan[]>();
+
+		for (const ch of visibleChannels) {
+			if (ch.categoryId) {
+				const arr = byCategory.get(ch.categoryId) || [];
+				arr.push(ch);
+				byCategory.set(ch.categoryId, arr);
+			} else {
+				uncategorized.push(ch);
+			}
+		}
+
+		const groups: { category: Category | null; channels: Chan[] }[] = [];
+
+		if (uncategorized.length > 0) {
+			groups.push({ category: null, channels: uncategorized });
+		}
+
+		for (const cat of categories) {
+			const chans = byCategory.get(cat.id) || [];
+			groups.push({ category: cat, channels: chans });
+		}
+
+		return groups;
+	});
+
 	function subscribeAll(server: string) {
 		const currentUser = get(user);
 		if (!currentUser?.uid) return;
@@ -1092,6 +1320,7 @@
 		watchProfileMembership(server);
 		watchChannels(server);
 		watchChannelOrder(server);
+		watchCategories(server);
 		reorderMode = 'none';
 		workingOrder = [];
 		orderError = null;
@@ -1106,6 +1335,7 @@
 		unsubMyMember?.();
 		unsubProfileMembership?.();
 		unsubPersonalOrder?.();
+		unsubCategories?.();
 		resetVoiceWatchers();
 		unsubscribeVoiceSession();
 		stopNotif?.();
@@ -1559,6 +1789,139 @@
 	});
 </script>
 
+{#snippet channelRow(c: Chan)}
+	<div
+		class={`channel-row ${activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
+		role="listitem"
+		draggable={false}
+		use:channelRowRefAction={c.id}
+		onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
+	>
+		<button
+			type="button"
+			class="channel-row__button"
+			onclick={() => pick(c.id)}
+			aria-label={`Open #${c.name} text channel`}
+			aria-current={activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'page' : undefined}
+			title={c.name}
+		>
+			<span class="channel-icon {c.isPrivate ? 'channel-icon--private' : ''}">
+				{#if c.type === 'voice'}
+					<i class="bx bx-headphone" aria-hidden="true"></i>
+				{:else}
+					<i class="bx bx-hash" aria-hidden="true"></i>
+				{/if}
+				{#if c.isPrivate === true}
+					<span class="channel-icon__lock" title="Private channel" aria-hidden="true">
+						<i class="bx bx-lock text-[0.55rem]" aria-hidden="true"></i>
+					</span>
+				{/if}
+			</span>
+			<span class="channel-name truncate">{c.name}</span>
+			<span class="channel-row__meta ml-auto">
+				{#if mentionHighlights.has(c.id)}
+					<span class="channel-mention-pill" title="You were mentioned">@</span>
+				{/if}
+				{#if c.type === 'voice'}
+					{#if (voicePresence[c.id]?.length ?? 0) > 0}
+						<span class="channel-voice-count">{voicePresence[c.id].length}</span>
+					{/if}
+				{:else if hasHighPriority(c.id) > 0}
+					<span class="channel-unread" aria-label={`${hasHighPriority(c.id)} unread high priority messages`}>
+						{hasHighPriority(c.id) > 99 ? '99+' : hasHighPriority(c.id)}
+					</span>
+				{:else if hasUnread(c.id)}
+					<span class="channel-blue-dot" aria-hidden="true" title="New messages"></span>
+				{/if}
+			</span>
+		</button>
+
+		{#if c.type === 'voice'}
+			{#if (voicePresence[c.id]?.length ?? 0) > 0}
+				<div class="channel-voice-presence">
+					{#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
+						{@const avatarUrl = resolveVoiceAvatar(member)}
+						{@const cachedProfile = voiceProfileCache.get(member.uid)}
+						<div class="channel-voice-avatar">
+							<Avatar
+								src={avatarUrl}
+								user={cachedProfile ? { ...member, ...cachedProfile } : member}
+								name={member.displayName}
+								size="xs"
+								isSelf={member.uid === $user?.uid}
+							/>
+						</div>
+					{/each}
+					{#if (voicePresence[c.id]?.length ?? 0) > 6}
+						<div class="channel-voice-more">+{voicePresence[c.id].length - 6}</div>
+					{/if}
+				</div>
+			{/if}
+
+			{@const channelThreadList = (threads ?? []).filter(
+				(thread) => thread.parentChannelId === c.id && thread.status !== 'archived'
+			)}
+			{@const joinableThreads = (availableThreads ?? []).filter(
+				(at) => at.parentChannelId === c.id && 
+					at.status !== 'archived' && 
+					!channelThreadList.some((ct) => ct.id === at.id) &&
+					currentUserId &&
+					!(at.memberUids ?? []).includes(currentUserId)
+			)}
+			{#if channelThreadList.length || joinableThreads.length}
+				<ul class="thread-list">
+					{#each channelThreadList as thread (thread.id)}
+						<li>
+							<button
+								type="button"
+								class={`thread-row ${thread.id === activeThreadId ? 'is-active' : ''}`}
+								onclick={(event) => {
+									event.stopPropagation();
+									onPickThread({ id: thread.id, parentChannelId: thread.parentChannelId ?? c.id });
+								}}
+							>
+								<div class="thread-row__info">
+									<i class="bx bx-message-square-dots" aria-hidden="true"></i>
+									<span class="thread-row__name">{thread.name || 'Thread'}</span>
+								</div>
+								<div class="thread-row__meta">
+									{#if thread.unread}
+										<span class="thread-row__dot" aria-hidden="true"></span>
+									{/if}
+									{#if thread.messageCount}
+										<span class="thread-row__count">{thread.messageCount}</span>
+									{/if}
+								</div>
+							</button>
+						</li>
+					{/each}
+					{#each joinableThreads as thread (thread.id)}
+						<li>
+							<button
+								type="button"
+								class="thread-row thread-row--joinable"
+								onclick={(event) => {
+									event.stopPropagation();
+									onJoinThread({ id: thread.id, channelId: c.id });
+								}}
+								title="Click to join this thread"
+							>
+								<div class="thread-row__info">
+									<i class="bx bx-message-square-add" aria-hidden="true"></i>
+									<span class="thread-row__name">{thread.name || 'Thread'}</span>
+								</div>
+								<div class="thread-row__meta">
+									<span class="thread-row__join">Join</span>
+								</div>
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		{/if}
+	</div>
+{/snippet}
+
 <aside
 	class="server-sidebar h-full w-full shrink-0 sidebar-surface flex flex-col border-r border-subtle text-primary"
 	aria-label="Channels"
@@ -1615,153 +1978,72 @@
 			<div class="channel-heading">Channels</div>
 		{/if}
 		<div class="channel-list space-y-0.5">
-			{#each visibleChannels as c (c.id)}
-				<div
-					class={`channel-row ${activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
-					role="listitem"
-					draggable={false}
-					use:channelRowRefAction={c.id}
-					onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
-				>
-					<button
-						type="button"
-						class="channel-row__button"
-						onclick={() => pick(c.id)}
-						aria-label={`Open #${c.name} text channel`}
-						aria-current={activeChannelId === c.id || isVoiceChannelActive(c.id)
-							? 'page'
-							: undefined}
-						title={c.name}
+			{#each unifiedDisplayList as item, itemIndex (item.type === 'category' ? `cat-${item.category.id}` : `ch-${item.channel.id}`)}
+				<!-- Drop zone BEFORE this item (always rendered for admins, visible only when dragging) -->
+				{#if canManageChannels && (item.type === 'channel' || (item.type === 'category' && item.category.id !== draggingCategoryId))}
+					<div
+						role="listitem"
+						class="category-drop-zone {itemIndex === 0 ? '' : 'category-drop-zone--inline'} {draggingCategoryId ? 'category-drop-zone--visible' : ''} {categoryDropTarget?.type === 'before-item' && categoryDropTarget?.itemIndex === itemIndex ? 'category-drop-zone--active' : ''}"
+						ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; categoryDropTarget = { type: 'before-item', itemIndex }; }}
+						ondragleave={handleCategoryDragLeave}
+						ondrop={handleCategoryDrop}
 					>
-						<span class="channel-icon {c.isPrivate ? 'channel-icon--private' : ''}">
-							{#if c.type === 'voice'}
-								<i class="bx bx-headphone" aria-hidden="true"></i>
-							{:else}
-								<i class="bx bx-hash" aria-hidden="true"></i>
-							{/if}
-							{#if c.isPrivate === true}
-								<span class="channel-icon__lock" title="Private channel" aria-hidden="true">
-									<i class="bx bx-lock text-[0.55rem]" aria-hidden="true"></i>
-								</span>
-							{/if}
-						</span>
-						<span class="channel-name truncate">{c.name}</span>
-						<span class="channel-row__meta ml-auto">
-							{#if mentionHighlights.has(c.id)}
-								<span class="channel-mention-pill" title="You were mentioned">@</span>
-							{/if}
-							{#if c.type === 'voice'}
-								{#if (voicePresence[c.id]?.length ?? 0) > 0}
-									<span class="channel-voice-count">
-										{voicePresence[c.id].length}
-									</span>
-								{/if}
-							{:else if hasHighPriority(c.id) > 0}
-								<span
-									class="channel-unread"
-									aria-label={`${hasHighPriority(c.id)} unread high priority messages`}
-								>
-									{hasHighPriority(c.id) > 99 ? '99+' : hasHighPriority(c.id)}
-								</span>
-							{:else if hasUnread(c.id)}
-								<span class="channel-blue-dot" aria-hidden="true" title="New messages"></span>
-							{/if}
-						</span>
-					</button>
+						<div class="category-drop-zone__line"></div>
+					</div>
+				{/if}
 
-					{#if c.type === 'voice'}
-						{#if (voicePresence[c.id]?.length ?? 0) > 0}
-							<div class="channel-voice-presence">
-								{#each voicePresence[c.id].slice(0, 6) as member (member.uid)}
-									{@const avatarUrl = resolveVoiceAvatar(member)}
-									{@const cachedProfile = voiceProfileCache.get(member.uid)}
-									<div class="channel-voice-avatar">
-										<Avatar
-											src={avatarUrl}
-											user={cachedProfile ? { ...member, ...cachedProfile } : member}
-											name={member.displayName}
-											size="xs"
-											isSelf={member.uid === $user?.uid}
-										/>
-									</div>
-								{/each}
-								{#if (voicePresence[c.id]?.length ?? 0) > 6}
-									<div class="channel-voice-more">
-										+{voicePresence[c.id].length - 6}
-									</div>
-								{/if}
-							</div>
-						{/if}
-
-						{@const channelThreadList = (threads ?? []).filter(
-							(thread) => thread.parentChannelId === c.id && thread.status !== 'archived'
-						)}
-						{@const joinableThreads = (availableThreads ?? []).filter(
-							(at) => at.parentChannelId === c.id && 
-								at.status !== 'archived' && 
-								!channelThreadList.some((ct) => ct.id === at.id) &&
-								currentUserId &&
-								!(at.memberUids ?? []).includes(currentUserId)
-						)}
-						{#if channelThreadList.length || joinableThreads.length}
-							<ul class="thread-list">
-								{#each channelThreadList as thread (thread.id)}
-									<li>
-										<button
-											type="button"
-											class={`thread-row ${thread.id === activeThreadId ? 'is-active' : ''}`}
-											onclick={(event) => {
-												event.stopPropagation();
-												onPickThread({
-													id: thread.id,
-													parentChannelId: thread.parentChannelId ?? c.id
-												});
-											}}
-										>
-											<div class="thread-row__info">
-												<i class="bx bx-message-square-dots" aria-hidden="true"></i>
-												<span class="thread-row__name">{thread.name || 'Thread'}</span>
-											</div>
-											<div class="thread-row__meta">
-												{#if thread.unread}
-													<span class="thread-row__dot" aria-hidden="true"></span>
-												{/if}
-												{#if thread.messageCount}
-													<span class="thread-row__count">{thread.messageCount}</span>
-												{/if}
-											</div>
-										</button>
-									</li>
-								{/each}
-								{#each joinableThreads as thread (thread.id)}
-									<li>
-										<button
-											type="button"
-											class="thread-row thread-row--joinable"
-											onclick={(event) => {
-												event.stopPropagation();
-												onJoinThread({
-													id: thread.id,
-													channelId: c.id
-												});
-											}}
-											title="Click to join this thread"
-										>
-											<div class="thread-row__info">
-												<i class="bx bx-message-square-add" aria-hidden="true"></i>
-												<span class="thread-row__name">{thread.name || 'Thread'}</span>
-											</div>
-											<div class="thread-row__meta">
-												<span class="thread-row__join">Join</span>
-											</div>
-										</button>
-									</li>
-								{/each}
-							</ul>
-						{/if}
+				{#if item.type === 'category'}
+					{@const cat = item.category}
+					{@const categoryChannels = item.channels}
+					<!-- Category Header - Draggable for admins -->
+					<div
+						role="listitem"
+						class="category-header-wrapper {draggingCategoryId === cat.id ? 'category-header--dragging' : ''}"
+						draggable={canManageChannels ? 'true' : 'false'}
+						ondragstart={(e) => startCategoryDrag(e, cat.id)}
+						ondragend={handleCategoryDragEnd}
+					>
+						<button
+							type="button"
+							class="category-header"
+							onclick={() => toggleCategoryCollapse(cat.id)}
+							draggable="false"
+						>
+							<i
+								class="bx {collapsedCategories.has(cat.id) ? 'bx-chevron-right' : 'bx-chevron-down'}"
+								aria-hidden="true"
+							></i>
+							<span class="category-name">{cat.name}</span>
+							{#if canManageChannels}
+								<i class="bx bx-grid-vertical category-drag-handle" aria-hidden="true" title="Drag to reorder"></i>
+							{/if}
+						</button>
+					</div>
+					<!-- Channels inside this category -->
+					{#if !collapsedCategories.has(cat.id)}
+						{#each categoryChannels as c (c.id)}
+							{@render channelRow(c)}
+						{/each}
 					{/if}
-				</div>
+				{:else}
+					{@const c = item.channel}
+					<!-- Uncategorized channel -->
+					{@render channelRow(c)}
+				{/if}
 			{/each}
+
+			<!-- Drop zone at END of list (always rendered for admins, visible only when dragging) -->
+			{#if canManageChannels && unifiedDisplayList.length > 0}
+				<div
+					role="listitem"
+					class="category-drop-zone category-drop-zone--inline {draggingCategoryId ? 'category-drop-zone--visible' : ''} {categoryDropTarget?.type === 'end' ? 'category-drop-zone--active' : ''}"
+					ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; categoryDropTarget = { type: 'end' }; }}
+					ondragleave={handleCategoryDragLeave}
+					ondrop={handleCategoryDrop}
+				>
+					<div class="category-drop-zone__line"></div>
+				</div>
+			{/if}
 
 			{#if !visibleChannels.length}
 				<div class="text-xs text-soft px-3 py-2">{noChannelsReason}</div>
@@ -1993,6 +2275,153 @@
 		width: auto;
 		padding: 0.5rem 1rem 0.5rem 0.15rem;
 		margin: -0.5rem 0 -0.5rem 0;
+	}
+
+	/* Category/folder header styling */
+	.category-header-wrapper {
+		position: relative;
+		transition: transform 0.15s ease, opacity 0.15s ease;
+	}
+
+	.category-header-wrapper[draggable="true"] {
+		cursor: grab;
+	}
+
+	.category-header-wrapper[draggable="true"]:active {
+		cursor: grabbing;
+	}
+
+	.category-header--dragging {
+		opacity: 0.5;
+		transform: scale(0.98);
+	}
+
+	.category-header--drop-target::after {
+		content: '';
+		position: absolute;
+		bottom: -2px;
+		left: 0;
+		right: 0;
+		height: 3px;
+		background: var(--color-accent);
+		border-radius: 2px;
+		animation: pulse-glow 1s ease-in-out infinite;
+	}
+
+	@keyframes pulse-glow {
+		0%, 100% { opacity: 0.7; }
+		50% { opacity: 1; }
+	}
+
+	.category-drop-zone {
+		height: 0;
+		position: relative;
+		transition: height 0.15s ease, background 0.15s ease;
+		overflow: visible;
+		border-radius: 4px;
+		margin: 0;
+		background: transparent;
+		pointer-events: none;
+	}
+
+	/* When dragging, show and enable drop zones */
+	.category-drop-zone--visible {
+		height: 20px;
+		margin: 4px 0;
+		pointer-events: auto;
+		background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+	}
+
+	.category-drop-zone--visible:hover,
+	.category-drop-zone--active {
+		background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+	}
+
+	.category-drop-zone__line {
+		position: absolute;
+		top: 50%;
+		left: 0;
+		right: 0;
+		height: 3px;
+		background: var(--color-accent);
+		border-radius: 2px;
+		transform: translateY(-50%) scaleX(0);
+		opacity: 0;
+		transition: all 0.15s ease;
+	}
+
+	.category-drop-zone--visible .category-drop-zone__line {
+		transform: translateY(-50%) scaleX(0.3);
+		opacity: 0.4;
+	}
+
+	.category-drop-zone--visible:hover .category-drop-zone__line,
+	.category-drop-zone--active .category-drop-zone__line {
+		transform: translateY(-50%) scaleX(1);
+		opacity: 1;
+	}
+
+	.category-drop-zone--inline.category-drop-zone--visible {
+		height: 16px;
+		margin: 2px 0;
+	}
+
+	.channel-with-drop-zone {
+		display: contents;
+	}
+
+	.category-header {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		width: 100%;
+		padding: 0.35rem 0.25rem;
+		margin-top: 0.5rem;
+		background: none;
+		border: none;
+		cursor: pointer;
+		color: var(--color-text-secondary);
+		font-size: 0.75rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.025em;
+		transition: color 0.15s ease;
+	}
+
+	.category-header:hover {
+		color: var(--color-text-primary);
+	}
+
+	.category-header-wrapper:first-child .category-header {
+		margin-top: 0;
+	}
+
+	.category-header i {
+		font-size: 1rem;
+		transition: transform 0.15s ease;
+	}
+
+	.category-drag-handle {
+		opacity: 0;
+		margin-left: auto;
+		color: var(--color-text-muted);
+		transition: opacity 0.15s ease;
+	}
+
+	.category-header-wrapper:hover .category-drag-handle {
+		opacity: 0.6;
+	}
+
+	.category-header-wrapper:hover .category-drag-handle:hover {
+		opacity: 1;
+	}
+
+	.category-name {
+		flex: 1;
+		text-align: left;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.channel-list {

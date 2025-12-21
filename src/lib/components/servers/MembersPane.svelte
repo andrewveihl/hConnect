@@ -923,4 +923,18 @@
 		display: none;
 		background: transparent;
 	}
+
+	/* Desktop: align header height with channel header so borders line up */
+	.members-pane__header {
+		height: 3rem;
+		padding-top: 0;
+		padding-bottom: 0;
+	}
+
+	@media (min-width: 640px) {
+		.members-pane__header {
+			padding-left: 1rem;
+			padding-right: 1rem;
+		}
+	}
 </style>

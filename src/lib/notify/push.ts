@@ -718,15 +718,12 @@ function detectPlatform(): DevicePlatform {
 	if (typeof navigator === 'undefined') return 'web';
 	const ua = navigator.userAgent || '';
 	const standalone = isStandalone();
-	if (/iPhone|iPad|iPod/i.test(ua)) {
-		// Check for third-party browsers on iOS (they can't do push)
-		// CriOS = Chrome, FxiOS = Firefox, OPiOS = Opera, EdgiOS = Edge
-		const isThirdPartyBrowser = /CriOS|FxiOS|OPiOS|EdgiOS/i.test(ua);
-		if (isThirdPartyBrowser) {
-			// Return a special platform to indicate push won't work
-			return 'ios_browser'; // Will be filtered out by shouldUseSafariWebPush
-		}
-		return standalone ? 'ios_pwa' : 'ios_browser';
+	const isIOS = /iPhone|iPad|iPod/i.test(ua);
+	if (isIOS) {
+		// If the app is running as an installed web app (standalone), treat it as an iOS PWA
+		// even if the UA string is from Chrome/Firefox; iOS exposes the same WebKit push APIs.
+		if (standalone) return 'ios_pwa';
+		return 'ios_browser';
 	}
 	if (/Android/i.test(ua)) {
 		return standalone ? 'android_pwa' : 'android_browser';
@@ -745,16 +742,20 @@ function detectPlatform(): DevicePlatform {
 export function isIOSPushSupported(): boolean {
 	if (typeof navigator === 'undefined') return true; // Assume supported on non-iOS
 	const ua = navigator.userAgent || '';
-	if (!/iPhone|iPad|iPod/i.test(ua)) return true; // Not iOS, assume supported
-	
-	// On iOS, only Safari supports push. Check for third-party browsers.
-	const isThirdPartyBrowser = /CriOS|FxiOS|OPiOS|EdgiOS/i.test(ua);
-	if (isThirdPartyBrowser) {
-		return false; // Chrome, Firefox, Opera, Edge on iOS don't support push
-	}
-	
-	// Safari or Safari-based PWA
-	return true;
+	const isIOS = /iPhone|iPad|iPod/i.test(ua);
+	if (!isIOS) return true; // Not iOS, assume supported
+
+	const standalone = isStandalone();
+	const hasPushApis =
+		typeof PushManager !== 'undefined' &&
+		typeof Notification !== 'undefined' &&
+		'serviceWorker' in navigator;
+
+	// On iOS, push is only available to installed web apps (standalone) that expose PushManager.
+	if (standalone && hasPushApis) return true;
+
+	// In-browser tabs (including Chrome/Firefox) do not get push on iOS.
+	return false;
 }
 
 /**
@@ -767,40 +768,38 @@ export function getPushSupportMessage(): { supported: boolean; message: string }
 	
 	const ua = navigator.userAgent || '';
 	const isIOS = /iPhone|iPad|iPod/i.test(ua);
+	const standalone = isStandalone();
+	const hasPushApis =
+		typeof PushManager !== 'undefined' &&
+		typeof Notification !== 'undefined' &&
+		'serviceWorker' in navigator;
+	const isThirdPartyBrowser = /CriOS|FxiOS|OPiOS|EdgiOS/i.test(ua);
 	
 	if (!isIOS) {
 		return { supported: true, message: 'Push notifications are supported.' };
 	}
 	
-	// Check for third-party browsers on iOS
-	if (/CriOS/i.test(ua)) {
+	if (standalone && hasPushApis) {
 		return {
-			supported: false,
-			message: 'Push notifications are not supported in Chrome on iOS. Please use Safari and add hConnect to your home screen for notifications.'
+			supported: true,
+			message: isThirdPartyBrowser
+				? 'Push notifications are supported in this installed web app.'
+				: 'Push notifications are supported in this PWA.'
 		};
 	}
-	if (/FxiOS/i.test(ua)) {
+
+	if (isThirdPartyBrowser) {
 		return {
 			supported: false,
-			message: 'Push notifications are not supported in Firefox on iOS. Please use Safari and add hConnect to your home screen for notifications.'
+			message:
+				'Add hConnect to your Home Screen, then open it from that icon to enable notifications.'
 		};
-	}
-	if (/OPiOS|EdgiOS/i.test(ua)) {
-		return {
-			supported: false,
-			message: 'Push notifications are not supported in this browser on iOS. Please use Safari and add hConnect to your home screen for notifications.'
-		};
-	}
-	
-	// Safari on iOS
-	const standalone = isStandalone();
-	if (standalone) {
-		return { supported: true, message: 'Push notifications are supported in this PWA.' };
 	}
 	
 	return {
-		supported: true,
-		message: 'For the best notification experience, add hConnect to your home screen from Safari.'
+		supported: false,
+		message:
+			'On iOS, add hConnect to your Home Screen from Safari and open it from that icon to enable notifications.'
 	};
 }
 

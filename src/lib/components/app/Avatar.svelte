@@ -128,7 +128,7 @@
 					return;
 				}
 				const img = new Image();
-				img.crossOrigin = 'anonymous';
+				// Don't set crossOrigin - local reference image doesn't need it
 				img.onload = () => resolve(computeImageHash(img));
 				img.onerror = () => resolve(null);
 				img.src = DEFAULT_GOOGLE_AVATAR_REF;
@@ -238,6 +238,11 @@
 		// Try to fix Google URLs that might not load
 		return url ? fixGooglePhotoUrl(url) : null;
 	});
+
+	// Check if current source is a Google photo (for CORS handling)
+	const isCurrentSrcGooglePhoto = $derived(
+		currentSrc ? isGooglePhotoUrl(currentSrc) : false
+	);
 
 	// Get display name for alt text and initials
 	const displayName = $derived.by(() => {
@@ -358,16 +363,29 @@
 	>
 		{#if currentSrc && !imgError}
 			{#key currentSrc}
-				<img
-					src={currentSrc}
-					alt={altText}
-					class="w-full h-full object-cover"
-					draggable="false"
-					crossorigin="anonymous"
-					referrerpolicy="no-referrer"
-					onerror={handleImageError}
-					onload={handleImageLoad}
-				/>
+				{#if isCurrentSrcGooglePhoto}
+					<!-- Google photos don't support CORS, skip crossorigin attribute -->
+					<img
+						src={currentSrc}
+						alt={altText}
+						class="w-full h-full object-cover"
+						draggable="false"
+						referrerpolicy="no-referrer"
+						onerror={handleImageError}
+						onload={handleImageLoad}
+					/>
+				{:else}
+					<img
+						src={currentSrc}
+						alt={altText}
+						class="w-full h-full object-cover"
+						draggable="false"
+						crossorigin="anonymous"
+						referrerpolicy="no-referrer"
+						onerror={handleImageError}
+						onload={handleImageLoad}
+					/>
+				{/if}
 			{/key}
 		{:else}
 			<!-- Fallback: show initial or icon -->

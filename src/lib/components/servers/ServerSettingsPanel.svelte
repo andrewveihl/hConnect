@@ -7,7 +7,7 @@
 	import { featureFlags } from '$lib/stores/featureFlags';
 	import { clearFeatureModal } from '$lib/stores/serverSettingsUI';
 	import { getDb } from '$lib/firebase';
-	import { createChannel } from '$lib/firestore/channels';
+	import { createChannel, createCategory, updateCategory, deleteCategory, reorderCategories, updateChannelCategory, type ChannelCategory } from '$lib/firestore/channels';
 	import {
 		ensureSystemRoles,
 		removeUserMembership,
@@ -266,7 +266,29 @@
 	let channelDetailBusy = $state(false);
 	let manageChannelsOpen = $state(false);
 	let channelDetailModalOpen = $state(false);
-	let channelDetailSection: 'overview' | 'access' = $state('overview');
+	let channelDetailSection: 'overview' | 'access' | 'category' = $state('overview');
+	
+	// Channel categories state
+	let categories: ChannelCategory[] = $state([]);
+	let sortedCategories: ChannelCategory[] = $state([]);
+	let categoryModalOpen = $state(false);
+	let manageCategoriesOpen = $state(false);
+	let newCategoryName = $state('');
+	let categoryCreateBusy = $state(false);
+	let categoryError: string | null = $state(null);
+	let categoryDragId: string | null = $state(null);
+	let categoryHoverId: string | null = $state(null);
+	let categoryReorderBusy = $state(false);
+	let categoryDetailId: string | null = $state(null);
+	let categoryDetailName = $state('');
+	let categoryDetailModalOpen = $state(false);
+	let categoryDetailBusy = $state(false);
+	let newChannelCategoryId: string | null = $state(null);
+	let channelDetailCategoryId: string | null = $state(null);
+	
+	// For custom folder dropdown in channel list
+	let openFolderDropdownId: string | null = $state(null);
+	
 	let roleDetailModalOpen = $state(false);
 	let roleDetailId: string | null = $state(null);
 	let roleDetailSection: 'display' | 'permissions' | 'members' = $state('display');
@@ -630,6 +652,14 @@
 		});
 	}
 
+	function watchCategories() {
+		const db = getDb();
+		const qRef = query(collection(db, 'servers', serverId!, 'categories'), orderBy('position'));
+		return onSnapshot(qRef, (snap) => {
+			categories = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+		});
+	}
+
 	function watchRoles() {
 		const db = getDb();
 		const qRef = query(collection(db, 'servers', serverId!, 'roles'), orderBy('position'));
@@ -799,6 +829,13 @@
 		});
 	});
 	run(() => {
+		sortedCategories = [...categories].sort((a, b) => {
+			const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+			const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+			return ap - bp;
+		});
+	});
+	run(() => {
 		if (!channelDetailId) return;
 		const match = sortedChannels.find((c) => c.id === channelDetailId);
 		if (!match) {
@@ -811,6 +848,7 @@
 		channelDetailRoles = Array.isArray(match.allowedRoleIds)
 			? [...match.allowedRoleIds]
 			: channelDetailRoles;
+		channelDetailCategoryId = (match as any).categoryId ?? null;
 	});
 	run(() => {
 		if (!channelDetailPrivate) {
@@ -1092,6 +1130,7 @@
 		let offMembers: (() => void) | null = null;
 		let offBans: (() => void) | null = null;
 		let offChannels: (() => void) | null = null;
+		let offCategories: (() => void) | null = null;
 		let offProfiles: (() => void) | null = null;
 		let offRoles: (() => void) | null = null;
 		let offDirectory: (() => void) | null = null;
@@ -1122,6 +1161,7 @@
 			offMembers = watchMembers();
 			offBans = watchBans();
 			offChannels = watchChannels();
+			offCategories = watchCategories();
 			offProfiles = watchProfiles();
 			offRoles = watchRoles();
 			offMyMember = watchMyMembership();
@@ -1143,6 +1183,7 @@
 			offMembers?.();
 			offBans?.();
 			offChannels?.();
+			offCategories?.();
 			offProfiles?.();
 			offRoles?.();
 			offMyMember?.();
@@ -1996,11 +2037,13 @@
 				name,
 				newChannelType,
 				newChannelPrivate,
-				newChannelPrivate ? newChannelAllowedRoleIds : []
+				newChannelPrivate ? newChannelAllowedRoleIds : [],
+				newChannelCategoryId
 			);
 			newChannelName = '';
 			newChannelPrivate = false;
 			newChannelAllowedRoleIds = [];
+			newChannelCategoryId = null;
 			channelModalOpen = false;
 		} catch (e) {
 			console.error(e);
@@ -2009,6 +2052,185 @@
 			channelCreateBusy = false;
 		}
 	}
+
+	// ----- actions: Categories -----
+	async function createCategoryInline() {
+		if (!isAdmin) return;
+		const name = newCategoryName.trim();
+		if (!name) {
+			categoryError = 'Enter a category name.';
+			return;
+		}
+		categoryCreateBusy = true;
+		categoryError = null;
+		try {
+			await createCategory(serverId!, name);
+			newCategoryName = '';
+			categoryModalOpen = false;
+		} catch (e) {
+			console.error(e);
+			categoryError = 'Failed to create category.';
+		} finally {
+			categoryCreateBusy = false;
+		}
+	}
+
+	function openCategoryDetail(categoryId: string) {
+		const match = sortedCategories.find((c) => c.id === categoryId);
+		if (!match) return;
+		categoryDetailId = match.id;
+		categoryDetailName = match.name ?? '';
+		categoryDetailModalOpen = true;
+		categoryError = null;
+	}
+
+	function closeCategoryDetail() {
+		categoryDetailId = null;
+		categoryDetailName = '';
+		categoryDetailModalOpen = false;
+	}
+
+	async function saveCategoryDetail() {
+		if (!categoryDetailId || !isAdmin) return;
+		const name = categoryDetailName.trim();
+		if (!name) {
+			categoryError = 'Name cannot be empty.';
+			return;
+		}
+		categoryDetailBusy = true;
+		categoryError = null;
+		try {
+			await updateCategory(serverId!, categoryDetailId, { name });
+			closeCategoryDetail();
+		} catch (e) {
+			console.error(e);
+			categoryError = 'Failed to update category.';
+		} finally {
+			categoryDetailBusy = false;
+		}
+	}
+
+	async function deleteCategoryAction(categoryId: string, categoryName: string) {
+		if (!canManageChannels) return;
+		if (!confirm(`Delete the "${categoryName}" folder? Channels inside will become uncategorized.`)) return;
+		try {
+			await deleteCategory(serverId!, categoryId, true);
+		} catch (e) {
+			console.error(e);
+			alert('Failed to delete category.');
+		}
+	}
+
+	function startCategoryDrag(event: DragEvent, id: string) {
+		if (!canManageChannels) return;
+		categoryDragId = id;
+		event.dataTransfer?.setData('text/plain', id);
+	}
+
+	function handleCategoryDragOver(event: DragEvent, id: string) {
+		if (!canManageChannels || categoryDragId === id) return;
+		event.preventDefault();
+		categoryHoverId = id;
+	}
+
+	async function handleCategoryDrop(event: DragEvent) {
+		if (!canManageChannels) return;
+		event.preventDefault();
+		const from = categoryDragId;
+		const to = categoryHoverId;
+		categoryDragId = null;
+		categoryHoverId = null;
+		if (!from || !to || from === to) return;
+		const next = [...sortedCategories];
+		const fromIdx = next.findIndex((c) => c.id === from);
+		const toIdx = next.findIndex((c) => c.id === to);
+		if (fromIdx === -1 || toIdx === -1) return;
+		const [moved] = next.splice(fromIdx, 1);
+		next.splice(toIdx, 0, moved);
+		sortedCategories = next;
+		await persistCategoryOrder(next);
+	}
+
+	function handleCategoryDragEnd() {
+		categoryHoverId = null;
+		categoryDragId = null;
+	}
+
+	async function persistCategoryOrder(next: typeof sortedCategories) {
+		if (!canManageChannels) return;
+		categoryReorderBusy = true;
+		try {
+			await reorderCategories(serverId!, next.map(c => c.id));
+		} catch (e) {
+			console.error(e);
+			alert('Failed to reorder categories.');
+		} finally {
+			categoryReorderBusy = false;
+		}
+	}
+
+	async function saveChannelCategory() {
+		if (!channelDetailId || !isAdmin) return;
+		channelDetailBusy = true;
+		channelError = null;
+		try {
+			await updateChannelCategory(serverId!, channelDetailId, channelDetailCategoryId);
+		} catch (e) {
+			console.error(e);
+			channelError = 'Failed to update channel category.';
+		} finally {
+			channelDetailBusy = false;
+		}
+	}
+
+	// Quick inline folder assignment for manage channels modal
+	async function quickSetChannelCategory(channelId: string, categoryId: string | null) {
+		if (!canManageChannels) return;
+		try {
+			await updateChannelCategory(serverId!, channelId, categoryId);
+		} catch (e) {
+			console.error(e);
+			alert('Failed to move channel to folder.');
+		}
+	}
+
+	// Get channels grouped by folder for the manage channels modal
+	function getChannelsGroupedByCategory() {
+		type GroupedChannels = { category: ChannelCategory | null; channels: typeof sortedChannels };
+		const groups: GroupedChannels[] = [];
+		const channelsByCategory = new Map<string | null, typeof sortedChannels>();
+		
+		// Initialize groups
+		channelsByCategory.set(null, []);
+		for (const cat of sortedCategories) {
+			channelsByCategory.set(cat.id, []);
+		}
+		
+		// Group channels
+		for (const ch of sortedChannels) {
+			const catId = (ch as any).categoryId ?? null;
+			if (!channelsByCategory.has(catId)) {
+				channelsByCategory.get(null)!.push(ch);
+			} else {
+				channelsByCategory.get(catId)!.push(ch);
+			}
+		}
+		
+		// Build groups array - uncategorized first
+		const uncategorized = channelsByCategory.get(null) ?? [];
+		if (uncategorized.length > 0 || sortedCategories.length === 0) {
+			groups.push({ category: null, channels: uncategorized });
+		}
+		
+		// Add categorized
+		for (const cat of sortedCategories) {
+			groups.push({ category: cat, channels: channelsByCategory.get(cat.id) ?? [] });
+		}
+		
+		return groups;
+	}
+	
+	let channelGroups = $derived(getChannelsGroupedByCategory());
 
 	async function persistChannelOrder(next: typeof sortedChannels) {
 		if (!canManageChannels) return;
@@ -3002,16 +3224,27 @@
 						{/if}
 						<!-- channels -->
 						{#if tab === 'channels'}
-							<div
-								class="settings-card flex flex-col gap-3 md:flex-row md:items-center md:justify-between"
-							>
+							<!-- Header with quick actions -->
+							<div class="settings-card flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
 								<div>
-									<div class="settings-card__title">Channels</div>
+									<div class="settings-card__title">Channels & Folders</div>
 									<div class="settings-card__subtitle">
-										Create, reorder, and edit channel permissions.
+										Organize your server with folders and channels.
 									</div>
 								</div>
 								<div class="flex flex-wrap gap-2">
+									<button
+										type="button"
+										class="btn btn-ghost"
+										disabled={!isAdmin}
+										onclick={() => {
+											categoryModalOpen = true;
+											newCategoryName = '';
+											categoryError = null;
+										}}
+									>
+										<i class="bx bx-folder-plus mr-1"></i> New Folder
+									</button>
 									<button
 										type="button"
 										class="btn btn-primary"
@@ -3022,24 +3255,212 @@
 											newChannelName = '';
 											newChannelPrivate = false;
 											newChannelAllowedRoleIds = [];
+											newChannelCategoryId = null;
 											channelError = null;
 										}}
 									>
-										Create channel
-									</button>
-									<button
-										type="button"
-										class="btn btn-ghost"
-										disabled={!canManageChannels}
-										onclick={() => {
-											manageChannelsOpen = true;
-											channelDragId = null;
-											channelHoverId = null;
-										}}
-									>
-										Manage channels
+										<i class="bx bx-plus mr-1"></i> New Channel
 									</button>
 								</div>
+							</div>
+							
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- Unified folder/channel tree view -->
+							<div class="settings-card" onclick={() => openFolderDropdownId = null}>
+								{#each channelGroups as group (group.category?.id ?? '__uncategorized')}
+									{@const isUncategorized = !group.category}
+									{@const cat = group.category}
+									
+									<!-- Folder header or Uncategorized section -->
+									<div class="channel-folder-section {isUncategorized ? 'channel-folder-section--uncategorized' : ''}">
+										{#if isUncategorized}
+											{#if group.channels.length > 0}
+												<div class="channel-folder-header channel-folder-header--uncategorized">
+													<div class="flex items-center gap-2">
+														<i class="bx bx-layer text-white/50"></i>
+														<span class="text-white/70 text-sm font-medium">Uncategorized</span>
+														<span class="text-xs text-white/40">({group.channels.length})</span>
+													</div>
+												</div>
+											{/if}
+										{:else if cat}
+											<div class="channel-folder-header">
+												<div class="flex items-center gap-2 flex-1 min-w-0">
+													<i class="bx bx-folder text-[color:var(--color-accent)]"></i>
+													<span class="font-medium truncate">{cat.name}</span>
+													<span class="text-xs text-white/50">({group.channels.length})</span>
+												</div>
+												<div class="flex items-center gap-1">
+													<button
+														type="button"
+														class="channel-folder-action"
+														title="Add channel to folder"
+														disabled={!isAdmin}
+														onclick={() => {
+															channelModalOpen = true;
+															newChannelType = 'text';
+															newChannelName = '';
+															newChannelPrivate = false;
+															newChannelAllowedRoleIds = [];
+															newChannelCategoryId = cat.id;
+															channelError = null;
+														}}
+													>
+														<i class="bx bx-plus"></i>
+													</button>
+													<button
+														type="button"
+														class="channel-folder-action"
+														title="Edit folder"
+														disabled={!canManageChannels}
+														onclick={() => openCategoryDetail(cat.id)}
+													>
+														<i class="bx bx-pencil"></i>
+													</button>
+													<button
+														type="button"
+														class="channel-folder-action channel-folder-action--danger"
+														title="Delete folder"
+														disabled={!canManageChannels}
+														onclick={() => deleteCategoryAction(cat.id, cat.name)}
+													>
+														<i class="bx bx-trash"></i>
+													</button>
+												</div>
+											</div>
+										{/if}
+										
+										<!-- Channels in this folder -->
+										{#if group.channels.length > 0}
+											<div class="channel-folder-channels">
+												{#each group.channels as c (c.id)}
+													{@const currentFolder = sortedCategories.find(cat => cat.id === (c as any).categoryId)}
+													<div class="channel-item">
+														<div class="channel-item-icon">
+															{#if c.type === 'text'}
+																<i class="bx bx-hash"></i>
+															{:else}
+																<i class="bx bx-headphone"></i>
+															{/if}
+														</div>
+														<div class="channel-item-info">
+															<span class="channel-item-name">{c.name}</span>
+															{#if c.isPrivate}
+																<i class="bx bx-lock-alt text-xs text-white/40" title="Private"></i>
+															{/if}
+														</div>
+														
+														<!-- Custom folder dropdown -->
+														<div class="folder-dropdown-wrapper">
+															<button
+																type="button"
+																class="folder-dropdown-trigger"
+																disabled={!canManageChannels}
+																onclick={(e) => {
+																	e.stopPropagation();
+																	openFolderDropdownId = openFolderDropdownId === c.id ? null : c.id;
+																}}
+															>
+																<i class="bx bx-folder text-white/50"></i>
+																<span class="folder-dropdown-text">{currentFolder?.name ?? 'No folder'}</span>
+																<i class="bx bx-chevron-down folder-dropdown-chevron" class:rotate-180={openFolderDropdownId === c.id}></i>
+															</button>
+															
+															{#if openFolderDropdownId === c.id}
+																<!-- svelte-ignore a11y_no_static_element_interactions -->
+																<!-- svelte-ignore a11y_click_events_have_key_events -->
+																<div 
+																	class="folder-dropdown-menu"
+																	onclick={(e) => e.stopPropagation()}
+																>
+																	<button
+																		type="button"
+																		class="folder-dropdown-item"
+																		class:folder-dropdown-item--active={!(c as any).categoryId}
+																		onclick={() => {
+																			quickSetChannelCategory(c.id, null);
+																			openFolderDropdownId = null;
+																		}}
+																	>
+																		<i class="bx bx-x-circle"></i>
+																		<span>No folder</span>
+																	</button>
+																	{#each sortedCategories as folder}
+																		<button
+																			type="button"
+																			class="folder-dropdown-item"
+																			class:folder-dropdown-item--active={(c as any).categoryId === folder.id}
+																			onclick={() => {
+																				quickSetChannelCategory(c.id, folder.id);
+																				openFolderDropdownId = null;
+																			}}
+																		>
+																			<i class="bx bx-folder"></i>
+																			<span>{folder.name}</span>
+																			{#if (c as any).categoryId === folder.id}
+																				<i class="bx bx-check ml-auto"></i>
+																			{/if}
+																		</button>
+																	{/each}
+																</div>
+															{/if}
+														</div>
+														
+														<div class="channel-item-actions">
+															<button
+																type="button"
+																class="channel-folder-action"
+																title="Edit channel"
+																disabled={!canManageChannels}
+																onclick={() => openChannelDetail(c.id)}
+															>
+																<i class="bx bx-pencil"></i>
+															</button>
+															<button
+																type="button"
+																class="channel-folder-action channel-folder-action--danger"
+																title="Delete channel"
+																disabled={!canManageChannels}
+																onclick={() => deleteChannel(c.id, c.name)}
+															>
+																<i class="bx bx-trash"></i>
+															</button>
+														</div>
+													</div>
+												{/each}
+											</div>
+										{:else if cat}
+											<div class="channel-folder-empty">
+												<span>Empty folder</span>
+												<button
+													type="button"
+													class="text-[color:var(--color-accent)] hover:underline text-xs"
+													disabled={!isAdmin}
+													onclick={() => {
+														channelModalOpen = true;
+														newChannelType = 'text';
+														newChannelName = '';
+														newChannelPrivate = false;
+														newChannelAllowedRoleIds = [];
+														newChannelCategoryId = cat.id;
+														channelError = null;
+													}}
+												>
+													Add channel
+												</button>
+											</div>
+										{/if}
+									</div>
+								{/each}
+								
+								{#if sortedChannels.length === 0 && sortedCategories.length === 0}
+									<div class="text-center py-8 text-white/50">
+										<i class="bx bx-folder-open text-3xl mb-2"></i>
+										<p>No channels yet</p>
+										<p class="text-sm">Create a folder or channel to get started.</p>
+									</div>
+								{/if}
 							</div>
 						{/if}
 						{#if tab === 'roles'}
@@ -3741,6 +4162,17 @@
 				<span>Channel name</span>
 				<input class="role-modal__input" placeholder="general" bind:value={newChannelName} />
 			</label>
+			{#if sortedCategories.length > 0}
+				<label class="role-modal__field">
+					<span>Folder (optional)</span>
+					<select class="role-modal__input" bind:value={newChannelCategoryId}>
+						<option value={null}>No folder</option>
+						{#each sortedCategories as cat}
+							<option value={cat.id}>{cat.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
 			<label class="settings-switch settings-switch--inline">
 				<input type="checkbox" bind:checked={newChannelPrivate} />
 				<span>Make channel private</span>
@@ -3808,7 +4240,7 @@
 			}
 		}}
 	>
-		<div class="role-modal role-modal--mid">
+		<div class="role-modal role-modal--mid" style="max-height: 80vh; overflow-y: auto;">
 			<div class="role-modal__header">
 				<h3>Manage channels</h3>
 				<button
@@ -3820,65 +4252,101 @@
 					<i class="bx bx-x"></i>
 				</button>
 			</div>
-			<p class="text-sm text-white/70">Drag to reorder, edit with the pencil, or delete.</p>
-			<div class="space-y-2" role="list">
-				{#each sortedChannels as c (c.id)}
-					<div
-						class={`flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border-subtle)]/80 bg-white/5 px-3 py-2 transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[color:var(--color-accent)] ${
-							channelHoverId === c.id
-								? 'ring-1 ring-[color:var(--color-accent)] scale-[1.01] shadow-lg shadow-black/40'
-								: ''
-						} ${channelDragId === c.id ? 'ring-2 ring-[color:var(--color-accent)] scale-[1.02] shadow-xl shadow-black/50' : ''}`}
-						draggable={canManageChannels}
-						role="listitem"
-						ondragstart={(event) => startChannelDrag(event, c.id)}
-						ondragover={(event) => handleChannelDragOver(event, c.id)}
-						ondrop={handleChannelDrop}
-						ondragend={handleChannelDragEnd}
-					>
-						<div class="flex items-center gap-3 min-w-0">
-							<span class="flex h-9 w-9 items-center justify-center rounded-lg bg-white/10 text-lg">
-								{#if c.type === 'text'}<i class="bx bx-hash"></i>{:else}<i class="bx bx-headphone"
-									></i>{/if}
-							</span>
-							<div class="min-w-0">
-								<div class="flex items-center gap-2 font-semibold truncate">
-									<span class="truncate">{c.name}</span>
-									{#if c.isPrivate}
-										<span class="settings-channel-lock" title="Private channel"
-											><i class="bx bx-lock-alt"></i></span
-										>
-									{/if}
-								</div>
-								<div class="text-xs text-white/60">
-									{c.type === 'text' ? 'Text' : 'Voice'} channel {#if c.isPrivate}· Private{/if}
-								</div>
-							</div>
-						</div>
-						<div class="flex items-center gap-2">
-							<span class="text-[11px] uppercase tracking-[0.18em] text-white/40">Drag</span>
-							<button
-								class="settings-chip-btn"
-								aria-label="Edit channel"
-								disabled={!canManageChannels}
-								onclick={() => openChannelDetail(c.id)}
-							>
-								<i class="bx bx-pencil"></i>
-							</button>
-							<button
-								class="settings-chip-btn text-red-300 hover:bg-red-900/30"
-								disabled={!canManageChannels}
-								onclick={() => deleteChannel(c.id, c.name)}
-								aria-label={`Delete ${c.name}`}
-							>
-								<i class="bx bx-trash"></i>
-							</button>
-						</div>
+			<p class="text-sm text-white/70 mb-3">Organize channels into folders. Use the dropdown to move channels between folders.</p>
+			
+			{#each channelGroups as group (group.category?.id ?? '__uncategorized')}
+				<div class="mb-4">
+					<!-- Folder header -->
+					<div class="flex items-center gap-2 mb-2 px-1">
+						{#if group.category}
+							<i class="bx bx-folder text-[color:var(--color-accent)]"></i>
+							<span class="font-semibold text-sm">{group.category.name}</span>
+						{:else}
+							<i class="bx bx-folder-open text-white/50"></i>
+							<span class="font-semibold text-sm text-white/70">No folder</span>
+						{/if}
+						<span class="text-xs text-white/50">({group.channels.length} channel{group.channels.length !== 1 ? 's' : ''})</span>
 					</div>
-				{/each}
-			</div>
+					
+					<!-- Channels in this folder -->
+					{#if group.channels.length === 0}
+						<div class="text-xs text-white/40 px-3 py-2 italic">
+							{group.category ? 'No channels in this folder yet' : 'All channels are in folders'}
+						</div>
+					{:else}
+						<div class="space-y-1.5" role="list">
+							{#each group.channels as c (c.id)}
+								<div
+									class={`flex items-center gap-2 rounded-lg border border-[color:var(--color-border-subtle)]/60 bg-white/5 px-2.5 py-1.5 transition hover:border-[color:var(--color-accent)]/50 ${
+										channelHoverId === c.id ? 'ring-1 ring-[color:var(--color-accent)]' : ''
+									} ${channelDragId === c.id ? 'ring-2 ring-[color:var(--color-accent)] opacity-70' : ''}`}
+									draggable={canManageChannels}
+									role="listitem"
+									ondragstart={(event) => startChannelDrag(event, c.id)}
+									ondragover={(event) => handleChannelDragOver(event, c.id)}
+									ondrop={handleChannelDrop}
+									ondragend={handleChannelDragEnd}
+								>
+									<!-- Channel icon and name -->
+									<span class="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-white/10 text-sm">
+										{#if c.type === 'text'}<i class="bx bx-hash"></i>{:else}<i class="bx bx-headphone"></i>{/if}
+									</span>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-1.5 text-sm font-medium truncate">
+											<span class="truncate">{c.name}</span>
+											{#if c.isPrivate}
+												<i class="bx bx-lock-alt text-xs text-white/50" title="Private"></i>
+											{/if}
+										</div>
+									</div>
+									
+									<!-- Folder dropdown -->
+									<select
+										class="manage-channel-folder-select"
+										value={(c as any).categoryId ?? ''}
+										onchange={(e) => quickSetChannelCategory(c.id, (e.currentTarget as HTMLSelectElement).value || null)}
+										disabled={!canManageChannels}
+										title="Move to folder"
+									>
+										<option value="">No folder</option>
+										{#each sortedCategories as cat}
+											<option value={cat.id}>{cat.name}</option>
+										{/each}
+									</select>
+									
+									<!-- Actions -->
+									<div class="flex items-center gap-1">
+										<button
+											class="settings-chip-btn !p-1"
+											aria-label="Edit channel"
+											disabled={!canManageChannels}
+											onclick={() => openChannelDetail(c.id)}
+										>
+											<i class="bx bx-pencil text-sm"></i>
+										</button>
+										<button
+											class="settings-chip-btn !p-1 text-red-300 hover:bg-red-900/30"
+											disabled={!canManageChannels}
+											onclick={() => deleteChannel(c.id, c.name)}
+											aria-label={`Delete ${c.name}`}
+										>
+											<i class="bx bx-trash text-sm"></i>
+										</button>
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/each}
+			
+			{#if sortedCategories.length === 0}
+				<p class="text-xs text-white/50 mt-2">
+					<i class="bx bx-info-circle"></i> Create folders in the "Channel Folders" section above to organize your channels.
+				</p>
+			{/if}
 			{#if channelReorderBusy}
-				<div class="text-xs text-white/60 mt-2">Saving order...</div>
+				<div class="text-xs text-white/60 mt-2">Saving...</div>
 			{/if}
 		</div>
 	</div>
@@ -3924,6 +4392,13 @@
 				>
 					Overview
 				</button>
+				<button
+					class:active-chip={channelDetailSection === 'category'}
+					type="button"
+					onclick={() => (channelDetailSection = 'category')}
+				>
+					Folder
+				</button>
 				{#if channelDetailPrivate}
 					<button
 						class:active-chip={channelDetailSection === 'access'}
@@ -3951,6 +4426,28 @@
 					<input type="checkbox" bind:checked={channelDetailPrivate} />
 					<span>Private channel</span>
 				</label>
+			{:else if channelDetailSection === 'category'}
+				<p class="text-xs text-white/70 mb-3">
+					Move this channel into a folder to keep your server organized.
+				</p>
+				<label class="role-modal__field">
+					<span>Folder</span>
+					<select 
+						class="role-modal__input" 
+						bind:value={channelDetailCategoryId}
+						onchange={() => saveChannelCategory()}
+					>
+						<option value={null}>No folder</option>
+						{#each sortedCategories as cat}
+							<option value={cat.id}>{cat.name}</option>
+						{/each}
+					</select>
+				</label>
+				{#if sortedCategories.length === 0}
+					<p class="text-xs text-white/50">
+						No folders yet. Create one in the Channels tab to organize your channels.
+					</p>
+				{/if}
 			{:else if !channelDetailPrivate}
 				<p class="text-xs text-white/70">
 					This channel is public. Turn on "Private channel" in Overview to restrict access by role.
@@ -3992,6 +4489,217 @@
 				</button>
 			</div>
 		</form>
+	</div>
+{/if}
+
+<!-- Create Category Modal -->
+{#if categoryModalOpen}
+	<div
+		class="role-modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		tabindex="0"
+		onclick={(event) => {
+			if (event.target === event.currentTarget) categoryModalOpen = false;
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				categoryModalOpen = false;
+			}
+		}}
+	>
+		<form
+			class="role-modal"
+			aria-label="Create folder"
+			onsubmit={preventDefault(createCategoryInline)}
+		>
+			<div class="role-modal__header">
+				<h3>Create a folder</h3>
+				<button
+					type="button"
+					class="settings-chip-btn"
+					aria-label="Close"
+					onclick={() => (categoryModalOpen = false)}
+				>
+					<i class="bx bx-x"></i>
+				</button>
+			</div>
+			<p class="text-xs text-white/70 mb-3">
+				Folders help organize your channels into collapsible groups.
+			</p>
+			<label class="role-modal__field">
+				<span>Folder name</span>
+				<input class="role-modal__input" placeholder="General" bind:value={newCategoryName} />
+			</label>
+			{#if categoryError}
+				<p class="settings-status settings-status--error">{categoryError}</p>
+			{/if}
+			<div class="role-modal__actions">
+				<button type="button" class="btn btn-ghost" onclick={() => (categoryModalOpen = false)}>
+					Cancel
+				</button>
+				<button
+					type="submit"
+					class="btn btn-primary"
+					disabled={!newCategoryName.trim() || categoryCreateBusy}
+				>
+					{categoryCreateBusy ? 'Creating...' : 'Create folder'}
+				</button>
+			</div>
+		</form>
+	</div>
+{/if}
+
+<!-- Edit Category Modal -->
+{#if categoryDetailModalOpen && categoryDetailId}
+	<div
+		class="role-modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		tabindex="0"
+		onclick={(event) => {
+			if (event.target === event.currentTarget) closeCategoryDetail();
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				closeCategoryDetail();
+			}
+		}}
+	>
+		<form
+			class="role-modal"
+			aria-label="Edit folder"
+			onsubmit={preventDefault(saveCategoryDetail)}
+		>
+			<div class="role-modal__header">
+				<h3>Edit folder</h3>
+				<button
+					type="button"
+					class="settings-chip-btn"
+					aria-label="Close"
+					onclick={closeCategoryDetail}
+				>
+					<i class="bx bx-x"></i>
+				</button>
+			</div>
+			<label class="role-modal__field">
+				<span>Folder name</span>
+				<input 
+					class="role-modal__input" 
+					bind:value={categoryDetailName}
+					oninput={() => (categoryError = null)}
+				/>
+			</label>
+			{#if categoryError}
+				<p class="settings-status settings-status--error">{categoryError}</p>
+			{/if}
+			<div class="role-modal__actions">
+				<button
+					type="button"
+					class="btn btn-ghost"
+					onclick={closeCategoryDetail}
+					disabled={categoryDetailBusy}
+				>
+					Cancel
+				</button>
+				<button type="submit" class="btn btn-primary" disabled={categoryDetailBusy}>
+					{categoryDetailBusy ? 'Saving...' : 'Save folder'}
+				</button>
+			</div>
+		</form>
+	</div>
+{/if}
+
+<!-- Manage Categories Modal -->
+{#if manageCategoriesOpen}
+	<div
+		class="role-modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		tabindex="0"
+		onclick={(event) => {
+			if (event.target === event.currentTarget) {
+				manageCategoriesOpen = false;
+				categoryHoverId = null;
+				categoryDragId = null;
+			}
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				manageCategoriesOpen = false;
+				categoryHoverId = null;
+				categoryDragId = null;
+			}
+		}}
+	>
+		<div class="role-modal role-modal--mid">
+			<div class="role-modal__header">
+				<h3>Manage folders</h3>
+				<button
+					type="button"
+					class="settings-chip-btn"
+					aria-label="Close"
+					onclick={() => (manageCategoriesOpen = false)}
+				>
+					<i class="bx bx-x"></i>
+				</button>
+			</div>
+			<p class="text-sm text-white/70">Drag to reorder folders.</p>
+			<div class="space-y-2" role="list">
+				{#each sortedCategories as cat (cat.id)}
+					{@const channelsInCategory = sortedChannels.filter(c => (c as any).categoryId === cat.id)}
+					<div
+						class={`flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border-subtle)]/80 bg-white/5 px-3 py-2 transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[color:var(--color-accent)] ${
+							categoryHoverId === cat.id
+								? 'ring-1 ring-[color:var(--color-accent)] scale-[1.01] shadow-lg shadow-black/40'
+								: ''
+						} ${categoryDragId === cat.id ? 'ring-2 ring-[color:var(--color-accent)] scale-[1.02] shadow-xl shadow-black/50' : ''}`}
+						draggable={canManageChannels}
+						role="listitem"
+						ondragstart={(event) => startCategoryDrag(event, cat.id)}
+						ondragover={(event) => handleCategoryDragOver(event, cat.id)}
+						ondrop={handleCategoryDrop}
+						ondragend={handleCategoryDragEnd}
+					>
+						<div class="flex items-center gap-3 min-w-0">
+							<span class="flex h-9 w-9 items-center justify-center rounded-lg bg-white/10 text-lg">
+								<i class="bx bx-folder"></i>
+							</span>
+							<div class="min-w-0">
+								<div class="font-semibold truncate">{cat.name}</div>
+								<div class="text-xs text-white/60">
+									{channelsInCategory.length} channel{channelsInCategory.length === 1 ? '' : 's'}
+								</div>
+							</div>
+						</div>
+						<div class="flex items-center gap-2">
+							<span class="text-[11px] uppercase tracking-[0.18em] text-white/40">Drag</span>
+							<button
+								class="settings-chip-btn"
+								aria-label="Edit folder"
+								disabled={!canManageChannels}
+								onclick={() => openCategoryDetail(cat.id)}
+							>
+								<i class="bx bx-pencil"></i>
+							</button>
+							<button
+								class="settings-chip-btn text-red-300 hover:bg-red-900/30"
+								disabled={!canManageChannels}
+								onclick={() => deleteCategoryAction(cat.id, cat.name)}
+								aria-label={`Delete ${cat.name}`}
+							>
+								<i class="bx bx-trash"></i>
+							</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+			{#if categoryReorderBusy}
+				<div class="text-xs text-white/60 mt-2">Saving order...</div>
+			{/if}
+		</div>
 	</div>
 {/if}
 
@@ -4892,6 +5600,245 @@
 	.settings-chip-btn:disabled {
 		opacity: 0.55;
 		cursor: not-allowed;
+	}
+
+	.manage-channel-folder-select {
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 0.375rem;
+		color: inherit;
+		cursor: pointer;
+		max-width: 120px;
+		text-overflow: ellipsis;
+	}
+	.manage-channel-folder-select:hover {
+		background: rgba(255, 255, 255, 0.12);
+		border-color: var(--color-accent);
+	}
+	.manage-channel-folder-select:focus {
+		outline: none;
+		border-color: var(--color-accent);
+		box-shadow: 0 0 0 2px rgba(var(--color-accent-rgb, 59, 130, 246), 0.3);
+	}
+	.manage-channel-folder-select:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Unified channel/folder tree styles */
+	.channel-folder-section {
+		margin-bottom: 0.75rem;
+	}
+	.channel-folder-section:last-child {
+		margin-bottom: 0;
+	}
+	.channel-folder-section--uncategorized {
+		margin-bottom: 1rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	}
+	.channel-folder-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem 0.75rem;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 0.5rem;
+		margin-bottom: 0.25rem;
+	}
+	.channel-folder-header--uncategorized {
+		background: transparent;
+		padding-left: 0.25rem;
+	}
+	.channel-folder-channels {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+		padding-left: 0.5rem;
+	}
+	.channel-item {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.4rem 0.5rem;
+		border-radius: 0.375rem;
+		transition: background 0.15s;
+	}
+	.channel-item:hover {
+		background: rgba(255, 255, 255, 0.05);
+	}
+	.channel-item-icon {
+		width: 1.5rem;
+		height: 1.5rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(255, 255, 255, 0.08);
+		border-radius: 0.25rem;
+		font-size: 0.875rem;
+		color: rgba(255, 255, 255, 0.7);
+	}
+	.channel-item-info {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		min-width: 0;
+	}
+	.channel-item-name {
+		font-size: 0.875rem;
+		font-weight: 500;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	
+	/* Modern folder dropdown - matches app theme */
+	.folder-dropdown-wrapper {
+		position: relative;
+	}
+	.folder-dropdown-trigger {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.4rem 0.6rem;
+		background: color-mix(in srgb, var(--color-panel-muted, #1a1f2e) 80%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		border-radius: var(--radius-md, 0.5rem);
+		color: var(--color-text-primary);
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		min-width: 110px;
+		max-width: 140px;
+	}
+	.folder-dropdown-trigger:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--color-panel-muted) 95%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+	}
+	.folder-dropdown-trigger:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.folder-dropdown-text {
+		flex: 1;
+		text-align: left;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.folder-dropdown-chevron {
+		font-size: 0.875rem;
+		transition: transform 0.2s ease;
+		opacity: 0.6;
+	}
+	.folder-dropdown-chevron.rotate-180 {
+		transform: rotate(180deg);
+	}
+	.folder-dropdown-menu {
+		position: absolute;
+		top: calc(100% + 4px);
+		left: 0;
+		z-index: 100;
+		min-width: 160px;
+		max-width: 200px;
+		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 80%, transparent);
+		border-radius: var(--radius-lg, 0.625rem);
+		box-shadow: var(--shadow-elevated, 0 8px 24px rgba(0, 0, 0, 0.4));
+		padding: 4px;
+		animation: dropdownSlide 0.15s ease-out;
+	}
+	@keyframes dropdownSlide {
+		from {
+			opacity: 0;
+			transform: translateY(-8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+	.folder-dropdown-item {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		padding: 0.55rem 0.65rem;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-md, 0.375rem);
+		color: var(--color-text-primary);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		text-align: left;
+	}
+	.folder-dropdown-item:hover {
+		background: color-mix(in srgb, var(--color-panel-muted) 75%, transparent);
+	}
+	.folder-dropdown-item--active {
+		background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+		color: color-mix(in srgb, var(--color-accent) 95%, white);
+	}
+	.folder-dropdown-item--active:hover {
+		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+	}
+	.folder-dropdown-item i {
+		font-size: 1rem;
+		opacity: 0.7;
+	}
+	.folder-dropdown-item--active i {
+		color: var(--color-accent);
+		opacity: 1;
+	}
+	
+	.channel-item-actions {
+		display: flex;
+		gap: 0.125rem;
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.channel-item:hover .channel-item-actions {
+		opacity: 1;
+	}
+	.channel-folder-action {
+		width: 1.75rem;
+		height: 1.75rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 0.25rem;
+		background: transparent;
+		border: none;
+		color: rgba(255, 255, 255, 0.6);
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+	}
+	.channel-folder-action:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.1);
+		color: white;
+	}
+	.channel-folder-action:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.channel-folder-action--danger:hover:not(:disabled) {
+		background: rgba(239, 68, 68, 0.2);
+		color: #fca5a5;
+	}
+	.channel-folder-empty {
+		padding: 0.5rem 0.75rem;
+		padding-left: 1rem;
+		font-size: 0.75rem;
+		color: rgba(255, 255, 255, 0.4);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 	}
 
 	.settings-popover {

@@ -526,6 +526,12 @@ service cloud.firestore {
         allow create, update, delete: if isServerAdmin(serverId);
       }
 
+      match /categories/{categoryId} {
+        // Members can read categories; admins/manageChannels can manage them
+        allow read: if isMember(serverId) || serverIsPublic(serverId);
+        allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
+      }
+
       match /members/{uid} {
         // Read: members can see other members, users can always read their own doc (even if it doesn't exist)
         allow read: if isSignedIn() && (request.auth.uid == uid || canViewMembers(serverId));

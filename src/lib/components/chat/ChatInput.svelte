@@ -47,6 +47,7 @@
 	type PopoverPlacement = {
 		left: string;
 		bottom: string;
+		top?: string;
 		width: string;
 		maxHeight: string;
 	};
@@ -188,6 +189,8 @@
 		conversationContext?: any[] | null;
 		aiAssistEnabled?: boolean;
 		threadLabel?: string | null;
+		/** If false, the mobile dock won't be suppressed when the input is focused. Default: true */
+		suppressDockOnFocus?: boolean;
 		onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
 		onUpload?: (payload: UploadRequest) => void;
 		onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
@@ -205,6 +208,7 @@
 		conversationContext = [],
 		aiAssistEnabled = false,
 		threadLabel = '',
+		suppressDockOnFocus = true,
 		onSend = () => {},
 		onUpload = () => {},
 		onSendGif = () => {},
@@ -221,6 +225,7 @@
 	let popoverPlacement: PopoverPlacement = $state({
 		left: '0.75rem',
 		bottom: '5rem',
+		top: 'auto',
 		width: 'min(20rem, 90vw)',
 		maxHeight: 'min(65vh, 26rem)'
 	});
@@ -260,7 +265,7 @@
 	let mentionLookup = $state(new Map<string, MentionCandidate>());
 	let mentionAliasLookup = $state(new Map<string, MentionCandidate>());
 	const mentionDraft = new Map<string, MentionRecord>();
-	let mentionMenuPosition = $state({ left: '0px', bottom: '5rem', maxHeight: '16rem' });
+	let mentionMenuPosition = $state({ left: '0px', bottom: '5rem', top: 'auto', maxHeight: '16rem' });
 	let emojiPickerPosition = $state({
 		left: 'auto',
 		right: '12px',
@@ -977,6 +982,7 @@
 
 	function engageDockSuppression() {
 		if (platform !== 'mobile') return;
+		if (!suppressDockOnFocus) return; // Skip dock suppression if disabled via prop
 		if (dockReleaseTimer) {
 			clearTimeout(dockReleaseTimer);
 			dockReleaseTimer = null;
@@ -1732,13 +1738,16 @@
 	function syncPopoverPosition() {
 		if (typeof window === 'undefined') return;
 
-		const vh = window.innerHeight;
-		const vw = window.innerWidth;
-		const width = platform === 'mobile' ? 280 : 320;
+		const vv = window.visualViewport;
+		const vh = vv ? vv.height : window.innerHeight;
+		const vw = vv ? vv.width : window.innerWidth;
+		const offsetX = vv?.offsetLeft ?? 0;
+		const offsetY = vv?.offsetTop ?? 0;
+		const width = Math.min(platform === 'mobile' ? 280 : 320, vw - 16);
 		const gap = 8;
 		const pad = 8;
 
-		const anchor = rootEl;
+		const anchor = plusTriggerEl ?? rootEl;
 		if (!anchor) {
 			popoverPlacement = {
 				left: `${pad}px`,
@@ -1750,36 +1759,38 @@
 		}
 
 		const rect = anchor.getBoundingClientRect();
+		const leftWithinViewport = rect.left - offsetX;
 
-		// The anchor's height from its top to the bottom of viewport
-		// We want to place popup ABOVE the anchor, so we need:
-		// bottom = height of anchor + gap (distance from viewport bottom to anchor bottom = vh - rect.bottom)
-		// Actually: popup bottom = (vh - rect.top) + gap
-		// rect.top = distance from viewport top to anchor top
-		// vh - rect.top = distance from anchor top to viewport bottom
-		// So setting popup's CSS bottom to (vh - rect.top + gap) places its bottom edge that far from viewport bottom
-		// This is ABOVE the anchor by gap pixels
+		// Available space
+		const spaceAbove = rect.top - offsetY - gap - pad;
+		const spaceBelow = vh - (rect.bottom - offsetY) - gap - pad;
+		const placeBelow = spaceBelow > spaceAbove;
 
-		const anchorHeight = rect.height;
-		const anchorDistanceFromBottom = vh - rect.bottom; // how far anchor's bottom is from viewport bottom
-		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap; // place popup above anchor's top
+		let maxHeight: number;
+		let top: number | null = null;
 
-		// Clamp so popup doesn't go off bottom of screen
-		const bottom = Math.max(pad, popupBottom);
-
-		// Calculate available height above (space from popup bottom to viewport top)
-		const spaceAbove = vh - bottom - pad;
-		const maxHeight = Math.min(400, Math.max(150, spaceAbove));
-
-		// Left aligned, clamped to viewport
-		let left = Math.max(pad, rect.left);
-		if (left + width > vw - pad) {
-			left = Math.max(pad, vw - width - pad);
+		if (placeBelow) {
+			maxHeight = Math.min(400, Math.max(160, spaceBelow));
+			top = rect.bottom - offsetY + gap;
+		} else {
+			maxHeight = Math.min(400, Math.max(160, spaceAbove));
+			top = Math.max(pad, rect.top - offsetY - maxHeight - gap);
 		}
+
+		// Ensure we don't exceed viewport vertically
+		const availableBelow = vh - top - pad;
+		maxHeight = Math.min(maxHeight, availableBelow);
+
+		// Center the popover on the trigger, clamped to viewport (visual viewport space)
+		let left = leftWithinViewport + rect.width / 2 - width / 2;
+		left = Math.max(pad, Math.min(left, vw - width - pad));
+		// Convert back to layout coordinates by adding viewport offset
+		left += offsetX;
 
 		popoverPlacement = {
 			left: `${Math.round(left)}px`,
-			bottom: `${Math.round(bottom)}px`,
+			top: top !== null ? `${Math.round(top + offsetY)}px` : 'auto',
+			bottom: 'auto',
 			width: `${width}px`,
 			maxHeight: `${Math.round(maxHeight)}px`
 		};
@@ -1791,39 +1802,55 @@
 	function syncMentionMenuPosition() {
 		if (typeof window === 'undefined') return;
 
-		const vh = window.innerHeight;
-		const vw = window.innerWidth;
-		const menuWidth = Math.min(320, vw - 16);
-		const gap = 8;
+		const vv = window.visualViewport;
+		const vh = vv ? vv.height : window.innerHeight;
+		const vw = vv ? vv.width : window.innerWidth;
+		const offsetX = vv?.offsetLeft ?? 0;
+		const offsetY = vv?.offsetTop ?? 0;
+		const menuWidth = Math.min(280, vw - 16);
+		const gap = 2;
 		const pad = 8;
 
-		const anchor = rootEl;
+		const anchor = inputEl ?? rootEl;
 		if (!anchor) {
-			mentionMenuPosition = { left: `${pad}px`, bottom: '70px', maxHeight: '200px' };
+			mentionMenuPosition = { left: `${pad}px`, top: `${pad + offsetY}px`, bottom: 'auto', maxHeight: '200px' };
 			return;
 		}
 
 		const rect = anchor.getBoundingClientRect();
+		const leftWithinViewport = rect.left - offsetX;
 
-		// Place above anchor
-		const anchorHeight = rect.height;
-		const anchorDistanceFromBottom = vh - rect.bottom;
-		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap;
-		const bottom = Math.max(pad, popupBottom);
+		// Choose above/below based on available space in visual viewport
+		const horizontalOffset = 4;
+		const verticalOffset = 0;
+		const spaceAbove = rect.top - offsetY - gap - pad;
+		const spaceBelow = vh - (rect.bottom - offsetY) - gap - pad;
+		const placeBelow = spaceBelow >= spaceAbove;
 
-		// Available height
-		const spaceAbove = vh - bottom - pad;
-		const maxHeight = Math.min(220, Math.max(100, spaceAbove));
+		let maxHeight: number;
+		let top: number;
 
-		// Left aligned, clamped
-		let left = Math.max(pad, rect.left);
-		if (left + menuWidth > vw - pad) {
-			left = Math.max(pad, vw - menuWidth - pad);
+		if (placeBelow) {
+			maxHeight = Math.min(260, Math.max(140, spaceBelow));
+			top = rect.bottom - offsetY + gap + verticalOffset;
+		} else {
+			maxHeight = Math.min(260, Math.max(140, spaceAbove));
+			top = Math.max(pad, rect.top - offsetY - maxHeight - gap - verticalOffset);
 		}
+
+		// Clamp to viewport height
+		const availableBelow = vh - top - pad;
+		maxHeight = Math.max(120, Math.min(maxHeight, availableBelow));
+
+		// Align to anchor's left edge (like Discord), with a slight inset, clamped to viewport width
+		let left = leftWithinViewport + horizontalOffset;
+		left = Math.max(pad, Math.min(left, vw - menuWidth - pad));
+		left += offsetX;
 
 		mentionMenuPosition = {
 			left: `${Math.round(left)}px`,
-			bottom: `${Math.round(bottom)}px`,
+			top: `${Math.round(top + offsetY)}px`,
+			bottom: 'auto',
 			maxHeight: `${Math.round(maxHeight)}px`
 		};
 	}
@@ -1834,13 +1861,16 @@
 	function syncEmojiPickerPosition() {
 		if (typeof window === 'undefined') return;
 
-		const vh = window.innerHeight;
-		const vw = window.innerWidth;
-		const pickerWidth = Math.min(380, vw - 16);
+		const vv = window.visualViewport;
+		const vh = vv ? vv.height : window.innerHeight;
+		const vw = vv ? vv.width : window.innerWidth;
+		const offsetX = vv?.offsetLeft ?? 0;
+		const offsetY = vv?.offsetTop ?? 0;
+		const pickerWidth = Math.min(320, vw - 16);
 		const gap = 8;
 		const pad = 8;
 
-		const anchor = rootEl;
+		const anchor = emojiTriggerEl ?? rootEl;
 		if (!anchor) {
 			emojiPickerPosition = {
 				left: 'auto',
@@ -1853,40 +1883,41 @@
 		}
 
 		const rect = anchor.getBoundingClientRect();
+		const leftWithinViewport = rect.left - offsetX;
+		const rightWithinViewport = rect.right - offsetX;
 
-		// Place above anchor
-		const anchorHeight = rect.height;
-		const anchorDistanceFromBottom = vh - rect.bottom;
-		const popupBottom = anchorDistanceFromBottom + anchorHeight + gap;
-		const bottom = Math.max(pad, popupBottom);
+		// Available space
+		const spaceAbove = rect.top - offsetY - gap - pad;
+		const spaceBelow = vh - (rect.bottom - offsetY) - gap - pad;
+		const placeBelow = spaceBelow > spaceAbove;
+
+		let maxHeight: number;
+		let top: number;
+
+		if (placeBelow) {
+			maxHeight = Math.min(380, Math.max(180, spaceBelow));
+			top = rect.bottom - offsetY + gap;
+		} else {
+			maxHeight = Math.min(380, Math.max(180, spaceAbove));
+			top = Math.max(pad, rect.top - offsetY - maxHeight - gap);
+		}
 
 		// Available height
-		const spaceAbove = vh - bottom - pad;
-		const maxHeight = Math.min(400, Math.max(200, spaceAbove));
+		const availableBelow = vh - top - pad;
+		maxHeight = Math.max(100, Math.min(400, Math.min(maxHeight, availableBelow)));
 
-		// Right-aligned by default
-		const right = Math.max(pad, vw - rect.right);
+		// Prefer centering on trigger but clamp within viewport
+		let left = leftWithinViewport + rect.width / 2 - pickerWidth / 2;
+		left = Math.max(pad, Math.min(left, vw - pickerWidth - pad));
+		left += offsetX;
 
-		// Check if right-aligning would push left edge off screen
-		const leftEdgeIfRightAligned = vw - right - pickerWidth;
-
-		if (leftEdgeIfRightAligned < pad) {
-			emojiPickerPosition = {
-				left: `${pad}px`,
-				right: 'auto',
-				bottom: `${Math.round(bottom)}px`,
-				top: 'auto',
-				maxHeight: `${Math.round(maxHeight)}px`
-			};
-		} else {
-			emojiPickerPosition = {
-				left: 'auto',
-				right: `${Math.round(right)}px`,
-				bottom: `${Math.round(bottom)}px`,
-				top: 'auto',
-				maxHeight: `${Math.round(maxHeight)}px`
-			};
-		}
+		emojiPickerPosition = {
+			left: `${Math.round(left)}px`,
+			right: 'auto',
+			bottom: 'auto',
+			top: `${Math.round(top + offsetY)}px`,
+			maxHeight: `${Math.round(maxHeight)}px`
+		};
 	}
 
 	onMount(() => {
@@ -2476,7 +2507,11 @@
 		style:top={emojiPickerPosition.top}
 		style:max-height={emojiPickerPosition.maxHeight}
 	>
-		<EmojiPicker on:close={() => (showEmoji = false)} on:pick={(e) => onEmojiPicked(e.detail)} />
+		<EmojiPicker
+			variant="compact"
+			on:close={() => (showEmoji = false)}
+			on:pick={(e) => onEmojiPicked(e.detail)}
+		/>
 	</div>
 {/if}
 
@@ -3577,13 +3612,16 @@
 		border-radius: 1rem;
 		display: flex;
 		flex-direction: column;
-		width: 380px;
-		max-width: calc(100vw - 1rem);
-		max-height: calc(100vh - 5rem);
-		max-height: calc(100dvh - 5rem);
+		width: min(320px, calc(100vw - 0.75rem));
+		max-width: calc(100vw - 0.75rem);
+		height: min(420px, 75vh);
+		max-height: min(420px, 75vh);
+		overflow: hidden;
 	}
 
 	.emoji-picker-wrapper :global(.emoji-panel) {
+		width: 100% !important;
+		max-width: 100% !important;
 		max-height: 100% !important;
 		height: 100% !important;
 	}

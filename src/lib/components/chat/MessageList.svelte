@@ -250,7 +250,20 @@
 	}
 
 	const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-		scroller?.scrollTo({ top: scroller.scrollHeight, behavior });
+		if (!scroller) return;
+		scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+	};
+
+	// Robust scroll to bottom - retries to handle cases where DOM isn't fully laid out
+	const scrollToBottomRobust = () => {
+		tick().then(() => {
+			scrollToBottom('auto');
+			// Secondary scroll after a brief delay to catch any layout shifts
+			// This helps with channels that have many messages or lazy-loaded content
+			requestAnimationFrame(() => {
+				scrollToBottom('auto');
+			});
+		});
 	};
 
 	const scrollToMessage = (messageId: string) => {
@@ -274,7 +287,14 @@
 	};
 
 	onMount(() => {
-		tick().then(() => scrollToBottom('auto'));
+		// Initial scroll to bottom - use robust method for reliability
+		// This handles cases where the component mounts with messages already present
+		scrollToBottomRobust();
+		
+		// Also ensure lastLen is synced if messages were passed in on mount
+		if (messages.length > 0 && lastLen === 0) {
+			lastLen = messages.length;
+		}
 	});
 
 	run(() => {
@@ -784,7 +804,8 @@
 			} else {
 				pendingPrependAdjustment = null;
 				if (shouldStickToBottom || wasEmpty) {
-					scrollToBottom(wasEmpty ? 'auto' : 'smooth');
+					// Use robust scroll for initial load with many messages
+					scrollToBottomRobust();
 				}
 			}
 		}
@@ -799,7 +820,9 @@
 		const prev = untrack(() => lastScrollSignal);
 		if (scrollToBottomSignal && scrollToBottomSignal !== prev) {
 			lastScrollSignal = scrollToBottomSignal;
-			tick().then(() => scrollToBottom('auto'));
+			// Reset shouldStickToBottom when explicitly signaled to scroll
+			shouldStickToBottom = true;
+			scrollToBottomRobust();
 		}
 	});
 
@@ -1896,6 +1919,7 @@
 			style={`top: ${reactionPickerPosition.top}px; left: ${reactionPickerPosition.left}px`}
 		>
 			<EmojiPicker
+				variant="compact"
 				on:close={closeReactionPicker}
 				on:pick={(event) => onReactionPickerPick(event.detail)}
 			/>

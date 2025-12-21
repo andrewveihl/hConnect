@@ -101,6 +101,7 @@ export type FeatureFlagKey =
 	| 'enableReadReceipts'
 	| 'enableMessageEditing'
 	| 'enableMessageDeleting'
+	| 'enableRaptorMini'
 	| 'readOnlyMode'
 	| 'showNotificationDebugTools'
 	| 'disableFabSnapping';
@@ -190,6 +191,11 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
 		description: 'Enable AI-powered recap panels in threads.'
 	},
 	{
+		key: 'enableRaptorMini',
+		label: 'Raptor mini (Preview)',
+		description: 'Enable the Raptor mini preview UI for all clients.'
+	},
+	{
 		key: 'enableTicketAI',
 		label: 'Issue Tracker',
 		description: 'Allow servers to enable AI-powered issue analytics.'
@@ -247,6 +253,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
 	enableAISuggestedReplies: true,
 	enableAIPredictions: true,
 	enableAISummaries: true,
+	enableRaptorMini: true,
 	enableTicketAI: true,
 	enableTypingIndicators: true,
 	enableReadReceipts: true,
@@ -256,6 +263,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagMap = {
 	showNotificationDebugTools: true,
 	disableFabSnapping: false
 };
+
 
 export type AdminLogType =
 	| 'chat'

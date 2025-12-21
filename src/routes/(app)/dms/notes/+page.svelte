@@ -122,7 +122,10 @@
 
 	onMount(() => {
 		const cleanup = setupGestures();
-		return cleanup;
+		
+		return () => {
+			cleanup?.();
+		};
 	});
 
 	function handleThreadSelect() {

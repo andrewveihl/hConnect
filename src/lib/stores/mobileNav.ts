@@ -117,6 +117,22 @@ export const mobileOverlayStack = {
 	subscribe: stackStore.subscribe
 };
 
+// Swipe progress for smooth dock animation (0 = closed, 1 = fully open)
+const swipeProgressStore = writable<{ target: 'channels' | 'members' | null; progress: number }>({
+	target: null,
+	progress: 0
+});
+
+export const mobileSwipeProgress = {
+	subscribe: swipeProgressStore.subscribe,
+	set: (target: 'channels' | 'members' | null, progress: number) => {
+		swipeProgressStore.set({ target, progress });
+	},
+	reset: () => {
+		swipeProgressStore.set({ target: null, progress: 0 });
+	}
+};
+
 // Track overlay state on document for CSS targeting
 if (browser) {
 	stackStore.subscribe((stack) => {
