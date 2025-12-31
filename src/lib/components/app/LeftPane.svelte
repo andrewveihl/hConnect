@@ -190,6 +190,17 @@
 
 	// Watch for snap zone element to be bound and register
 	$effect(() => {
+		// If snapping is globally disabled by a super admin, clear any registered zones
+		if ($isFabSnappingDisabled) {
+			if (snapZoneRegistered) {
+				fabSnapStore.unregisterZone(FAB_SNAP_ZONE_ID);
+				snapZoneRegistered = false;
+				snapZones = [];
+				activeSnapZoneId = null;
+			}
+			return;
+		}
+
 		if (browser && fabSnapZoneEl && !snapZoneRegistered) {
 			snapZoneRegistered = true;
 			requestAnimationFrame(() => {
