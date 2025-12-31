@@ -653,6 +653,27 @@ export async function toggleDMReaction(
 	});
 }
 
+/**
+ * Edit a DM message (text only). Only the original author can edit.
+ */
+export async function editDMMessage(threadId: string, messageId: string, newText: string) {
+	const cleanThreadId = trimValue(threadId);
+	const cleanMessage = trimValue(messageId);
+	const text = trimValue(newText);
+
+	if (!cleanThreadId || !cleanMessage || !text) {
+		throw new Error('Missing required fields for DM message edit.');
+	}
+
+	const db = getDb();
+	await updateDoc(doc(db, COL_DMS, cleanThreadId, SUB_MESSAGES, cleanMessage), {
+		text,
+		content: text,
+		plainTextContent: text,
+		editedAt: serverTimestamp()
+	});
+}
+
 export async function voteOnDMPoll(
 	threadId: string,
 	messageId: string,

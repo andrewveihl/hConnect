@@ -16,6 +16,7 @@
 		pinChannelMessage,
 		unpinChannelMessage
 	} from '$lib/firestore/messages';
+	import { editDMMessage } from '$lib/firestore/dms';
 
 	const dispatch = createEventDispatcher();
 
@@ -103,6 +104,8 @@
 		channelId?: string | null;
 		/** Thread ID for ticket creation (if in a thread) */
 		threadId?: string | null;
+		/** DM thread ID (when rendering DMs) */
+		dmThreadId?: string | null;
 		/** Set of message IDs that already have tickets */
 		ticketedMessageIds?: Set<string>;
 		pinnedMessageIds?: Set<string>;
@@ -123,6 +126,7 @@
 		serverId = null,
 		channelId = null,
 		threadId = null,
+		dmThreadId = null,
 		ticketedMessageIds = new Set<string>(),
 		pinnedMessageIds = new Set<string>(),
 		canPinMessages = false
@@ -214,10 +218,17 @@
 
 	// Save edited message
 	async function saveEdit() {
-		if (!editingMessageId || !serverId || !channelId || !editingText.trim()) return;
-		
+		if (!editingMessageId || !editingText.trim()) return;
+
+		const text = editingText.trim();
 		try {
-			await editChannelMessage(serverId, channelId, editingMessageId, editingText.trim());
+			if (serverId && channelId) {
+				await editChannelMessage(serverId, channelId, editingMessageId, text);
+			} else if (dmThreadId) {
+				await editDMMessage(dmThreadId, editingMessageId, text);
+			} else {
+				return;
+			}
 			dispatch('messageEdited', { messageId: editingMessageId });
 		} catch (err) {
 			console.error('[MessageList] Failed to edit message:', err);

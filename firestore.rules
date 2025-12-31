@@ -378,6 +378,20 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["reactions"]);
     }
 
+    // Allow DM authors to edit only their message text/content while preserving author fields.
+    function isDmTextEdit() {
+      return request.resource != null
+        && resource != null
+        && request.auth != null
+        && request.auth.uid == resource.data.uid
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["text", "content", "plainTextContent", "editedAt"])
+        && request.resource.data.text is string
+        && request.resource.data.text != ''
+        && request.resource.data.content == request.resource.data.text
+        && request.resource.data.plainTextContent == request.resource.data.text;
+    }
+
     /* ---------------- DM helpers (legacy tolerant) ---------------- */
 
     function docHasParticipant(docData, uid) {
@@ -728,7 +742,7 @@ service cloud.firestore {
         allow update: if isSuperAdminUser()
           || (isSignedIn()
           && dmHasParticipantOrKey_byId(threadId, request.auth.uid)
-          && isReactionOnlyUpdate());
+          && (isReactionOnlyUpdate() || isDmTextEdit()));
         allow delete: if isSuperAdminUser();
       }
 
