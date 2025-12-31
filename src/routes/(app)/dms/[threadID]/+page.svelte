@@ -1560,6 +1560,7 @@
 							replyTargetId={pendingReply?.messageId ?? null}
 							{pendingUploads}
 							scrollToBottomSignal={combinedScrollSignal}
+							dmThreadId={threadID}
 							on:vote={handleVote}
 							on:submitForm={handleFormSubmit}
 							on:react={handleReaction}
