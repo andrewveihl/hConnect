@@ -1436,10 +1436,12 @@
 										tabindex="0"
 										onclick={(event) => handleReplyClick(event, m)}
 										onkeydown={(event) => {
-											if (event.key === 'Enter' || event.key === ' ') {
-												event.preventDefault();
-												handleReplyClick(event, m);
-											}
+											if (event.key !== 'Enter' && event.key !== ' ') return;
+											if (editingMessageId === m.id) return;
+											const target = event.target as HTMLElement | null;
+											if (target?.closest?.('textarea, input, button, [contenteditable="true"]')) return;
+											event.preventDefault();
+											handleReplyClick(event, m);
 										}}
 									>
 										<div class="message-header">
