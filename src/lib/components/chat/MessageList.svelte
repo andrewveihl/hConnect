@@ -139,6 +139,7 @@
 	let highlightedMessageId = $state<string | null>(null);
 	let lastScrollToMessageId: string | null = null;
 	let creatingTicketForMessageId = $state<string | null>(null);
+	let editTextareaEl = $state<HTMLTextAreaElement | null>(null);
 
 	// Message menu state
 	let menuOpenForMessageId = $state<string | null>(null);
@@ -191,6 +192,7 @@
 		editingMessageId = message.id;
 		editingText = (message as any).text ?? (message as any).content ?? '';
 		menuOpenForMessageId = null;
+		tick().then(() => autosizeEditTextarea());
 	}
 
 	// Cancel editing
@@ -198,6 +200,17 @@
 		editingMessageId = null;
 		editingText = '';
 	}
+
+	function autosizeEditTextarea() {
+		if (!editTextareaEl) return;
+		editTextareaEl.style.height = 'auto';
+		const nextHeight = Math.min(editTextareaEl.scrollHeight, 320);
+		editTextareaEl.style.height = `${Math.max(nextHeight, 120)}px`;
+	}
+
+	$effect(() => {
+		autosizeEditTextarea();
+	});
 
 	// Save edited message
 	async function saveEdit() {
@@ -1161,8 +1174,8 @@
 		chooseReaction(messageId, emoji);
 	}
 
-	function onMessagePointerEnter(messageId: string, minuteKey: string | null) {
-		if (!hasHoverSupport) return;
+	function onMessagePointerEnter(event: PointerEvent, messageId: string, minuteKey: string | null) {
+		if (event.pointerType === 'touch') return;
 		// Clear any pending timeout when re-entering
 		if (hoverLeaveTimeout) {
 			clearTimeout(hoverLeaveTimeout);
@@ -1172,8 +1185,8 @@
 		hoveredMinuteKey = minuteKey;
 	}
 
-	function onMessagePointerLeave(messageId: string, minuteKey: string | null) {
-		if (!hasHoverSupport) return;
+	function onMessagePointerLeave(event: PointerEvent, messageId: string, minuteKey: string | null) {
+		if (event.pointerType === 'touch') return;
 		if (reactionMenuFor === messageId) return;
 
 		// Add a small delay before hiding the action bar
@@ -1236,6 +1249,8 @@
 		longPressTimer = window.setTimeout(() => {
 			longPressTimer = null;
 			touchActionMessageId = messageId;
+			hoveredMessageId = messageId;
+			openMessageMenu(messageId);
 		}, LONG_PRESS_MS);
 	}
 
@@ -1359,7 +1374,7 @@
 				!isSystem &&
 				Boolean(
 					currentUserId &&
-					((hasHoverSupport && hoveredMessageId === m.id) || touchActionMessageId === m.id)
+					(hoveredMessageId === m.id || touchActionMessageId === m.id)
 				)}
 			{@const showTimestampMobile = !hasHoverSupport && !isSystem && reactionMenuFor === m.id}
 			{@const replyRef = (m as any).replyTo ?? null}
@@ -1384,9 +1399,9 @@
 				<div
 					class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''} ${isHighlighted ? 'message-row--highlighted' : ''}`}
 					data-message-id={m.id}
-					onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
-					onpointerleave={() => {
-						onMessagePointerLeave(m.id, minuteKey);
+					onpointerenter={(event) => onMessagePointerEnter(event, m.id, minuteKey)}
+					onpointerleave={(event) => {
+						onMessagePointerLeave(event, m.id, minuteKey);
 						handlePointerUp();
 					}}
 					onfocusin={() => onMessageFocusIn(m.id, minuteKey)}
@@ -1468,8 +1483,8 @@
 										{#if currentUserId}
 											<div
 												class={`message-action-bar ${mine ? 'message-action-bar--mine' : 'message-action-bar--other'} ${showAdd || menuOpenForMessageId === m.id ? 'is-visible' : ''}`}
-												onpointerenter={() => onMessagePointerEnter(m.id, minuteKey)}
-												onpointerleave={() => onMessagePointerLeave(m.id, minuteKey)}
+												onpointerenter={(event) => onMessagePointerEnter(event, m.id, minuteKey)}
+												onpointerleave={(event) => onMessagePointerLeave(event, m.id, minuteKey)}
 											>
 												<button
 													type="button"
@@ -1632,6 +1647,7 @@
 														<textarea
 															class="message-edit-input"
 															bind:value={editingText}
+															bind:this={editTextareaEl}
 															onkeydown={(event) => {
 																if (event.key === 'Escape') {
 																	cancelEditing();
@@ -1640,6 +1656,7 @@
 																	saveEdit();
 																}
 															}}
+															oninput={autosizeEditTextarea}
 														></textarea>
 														<div class="message-edit-actions">
 															<button type="button" class="message-edit-btn message-edit-btn--cancel" onclick={cancelEditing}>
@@ -2400,9 +2417,9 @@
 	}
 
 	.message-action-bar--mine {
-		right: auto;
-		left: 0;
-		justify-content: flex-start;
+		right: 0;
+		left: auto;
+		justify-content: flex-end;
 	}
 
 	.message-action-bar.is-visible {
@@ -2529,7 +2546,7 @@
 		flex-direction: column;
 		gap: 0.5rem;
 		width: 100%;
-		max-width: 400px;
+		max-width: min(52rem, 100%);
 	}
 
 	.message-edit-container--mine {
@@ -2538,15 +2555,20 @@
 
 	.message-edit-input {
 		width: 100%;
-		min-height: 60px;
-		padding: 0.5rem 0.75rem;
+		min-height: 120px;
+		max-height: 320px;
+		padding: 0.75rem 0.9rem;
 		border-radius: 0.5rem;
 		border: 1px solid var(--color-border-subtle);
 		background: var(--color-panel);
 		color: var(--color-text-primary);
-		font-size: 0.9rem;
+		font-size: 0.95rem;
+		line-height: 1.4;
 		resize: vertical;
+		overflow: auto;
 		font-family: inherit;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
 	.message-edit-input:focus {
@@ -3185,8 +3207,8 @@
 		}
 
 		.message-action-bar--mine {
-			right: auto;
-			left: -2rem;
+			right: -2rem;
+			left: auto;
 		}
 
 		.message-action-bar--other {

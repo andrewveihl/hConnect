@@ -232,8 +232,8 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
 	},
 	{
 		key: 'disableFabSnapping',
-		label: 'Disable FAB Snapping',
-		description: 'Turn off floating button snap-to-rail feature.'
+		label: 'Hide FAB Snap Points',
+		description: 'Super admin override to remove left-rail snap targets and snapping for everyone.'
 	}
 ];
 
