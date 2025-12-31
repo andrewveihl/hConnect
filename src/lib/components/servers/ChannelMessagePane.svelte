@@ -1,10 +1,11 @@
 <script lang="ts">
-	import { createEventDispatcher, onMount } from 'svelte';
-	import MessageList from '$lib/components/chat/MessageList.svelte';
-	import ChatInput from '$lib/components/chat/ChatInput.svelte';
-	import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
-	import type { ReplyReferenceInput } from '$lib/firestore/messages';
-	import type { PendingUploadPreview } from '$lib/components/chat/types';
+import { createEventDispatcher, onMount } from 'svelte';
+import MessageList from '$lib/components/chat/MessageList.svelte';
+import ChatInput from '$lib/components/chat/ChatInput.svelte';
+import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
+import type { PinnedMessage, ReplyReferenceInput } from '$lib/firestore/messages';
+import type { PendingUploadPreview } from '$lib/components/chat/types';
+import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 
 	interface Props {
 		hasChannel?: boolean;
@@ -74,6 +75,9 @@
 		onTicketCreated?: (event: CustomEvent<{ messageId: string; ticketId?: string }>) => void;
 		/** Callback when a ticket creation fails */
 		onTicketError?: (event: CustomEvent<{ messageId: string; error?: string }>) => void;
+		pinnedMessageIds?: Set<string>;
+		canPinMessages?: boolean;
+		pinnedMessages?: PinnedMessage[];
 	}
 
 	let {
@@ -114,7 +118,10 @@
 		threadId = null,
 		ticketedMessageIds = new Set<string>(),
 		onTicketCreated = () => {},
-		onTicketError = () => {}
+		onTicketError = () => {},
+		pinnedMessageIds = new Set<string>(),
+		canPinMessages = false,
+		pinnedMessages = []
 	}: Props = $props();
 
 	const dispatch = createEventDispatcher();
@@ -162,65 +169,122 @@
 		attachComposerObserver();
 	});
 
-	const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
+const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 </script>
 
-{#if hasChannel}
-	<div class={listClass} style={scrollRegionStyle}>
-		{#key scrollContextKey ?? 'channel-pane'}
-			<MessageList
-				{messages}
-				users={profiles}
-				{currentUserId}
-				replyTargetId={replyTarget?.messageId ?? null}
-				{threadStats}
-				{pendingUploads}
-				scrollToBottomSignal={combinedScrollSignal}
-				{scrollToMessageId}
-				{isTicketAiStaff}
-				{serverId}
-				{channelId}
-				{threadId}
-				{ticketedMessageIds}
-				on:vote={onVote}
-				on:submitForm={onSubmitForm}
-				on:react={onReact}
-				on:loadMore={onLoadMore}
-				on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
-				on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
-				on:ticketCreated={onTicketCreated}
-				on:ticketError={onTicketError}
-			/>
-		{/key}
-	</div>
-	{#if !hideInput}
-		<div
-			class={inputWrapperClass}
-			bind:this={composerEl}
-			style:padding-bottom={inputPaddingBottom ?? undefined}
-		>
-			<ChatInput
-				placeholder={`Message #${channelName}`}
-				{mentionOptions}
-				{replyTarget}
-				{defaultSuggestionSource}
-				{conversationContext}
-				{aiAssistEnabled}
-				threadLabel={threadLabel || channelName}
-				{onSend}
-				{onSendGif}
-				{onCreatePoll}
-				{onCreateForm}
-				onUpload={onUploadFiles}
-				on:cancelReply={() => dispatch('cancelReply')}
-				on:focusInput={handleComposerFocus}
-			/>
+<div class="channel-message-pane">
+	{#if hasChannel}
+		<div class="message-pane-shell">
+			{#if pinnedMessages?.length}
+				<div class="pinned-fab">
+					<ChannelPinnedBar
+						items={pinnedMessages}
+						canManagePins={canPinMessages}
+						on:open={(event) => dispatch('pinnedOpen', event.detail)}
+						on:unpin={(event) => dispatch('pinnedUnpin', event.detail)}
+					/>
+				</div>
+			{/if}
+			<div class={listClass} style={scrollRegionStyle}>
+				{#key scrollContextKey ?? 'channel-pane'}
+					<MessageList
+						{messages}
+						users={profiles}
+						{currentUserId}
+						replyTargetId={replyTarget?.messageId ?? null}
+						{threadStats}
+						{pendingUploads}
+						scrollToBottomSignal={combinedScrollSignal}
+						{scrollToMessageId}
+						{isTicketAiStaff}
+						{serverId}
+						{channelId}
+						{threadId}
+						{ticketedMessageIds}
+						on:vote={onVote}
+						on:submitForm={onSubmitForm}
+						on:react={onReact}
+						on:loadMore={onLoadMore}
+						on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
+						on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
+						on:ticketCreated={onTicketCreated}
+						on:ticketError={onTicketError}
+						{pinnedMessageIds}
+						canPinMessages={canPinMessages}
+					/>
+				{/key}
+			</div>
+		</div>
+		{#if !hideInput}
+			<div
+				class={inputWrapperClass}
+				bind:this={composerEl}
+				style:padding-bottom={inputPaddingBottom ?? undefined}
+			>
+				<ChatInput
+					placeholder={`Message #${channelName}`}
+					{mentionOptions}
+					{replyTarget}
+					{defaultSuggestionSource}
+					{conversationContext}
+					{aiAssistEnabled}
+					threadLabel={threadLabel || channelName}
+					{onSend}
+					{onSendGif}
+					{onCreatePoll}
+					{onCreateForm}
+					onUpload={onUploadFiles}
+					on:cancelReply={() => dispatch('cancelReply')}
+					on:focusInput={handleComposerFocus}
+				/>
+			</div>
+		{/if}
+	{:else}
+		<div class="flex-1 grid place-items-center text-soft">
+			{#if empty}{@render empty()}{:else}
+				<div>{emptyMessage}</div>
+			{/if}
 		</div>
 	{/if}
-{:else}
-	<div class="flex-1 grid place-items-center text-soft">
-		{#if empty}{@render empty()}{:else}
-			<div>{emptyMessage}</div>
-		{/if}
-	</div>
-{/if}
+</div>
+
+<style>
+	.channel-message-pane {
+		display: flex;
+		flex-direction: column;
+		flex: 1 1 auto;
+		min-height: 0;
+		width: 100%;
+	}
+
+	.message-pane-shell {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		flex: 1 1 auto;
+		min-height: 0;
+		width: 100%;
+	}
+
+	.pinned-fab {
+		position: absolute;
+		left: 0.5rem;
+		top: 0.35rem;
+		z-index: 5;
+	}
+
+	.pinned-fab :global(.pinned-bar) {
+		padding: 0;
+		border: none;
+		background: transparent;
+	}
+
+	.pinned-fab :global(.pinned-pill) {
+		background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+	}
+
+	.pinned-fab :global(.pinned-menu) {
+		left: 0;
+		right: auto;
+	}
+</style>

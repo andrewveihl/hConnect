@@ -9,6 +9,7 @@
 		onToggleMembers?: (() => void) | null;
 		onOpenMessages?: (() => void) | null;
 		onExitThread?: (() => void) | null;
+		onOpenSettings?: (() => void) | null;
 	}
 
 	let {
@@ -20,7 +21,8 @@
 		onToggleChannels = null,
 		onToggleMembers = null,
 		onOpenMessages = null,
-		onExitThread = null
+		onExitThread = null,
+		onOpenSettings = null
 	}: Props = $props();
 
 	let rootEl: HTMLElement | null = null;
@@ -44,7 +46,19 @@
 		{/if}
 
 		{#if channel}
-			<div class="channel-header__title">
+			<div
+				class="channel-header__title"
+				role="button"
+				tabindex="0"
+				onclick={() => onOpenSettings?.()}
+				onkeydown={(event) => {
+					if (event.key === 'Enter' || event.key === ' ') {
+						event.preventDefault();
+						onOpenSettings?.();
+					}
+				}}
+				title="Channel settings"
+			>
 				<span class="channel-header__badge" aria-hidden="true">
 					{#if channel.type === 'text'}
 						<i class="bx bx-hash"></i>
@@ -96,6 +110,7 @@
 				<i class="bx bx-group text-lg"></i>
 			</button>
 		{/if}
+
 	</div>
 </header>
 
@@ -239,4 +254,15 @@
 		border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
 		color: var(--color-accent);
 	}
+
+	.channel-header__title {
+		cursor: pointer;
+	}
+
+	.channel-header__title:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+		border-radius: 8px;
+	}
+
 </style>

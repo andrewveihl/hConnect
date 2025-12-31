@@ -14,6 +14,8 @@
 	import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte';
 	import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
 	import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
+	import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
+	import ChannelSettingsSheet from '$lib/components/servers/ChannelSettingsSheet.svelte';
 	import ThreadPane from '$lib/components/chat/ThreadPane.svelte';
 	import VideoChat from '$lib/components/voice/VideoChat.svelte';
 	import CallPreview from '$lib/components/voice/CallPreview.svelte';
@@ -42,7 +44,11 @@
 		sendChannelMessage,
 		submitChannelForm,
 		toggleChannelReaction,
-		voteOnChannelPoll
+		voteOnChannelPoll,
+		subscribePinnedMessages,
+		unpinChannelMessage,
+		pinChannelLink,
+		type PinnedMessage
 	} from '$lib/firestore/messages';
 	import type { ReplyReferenceInput } from '$lib/firestore/messages';
 	import {
@@ -312,6 +318,20 @@
 	const profileUnsubs: Record<string, Unsubscribe> = {};
 	let serverDisplayName = $state('Server');
 	let serverMetaUnsub: Unsubscribe | null = null;
+	let serverOwnerId: string | null = $state(null);
+	let myRole: string | null = $state(null);
+	let myPerms: { manageServer?: boolean; manageRoles?: boolean } | null = $state(null);
+	let memberPermsUnsub: Unsubscribe | null = null;
+	let memberPermsServer: string | null = null;
+	let pinnedMessages = $state<PinnedMessage[]>([]);
+	let pinnedMessageIds = $state<Set<string>>(new Set());
+	let pinnedUnsub: Unsubscribe | null = null;
+	let pinnedServerId: string | null = null;
+	let pinnedChannelId: string | null = null;
+	let popoutPinnedMessageIds = $state<Set<string>>(new Set());
+	let popoutPinnedUnsub: Unsubscribe | null = null;
+	let popoutPinnedChannelId: string | null = null;
+	let channelSettingsOpen = $state(false);
 	let mentionOptions: MentionDirectoryEntry[] = $state([]);
 	let memberMentionOptions: MentionDirectoryEntry[] = $state([]);
 	let roleMentionOptions: MentionDirectoryEntry[] = $state([]);
@@ -320,6 +340,12 @@
 	let lastMentionServer: string | null = null;
 	let isCurrentServerMember = false;
 	let memberEnsurePromise: Promise<void> | null = null;
+	const canPinMessages = $derived.by(() => {
+		const isOwner = Boolean(serverOwnerId && $user?.uid && serverOwnerId === $user.uid);
+		const admin = myPerms?.manageServer === true || myPerms?.manageRoles === true;
+		const adminRole = myRole === 'owner' || myRole === 'admin';
+		return isOwner || admin || adminRole;
+	});
 
 	const canonicalHandle = (value: string) =>
 		(value ?? '')
@@ -333,6 +359,8 @@
 		const channel = channels.find((c) => c.id === channelId);
 		return channel?.name ?? null;
 	};
+
+	const deriveOwnerId = (data: any) => data?.ownerId ?? data?.owner ?? data?.createdBy ?? null;
 
 	const parentChannelNameForThread = (
 		thread: ChannelThread | null,
@@ -1123,6 +1151,22 @@
 		serverThreadsScope = null;
 	}
 
+	function clearPinnedState() {
+		pinnedUnsub?.();
+		pinnedUnsub = null;
+		pinnedServerId = null;
+		pinnedChannelId = null;
+		pinnedMessages = [];
+		pinnedMessageIds = new Set();
+	}
+
+	function clearPopoutPinnedState() {
+		popoutPinnedUnsub?.();
+		popoutPinnedUnsub = null;
+		popoutPinnedChannelId = null;
+		popoutPinnedMessageIds = new Set();
+	}
+
 	function resetChannelState() {
 		// Increment subscription version to invalidate any pending subscriptions
 		messagesSubscriptionVersion++;
@@ -1143,6 +1187,8 @@
 		popoutReplyTarget = null;
 		popoutPendingUploads = [];
 		popoutEarliestLoaded = null;
+		clearPinnedState();
+		clearPopoutPinnedState();
 	}
 
 	function normalizeThreadSnapshot(data: any, id: string): ChannelThread {
@@ -2952,6 +2998,8 @@
 		clearServerThreads();
 		cleanupProfileSubscriptions();
 		cleanupPopoutProfileSubscriptions();
+		clearPinnedState();
+		clearPopoutPinnedState();
 		releaseChannelDockSuppression();
 		unsubscribeVoice();
 		serverMetaUnsub?.();
@@ -2977,6 +3025,9 @@
 		ticketedMsgUnsub = null;
 		ticketedMsgChannelId = null;
 		ticketedMessageIds = new Set();
+		memberPermsUnsub?.();
+		memberPermsUnsub = null;
+		memberPermsServer = null;
 	});
 
 	// Persist read state when tab is hidden
@@ -4258,6 +4309,48 @@
 		}
 	}
 
+	function jumpToPinnedMessage(messageId: string | null | undefined) {
+		if (!messageId) return;
+		requestedMessageId = messageId;
+	}
+
+	function handlePinnedOpen(detail: { messageId?: string | null; linkUrl?: string | null }) {
+		if (detail?.linkUrl) {
+			try {
+				window.open(detail.linkUrl, '_blank', 'noopener,noreferrer');
+			} catch {
+				// ignore
+			}
+		}
+		if (detail?.messageId) {
+			jumpToPinnedMessage(detail.messageId);
+		}
+	}
+
+	async function handlePinnedUnpin(messageId: string | null | undefined) {
+		if (!messageId || !serverId || !activeChannel?.id) return;
+		try {
+			await unpinChannelMessage(serverId, activeChannel.id, messageId);
+		} catch (err) {
+			console.error('Failed to unpin message', err);
+		}
+	}
+
+	async function handlePinCustomLink(payload: { title: string; url: string; description?: string | null }) {
+		if (!serverId || !activeChannel?.id || !$user) return;
+		try {
+			await pinChannelLink(serverId, activeChannel.id, {
+				title: payload.title,
+				url: payload.url,
+				description: payload.description,
+				uid: $user.uid,
+				authorName: $user.displayName ?? $user.email ?? null
+			});
+		} catch (err) {
+			console.error('Failed to pin link', err);
+		}
+	}
+
 	async function handlePopoutVote(event: CustomEvent<{ messageId: string; optionIndex: number }>) {
 		if (!serverId || !channelMessagesPopoutChannelId || !$user) return;
 		const { messageId, optionIndex } = event.detail ?? {};
@@ -4690,6 +4783,81 @@
 			void ensureServerMembership(serverId, $user.uid);
 		}
 	});
+	run(() => {
+		const currentServer = serverId ?? null;
+		const uid = $user?.uid ?? null;
+		if (!currentServer || !uid) {
+			memberPermsUnsub?.();
+			memberPermsUnsub = null;
+			memberPermsServer = null;
+			myPerms = null;
+			myRole = null;
+			return;
+		}
+		if (memberPermsServer === currentServer && memberPermsUnsub) return;
+		memberPermsUnsub?.();
+		memberPermsServer = currentServer;
+		const database = db();
+		const ref = doc(database, 'servers', currentServer, 'members', uid);
+		memberPermsUnsub = onSnapshot(
+			ref,
+			(snap) => {
+				const data: any = snap.data() ?? {};
+				myPerms = (data?.perms as any) ?? (data?.permissions as any) ?? null;
+				myRole = typeof data?.role === 'string' ? data.role : null;
+			},
+			() => {
+				myPerms = null;
+				myRole = null;
+			}
+		);
+	});
+	run(() => {
+		const s = serverId ?? null;
+		const c = activeChannel?.id ?? null;
+		if (s && c) {
+			if (s !== pinnedServerId || c !== pinnedChannelId) {
+				clearPinnedState();
+				const stop = subscribePinnedMessages(s, c, (pins) => {
+					const nextIds = new Set(pins.map((pin) => pin.messageId));
+					pinnedMessages = pins;
+					pinnedMessageIds = nextIds;
+					if (channelMessagesPopout && channelMessagesPopoutChannelId === c) {
+						popoutPinnedMessageIds = nextIds;
+					}
+				});
+				pinnedUnsub = stop ?? null;
+				pinnedServerId = s;
+				pinnedChannelId = c;
+			}
+		} else {
+			clearPinnedState();
+			channelSettingsOpen = false;
+		}
+	});
+	run(() => {
+		const s = serverId ?? null;
+		const popChannel = channelMessagesPopoutChannelId ?? null;
+		if (channelMessagesPopout && s && popChannel) {
+			// Share the active pin cache when the popout is the same channel
+			if (popChannel === pinnedChannelId && s === pinnedServerId) {
+				clearPopoutPinnedState();
+				popoutPinnedMessageIds = pinnedMessageIds;
+				popoutPinnedChannelId = popChannel;
+				return;
+			}
+			if (popChannel !== popoutPinnedChannelId) {
+				clearPopoutPinnedState();
+				const stop = subscribePinnedMessages(s, popChannel, (pins) => {
+					popoutPinnedMessageIds = new Set(pins.map((pin) => pin.messageId));
+				});
+				popoutPinnedUnsub = stop ?? null;
+				popoutPinnedChannelId = popChannel;
+			}
+		} else {
+			clearPopoutPinnedState();
+		}
+	});
 	// Sync channels from sidebar cache when dependencies change, using a separate tracking variable
 	// to avoid recursion warnings
 	let lastSyncedServer: string | null = null;
@@ -4989,12 +5157,14 @@
 						pickString(data?.title) ??
 						'Server';
 					serverDisplayName = nextName;
+					serverOwnerId = deriveOwnerId(data);
 					if (serverId) {
 						voiceSession.setServerName(serverId, nextName);
 					}
 				},
 				() => {
 					serverDisplayName = 'Server';
+					serverOwnerId = null;
 					if (serverId) {
 						voiceSession.setServerName(serverId, 'Server');
 					}
@@ -5004,6 +5174,7 @@
 			serverMetaUnsub?.();
 			serverMetaUnsub = null;
 			serverDisplayName = 'Server';
+			serverOwnerId = null;
 		}
 	});
 	// Subscribe to Ticket AI settings for staff detection
@@ -5129,6 +5300,11 @@
 							}
 						}}
 						onOpenMessages={openChannelMessages}
+						onOpenSettings={() => {
+							if (activeChannel) {
+								channelSettingsOpen = true;
+							}
+						}}
 						onExitThread={() => closeThreadView()}
 					/>
 
@@ -5207,6 +5383,8 @@
 											{serverId}
 											channelId={activeChannel?.id ?? null}
 											{ticketedMessageIds}
+											pinnedMessageIds={pinnedMessageIds}
+											canPinMessages={canPinMessages}
 											onVote={handleVote}
 											onSubmitForm={handleFormSubmit}
 											onReact={handleReaction}
@@ -5369,6 +5547,10 @@
 												{serverId}
 												channelId={channelMessagesPopoutChannelId}
 												{ticketedMessageIds}
+												pinnedMessageIds={channelMessagesPopoutChannelId === activeChannel?.id
+													? pinnedMessageIds
+													: popoutPinnedMessageIds}
+												canPinMessages={canPinMessages}
 												onVote={handlePopoutVote}
 												onSubmitForm={handlePopoutFormSubmit}
 												onReact={handlePopoutReaction}
@@ -5383,13 +5565,13 @@
 												onCreateForm={handlePopoutCreateForm}
 												onUploadFiles={handlePopoutUploadFiles}
 												on:reply={handlePopoutReplyRequest}
-												on:thread={(event) =>
-													void openThreadFromMessage(
-														event.detail?.message,
-														channelMessagesPopoutChannelId
-													)}
-												on:cancelReply={() => (popoutReplyTarget = null)}
-											/>
+										on:thread={(event) =>
+											void openThreadFromMessage(
+												event.detail?.message,
+												channelMessagesPopoutChannelId
+											)}
+										on:cancelReply={() => (popoutReplyTarget = null)}
+									/>
 										</div>
 									</div>
 								</div>
@@ -5429,6 +5611,11 @@
 										{serverId}
 										channelId={activeChannel?.id ?? null}
 										{ticketedMessageIds}
+										{pinnedMessageIds}
+										canPinMessages={canPinMessages}
+										pinnedMessages={pinnedMessages}
+										on:pinnedOpen={(event) => handlePinnedOpen(event.detail ?? {})}
+										on:pinnedUnpin={(event) => handlePinnedUnpin(event.detail?.messageId)}
 										onVote={handleVote}
 										onSubmitForm={handleFormSubmit}
 										onReact={handleReaction}
@@ -5827,6 +6014,20 @@
 		<span>Loading thread...</span>
 	</div>
 {/if}
+
+<ChannelSettingsSheet
+	visible={channelSettingsOpen}
+	channelName={activeChannel?.name ?? 'Channel'}
+	pinned={pinnedMessages}
+	canManagePins={canPinMessages}
+	on:close={() => (channelSettingsOpen = false)}
+	on:openPinned={(event) => {
+		handlePinnedOpen(event.detail ?? {});
+		channelSettingsOpen = false;
+	}}
+	on:unpin={(event) => handlePinnedUnpin(event.detail?.messageId)}
+	on:pinLink={(event) => handlePinCustomLink(event.detail)}
+/>
 
 <style>
 	/* Popup window mode styles (when opened in separate browser window) */
@@ -7064,6 +7265,14 @@
 
 	.mobile-chat-card :global(.message-scroll-region) {
 		border-radius: 0.75rem 0.75rem 0 0;
+	}
+
+	.pinned-banner {
+		border-bottom: 1px solid var(--color-border-subtle);
+	}
+
+	.pinned-banner :global(.pinned-bar) {
+		border-radius: 0 0 var(--radius-sm) var(--radius-sm);
 	}
 
 	@media (min-width: 768px) {

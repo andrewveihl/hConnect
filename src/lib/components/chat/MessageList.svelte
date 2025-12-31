@@ -10,7 +10,12 @@
 	import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 	import { createTicketFromMessage } from '$lib/firestore/ticketAi';
-	import { editChannelMessage, deleteChannelMessage } from '$lib/firestore/messages';
+	import {
+		editChannelMessage,
+		deleteChannelMessage,
+		pinChannelMessage,
+		unpinChannelMessage
+	} from '$lib/firestore/messages';
 
 	const dispatch = createEventDispatcher();
 
@@ -100,6 +105,8 @@
 		threadId?: string | null;
 		/** Set of message IDs that already have tickets */
 		ticketedMessageIds?: Set<string>;
+		pinnedMessageIds?: Set<string>;
+		canPinMessages?: boolean;
 	}
 
 	let {
@@ -116,7 +123,9 @@
 		serverId = null,
 		channelId = null,
 		threadId = null,
-		ticketedMessageIds = new Set<string>()
+		ticketedMessageIds = new Set<string>(),
+		pinnedMessageIds = new Set<string>(),
+		canPinMessages = false
 	}: Props = $props();
 
 	let scroller = $state<HTMLDivElement | null>(null);
@@ -219,6 +228,31 @@
 			console.error('[MessageList] Failed to delete message:', err);
 		} finally {
 			deletingMessageId = null;
+		}
+	}
+
+	function isPinned(messageId: string | null | undefined) {
+		if (!messageId) return false;
+		return pinnedMessageIds?.has?.(messageId) ?? false;
+	}
+
+	async function pinMessage(message: ChatMessage) {
+		if (!canPinMessages || !serverId || !channelId || !currentUserId) return;
+		menuOpenForMessageId = null;
+		try {
+			await pinChannelMessage(serverId, channelId, message, currentUserId);
+		} catch (err) {
+			console.error('[MessageList] Failed to pin message:', err);
+		}
+	}
+
+	async function unpinMessage(message: ChatMessage) {
+		if (!canPinMessages || !serverId || !channelId) return;
+		menuOpenForMessageId = null;
+		try {
+			await unpinChannelMessage(serverId, channelId, message.id);
+		} catch (err) {
+			console.error('[MessageList] Failed to unpin message:', err);
 		}
 	}
 
@@ -1535,6 +1569,7 @@
 														<div 
 															class="message-menu" 
 															role="menu" 
+															tabindex="-1"
 															onclick={(e) => e.stopPropagation()}
 															ontouchstart={(e) => e.stopPropagation()}
 															onpointerdown={(e) => e.stopPropagation()}
@@ -1548,6 +1583,18 @@
 																<i class="bx bx-copy" aria-hidden="true"></i>
 																<span>Copy text</span>
 															</button>
+															{#if canPinMessages}
+																{@const pinned = isPinned(m.id)}
+																<button
+																	type="button"
+																	class="message-menu__item"
+																	role="menuitem"
+																	onclick={() => (pinned ? unpinMessage(m) : pinMessage(m))}
+																>
+																	<i class={`bx ${pinned ? 'bx-pin-off' : 'bx-pin'}`} aria-hidden="true"></i>
+																	<span>{pinned ? 'Unpin message' : 'Pin to channel'}</span>
+																</button>
+															{/if}
 															{#if mine}
 																<button
 																	type="button"
@@ -2839,6 +2886,7 @@
 			max-width: 100%;
 			white-space: normal;
 			display: -webkit-box;
+			line-clamp: 2;
 			-webkit-line-clamp: 2;
 			-webkit-box-orient: vertical;
 			overflow: hidden;

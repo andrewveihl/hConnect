@@ -3,10 +3,16 @@ import {
 	addDoc,
 	collection,
 	doc,
+	limit,
+	onSnapshot,
+	orderBy,
+	query,
 	serverTimestamp,
+	setDoc,
 	updateDoc,
 	runTransaction,
-	deleteField
+	deleteField,
+	type Unsubscribe
 } from 'firebase/firestore';
 import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 
@@ -532,5 +538,246 @@ export async function submitChannelForm(
 				submittedAt: serverTimestamp()
 			}
 		}
+	);
+}
+
+export type PinnedMessage = {
+	id: string;
+	messageId: string;
+	channelId: string;
+	serverId: string;
+	pinnedBy: string | null;
+	pinnedAt: number | null;
+	authorId: string | null;
+	authorName: string | null;
+	title: string;
+	preview: string | null;
+	linkUrl: string | null;
+	linkKind: string | null;
+	messageType: string | null;
+	fileName?: string | null;
+	fileUrl?: string | null;
+	fileContentType?: string | null;
+	description?: string | null;
+};
+
+function firstUrlFromText(text: Nullable<string>): string | null {
+	const value = typeof text === 'string' ? text : '';
+	if (!value) return null;
+	const match = value.match(/https?:\/\/[^\s<>"')]+/i);
+	return match ? match[0].replace(/[),.;]+$/, '') : null;
+}
+
+function classifyLinkKind(options: {
+	url?: Nullable<string>;
+	fileName?: Nullable<string>;
+	contentType?: Nullable<string>;
+	messageType?: Nullable<string>;
+}): string | null {
+	const url = trimString(options.url) ?? '';
+	const fileName = trimString(options.fileName) ?? '';
+	const contentType = trimString(options.contentType) ?? '';
+	const type = (options.messageType ?? '').toLowerCase();
+	const lowerUrl = url.toLowerCase();
+	const lowerName = fileName.toLowerCase();
+
+	if (lowerUrl.includes('meet.google.com')) return 'google_meet';
+	if (lowerUrl.includes('zoom.us/')) return 'video_meeting';
+	if (lowerUrl.includes('docs.google.com/document')) return 'google_doc';
+	if (lowerUrl.includes('docs.google.com/spreadsheets')) return 'google_sheet';
+	if (lowerUrl.includes('docs.google.com/presentation')) return 'google_slides';
+	if (lowerUrl.includes('docs.google.com/forms') || lowerUrl.includes('forms.gle')) return 'google_form';
+	if (lowerUrl.includes('drive.google.com')) return 'google_drive';
+	if (lowerUrl.includes('notion.so') || lowerUrl.includes('notion.site')) return 'notion';
+	if (lowerUrl.includes('figma.com')) return 'figma';
+	if (lowerUrl.includes('microsoft.com') || lowerUrl.includes('office.com') || lowerUrl.includes('sharepoint.com'))
+		return 'office';
+	if (lowerName.endsWith('.doc') || lowerName.endsWith('.docx')) return 'word_doc';
+	if (lowerName.endsWith('.ppt') || lowerName.endsWith('.pptx')) return 'slides';
+	if (lowerName.endsWith('.xls') || lowerName.endsWith('.xlsx')) return 'sheet';
+	if (lowerName.endsWith('.pdf') || contentType.includes('pdf')) return 'pdf';
+	if (lowerName) return 'file';
+	if (type === 'gif') return 'gif';
+	if (url) return 'link';
+	return null;
+}
+
+function millisFrom(value: any): number | null {
+	if (!value) return null;
+	if (typeof value === 'number') return value;
+	if (value instanceof Date) return value.getTime();
+	if (typeof value?.toMillis === 'function') {
+		try {
+			return value.toMillis();
+		} catch {
+			return null;
+		}
+	}
+	return null;
+}
+
+function normalizePinnedSnapshot(id: string, raw: Record<string, any>): PinnedMessage {
+	const title =
+		trimString(raw?.title) ??
+		trimString(raw?.preview) ??
+		trimString(raw?.text) ??
+		trimString(raw?.fileName) ??
+		'Pinned message';
+	return {
+		id,
+		messageId: raw?.messageId ?? id,
+		channelId: raw?.channelId ?? '',
+		serverId: raw?.serverId ?? '',
+		pinnedBy: raw?.pinnedBy ?? null,
+		pinnedAt: millisFrom(raw?.pinnedAt),
+		authorId: raw?.authorId ?? null,
+		authorName: raw?.authorName ?? null,
+		title,
+		preview: trimString(raw?.preview) ?? null,
+		linkUrl: trimString(raw?.linkUrl) ?? null,
+		linkKind: trimString(raw?.linkKind) ?? null,
+		messageType: trimString(raw?.messageType) ?? null,
+		fileName: trimString(raw?.fileName) ?? null,
+		fileUrl: trimString(raw?.fileUrl) ?? null,
+		fileContentType: trimString(raw?.fileContentType) ?? null,
+		description: trimString(raw?.description) ?? null
+	};
+}
+
+export async function pinChannelMessage(
+	serverId: string,
+	channelId: string,
+	message: any,
+	uid: string
+) {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	const cleanMessage = trimString(message?.id ?? message?.messageId ?? message?.mid ?? null);
+	const cleanUid = trimString(uid);
+
+	if (!cleanServer || !cleanChannel || !cleanMessage || !cleanUid) {
+		throw new Error('Missing identifiers for pinning a message.');
+	}
+
+	const text = trimString(message?.text ?? message?.content ?? null) ?? null;
+	const file = (message as any)?.file ?? null;
+	const fileName = trimString(file?.name) ?? null;
+	const fileUrl = trimString(file?.url) ?? null;
+	const fileContentType = trimString(file?.contentType) ?? null;
+	const primaryUrl = firstUrlFromText(text) ?? trimString(message?.url) ?? fileUrl;
+
+	const authorId = trimString(message?.uid ?? message?.authorId ?? null) ?? null;
+	const authorName =
+		trimString(message?.displayName) ??
+		trimString(message?.authorName) ??
+		trimString(message?.author?.displayName) ??
+		null;
+	const messageType = trimString(message?.type ?? null) ?? 'text';
+
+	const db = getDb();
+	await setDoc(
+		doc(db, 'servers', cleanServer, 'channels', cleanChannel, 'pinned', cleanMessage),
+		{
+			messageId: cleanMessage,
+			channelId: cleanChannel,
+			serverId: cleanServer,
+			pinnedBy: cleanUid,
+			pinnedAt: serverTimestamp(),
+			authorId,
+			authorName,
+			title: (text ?? fileName ?? 'Pinned message').slice(0, 140),
+			preview: (text ?? fileName ?? null)?.slice(0, 280) ?? null,
+			linkUrl: primaryUrl ?? null,
+			linkKind: classifyLinkKind({
+				url: primaryUrl,
+				fileName,
+				contentType: fileContentType,
+				messageType
+			}),
+			messageType,
+			fileName,
+			fileUrl,
+			fileContentType
+		},
+		{ merge: true }
+	);
+}
+
+export async function pinChannelLink(
+	serverId: string,
+	channelId: string,
+	payload: { title?: string; url: string; description?: string | null; uid: string; authorName?: string | null }
+) {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	const cleanUrl = trimString(payload?.url ?? '');
+	const cleanTitle = trimString(payload?.title ?? '') ?? 'Pinned link';
+	const cleanUid = trimString(payload?.uid ?? '');
+	if (!cleanServer || !cleanChannel || !cleanUrl || !cleanUid) {
+		throw new Error('Missing identifiers for pinning a link.');
+	}
+
+	const id =
+		(typeof crypto !== 'undefined' && (crypto as any)?.randomUUID?.()) ?? `pin_${Date.now()}`;
+	const db = getDb();
+	await setDoc(
+		doc(db, 'servers', cleanServer, 'channels', cleanChannel, 'pinned', id),
+		{
+			messageId: id,
+			channelId: cleanChannel,
+			serverId: cleanServer,
+			pinnedBy: cleanUid,
+			pinnedAt: serverTimestamp(),
+			authorId: cleanUid,
+			authorName: trimString(payload?.authorName ?? '') ?? null,
+			title: cleanTitle.slice(0, 140),
+			preview: trimString(payload?.description ?? '')?.slice(0, 280) ?? null,
+			linkUrl: cleanUrl,
+			linkKind: classifyLinkKind({ url: cleanUrl }),
+			messageType: 'link',
+			fileName: null,
+			fileUrl: null,
+			fileContentType: null
+		},
+		{ merge: true }
+	);
+}
+
+export async function unpinChannelMessage(serverId: string, channelId: string, messageId: string) {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	const cleanMessage = trimString(messageId);
+	if (!cleanServer || !cleanChannel || !cleanMessage) {
+		throw new Error('Missing identifiers for unpinning a message.');
+	}
+	const db = getDb();
+	const { deleteDoc } = await import('firebase/firestore');
+	await deleteDoc(doc(db, 'servers', cleanServer, 'channels', cleanChannel, 'pinned', cleanMessage));
+}
+
+export function subscribePinnedMessages(
+	serverId: string,
+	channelId: string,
+	cb: (pins: PinnedMessage[]) => void
+): Unsubscribe | null {
+	const cleanServer = trimString(serverId);
+	const cleanChannel = trimString(channelId);
+	if (!cleanServer || !cleanChannel) return null;
+	const database = getDb();
+	const q = query(
+		collection(database, 'servers', cleanServer, 'channels', cleanChannel, 'pinned'),
+		orderBy('pinnedAt', 'desc'),
+		limit(20)
+	);
+	return onSnapshot(
+		q,
+		(snap) => {
+			const pins: PinnedMessage[] = [];
+			snap.forEach((docSnap) => {
+				pins.push(normalizePinnedSnapshot(docSnap.id, docSnap.data() ?? {}));
+			});
+			cb(pins);
+		},
+		() => cb([])
 	);
 }
