@@ -586,6 +586,13 @@ service cloud.firestore {
             || (isSignedIn() && request.auth.uid == resource.data.uid);
         }
 
+        match /pinned/{pinId} {
+          // Pinned items are visible to anyone who can view the channel
+          allow read: if isSignedIn() && canViewChannel(serverId, channelId);
+          // Only server owners and admins can pin/unpin
+          allow create, update, delete: if isServerOwner(serverId) || isServerAdmin(serverId);
+        }
+
         match /members/{uid} {
           allow read: if canViewChannel(serverId, channelId)
             || (isMember(serverId) && hasPerm(serverId, "viewChannels"));

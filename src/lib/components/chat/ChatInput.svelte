@@ -2132,6 +2132,7 @@
 	ondragover={handleDragOver}
 	ondragleave={handleDragLeave}
 	ondrop={handleDrop}
+	role="region"
 >
 	<div class="chat-input-overlays">
 		{#if showRewriteCoach}
