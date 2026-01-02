@@ -39,6 +39,7 @@
 	const MIN_MARGIN = 8;
 
 	type Position = { x: number; y: number };
+	type BulkAction = 'idle' | 'clearingNotifications' | 'clearingThreads';
 
 	let fabEl = $state<HTMLDivElement | null>(null);
 	let fabBtnEl = $state<HTMLButtonElement | null>(null);
@@ -58,6 +59,7 @@
 	let navigationHistory = $state<ThreadWithMeta[]>([]);
 	let dismissedThreadIds = $state<Set<string>>(new Set());
 	let searchQuery = $state('');
+	let bulkAction = $state<BulkAction>('idle');
 
 	// Floating thread popup state (for when not on server page)
 	type FloatingThreadState = {
@@ -695,6 +697,48 @@
 		floatingThread = { ...floatingThread, replyTarget: null };
 	}
 
+	async function markAllThreadsRead() {
+		if (!$user?.uid || !visibleThreads.length) return;
+		const tasks = visibleThreads.map((thread) =>
+			markThreadReadThread(
+				$user.uid,
+				thread.serverId,
+				thread.parentChannelId || thread.channelId,
+				thread.id,
+				{ at: thread.lastMessageAt ?? Timestamp.now() }
+			)
+		);
+		await Promise.allSettled(tasks);
+	}
+
+	async function clearAllThreadNotifications() {
+		if (!visibleThreads.length) return;
+		bulkAction = 'clearingNotifications';
+		try {
+			await markAllThreadsRead();
+		} catch (err) {
+			console.error('[ThreadsFab] Failed to clear thread notifications:', err);
+		} finally {
+			bulkAction = 'idle';
+		}
+	}
+
+	async function clearAllThreads() {
+		if (!visibleThreads.length) return;
+		bulkAction = 'clearingThreads';
+		try {
+			await markAllThreadsRead();
+			const ids = visibleThreads.map((t) => t.id);
+			const nextDismissed = new Set([...dismissedThreadIds, ...ids]);
+			dismissedThreadIds = nextDismissed;
+			recentThreads = recentThreads.filter((t) => !nextDismissed.has(t.id));
+		} catch (err) {
+			console.error('[ThreadsFab] Failed to clear threads:', err);
+		} finally {
+			bulkAction = 'idle';
+		}
+	}
+
 	function goBackToThread() {
 		if (navigationHistory.length > 1) {
 			const previous = navigationHistory[navigationHistory.length - 2];
@@ -865,6 +909,7 @@
 		}
 		return `${visibleThreads.length} active`;
 	});
+	const bulkBusy = $derived(bulkAction !== 'idle');
 	
 	// Compute popover position based on FAB location
 	const popoverPosition = $derived.by(() => {
@@ -955,6 +1000,31 @@
 					title="Close"
 				>
 					<i class="bx bx-x" aria-hidden="true"></i>
+				</button>
+			</div>
+
+			<div class="threads-popover__actions">
+				<button
+					type="button"
+					class="threads-popover__action-btn threads-popover__action-btn--primary"
+					onclick={clearAllThreadNotifications}
+					disabled={!hasThreads || bulkBusy}
+					title="Mark all thread notifications as read"
+				>
+					<i class="bx bx-bell-off" aria-hidden="true"></i>
+					<span>
+						{bulkAction === 'clearingNotifications' ? 'Clearing...' : 'Clear notifications'}
+					</span>
+				</button>
+				<button
+					type="button"
+					class="threads-popover__action-btn threads-popover__action-btn--danger"
+					onclick={clearAllThreads}
+					disabled={!hasThreads || bulkBusy}
+					title="Dismiss all threads from this list"
+				>
+					<i class="bx bx-message-square-x" aria-hidden="true"></i>
+					<span>{bulkAction === 'clearingThreads' ? 'Clearing...' : 'Clear threads'}</span>
 				</button>
 			</div>
 
@@ -1315,6 +1385,68 @@
 		flex: 1;
 		overflow-y: auto;
 		padding: 8px;
+	}
+
+	.threads-popover__actions {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 8px;
+		padding: 8px 12px 10px;
+		border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+	}
+
+	.threads-popover__action-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		border-radius: 6px;
+		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--text-primary, #f8fafc);
+		padding: 6px 8px;
+		min-height: 32px;
+		font-size: 0.78rem;
+		line-height: 1.1;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			transform 120ms ease,
+			box-shadow 150ms ease,
+			background 150ms ease,
+			border-color 150ms ease,
+			color 150ms ease;
+	}
+
+	.threads-popover__action-btn:hover:not(:disabled) {
+		transform: translateY(-1px);
+		box-shadow: 0 8px 14px rgba(0, 0, 0, 0.25);
+	}
+
+	.threads-popover__action-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.threads-popover__action-btn--primary {
+		background: linear-gradient(135deg, rgba(168, 85, 247, 0.35), rgba(139, 92, 246, 0.32));
+		border-color: rgba(168, 85, 247, 0.45);
+		box-shadow: 0 10px 22px rgba(139, 92, 246, 0.25);
+	}
+
+	.threads-popover__action-btn--primary:hover:not(:disabled) {
+		background: linear-gradient(135deg, rgba(168, 85, 247, 0.5), rgba(139, 92, 246, 0.48));
+	}
+
+	.threads-popover__action-btn--danger {
+		background: linear-gradient(135deg, rgba(239, 68, 68, 0.16), rgba(239, 68, 68, 0.14));
+		border-color: rgba(239, 68, 68, 0.4);
+	}
+
+	.threads-popover__action-btn--danger:hover:not(:disabled) {
+		background: linear-gradient(135deg, rgba(239, 68, 68, 0.26), rgba(239, 68, 68, 0.2));
+		color: #fecaca;
 	}
 
 	.threads-popover__search {
