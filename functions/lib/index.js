@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
+exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
@@ -43,10 +43,12 @@ const firebase_1 = require("./firebase");
 const firestore_2 = require("firebase-admin/firestore");
 const notifications_1 = require("./notifications");
 const ticketAi_1 = require("./ticketAi");
+const email_1 = require("./email");
 var domainInvites_1 = require("./domainInvites");
 Object.defineProperty(exports, "requestDomainAutoInvite", { enumerable: true, get: function () { return domainInvites_1.requestDomainAutoInvite; } });
 // Define secrets for functions that need them
 const openaiApiKey = (0, params_1.defineSecret)('OPENAI_API_KEY');
+const resendApiKey = (0, params_1.defineSecret)('RESEND_API_KEY');
 /**
  * Check if a URL is a Google profile photo URL
  */
@@ -137,14 +139,20 @@ exports.cacheGoogleProfilePhoto = (0, firestore_1.onDocumentWritten)('profiles/{
 });
 exports.onChannelMessageCreated = (0, firestore_1.onDocumentCreated)({
     document: 'servers/{serverId}/channels/{channelId}/messages/{messageId}',
-    secrets: [openaiApiKey]
+    secrets: [openaiApiKey, resendApiKey]
 }, async (event) => {
     await Promise.all([(0, notifications_1.handleServerMessage)(event), (0, ticketAi_1.handleTicketAiChannelMessage)(event)]);
 });
-exports.onThreadMessageCreated = (0, firestore_1.onDocumentCreated)('servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}', async (event) => {
+exports.onThreadMessageCreated = (0, firestore_1.onDocumentCreated)({
+    document: 'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}',
+    secrets: [resendApiKey]
+}, async (event) => {
     await Promise.all([(0, notifications_1.handleThreadMessage)(event), (0, ticketAi_1.handleTicketAiThreadMessage)(event)]);
 });
-exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)('dms/{threadID}/messages/{messageId}', async (event) => {
+exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)({
+    document: 'dms/{threadID}/messages/{messageId}',
+    secrets: [resendApiKey]
+}, async (event) => {
     await (0, notifications_1.handleDmMessage)(event);
 });
 /**
@@ -383,6 +391,198 @@ exports.sendTestPush = (0, https_1.onCall)({
         return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
     return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
+});
+/**
+ * Super Admin callable: send a test email notification to a specified address.
+ * Uses RESEND_API_KEY secret for email delivery.
+ */
+exports.sendTestEmailNotification = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: true,
+    secrets: [resendApiKey]
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    if (!callerEmail) {
+        throw new https_1.HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    const target = typeof request.data?.email === 'string' ? request.data.email.trim() : '';
+    if (!target || !target.includes('@')) {
+        throw new https_1.HttpsError('invalid-argument', 'Valid email address required.');
+    }
+    const message = typeof request.data?.message === 'string' && request.data.message.trim().length
+        ? request.data.message.trim()
+        : 'This is a test email notification from hConnect.';
+    const subject = 'hConnect test notification';
+    const text = `${message}\n\nTriggered by ${callerEmail}.`;
+    firebase_functions_1.logger.info('[sendTestEmailNotification] Sending test email', {
+        callerUid,
+        callerEmail,
+        target
+    });
+    const result = await (0, email_1.sendEmail)({
+        to: target,
+        subject,
+        text,
+        context: { type: 'test' }
+    });
+    if (!result.sent) {
+        firebase_functions_1.logger.warn('[sendTestEmailNotification] Send failed', { reason: result.reason ?? 'unknown' });
+        return { ok: false, reason: result.reason ?? 'send_failed' };
+    }
+    firebase_functions_1.logger.info('[sendTestEmailNotification] Sent', { target, messageId: result.messageId ?? null });
+    return { ok: true, messageId: result.messageId ?? null };
+});
+/**
+ * HTTP variant for browsers: explicit CORS + ID token auth.
+ * Uses RESEND_API_KEY secret for email delivery.
+ */
+exports.sendTestEmailNotificationHttp = (0, https_1.onRequest)({
+    region: 'us-central1',
+    secrets: [resendApiKey]
+}, async (req, res) => {
+    const origin = req.headers.origin || '*';
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Firebase-AppCheck');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Credentials', 'true');
+    if (req.method === 'OPTIONS') {
+        res.status(204).send('');
+        return;
+    }
+    if (req.method !== 'POST') {
+        res.status(405).send('Method not allowed');
+        return;
+    }
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+        res.status(401).json({ ok: false, reason: 'missing_auth' });
+        return;
+    }
+    let decoded = null;
+    try {
+        const token = authHeader.substring('Bearer '.length);
+        decoded = await firebase_1.auth.verifyIdToken(token);
+    }
+    catch (err) {
+        firebase_functions_1.logger.warn('[sendTestEmailNotificationHttp] Invalid token', { err });
+        res.status(401).json({ ok: false, reason: 'invalid_token' });
+        return;
+    }
+    const callerUid = decoded?.uid ?? null;
+    const callerEmail = decoded?.email ?? null;
+    if (!callerUid || !callerEmail) {
+        res.status(403).json({ ok: false, reason: 'missing_email' });
+        return;
+    }
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        res.status(403).json({ ok: false, reason: 'not_super_admin' });
+        return;
+    }
+    const body = (req.body ?? {});
+    const target = typeof body?.email === 'string'
+        ? body.email.trim()
+        : typeof body?.target === 'string'
+            ? body.target.trim()
+            : '';
+    if (!target || !target.includes('@')) {
+        res.status(400).json({ ok: false, reason: 'invalid_email' });
+        return;
+    }
+    const message = typeof body?.message === 'string' && body.message.trim().length
+        ? body.message.trim()
+        : 'This is a test email notification from hConnect.';
+    const subject = 'hConnect test notification';
+    const text = `${message}\n\nTriggered by ${callerEmail}.`;
+    try {
+        const result = await (0, email_1.sendEmail)({
+            to: target,
+            subject,
+            text,
+            context: { type: 'test' }
+        });
+        if (!result.sent) {
+            firebase_functions_1.logger.warn('[sendTestEmailNotificationHttp] Send failed', { reason: result.reason ?? 'unknown' });
+            res.status(500).json({ ok: false, reason: result.reason ?? 'send_failed' });
+            return;
+        }
+        firebase_functions_1.logger.info('[sendTestEmailNotificationHttp] Sent', { target, messageId: result.messageId ?? null });
+        res.status(200).json({ ok: true, messageId: result.messageId ?? null });
+        return;
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[sendTestEmailNotificationHttp] Unexpected error', { err });
+        const reason = err instanceof Error ? err.message : 'internal';
+        res.status(500).json({ ok: false, reason });
+        return;
+    }
+});
+/**
+ * Super Admin callable: fetch recent email notification logs.
+ */
+exports.getEmailNotificationLogs = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid || !callerEmail) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    // Check super admin
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    const limitParam = typeof request.data?.limit === 'number' ? request.data.limit : 50;
+    const actualLimit = Math.min(Math.max(1, limitParam), 200);
+    try {
+        const logsRef = firebase_1.db.collection('adminLogs').doc('email').collection('notifications');
+        const snapshot = await logsRef
+            .orderBy('createdAt', 'desc')
+            .limit(actualLimit)
+            .get();
+        const logs = snapshot.docs.map((doc) => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                to: data.to ?? null,
+                subject: data.subject ?? null,
+                sent: data.sent ?? false,
+                reason: data.reason ?? null,
+                messageId: data.messageId ?? null,
+                provider: data.provider ?? null,
+                context: data.context ?? null,
+                durationMs: data.durationMs ?? null,
+                createdAt: data.createdAt?.toDate?.()?.toISOString() ?? null
+            };
+        });
+        return { ok: true, logs };
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[getEmailNotificationLogs] Failed to fetch logs', { err });
+        throw new https_1.HttpsError('internal', 'Failed to fetch email logs.');
+    }
 });
 /**
  * Callable function to manually create a ticket from a message.

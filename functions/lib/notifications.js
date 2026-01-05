@@ -12,6 +12,7 @@ const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-admin/firestore");
 const web_push_1 = __importDefault(require("web-push"));
 const firebase_1 = require("./firebase");
+const email_1 = require("./email");
 const settings_1 = require("./settings");
 const SPECIAL_MENTION_IDS = {
     EVERYONE: 'special:mention:everyone',
@@ -39,6 +40,9 @@ const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ??
     process.env.VAPID_PRIVATE_KEY ??
     functionsConfig.vapid?.private_key ??
     '';
+const APP_BASE_URL = process.env.APP_BASE_URL ??
+    functionsConfig.app?.base_url ??
+    'https://hconnect-6212b.web.app';
 const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (WEB_PUSH_AVAILABLE) {
     try {
@@ -242,6 +246,25 @@ function buildDeepLink(context) {
     }
     return '/?origin=push';
 }
+function absoluteUrl(path) {
+    try {
+        return new URL(path, APP_BASE_URL).toString();
+    }
+    catch (err) {
+        firebase_functions_1.logger.warn('[notify] Failed to build absolute URL', { path, err });
+        const base = APP_BASE_URL.endsWith('/') ? APP_BASE_URL.slice(0, -1) : APP_BASE_URL;
+        const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+        return `${base}${normalizedPath}`;
+    }
+}
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 function describeTitle(context) {
     if (context.dmId) {
         return 'Direct message';
@@ -395,7 +418,12 @@ function respectsSettings(settings, candidate, opts) {
             return settings.allowMentionPush && settings.allowEveryoneMentionPush !== false;
         case 'channel':
             // Channel notifications - users can opt out with allowChannelMessagePush setting
-            return settings.allowChannelMessagePush !== false;
+            // If pushChannelMentionsOnly is enabled, skip plain channel messages (only allow mentions)
+            if (settings.allowChannelMessagePush === false)
+                return false;
+            if (settings.pushChannelMentionsOnly)
+                return false;
+            return true;
         default:
             return true;
     }
@@ -447,6 +475,8 @@ function getFilterReason(settings, candidate, opts) {
         case 'channel':
             if (settings.allowChannelMessagePush === false)
                 return 'channel_push_disabled';
+            if (settings.pushChannelMentionsOnly)
+                return 'channel_mentions_only';
             return null;
         default:
             return null;
@@ -458,13 +488,33 @@ async function filterCandidates(candidates, opts) {
     for (const candidate of candidates) {
         const settings = await (0, settings_1.fetchNotificationSettings)(candidate.uid);
         const filterReason = getFilterReason(settings, candidate, opts);
+        // Special case: For 'channel' type candidates, don't filter out if user wants email for all channel messages
+        // This allows users who have push disabled but email enabled to still get channel message emails
         if (filterReason) {
-            filtered.push({ uid: candidate.uid, reason: filterReason });
-            continue;
+            const canStillReceiveEmail = candidate.mentionType === 'channel' &&
+                settings.emailEnabled &&
+                settings.emailForAllChannelMessages;
+            if (!canStillReceiveEmail) {
+                filtered.push({ uid: candidate.uid, reason: filterReason });
+                continue;
+            }
+            // Log that we're keeping this candidate for email-only delivery
+            firebase_functions_1.logger.info('[notify] Keeping channel candidate for email-only delivery', {
+                uid: candidate.uid,
+                filterReason,
+                emailEnabled: settings.emailEnabled,
+                emailForAllChannelMessages: settings.emailForAllChannelMessages
+            });
         }
         if (!respectsSettings(settings, candidate, opts)) {
-            filtered.push({ uid: candidate.uid, reason: 'unknown_settings_filter' });
-            continue;
+            // Same check for email-only users
+            const canStillReceiveEmail = candidate.mentionType === 'channel' &&
+                settings.emailEnabled &&
+                settings.emailForAllChannelMessages;
+            if (!canStillReceiveEmail) {
+                filtered.push({ uid: candidate.uid, reason: 'unknown_settings_filter' });
+                continue;
+            }
         }
         if (candidate.requirePresence) {
             const presence = await (0, settings_1.fetchPresence)(candidate.uid);
@@ -545,7 +595,192 @@ async function writeActivityEntry(uid, recipient, message, context, title, body,
     });
     return ref.id;
 }
+function describeLocation(context) {
+    if (context.dmId)
+        return 'Direct messages';
+    const serverName = context.server?.name ?? 'Server';
+    const channelName = context.channel?.name ? `#${context.channel.name}` : '#channel';
+    if (context.threadId) {
+        const threadName = context.thread?.name ?? 'Thread';
+        return `${serverName} ${channelName} > ${threadName}`;
+    }
+    return `${serverName} ${channelName}`;
+}
+const recipientContactCache = new Map();
+async function resolveRecipientContact(uid) {
+    if (recipientContactCache.has(uid)) {
+        return recipientContactCache.get(uid);
+    }
+    let email = null;
+    let displayName = null;
+    try {
+        const snap = await firebase_1.db.doc(`profiles/${uid}`).get();
+        if (snap.exists) {
+            const data = snap.data();
+            if (typeof data?.email === 'string' && data.email.trim()) {
+                email = data.email.trim();
+            }
+            if (!displayName && typeof data?.displayName === 'string') {
+                displayName = data.displayName;
+            }
+        }
+    }
+    catch (err) {
+        firebase_functions_1.logger.warn('[notify] Failed to read profile for email fallback', { uid, err });
+    }
+    if (!email) {
+        try {
+            const userRecord = await firebase_1.auth.getUser(uid);
+            if (userRecord.email)
+                email = userRecord.email;
+            if (!displayName && userRecord.displayName)
+                displayName = userRecord.displayName;
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[notify] Failed to read auth record for email fallback', { uid, err });
+        }
+    }
+    const contact = { email, displayName };
+    recipientContactCache.set(uid, contact);
+    return contact;
+}
+function shouldSendEmailForRecipient(recipient, hasLikelyReachablePush) {
+    const settings = recipient.settings;
+    if (!settings.emailEnabled)
+        return { should: false, reason: 'email_disabled' };
+    if (settings.emailOnlyWhenNoPush !== false && hasLikelyReachablePush) {
+        return { should: false, reason: 'push_available' };
+    }
+    if (recipient.mentionType === 'dm') {
+        if (settings.emailForDMs === false)
+            return { should: false, reason: 'dm_email_disabled' };
+    }
+    else if (recipient.mentionType === 'channel') {
+        // Check both the old setting and the new "all channel messages" setting
+        if (!settings.emailForChannelMessages && !settings.emailForAllChannelMessages) {
+            return { should: false, reason: 'channel_email_disabled' };
+        }
+        // If emailChannelMentionsOnly is enabled, skip emails for plain channel messages
+        // (only allow direct mentions, role mentions, @here, @everyone - not 'channel' type)
+        if (settings.emailChannelMentionsOnly) {
+            return { should: false, reason: 'channel_mentions_only' };
+        }
+    }
+    else {
+        if (settings.emailForMentions === false)
+            return { should: false, reason: 'mention_email_disabled' };
+    }
+    return { should: true };
+}
+function buildEmailCopy(params) {
+    const location = describeLocation(params.context);
+    const openUrl = absoluteUrl(params.deepLink);
+    let subjectContext = `New message in ${location}`;
+    let heading = `${params.authorName} sent a new message in ${location}.`;
+    if (params.recipient.mentionType === 'dm') {
+        subjectContext = `New direct message from ${params.authorName}`;
+        heading = `${params.authorName} sent you a direct message.`;
+    }
+    else if (params.recipient.mentionType !== 'channel') {
+        subjectContext = `You were mentioned in ${location}`;
+        heading = `${params.authorName} mentioned you in ${location}.`;
+    }
+    const subject = `[hConnect] ${subjectContext}`;
+    const bodyText = `${heading}\n\n${params.preview}\n\nOpen hConnect: ${openUrl}\n\nManage email alerts in Settings → Notifications.`;
+    const logoUrl = 'https://hconnect-6212b.web.app/HS-LOGO.png';
+    const html = `<div style="font-family:Arial,sans-serif;line-height:1.5;color:#0f172a;max-width:600px;">
+    <div style="margin-bottom:16px;">
+      <img src="${logoUrl}" alt="hConnect" style="width:48px;height:48px;border-radius:8px;" />
+    </div>
+    <p>${escapeHtml(heading)}</p>
+    <div style="margin:12px 0;padding:12px;border-radius:10px;background:#0f172a;color:#e2e8f0;">
+      ${escapeHtml(params.preview)}
+    </div>
+    <p><a href="${openUrl}" style="color:#0ea5e9;text-decoration:none;font-weight:600;" target="_blank" rel="noopener noreferrer">Open hConnect</a></p>
+    <p style="font-size:12px;color:#64748b;">You can change these emails in Settings → Notifications.</p>
+  </div>`;
+    return { subject, text: bodyText, html };
+}
+async function maybeSendEmailNotification(params) {
+    // Log the decision inputs for debugging
+    firebase_functions_1.logger.info('[notify] maybeSendEmailNotification checking', {
+        recipientUid: params.recipient.uid,
+        mentionType: params.recipient.mentionType,
+        hasLikelyReachablePush: params.hasLikelyReachablePush,
+        deviceTokenCount: params.deviceTokenCount,
+        emailEnabled: params.recipient.settings.emailEnabled,
+        emailOnlyWhenNoPush: params.recipient.settings.emailOnlyWhenNoPush,
+        emailForDMs: params.recipient.settings.emailForDMs,
+        emailForMentions: params.recipient.settings.emailForMentions
+    });
+    const decision = shouldSendEmailForRecipient(params.recipient, params.hasLikelyReachablePush);
+    if (!decision.should) {
+        firebase_functions_1.logger.info('[notify] Email skipped by shouldSendEmailForRecipient', {
+            recipientUid: params.recipient.uid,
+            reason: decision.reason
+        });
+        return { attempted: false, sent: false, reason: decision.reason };
+    }
+    // Skip sending email if the user appears active to avoid noisy duplicates
+    const presence = await (0, settings_1.fetchPresence)(params.recipient.uid);
+    const presenceState = (presence?.state || presence?.status || '').toLowerCase();
+    if (presenceState === 'online' || presenceState === 'active') {
+        firebase_functions_1.logger.info('[notify] Email skipped - recipient is active', {
+            recipientUid: params.recipient.uid,
+            presenceState
+        });
+        return { attempted: true, sent: false, reason: 'recipient_active' };
+    }
+    const contact = await resolveRecipientContact(params.recipient.uid);
+    if (!contact.email) {
+        firebase_functions_1.logger.info('[notify] Email skipped - no email address found', {
+            recipientUid: params.recipient.uid
+        });
+        return { attempted: true, sent: false, reason: 'missing_email', to: null };
+    }
+    firebase_functions_1.logger.info('[notify] Proceeding to send email', {
+        recipientUid: params.recipient.uid,
+        to: contact.email,
+        dmId: params.context.dmId
+    });
+    const deepLink = buildDeepLink(params.context);
+    const copy = buildEmailCopy({
+        recipient: params.recipient,
+        context: params.context,
+        authorName: params.authorName,
+        preview: params.preview,
+        deepLink
+    });
+    const result = await (0, email_1.sendEmail)({
+        to: contact.email,
+        subject: copy.subject,
+        text: copy.text,
+        html: copy.html,
+        context: {
+            type: params.context.dmId ? 'dm' : params.context.threadId ? 'thread' : 'channel',
+            recipientUid: params.recipient.uid,
+            messageId: params.context.messageId,
+            serverId: params.context.serverId ?? undefined,
+            channelId: params.context.channelId ?? undefined,
+            dmId: params.context.dmId ?? undefined
+        }
+    });
+    return {
+        attempted: true,
+        sent: result.sent,
+        reason: result.reason,
+        to: contact.email
+    };
+}
 const APPLE_WEB_PUSH_PLATFORMS = new Set(['ios_browser', 'ios_pwa', 'web_safari']);
+function hasLikelyReachablePush(deviceTokens) {
+    return deviceTokens.some((token) => {
+        const platform = (token.platform ?? '').toLowerCase();
+        if (platform && APPLE_WEB_PUSH_PLATFORMS.has(platform))
+            return false;
+        return Boolean(token.token || token.subscription?.endpoint);
+    });
+}
 function groupTokensByChannel(deviceTokens) {
     const safariSubscriptions = [];
     const fcmTokens = [];
@@ -793,11 +1028,32 @@ async function deliverToRecipients(recipients, message, context) {
         const label = mentionLabel(recipient.mentionType, roleName);
         const body = label ? `${label} ${authorName}: ${preview}` : `${authorName}: ${preview}`;
         const activityId = await writeActivityEntry(recipient.uid, recipient, message, context, title, body, deviceTokens.length > 0);
+        const pushLikelyReachable = hasLikelyReachablePush(deviceTokens);
+        const emailResult = await maybeSendEmailNotification({
+            recipient,
+            context,
+            authorName,
+            preview,
+            deviceTokenCount: deviceTokens.length,
+            hasLikelyReachablePush: pushLikelyReachable
+        });
+        if (emailResult.attempted) {
+            firebase_functions_1.logger.info('[notify] Email fallback considered', {
+                uid: recipient.uid,
+                mentionType: recipient.mentionType,
+                sent: emailResult.sent,
+                reason: emailResult.reason ?? null,
+                to: emailResult.to ?? null,
+                messageId: context.messageId
+            });
+        }
         if (!deviceTokens.length) {
             firebase_functions_1.logger.info('[notify] No device tokens for recipient', {
                 uid: recipient.uid,
                 mentionType: recipient.mentionType,
-                messageId: context.messageId
+                messageId: context.messageId,
+                emailAttempted: emailResult.attempted,
+                emailSent: emailResult.sent
             });
             return;
         }

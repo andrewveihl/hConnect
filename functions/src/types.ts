@@ -76,6 +76,14 @@ export type NotificationSettings = {
   allowHereMentionPush: boolean;
   allowEveryoneMentionPush: boolean;
   allowChannelMessagePush: boolean;
+  pushChannelMentionsOnly: boolean;
+  emailEnabled: boolean;
+  emailForDMs: boolean;
+  emailForMentions: boolean;
+  emailForChannelMessages: boolean;
+  emailForAllChannelMessages: boolean;
+  emailChannelMentionsOnly: boolean;
+  emailOnlyWhenNoPush: boolean;
   doNotDisturbUntil: number | null;
 };
 
