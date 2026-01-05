@@ -19,11 +19,19 @@ export type NotificationSettings = {
 	allowDMPreview: boolean;
 	allowActivityBadges: boolean;
 	allowThreadPush: boolean;
-	allowRoleMentionPush: boolean;
-	allowHereMentionPush: boolean;
-	allowEveryoneMentionPush: boolean;
-	allowChannelMessagePush: boolean;
-	doNotDisturbUntil: number | null;
+ allowRoleMentionPush: boolean;
+ allowHereMentionPush: boolean;
+ allowEveryoneMentionPush: boolean;
+ allowChannelMessagePush: boolean;
+  pushChannelMentionsOnly: boolean;
+  emailEnabled: boolean;
+  emailForDMs: boolean;
+  emailForMentions: boolean;
+  emailForChannelMessages: boolean;
+  emailForAllChannelMessages: boolean;
+  emailChannelMentionsOnly: boolean;
+  emailOnlyWhenNoPush: boolean;
+  doNotDisturbUntil: number | null;
 };
 
 const SETTINGS_DOC_ID = 'preferences';
@@ -39,11 +47,19 @@ export const defaultNotificationSettings: NotificationSettings = {
 	allowDMPreview: true,
 	allowActivityBadges: true,
 	allowThreadPush: true,
-	allowRoleMentionPush: true,
-	allowHereMentionPush: true,
-	allowEveryoneMentionPush: true,
-	allowChannelMessagePush: true,
-	doNotDisturbUntil: null
+  allowRoleMentionPush: true,
+  allowHereMentionPush: true,
+  allowEveryoneMentionPush: true,
+  allowChannelMessagePush: true,
+  pushChannelMentionsOnly: false,
+  emailEnabled: false,
+  emailForDMs: true,
+  emailForMentions: true,
+  emailForChannelMessages: false,
+  emailForAllChannelMessages: false,
+  emailChannelMentionsOnly: false,
+  emailOnlyWhenNoPush: true,
+  doNotDisturbUntil: null
 };
 
 function settingsDocRef(uid: string) {

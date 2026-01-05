@@ -1,22 +1,23 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import { browser } from '$app/environment';
-import { FEATURE_FLAGS, type FeatureFlagKey, type FeatureFlagMeta } from '$lib/admin/types';
-import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
-import { showAdminToast } from '$lib/admin/stores/toast';
-import type { ServerInvite } from '$lib/firestore/invites';
-import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
-import { triggerTestPush } from '$lib/notify/testPush';
-import { getDb } from '$lib/firebase';
-import {
-	addVoiceDebugAssignee,
-	removeVoiceDebugAssignee,
-	setVoiceDebugEnabled,
-	voiceDebugConfigStore
-} from '$lib/admin/voiceDebug';
-import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
-import { isMobileViewport } from '$lib/stores/viewport';
-import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt } from 'firebase/firestore';
+	import { FEATURE_FLAGS, type FeatureFlagKey, type FeatureFlagMeta } from '$lib/admin/types';
+	import { featureFlagsStore, updateFeatureFlag } from '$lib/admin/featureFlags';
+	import { showAdminToast } from '$lib/admin/stores/toast';
+	import type { ServerInvite } from '$lib/firestore/invites';
+	import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
+	import { triggerTestPush } from '$lib/notify/testPush';
+	import { getDb, getFunctionsClient, getFirebase } from '$lib/firebase';
+	import {
+		addVoiceDebugAssignee,
+		removeVoiceDebugAssignee,
+		setVoiceDebugEnabled,
+		voiceDebugConfigStore
+	} from '$lib/admin/voiceDebug';
+	import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
+	import { isMobileViewport } from '$lib/stores/viewport';
+	import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt } from 'firebase/firestore';
+	import { httpsCallable } from 'firebase/functions';
 
 	interface Props {
 		data: PageData;
@@ -59,6 +60,25 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 	let voiceDebugSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	let previewInvite: ServerInvite | null = $state(null);
 	let testPushLoading = $state(false);
+	let testEmailAddress = $state(data?.user?.email ?? '');
+	let testEmailLoading = $state(false);
+
+	// Email logs modal state
+	let emailLogsOpen = $state(false);
+	let emailLogsLoading = $state(false);
+	type EmailLogEntry = {
+		id: string;
+		to: string | null;
+		subject: string | null;
+		sent: boolean;
+		reason: string | null;
+		messageId: string | null;
+		provider: string | null;
+		context: { type?: string; recipientUid?: string; messageId?: string; serverId?: string; channelId?: string; dmId?: string } | null;
+		durationMs: number | null;
+		createdAt: string | null;
+	};
+	let emailLogs = $state<EmailLogEntry[]>([]);
 
 	// Mobile: active tab for feature sections
 	type TabId = 'toggles' | 'testing';
@@ -302,6 +322,98 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 		} finally {
 			testPushLoading = false;
 		}
+	};
+
+	const handleSendTestEmail = async () => {
+		if (!browser) {
+			showAdminToast({ type: 'info', message: 'Email testing requires a browser session.' });
+			return;
+		}
+		const email = (testEmailAddress ?? '').trim();
+		if (!email || !email.includes('@')) {
+			showAdminToast({ type: 'warning', message: 'Enter a valid email address first.' });
+			return;
+		}
+		testEmailLoading = true;
+		try {
+			await getFunctionsClient(); // ensures Firebase is initialized
+			const { auth } = getFirebase();
+			const currentUser = auth?.currentUser;
+			if (!currentUser) {
+				showAdminToast({ type: 'warning', message: 'Sign in again to send test emails.' });
+				return;
+			}
+			const idToken = await currentUser.getIdToken();
+			const endpoint =
+				'https://sendtestemailnotificationhttp-xpac7ukbha-uc.a.run.app';
+			const response = await fetch(endpoint, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Bearer ${idToken}`
+				},
+				body: JSON.stringify({ email })
+			});
+			let payload: any = null;
+			let fallbackText = '';
+			try {
+				payload = await response.json();
+			} catch (err) {
+				try {
+					fallbackText = await response.text();
+				} catch {
+					fallbackText = '';
+				}
+			}
+
+			if (response.ok && payload?.ok) {
+				showAdminToast({
+					type: 'success',
+					message: 'Test email sent. Check the inbox to confirm delivery.'
+				});
+			} else {
+				const reason =
+					payload?.reason ||
+					fallbackText ||
+					response.statusText ||
+					`Request failed (${response.status})`;
+				showAdminToast({
+					type: 'warning',
+					message: `Test email failed: ${reason}`
+				});
+			}
+		} catch (error) {
+			console.error('sendTestEmailNotification failed', error);
+			showAdminToast({ type: 'error', message: 'Unable to send test email.' });
+		} finally {
+			testEmailLoading = false;
+		}
+	};
+
+	const handleOpenEmailLogs = async () => {
+		emailLogsOpen = true;
+		emailLogsLoading = true;
+		emailLogs = [];
+		try {
+			const functions = await getFunctionsClient();
+			const getLogsFunc = httpsCallable(functions, 'getEmailNotificationLogs');
+			const result = await getLogsFunc({ limit: 100 });
+			const data = result.data as { ok: boolean; logs?: EmailLogEntry[] };
+			if (data.ok && Array.isArray(data.logs)) {
+				emailLogs = data.logs;
+			} else {
+				showAdminToast({ type: 'warning', message: 'No logs returned.' });
+			}
+		} catch (error) {
+			console.error('getEmailNotificationLogs failed', error);
+			showAdminToast({ type: 'error', message: 'Unable to fetch email logs.' });
+		} finally {
+			emailLogsLoading = false;
+		}
+	};
+
+	const closeEmailLogs = () => {
+		emailLogsOpen = false;
 	};
 
 	const resetNavigationMemory = () => {
@@ -685,6 +797,50 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 						</div>
 					</article>
 
+					<!-- Email delivery test -->
+					<article class="test-card">
+						<div class="test-icon email">
+							<i class="bx bx-mail-send"></i>
+						</div>
+						<div class="test-content">
+							<h4>Email notification test</h4>
+							<p>Send a one-off test email notification to verify SMTP wiring.</p>
+							<label class="input-label" for="test-email-address">Destination email</label>
+							<input
+								id="test-email-address"
+								type="email"
+								placeholder="you@example.com"
+								bind:value={testEmailAddress}
+								class="input"
+								autocomplete="email"
+							/>
+						</div>
+						<div class="test-actions">
+							<button
+								type="button"
+								class="btn warning"
+								onclick={handleSendTestEmail}
+								disabled={testEmailLoading}
+							>
+								{#if testEmailLoading}
+									<i class="bx bx-loader-alt bx-spin"></i>
+									Sending...
+								{:else}
+									<i class="bx bx-send"></i>
+									Send test email
+								{/if}
+							</button>
+							<button
+								type="button"
+								class="btn outline"
+								onclick={handleOpenEmailLogs}
+							>
+								<i class="bx bx-list-ul"></i>
+								View Logs
+							</button>
+						</div>
+					</article>
+
 					<!-- Navigation cache -->
 					<article class="test-card">
 						<div class="test-icon nav">
@@ -867,6 +1023,87 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 	onDecline={handlePreviewDecline}
 	onDismiss={closePreviewInvite}
 />
+
+<!-- Email Logs Modal -->
+{#if emailLogsOpen}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div
+		class="email-logs-backdrop"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="email-logs-title"
+		onclick={(e) => { if (e.target === e.currentTarget) closeEmailLogs(); }}
+		onkeydown={(e) => { if (e.key === 'Escape') closeEmailLogs(); }}
+		tabindex="-1"
+	>
+		<div class="email-logs-modal">
+			<header class="email-logs-header">
+				<h2 id="email-logs-title">
+					<i class="bx bx-mail-send"></i>
+					Email Notification Logs
+				</h2>
+				<button type="button" class="close-btn" onclick={closeEmailLogs} aria-label="Close">
+					<i class="bx bx-x"></i>
+				</button>
+			</header>
+			<div class="email-logs-body">
+				{#if emailLogsLoading}
+					<div class="logs-loading">
+						<i class="bx bx-loader-alt bx-spin"></i>
+						<span>Loading logs...</span>
+					</div>
+				{:else if emailLogs.length === 0}
+					<div class="logs-empty">
+						<i class="bx bx-inbox"></i>
+						<p>No email logs yet. Send a test email to see logs here.</p>
+					</div>
+				{:else}
+					<div class="logs-list">
+						{#each emailLogs as log (log.id)}
+							<div class="log-entry" class:success={log.sent} class:failed={!log.sent}>
+								<div class="log-status">
+									{#if log.sent}
+										<i class="bx bx-check-circle"></i>
+									{:else}
+										<i class="bx bx-x-circle"></i>
+									{/if}
+								</div>
+								<div class="log-details">
+									<div class="log-main">
+										<span class="log-to">{log.to ?? 'Unknown'}</span>
+										<span class="log-type">{log.context?.type ?? 'unknown'}</span>
+									</div>
+									<div class="log-subject">{log.subject ?? 'No subject'}</div>
+									{#if !log.sent && log.reason}
+										<div class="log-reason">Reason: {log.reason}</div>
+									{/if}
+									<div class="log-meta">
+										<span>{log.provider ?? 'N/A'}</span>
+										{#if log.durationMs}
+											<span>{log.durationMs}ms</span>
+										{/if}
+										{#if log.createdAt}
+											<span>{new Date(log.createdAt).toLocaleString()}</span>
+										{/if}
+									</div>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+			<footer class="email-logs-footer">
+				<button type="button" class="btn outline" onclick={handleOpenEmailLogs} disabled={emailLogsLoading}>
+					<i class="bx bx-refresh"></i>
+					Refresh
+				</button>
+				<button type="button" class="btn" onclick={closeEmailLogs}>
+					Close
+				</button>
+			</footer>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.features-page {
@@ -1323,6 +1560,14 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 		color: #f59e0b;
 	}
 
+	.test-icon.email {
+		background: linear-gradient(135deg, rgba(14, 165, 233, 0.2), rgba(6, 95, 212, 0.18));
+	}
+
+	.test-icon.email i {
+		color: #0ea5e9;
+	}
+
 	.test-icon.nav {
 		background: color-mix(in srgb, #3b82f6 15%, transparent);
 	}
@@ -1635,5 +1880,194 @@ import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt }
 		margin: 0;
 		font-size: 0.75rem;
 		color: var(--color-text-secondary);
+	}
+
+	/* Email Logs Modal */
+	.email-logs-backdrop {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 9999;
+		background: rgba(0, 0, 0, 0.85);
+		backdrop-filter: blur(8px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+	}
+
+	.email-logs-modal {
+		background: var(--surface-panel, #1a1a2e);
+		border-radius: 16px;
+		width: 100%;
+		max-width: 800px;
+		max-height: 85vh;
+		display: flex;
+		flex-direction: column;
+		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+	}
+
+	.email-logs-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 1rem 1.25rem;
+		border-bottom: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+	}
+
+	.email-logs-header h2 {
+		margin: 0;
+		font-size: 1.125rem;
+		font-weight: 600;
+		color: var(--color-text-primary);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.email-logs-header h2 i {
+		color: var(--accent-primary);
+	}
+
+	.email-logs-header .close-btn {
+		background: none;
+		border: none;
+		color: var(--color-text-secondary);
+		font-size: 1.5rem;
+		cursor: pointer;
+		padding: 0.25rem;
+		border-radius: 6px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: background 0.15s, color 0.15s;
+	}
+
+	.email-logs-header .close-btn:hover {
+		background: color-mix(in srgb, var(--color-text-primary) 10%, transparent);
+		color: var(--color-text-primary);
+	}
+
+	.email-logs-body {
+		flex: 1;
+		overflow-y: auto;
+		padding: 1rem;
+		min-height: 200px;
+	}
+
+	.logs-loading,
+	.logs-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
+		padding: 3rem 1rem;
+		color: var(--color-text-secondary);
+	}
+
+	.logs-loading i,
+	.logs-empty i {
+		font-size: 2.5rem;
+		opacity: 0.5;
+	}
+
+	.logs-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.log-entry {
+		display: flex;
+		gap: 0.75rem;
+		padding: 0.75rem;
+		background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+		border-radius: 10px;
+		border-left: 3px solid var(--color-text-secondary);
+	}
+
+	.log-entry.success {
+		border-left-color: #22c55e;
+	}
+
+	.log-entry.failed {
+		border-left-color: #ef4444;
+	}
+
+	.log-status {
+		font-size: 1.25rem;
+		flex-shrink: 0;
+	}
+
+	.log-entry.success .log-status {
+		color: #22c55e;
+	}
+
+	.log-entry.failed .log-status {
+		color: #ef4444;
+	}
+
+	.log-details {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.log-main {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.log-to {
+		font-weight: 600;
+		color: var(--color-text-primary);
+		word-break: break-all;
+	}
+
+	.log-type {
+		font-size: 0.6875rem;
+		text-transform: uppercase;
+		background: color-mix(in srgb, var(--accent-primary) 20%, transparent);
+		color: var(--accent-primary);
+		padding: 0.125rem 0.5rem;
+		border-radius: 4px;
+		font-weight: 600;
+	}
+
+	.log-subject {
+		font-size: 0.875rem;
+		color: var(--color-text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.log-reason {
+		font-size: 0.8125rem;
+		color: #fca5a5;
+	}
+
+	.log-meta {
+		display: flex;
+		gap: 0.75rem;
+		font-size: 0.75rem;
+		color: var(--color-text-tertiary);
+		flex-wrap: wrap;
+	}
+
+	.email-logs-footer {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		padding: 1rem 1.25rem;
+		border-top: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent);
 	}
 </style>

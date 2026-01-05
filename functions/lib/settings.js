@@ -23,6 +23,14 @@ exports.defaultNotificationSettings = {
     allowHereMentionPush: true,
     allowEveryoneMentionPush: true,
     allowChannelMessagePush: true,
+    pushChannelMentionsOnly: false,
+    emailEnabled: false,
+    emailForDMs: true,
+    emailForMentions: true,
+    emailForChannelMessages: false,
+    emailForAllChannelMessages: false,
+    emailChannelMentionsOnly: false,
+    emailOnlyWhenNoPush: true,
     doNotDisturbUntil: null
 };
 async function fetchNotificationSettings(uid) {

@@ -1,9 +1,10 @@
 import { logger } from 'firebase-functions';
 import { onDocumentCreated, onDocumentWritten } from 'firebase-functions/v2/firestore';
-import { HttpsError, onCall } from 'firebase-functions/v2/https';
+import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
+import type { Request, Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
 import { getStorage } from 'firebase-admin/storage';
-import { db } from './firebase';
+import { auth, db } from './firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 
 import {
@@ -13,10 +14,12 @@ import {
   sendTestPushForUid
 } from './notifications';
 import { handleTicketAiThreadMessage, handleTicketAiChannelMessage, createManualTicket } from './ticketAi';
+import { sendEmail } from './email';
 export { requestDomainAutoInvite } from './domainInvites';
 
 // Define secrets for functions that need them
 const openaiApiKey = defineSecret('OPENAI_API_KEY');
+const resendApiKey = defineSecret('RESEND_API_KEY');
 
 /**
  * Check if a URL is a Google profile photo URL
@@ -126,7 +129,7 @@ export const cacheGoogleProfilePhoto = onDocumentWritten(
 export const onChannelMessageCreated = onDocumentCreated(
   {
     document: 'servers/{serverId}/channels/{channelId}/messages/{messageId}',
-    secrets: [openaiApiKey]
+    secrets: [openaiApiKey, resendApiKey]
   },
   async (event) => {
     await Promise.all([handleServerMessage(event), handleTicketAiChannelMessage(event as any)]);
@@ -134,14 +137,20 @@ export const onChannelMessageCreated = onDocumentCreated(
 );
 
 export const onThreadMessageCreated = onDocumentCreated(
-  'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}',
+  {
+    document: 'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}',
+    secrets: [resendApiKey]
+  },
   async (event) => {
     await Promise.all([handleThreadMessage(event as any), handleTicketAiThreadMessage(event as any)]);
   }
 );
 
 export const onDmMessageCreated = onDocumentCreated(
-  'dms/{threadID}/messages/{messageId}',
+  {
+    document: 'dms/{threadID}/messages/{messageId}',
+    secrets: [resendApiKey]
+  },
   async (event) => {
     await handleDmMessage(event);
   }
@@ -408,6 +417,233 @@ export const sendTestPush = onCall(
       return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
     return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
+  }
+);
+
+/**
+ * Super Admin callable: send a test email notification to a specified address.
+ * Uses RESEND_API_KEY secret for email delivery.
+ */
+export const sendTestEmailNotification = onCall(
+  {
+    region: 'us-central1',
+    invoker: 'public',
+    cors: true,
+    secrets: [resendApiKey]
+  },
+  async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+    if (!callerEmail) {
+      throw new HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+
+    const superAdminsDoc = await db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin =
+      emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+      throw new HttpsError('permission-denied', 'Super Admin access required.');
+    }
+
+    const target = typeof request.data?.email === 'string' ? request.data.email.trim() : '';
+    if (!target || !target.includes('@')) {
+      throw new HttpsError('invalid-argument', 'Valid email address required.');
+    }
+
+    const message =
+      typeof request.data?.message === 'string' && request.data.message.trim().length
+        ? request.data.message.trim()
+        : 'This is a test email notification from hConnect.';
+    const subject = 'hConnect test notification';
+    const text = `${message}\n\nTriggered by ${callerEmail}.`;
+
+    logger.info('[sendTestEmailNotification] Sending test email', {
+      callerUid,
+      callerEmail,
+      target
+    });
+
+    const result = await sendEmail({ 
+      to: target, 
+      subject, 
+      text,
+      context: { type: 'test' }
+    });
+    if (!result.sent) {
+      logger.warn('[sendTestEmailNotification] Send failed', { reason: result.reason ?? 'unknown' });
+      return { ok: false, reason: result.reason ?? 'send_failed' };
+    }
+
+    logger.info('[sendTestEmailNotification] Sent', { target, messageId: result.messageId ?? null });
+    return { ok: true, messageId: result.messageId ?? null };
+  }
+);
+
+/**
+ * HTTP variant for browsers: explicit CORS + ID token auth.
+ * Uses RESEND_API_KEY secret for email delivery.
+ */
+export const sendTestEmailNotificationHttp = onRequest(
+  {
+    region: 'us-central1',
+    secrets: [resendApiKey]
+  },
+  async (req: Request, res: Response) => {
+    const origin = req.headers.origin || '*';
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Firebase-AppCheck');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Credentials', 'true');
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('');
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.status(405).send('Method not allowed');
+      return;
+    }
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      res.status(401).json({ ok: false, reason: 'missing_auth' });
+      return;
+    }
+
+    let decoded: any = null;
+    try {
+      const token = authHeader.substring('Bearer '.length);
+      decoded = await auth.verifyIdToken(token);
+    } catch (err) {
+      logger.warn('[sendTestEmailNotificationHttp] Invalid token', { err });
+      res.status(401).json({ ok: false, reason: 'invalid_token' });
+      return;
+    }
+
+    const callerUid = decoded?.uid ?? null;
+    const callerEmail = decoded?.email ?? null;
+    if (!callerUid || !callerEmail) {
+      res.status(403).json({ ok: false, reason: 'missing_email' });
+      return;
+    }
+
+    const superAdminsDoc = await db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin =
+      emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+      res.status(403).json({ ok: false, reason: 'not_super_admin' });
+      return;
+    }
+
+    const body = (req.body ?? {}) as any;
+    const target =
+      typeof body?.email === 'string'
+        ? body.email.trim()
+        : typeof body?.target === 'string'
+          ? body.target.trim()
+          : '';
+    if (!target || !target.includes('@')) {
+      res.status(400).json({ ok: false, reason: 'invalid_email' });
+      return;
+    }
+
+    const message =
+      typeof body?.message === 'string' && body.message.trim().length
+        ? body.message.trim()
+        : 'This is a test email notification from hConnect.';
+
+    const subject = 'hConnect test notification';
+    const text = `${message}\n\nTriggered by ${callerEmail}.`;
+
+    try {
+      const result = await sendEmail({ 
+        to: target, 
+        subject, 
+        text,
+        context: { type: 'test' }
+      });
+      if (!result.sent) {
+        logger.warn('[sendTestEmailNotificationHttp] Send failed', { reason: result.reason ?? 'unknown' });
+        res.status(500).json({ ok: false, reason: result.reason ?? 'send_failed' });
+        return;
+      }
+      logger.info('[sendTestEmailNotificationHttp] Sent', { target, messageId: result.messageId ?? null });
+      res.status(200).json({ ok: true, messageId: result.messageId ?? null });
+      return;
+    } catch (err) {
+      logger.error('[sendTestEmailNotificationHttp] Unexpected error', { err });
+      const reason = err instanceof Error ? err.message : 'internal';
+      res.status(500).json({ ok: false, reason });
+      return;
+    }
+  }
+);
+
+/**
+ * Super Admin callable: fetch recent email notification logs.
+ */
+export const getEmailNotificationLogs = onCall(
+  {
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+  },
+  async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid || !callerEmail) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+
+    // Check super admin
+    const superAdminsDoc = await db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin =
+      emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+      throw new HttpsError('permission-denied', 'Super Admin access required.');
+    }
+
+    const limitParam = typeof request.data?.limit === 'number' ? request.data.limit : 50;
+    const actualLimit = Math.min(Math.max(1, limitParam), 200);
+
+    try {
+      const logsRef = db.collection('adminLogs').doc('email').collection('notifications');
+      const snapshot = await logsRef
+        .orderBy('createdAt', 'desc')
+        .limit(actualLimit)
+        .get();
+
+      const logs = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          to: data.to ?? null,
+          subject: data.subject ?? null,
+          sent: data.sent ?? false,
+          reason: data.reason ?? null,
+          messageId: data.messageId ?? null,
+          provider: data.provider ?? null,
+          context: data.context ?? null,
+          durationMs: data.durationMs ?? null,
+          createdAt: data.createdAt?.toDate?.()?.toISOString() ?? null
+        };
+      });
+
+      return { ok: true, logs };
+    } catch (err) {
+      logger.error('[getEmailNotificationLogs] Failed to fetch logs', { err });
+      throw new HttpsError('internal', 'Failed to fetch email logs.');
+    }
   }
 );
 

@@ -1,1 +1,1 @@
-{"root":["./src/domaininvites.ts","./src/firebase.ts","./src/index.ts","./src/notifications.ts","./src/settings.ts","./src/ticketai.ts","./src/types.ts"],"version":"5.9.3"}
+{"root":["./src/domaininvites.ts","./src/email.ts","./src/firebase.ts","./src/index.ts","./src/notifications.ts","./src/settings.ts","./src/ticketai.ts","./src/types.ts"],"version":"5.9.3"}
