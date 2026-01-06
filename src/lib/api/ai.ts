@@ -61,6 +61,8 @@ const FALLBACK_ENDPOINT = !apiBase && remoteFallbackEnabled ? REMOTE_ENDPOINT : 
 const ENDPOINTS = [LOCAL_ENDPOINT, ...(FALLBACK_ENDPOINT ? [FALLBACK_ENDPOINT] : [])].filter(
 	(endpoint, index, list) => endpoint && list.indexOf(endpoint) === index
 );
+// Local-only endpoint for features not supported on remote backend (like announcements)
+const LOCAL_ONLY_ENDPOINT = apiBase ? `${apiBase}/api/ai` : '/api/ai';
 
 async function readErrorDetail(response: Response) {
 	try {
@@ -170,4 +172,43 @@ export async function requestThreadSummary(input: ThreadSummaryRequest, signal?:
 		{ signal }
 	);
 	return Array.isArray(payload.summary) ? payload.summary : [];
+}
+
+// Announcement generation types and functions
+export type AnnouncementGenerateInput = {
+	category: 'update' | 'feature' | 'maintenance' | 'security' | 'general';
+	version?: string | null;
+	features: string[]; // List of features/changes to describe
+	tone?: 'formal' | 'friendly' | 'exciting' | null;
+	appName?: string;
+};
+
+export type AnnouncementGenerateResult = {
+	title: string;
+	message: string;
+};
+
+/**
+ * Generate an announcement using AI based on features/changes
+ */
+export async function requestAnnouncementGeneration(
+	input: AnnouncementGenerateInput,
+	signal?: AbortSignal
+): Promise<AnnouncementGenerateResult> {
+	// Use local-only endpoint since announcement generation isn't supported on remote backend
+	const payload = await postJson<{ title?: string; message?: string }>(
+		{
+			intent: 'announcement',
+			category: input.category,
+			version: input.version,
+			features: input.features,
+			tone: input.tone ?? 'friendly',
+			appName: input.appName ?? 'hConnect'
+		},
+		{ signal, endpoints: [LOCAL_ONLY_ENDPOINT] }
+	);
+	return {
+		title: (payload.title ?? '').trim(),
+		message: (payload.message ?? '').trim()
+	};
 }

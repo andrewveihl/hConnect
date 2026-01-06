@@ -26,7 +26,16 @@ type PredictPayload = {
 	platform?: 'desktop' | 'mobile';
 };
 
-type RequestBody = ReplyPayload | PredictPayload;
+type AnnouncementPayload = {
+	intent: 'announcement';
+	category?: 'update' | 'feature' | 'maintenance' | 'security' | 'general';
+	version?: string | null;
+	features: string[];
+	tone?: 'formal' | 'friendly' | 'exciting' | null;
+	appName?: string;
+};
+
+type RequestBody = ReplyPayload | PredictPayload | AnnouncementPayload;
 
 const clampText = (value: unknown, max = MAX_CONTEXT_CHARS) => {
 	if (typeof value !== 'string') return '';
@@ -177,6 +186,82 @@ async function generatePredictions(body: PredictPayload) {
 	return normalizePredictionArray(raw, count);
 }
 
+async function generateAnnouncement(body: AnnouncementPayload) {
+	const appName = body.appName || 'hConnect';
+	const category = body.category || 'general';
+	const version = body.version || null;
+	const features = body.features || [];
+
+	if (features.length === 0) {
+		throw new Error('At least one feature is required to generate an announcement.');
+	}
+
+	const categoryContext: Record<string, string> = {
+		update: 'app update',
+		feature: 'new feature release',
+		maintenance: 'maintenance notice',
+		security: 'security update',
+		general: 'announcement'
+	};
+
+	const systemPrompt = `You are the copywriter for ${appName}, a team collaboration app. Write release notes in Apple's App Store style - clean, scannable, and concise.
+
+STYLE GUIDE (mimic Apple's app update notes):
+- Title: Short, punchy, 3-6 words max. Often starts with emoji or action word.
+- Body: Clean bullet points, each 1-2 short sentences max
+- Each bullet starts with the feature/fix name in bold, then brief description
+- Use simple, direct language - no marketing fluff
+- Be specific about what changed, not vague promises
+- Keep total length under 150 words
+
+EXAMPLE FORMAT:
+**Voice Calls** - Crystal clear audio with reduced latency
+**Dark Mode** - Easy on the eyes, works system-wide  
+**Bug Fixes** - Squashed issues with notifications and message sync
+
+Return ONLY valid JSON: {"title": "...", "message": "..."}`;
+
+	const featureList = features.map(f => `- ${f}`).join('\n');
+	const userPrompt = `Write ${categoryContext[category]} notes for ${appName}${version ? ` v${version}` : ''}:
+
+${featureList}
+
+Keep it Apple-style: clean, scannable bullet points. JSON only.`;
+
+	const raw = await callOpenAI(
+		[
+			{ role: 'system', content: systemPrompt },
+			{ role: 'user', content: userPrompt }
+		],
+		{ max_completion_tokens: 400, temperature: 0.6 }
+	);
+
+	// Parse the response
+	const cleaned = raw.trim();
+	try {
+		const parsed = JSON.parse(cleaned);
+		return {
+			title: typeof parsed.title === 'string' ? parsed.title.trim() : '',
+			message: typeof parsed.message === 'string' ? parsed.message.trim() : ''
+		};
+	} catch {
+		// Try to extract from markdown code block
+		const jsonMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+		if (jsonMatch) {
+			try {
+				const parsed = JSON.parse(jsonMatch[1].trim());
+				return {
+					title: typeof parsed.title === 'string' ? parsed.title.trim() : '',
+					message: typeof parsed.message === 'string' ? parsed.message.trim() : ''
+				};
+			} catch {
+				// Fall through
+			}
+		}
+		throw new Error('Failed to parse AI response as JSON.');
+	}
+}
+
 export async function POST({ request }: { request: Request }) {
 	if (!OPENAI_KEY) {
 		return json(
@@ -204,6 +289,10 @@ export async function POST({ request }: { request: Request }) {
 		if (body.intent === 'predict') {
 			const suggestions = await generatePredictions(body);
 			return json({ suggestions });
+		}
+		if (body.intent === 'announcement') {
+			const result = await generateAnnouncement(body as AnnouncementPayload);
+			return json(result);
 		}
 		return json({ error: 'Unsupported intent.' }, { status: 400 });
 	} catch (error) {

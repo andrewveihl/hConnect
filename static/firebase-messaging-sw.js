@@ -800,3 +800,4 @@ self.addEventListener('notificationclose', (event) => {
   swInfo('notificationclose event', {
     tag: event.notification?.tag ?? null
   });
+});
