@@ -22,6 +22,7 @@ import {
 import { getDb } from '$lib/firebase/index';
 import { getAuth } from 'firebase/auth';
 import type { User, Server, Channel, Message, Membership, UserRole } from '$lib/types';
+import { clearAllMessageCaches } from '$lib/stores/messageCache';
 
 // ============ AUTH ============
 
@@ -60,6 +61,8 @@ export async function signIn(email: string, password: string): Promise<User> {
 
 export async function signOut(): Promise<void> {
 	const auth = getAuth();
+	// Clear message caches on logout for privacy and fresh state
+	clearAllMessageCaches();
 	await firebaseSignOut(auth);
 }
 

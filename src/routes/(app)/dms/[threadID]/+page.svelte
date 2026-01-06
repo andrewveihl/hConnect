@@ -38,6 +38,12 @@
 	import type { PendingUploadPreview } from '$lib/components/chat/types';
 	import { looksLikeImage } from '$lib/utils/fileType';
 	import { presenceFromSources, type PresenceState } from '$lib/presence/state';
+	import {
+		getCachedDMMessages,
+		updateDMCache,
+		hasDMCache,
+		type CachedMessage
+	} from '$lib/stores/messageCache';
 
 	interface Props {
 		data: { threadID: string };
@@ -1129,11 +1135,30 @@
 
 	run(() => {
 		if (mounted && threadID) {
-			messagesLoading = true;
+			// Show cached messages instantly for better UX
+			if (hasDMCache(threadID)) {
+				const cached = getCachedDMMessages(threadID);
+				if (cached.length > 0) {
+					messages = cached.map((row: any) => toChatMessage(row.id, row));
+					messagesLoading = false;
+					scrollResumeSignal = Date.now();
+				}
+			} else {
+				messagesLoading = true;
+			}
+			
 			earliestLoadedDoc = null;
 			unsub?.();
 			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
 				messages = msgs.map((row: any) => toChatMessage(row.id, row));
+				
+				// Update DM cache with new messages
+				if (msgs.length > 0) {
+					updateDMCache(threadID, msgs as CachedMessage[], {
+						hasOlderMessages: msgs.length >= 50
+					});
+				}
+				
 				// Only set earliestLoadedDoc on initial load (when it's null)
 				if (!earliestLoadedDoc && firstDoc) {
 					earliestLoadedDoc = firstDoc;
@@ -1165,6 +1190,13 @@
 			if (olderMsgs.length > 0) {
 				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
 				messages = [...olderConverted, ...messages];
+				
+				// Update DM cache with older messages
+				updateDMCache(threadID, olderMsgs as CachedMessage[], {
+					hasOlderMessages: olderMsgs.length >= 50,
+					prepend: true
+				});
+				
 				// Update earliest doc reference for next pagination
 				const db = getDb();
 				const firstOlderId = olderMsgs[0]?.id;

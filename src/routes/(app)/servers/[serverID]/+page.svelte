@@ -78,6 +78,12 @@
 	import { openOverlay, closeOverlay, mobileSwipeProgress } from '$lib/stores/mobileNav';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
+	import {
+		getCachedChannelMessages,
+		updateChannelCache,
+		hasChannelCache,
+		type CachedMessage
+	} from '$lib/stores/messageCache';
 
 	interface Props {
 		data: { serverId: string | null };
@@ -1280,6 +1286,12 @@
 			messages = [...older, ...messages];
 			if (older.length) {
 				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
+				// Update cache with older messages
+				updateChannelCache(currServerId, channelId, older as CachedMessage[], {
+					earliestLoaded,
+					hasOlderMessages: older.length >= PAGE_SIZE,
+					prepend: true
+				});
 			}
 		} catch (err) {
 			console.error('Failed to load older messages', err);
@@ -1376,6 +1388,15 @@
 
 				const nextLen = nextMessages.length;
 				messages = nextMessages;
+				
+				// Update message cache for this channel
+				if (nextLen > 0) {
+					updateChannelCache(currServerId, channelId, nextMessages as CachedMessage[], {
+						earliestLoaded: nextMessages[0]?.createdAt ?? null,
+						hasOlderMessages: nextLen >= PAGE_SIZE
+					});
+				}
+				
 				triggerScrollToBottom();
 				if (nextLen) {
 					earliestLoaded = nextMessages[0]?.createdAt ?? null;
@@ -1772,7 +1793,18 @@
 		}
 		const next = selectChannelObject(id);
 		activeChannel = next;
-		messages = [];
+		
+		// Immediately show cached messages for instant feedback
+		if (next.type !== 'voice' && hasChannelCache(serverId, id)) {
+			const cached = getCachedChannelMessages(serverId, id);
+			if (cached.length > 0) {
+				messages = cached;
+				earliestLoaded = cached[0]?.createdAt ?? null;
+			}
+		} else {
+			messages = [];
+		}
+		
 		messagesLoadError = null;
 		clearMessagesUnsub();
 		resetThreadState();
