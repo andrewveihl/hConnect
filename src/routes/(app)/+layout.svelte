@@ -27,6 +27,7 @@
 	import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
 	import MobileNavBar from '$lib/components/app/MobileNavBar.svelte';
 	import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
+	import AnnouncementModal from '$lib/components/app/AnnouncementModal.svelte';
 	import SettingsMobileShell from '$lib/components/settings/SettingsMobileShell.svelte';
 	import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
 	import ServerSettingsMobileShell from '$lib/components/servers/ServerSettingsMobileShell.svelte';
@@ -47,6 +48,13 @@
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
 	import { primeSoundPlayback } from '$lib/utils/sounds';
 	import { setTheme, type ThemeMode } from '$lib/stores/theme';
+	import {
+		startAnnouncementListener,
+		nextAnnouncement,
+		dismissAnnouncement,
+		loadDismissedAnnouncements,
+		toDisplayAnnouncement
+	} from '$lib/stores/announcements';
 	import {
 		customizationConfigStore,
 		applyThemeOverrides,
@@ -146,6 +154,21 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 	let skipResumeRestore = false;
 	let stopDeepLinkListener: (() => void) | null = null;
 	const DOMAIN_INVITE_DISMISS_KEY = 'domainAutoInviteDismissals';
+
+	// Announcement state
+	let stopAnnouncementListener: (() => void) | null = null;
+	const currentAnnouncement = $derived($nextAnnouncement);
+	const displayAnnouncement = $derived(
+		currentAnnouncement ? toDisplayAnnouncement(currentAnnouncement) : null
+	);
+
+	const handleDismissAnnouncement = () => {
+		const announcement = currentAnnouncement;
+		const uid = $user?.uid;
+		if (announcement && uid) {
+			dismissAnnouncement(announcement.id, uid);
+		}
+	};
 
 	let domainInviteCandidate: ServerInvite | null = $state(null);
 	let domainInviteBusy = $state(false);
@@ -262,6 +285,15 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 		}
 		domainInviteInboxStop = subscribeInbox(uid, handleDomainInboxSnapshot);
 		void requestDomainAutoInvites();
+	});
+
+	// Load dismissed announcements when user changes
+	run(() => {
+		if (!browser) return;
+		const uid = $user?.uid ?? null;
+		if (uid) {
+			loadDismissedAnnouncements(uid);
+		}
 	});
 
 	async function acceptDomainInvite() {
@@ -446,6 +478,11 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 			stopProfileListener = unsub ?? null;
 		});
 
+		// Start listening for announcements
+		startAnnouncementListener().then((unsub) => {
+			stopAnnouncementListener = unsub ?? null;
+		});
+
 		stopDeepLinkListener = startDeepLinkListener((payload) => {
 			skipResumeRestore = true;
 			handleDeepLinkPayload(payload).catch(() => {});
@@ -533,6 +570,7 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 			detachGestureGuards?.();
 			detachSwipeGestures?.();
 			stopDeepLinkListener?.();
+			stopAnnouncementListener?.();
 		};
 	});
 
@@ -627,5 +665,11 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 		onAccept={acceptDomainInvite}
 		onDecline={declineDomainInvite}
 		onDismiss={dismissCurrentDomainInvite}
+	/>
+
+	<!-- System Announcements Modal -->
+	<AnnouncementModal
+		announcement={displayAnnouncement}
+		onDismiss={handleDismissAnnouncement}
 	/>
 </div>
