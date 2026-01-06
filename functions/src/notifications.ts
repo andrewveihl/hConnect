@@ -902,17 +902,23 @@ function groupTokensByChannel(deviceTokens: DeviceTokenRecord[]) {
 }
 
 async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { title: string; body: string; data: Record<string, string> }) {
-  if (!deviceTokens.length) return;
+  if (!deviceTokens.length) {
+    logger.info('[push] sendPushToTokens: no device tokens provided');
+    return;
+  }
   const { safariSubscriptions, fcmTokens } = groupTokensByChannel(deviceTokens);
   const startedAt = Date.now();
   logger.info('[push] sendPushToTokens invoked', {
     totalTokens: deviceTokens.length,
     safariSubscriptions: safariSubscriptions.length,
     fcmTokens: fcmTokens.length,
+    tokenDetails: {
+      platforms: deviceTokens.map((d) => d.platform ?? 'unknown'),
+      hasTokens: deviceTokens.map(d => ({ platform: d.platform, hasToken: !!d.token, hasSubscription: !!d.subscription?.endpoint }))
+    },
     dataKeys: Object.keys(payload.data ?? {}),
     messageId: payload.data?.messageId ?? null,
-    targetUrl: payload.data?.targetUrl ?? null,
-    platforms: deviceTokens.map((d) => d.platform ?? 'unknown')
+    targetUrl: payload.data?.targetUrl ?? null
   });
   const tasks: Promise<unknown>[] = [];
   if (fcmTokens.length) {
@@ -1003,13 +1009,23 @@ async function sendPushToTokens(deviceTokens: DeviceTokenRecord[], payload: { ti
       if (failureCount > 0) {
         response.responses.forEach((resp, idx) => {
           if (!resp.success) {
-            logger.warn('[push] FCM token delivery failed', {
+            const tokenRec = fcmTokens[idx];
+            logger.warn('[push] FCM delivery failed', {
               tokenIndex: idx,
-              tokenPreview: `${fcmTokens[idx]?.slice(0, 10)}...`,
+              tokenPrefix: tokenRec ? tokenRec.slice(0, 10) : 'unknown',
               errorCode: resp.error?.code,
-              errorMessage: resp.error?.message
+              errorMessage: resp.error?.message,
+              messageId: payload.data?.messageId ?? null
             });
           }
+        });
+      }
+      if (successCount > 0) {
+        logger.info('[push] FCM delivery successful', {
+          successCount,
+          failureCount,
+          totalTokens: fcmTokens.length,
+          messageId: payload.data?.messageId ?? null
         });
       }
       return response;

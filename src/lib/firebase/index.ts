@@ -38,6 +38,7 @@ import {
 } from 'firebase/firestore';
 import { getStorage, type FirebaseStorage } from 'firebase/storage';
 import { getFunctions, type Functions } from 'firebase/functions';
+import { clearAllMessageCaches } from '$lib/stores/messageCache';
 
 import { user as userStore } from '$lib/stores/user';
 
@@ -240,6 +241,8 @@ export async function signInWithApple() {
 
 export async function signOutUser() {
 	await ensureFirebaseReady();
+	// Clear message caches on logout for privacy and fresh state
+	clearAllMessageCaches();
 	await signOut(auth!);
 }
 export const signOutNow = signOutUser;

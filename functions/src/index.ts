@@ -421,6 +421,77 @@ export const sendTestPush = onCall(
 );
 
 /**
+ * Diagnostic function: get details about all devices registered for a user.
+ * Returns comprehensive info about token status, platform, and why devices might be filtered.
+ */
+export const getPushDeviceDiagnostics = onCall(
+  {
+    region: 'us-central1',
+    invoker: 'public',
+    cors: true
+  },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+
+    try {
+      const devicesRef = db.collection(`profiles/${uid}/devices`);
+      const devicesSnap = await devicesRef.get();
+      
+      const diagnostics = {
+        uid,
+        timestamp: new Date().toISOString(),
+        totalDevices: devicesSnap.size,
+        devices: [] as any[]
+      };
+
+      for (const docSnap of devicesSnap.docs) {
+        const deviceId = docSnap.id;
+        const device = docSnap.data() as any;
+        
+        diagnostics.devices.push({
+          deviceId,
+          platform: device.platform ?? 'unknown',
+          userAgent: device.userAgent?.slice(0, 100) ?? null,
+          permission: device.permission ?? 'unknown',
+          enabled: device.enabled ?? true,
+          hasToken: Boolean(device.token),
+          tokenPrefix: device.token ? device.token.slice(0, 12) : null,
+          hasSubscription: Boolean(device.subscription?.endpoint),
+          subscriptionEndpointPrefix: device.subscription?.endpoint ? device.subscription.endpoint.slice(0, 30) : null,
+          lastSeen: device.lastSeen?.toDate?.().toISOString?.() ?? null,
+          createdAt: device.createdAt?.toDate?.().toISOString?.() ?? null,
+          tokenUpdatedAt: device.tokenUpdatedAt?.toDate?.().toISOString?.() ?? null,
+          isStandalone: device.isStandalone ?? false,
+          filterReasons: {
+            noTokenOrSubscription: !device.token && !device.subscription?.endpoint,
+            permissionDenied: device.permission === 'denied',
+            permissionDefault: device.permission === 'default',
+            disabled: device.enabled === false,
+            willReceivePush: Boolean((device.token || device.subscription?.endpoint) && 
+                                    (device.permission === 'granted' || device.permission === undefined) && 
+                                    device.enabled !== false)
+          }
+        });
+      }
+
+      logger.info('[getPushDeviceDiagnostics] Diagnostics retrieved', {
+        uid,
+        totalDevices: diagnostics.totalDevices,
+        willReceivePush: diagnostics.devices.filter(d => d.filterReasons.willReceivePush).length
+      });
+
+      return diagnostics;
+    } catch (err) {
+      logger.error('[getPushDeviceDiagnostics] Error', { uid, error: err });
+      throw new HttpsError('internal', 'Failed to retrieve device diagnostics');
+    }
+  }
+);
+
+/**
  * Super Admin callable: send a test email notification to a specified address.
  * Uses RESEND_API_KEY secret for email delivery.
  */

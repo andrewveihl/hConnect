@@ -829,6 +829,7 @@
 				if (computeIsOwner()) {
 					myRole = 'owner';
 				}
+				
 				maybeRefreshChannels(server);
 			},
 			(error) => {
@@ -1114,7 +1115,10 @@
 			channelFetchDenied = true;
 			channelVisibilityHint =
 				'You do not have permission to view channels. Ask an admin to allow @everyone/default role to view channels or add you to the server.';
-			channels = [];
+			// Only clear if actually blocked - don't clear cached data from other servers
+			if (currentChannelServer === server) {
+				channels = [];
+			}
 			syncVoicePresenceWatchers(channels);
 			return;
 		}
@@ -1314,6 +1318,7 @@
 	function subscribeAll(server: string) {
 		const currentUser = get(user);
 		if (!currentUser?.uid) return;
+		
 		resetVoiceWatchers();
 		watchServerMeta(server);
 		watchMyMember(server);

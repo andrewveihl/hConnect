@@ -104,10 +104,19 @@ async function setupBackgroundMessageHandler() {
     
     // Handle background messages from FCM
     messagingInstance.onBackgroundMessage((payload) => {
+      const hasNotification = Boolean(payload?.notification);
+      const hasData = Boolean(payload?.data);
+      const title = payload?.notification?.title ?? payload?.data?.title ?? null;
+      const messageId = payload?.data?.messageId ?? null;
+      const platform = payload?.data?.platform ?? 'unknown';
+      
       swInfo('onBackgroundMessage received', {
-        hasNotification: Boolean(payload?.notification),
-        hasData: Boolean(payload?.data),
-        title: payload?.notification?.title ?? payload?.data?.title ?? null
+        hasNotification,
+        hasData,
+        title,
+        messageId,
+        platform,
+        dataKeys: Object.keys(payload?.data ?? {})
       });
       
       // If FCM already showed a notification (notification key present), we may skip
@@ -390,20 +399,23 @@ async function showNotification(payload) {
     vibrate: [200, 100, 200]
   };
   
-  swInfo('showNotification options', {
+  swInfo('showNotification preparing', {
     title,
     bodyLength: body.length,
     tag,
     mentionType,
     isIOSPWA,
-    hasIcon: Boolean(options.icon)
+    platform: data.platform ?? 'unknown',
+    messageId: data.messageId ?? null,
+    hasIcon: Boolean(options.icon),
+    dataKeys: Object.keys(data)
   });
   
   try {
     await self.registration.showNotification(title, options);
-    swInfo('showNotification succeeded', { tag, title });
+    swInfo('showNotification succeeded', { tag, title, messageId: data.messageId, platform: data.platform });
   } catch (err) {
-    swWarn('showNotification error', { error: err?.message ?? String(err) });
+    swWarn('showNotification error', { error: err?.message ?? String(err), tag, platform: data.platform });
     // Fallback: try with minimal options for iOS compatibility
     try {
       await self.registration.showNotification(title, {

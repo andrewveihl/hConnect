@@ -417,12 +417,13 @@ export async function requestNotificationPermission(): Promise<boolean> {
 	if (initial === 'denied') return false;
 	
 	try {
-		logPushDebug('requestNotificationPermission: calling Notification.requestPermission()');
+		const platform = detectPlatform();
+		logPushDebug('requestNotificationPermission: calling Notification.requestPermission()', { platform });
 		
 		// Add timeout to prevent hanging on mobile browsers - increased to 15s for iOS
 		const timeoutPromise = new Promise<NotificationPermission>((resolve) => {
 			setTimeout(() => {
-				logPushDebug('requestNotificationPermission: timeout reached');
+				logPushDebug('requestNotificationPermission: timeout reached', { platform });
 				resolve('default');
 			}, 15000);
 		});
@@ -447,17 +448,19 @@ export async function requestNotificationPermission(): Promise<boolean> {
 		}
 		
 		const res = await Promise.race([permissionPromise, timeoutPromise]);
-		logPushDebug('requestNotificationPermission: result', { res });
+		logPushDebug('requestNotificationPermission: result', { res, platform });
 		
 		if (res === 'granted') return true;
 		
 		// Double-check the final state
 		const finalState = await getEffectiveNotificationPermission();
-		logPushDebug('requestNotificationPermission: final state check', { finalState });
+		logPushDebug('requestNotificationPermission: final state check', { finalState, platform });
 		return finalState === 'granted';
 	} catch (err) {
+		const platform = detectPlatform();
 		logPushDebug('requestNotificationPermission: exception', { 
-			error: err instanceof Error ? err.message : String(err) 
+			error: err instanceof Error ? err.message : String(err),
+			platform
 		});
 		const fallback = await getEffectiveNotificationPermission();
 		return fallback === 'granted';
@@ -690,21 +693,27 @@ export async function enablePushForUser(
 		}
 		const messagingSdk = await import('firebase/messaging');
 		const messaging = messagingSdk.getMessaging(app);
+		const platform = detectPlatform();
+		logPushDebug('enablePushForUser: calling getToken', { platform, hasVapidKey: Boolean(vapid) });
 		const token = await messagingSdk.getToken(messaging, {
 			vapidKey: vapid || undefined,
 			serviceWorkerRegistration: sw
 		});
+		logPushDebug('enablePushForUser: getToken complete', { platform, hasToken: Boolean(token), tokenPrefix: token ? token.slice(0, 12) : null });
 		emitPushDebug(debug, {
 			step: 'messaging.token.result',
 			context: {
 				hasToken: Boolean(token),
-				tokenPreview: token ? `${token.slice(0, 12)}…${token.slice(-6)}` : null
+				tokenPreview: token ? `${token.slice(0, 12)}…${token.slice(-6)}` : null,
+				platform
 			}
 		});
 		if (!token) {
+			const platform = detectPlatform();
+			logPushDebug('enablePushForUser: FCM token is null', { platform, permission, uid });
 			emitPushDebug(debug, {
 				step: 'device.persist',
-				context: { reason: 'token_missing', permission }
+				context: { reason: 'token_missing', permission, platform }
 			});
 			// Non-blocking persist
 			persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
@@ -730,15 +739,19 @@ export async function enablePushForUser(
 		});
 		return token;
 	} catch (err) {
-		console.error('Failed to obtain FCM token', err);
+		const platform = detectPlatform();
+		const errorMsg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+		console.error('[push] Failed to obtain FCM token', { platform, errorMsg, uid });
+		logPushDebug('enablePushForUser: FCM getToken exception', { platform, errorMsg, permission });
 		emitPushDebug(debug, {
 			step: 'messaging.token.error',
 			message: 'Failed while collecting FCM token.',
-			error: err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+			error: errorMsg,
+			context: { platform }
 		});
 		emitPushDebug(debug, {
 			step: 'device.persist',
-			context: { reason: 'token_error', permission }
+			context: { reason: 'token_error', permission, platform }
 		});
 		// Non-blocking persist
 		persistDeviceDoc(uid, { permission, token: null, subscription: null }).catch(() => {});
