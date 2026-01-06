@@ -890,5 +890,29 @@ service cloud.firestore {
       allow read, write: if isSuperAdminUser();
     }
 
+    /* ---------------- Integrations ---------------- */
+    // Slack integration config - server owners/admins can manage
+    match /integrations/slack {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdminUser();
+    }
+    
+    // Slack workspaces - only super admins can manage (contains tokens)
+    match /integrations/slack/workspaces/{workspaceId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdminUser();
+    }
+    
+    // Slack bridges - server owners can manage bridges for their servers
+    match /integrations/slack/bridges/{bridgeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() 
+        && request.resource.data.hconnectServerId is string
+        && isServerOwner(request.resource.data.hconnectServerId);
+      allow update, delete: if isSignedIn()
+        && resource.data.hconnectServerId is string
+        && isServerOwner(resource.data.hconnectServerId);
+    }
+
   } // /documents
 } // service

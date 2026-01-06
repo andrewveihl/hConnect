@@ -16,6 +16,7 @@ import {
 import { handleTicketAiThreadMessage, handleTicketAiChannelMessage, createManualTicket } from './ticketAi';
 import { sendEmail } from './email';
 export { requestDomainAutoInvite } from './domainInvites';
+export { slackWebhook, slackOAuth } from './slack';
 
 // Define secrets for functions that need them
 const openaiApiKey = defineSecret('OPENAI_API_KEY');

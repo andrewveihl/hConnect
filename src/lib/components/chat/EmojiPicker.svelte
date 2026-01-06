@@ -12,6 +12,9 @@
 
 	const dispatch = createEventDispatcher();
 	const MAX_RESULTS = 160;
+	
+	// Track recently picked emojis for animation
+	let recentlyPicked = $state<string | null>(null);
 
 	type EmojiCategory = {
 		id: string;
@@ -164,9 +167,42 @@
 		dispatch('close');
 	}
 
-	function pick(symbol: string) {
-		dispatch('pick', symbol);
-		close();
+	function pick(symbol: string, event?: MouseEvent) {
+		// Trigger pick animation
+		recentlyPicked = symbol;
+		
+		// Create floating emoji effect from click position
+		if (event) {
+			createFloatingEmoji(symbol, event);
+		}
+		
+		// Dispatch and close after brief animation
+		setTimeout(() => {
+			dispatch('pick', symbol);
+			close();
+		}, 150);
+	}
+	
+	function createFloatingEmoji(symbol: string, event: MouseEvent) {
+		const button = event.currentTarget as HTMLElement;
+		if (!button) return;
+		
+		const rect = button.getBoundingClientRect();
+		const floater = document.createElement('span');
+		floater.textContent = symbol;
+		floater.className = 'emoji-floater';
+		floater.style.cssText = `
+			position: fixed;
+			left: ${rect.left + rect.width / 2}px;
+			top: ${rect.top + rect.height / 2}px;
+			font-size: 2rem;
+			pointer-events: none;
+			z-index: 9999;
+			transform: translate(-50%, -50%);
+			animation: emoji-float-up 600ms ease-out forwards;
+		`;
+		document.body.appendChild(floater);
+		setTimeout(() => floater.remove(), 600);
 	}
 
 	function onKeydown(event: KeyboardEvent) {
@@ -187,15 +223,16 @@
 >
 	<div class="emoji-layout">
 		<div class="emoji-category-bar" aria-label="Emoji categories">
-			{#each CATEGORIES as category}
+			{#each CATEGORIES as category, index}
 				<button
 					type="button"
 					class={`emoji-category ${activeCategory === category.id ? 'is-active' : ''}`}
 					title={category.name}
 					aria-label={category.name}
+					style={`animation-delay: ${index * 40}ms`}
 					onclick={() => (activeCategory = category.id)}
 				>
-					<span aria-hidden="true">{category.icon}</span>
+					<span class="emoji-category__icon" aria-hidden="true">{category.icon}</span>
 				</button>
 			{/each}
 		</div>
@@ -230,12 +267,12 @@
 					{#each visible as emoji (emoji.char + emoji.name)}
 						<button
 							type="button"
-							class="emoji-cell"
+							class={`emoji-cell ${recentlyPicked === emoji.char ? 'emoji-cell--picked' : ''}`}
 							aria-label={emoji.name}
 							title={emoji.name}
-							onclick={() => pick(emoji.char)}
+							onclick={(e) => pick(emoji.char, e)}
 						>
-							<span aria-hidden="true">{emoji.char}</span>
+							<span class="emoji-symbol" aria-hidden="true">{emoji.char}</span>
 						</button>
 					{/each}
 				</div>
@@ -303,11 +340,31 @@
 		justify-content: center;
 		font-size: 1.35rem;
 		cursor: pointer;
+		opacity: 0;
+		transform: scale(0.8) translateY(4px);
+		animation: emoji-category-appear 200ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 		transition:
 			background 120ms ease,
 			border 120ms ease,
-			transform 120ms ease,
-			color 120ms ease;
+			transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			color 120ms ease,
+			box-shadow 120ms ease;
+	}
+	
+	@keyframes emoji-category-appear {
+		0% {
+			opacity: 0;
+			transform: scale(0.8) translateY(4px);
+		}
+		100% {
+			opacity: 1;
+			transform: scale(1) translateY(0);
+		}
+	}
+	
+	.emoji-category__icon {
+		display: inline-block;
+		transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
 	.emoji-category.is-active {
@@ -315,13 +372,26 @@
 		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
 		color: var(--color-accent);
 	}
+	
+	.emoji-category.is-active .emoji-category__icon {
+		animation: emoji-pulse 800ms ease-in-out infinite;
+	}
 
 	.emoji-category:not(.is-active):hover,
 	.emoji-category:not(.is-active):focus-visible {
 		border-color: color-mix(in srgb, var(--color-border-subtle) 75%, transparent);
 		background: color-mix(in srgb, var(--color-border-subtle) 25%, transparent);
 		outline: none;
-		transform: translateY(-1px);
+		transform: translateY(-2px) scale(1.05);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	}
+	
+	.emoji-category:hover .emoji-category__icon {
+		transform: scale(1.1);
+	}
+	
+	.emoji-category:active {
+		transform: scale(0.95);
 	}
 
 	.emoji-content {
@@ -443,18 +513,64 @@
 		background: color-mix(in srgb, var(--color-panel-muted) 55%, transparent);
 		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
 		transition:
-			transform 120ms ease,
+			transform 120ms cubic-bezier(0.34, 1.56, 0.64, 1),
 			background 120ms ease,
 			border 120ms ease;
 		scroll-snap-align: start;
+		cursor: pointer;
+	}
+	
+	.emoji-symbol {
+		display: inline-block;
+		transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+
+	.emoji-cell:hover .emoji-symbol,
+	.emoji-cell:focus-visible .emoji-symbol {
+		transform: scale(1.15);
+		animation: emoji-wiggle 400ms ease-in-out;
+	}
+	
+	.emoji-cell:active .emoji-symbol {
+		transform: scale(0.9);
+	}
+	
+	.emoji-cell--picked {
+		animation: emoji-pop 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+	
+	.emoji-cell--picked .emoji-symbol {
+		animation: emoji-bounce 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
 	.emoji-cell:hover,
 	.emoji-cell:focus-visible {
-		transform: translateY(-2px);
+		transform: translateY(-3px) scale(1.05);
 		background: color-mix(in srgb, var(--color-panel-muted) 85%, transparent);
 		border-color: var(--color-accent);
 		outline: none;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	}
+	
+	/* Emoji animations */
+	@keyframes emoji-wiggle {
+		0%, 100% { transform: scale(1.15) rotate(0deg); }
+		25% { transform: scale(1.15) rotate(-8deg); }
+		75% { transform: scale(1.15) rotate(8deg); }
+	}
+	
+	@keyframes emoji-bounce {
+		0% { transform: scale(1); }
+		30% { transform: scale(1.4); }
+		50% { transform: scale(0.9); }
+		70% { transform: scale(1.2); }
+		100% { transform: scale(1); }
+	}
+	
+	@keyframes emoji-pop {
+		0% { transform: translateY(-3px) scale(1.05); }
+		50% { transform: translateY(-3px) scale(1.2); background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+		100% { transform: translateY(-3px) scale(1.05); }
 	}
 
 	.emoji-empty {

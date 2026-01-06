@@ -796,18 +796,23 @@ function groupTokensByChannel(deviceTokens) {
     return { safariSubscriptions, fcmTokens };
 }
 async function sendPushToTokens(deviceTokens, payload) {
-    if (!deviceTokens.length)
+    if (!deviceTokens.length) {
+        firebase_functions_1.logger.info('[push] sendPushToTokens: no device tokens provided');
         return;
+    }
     const { safariSubscriptions, fcmTokens } = groupTokensByChannel(deviceTokens);
     const startedAt = Date.now();
     firebase_functions_1.logger.info('[push] sendPushToTokens invoked', {
         totalTokens: deviceTokens.length,
         safariSubscriptions: safariSubscriptions.length,
         fcmTokens: fcmTokens.length,
+        tokenDetails: {
+            platforms: deviceTokens.map((d) => d.platform ?? 'unknown'),
+            hasTokens: deviceTokens.map(d => ({ platform: d.platform, hasToken: !!d.token, hasSubscription: !!d.subscription?.endpoint }))
+        },
         dataKeys: Object.keys(payload.data ?? {}),
         messageId: payload.data?.messageId ?? null,
-        targetUrl: payload.data?.targetUrl ?? null,
-        platforms: deviceTokens.map((d) => d.platform ?? 'unknown')
+        targetUrl: payload.data?.targetUrl ?? null
     });
     const tasks = [];
     if (fcmTokens.length) {
@@ -897,13 +902,23 @@ async function sendPushToTokens(deviceTokens, payload) {
             if (failureCount > 0) {
                 response.responses.forEach((resp, idx) => {
                     if (!resp.success) {
-                        firebase_functions_1.logger.warn('[push] FCM token delivery failed', {
+                        const tokenRec = fcmTokens[idx];
+                        firebase_functions_1.logger.warn('[push] FCM delivery failed', {
                             tokenIndex: idx,
-                            tokenPreview: `${fcmTokens[idx]?.slice(0, 10)}...`,
+                            tokenPrefix: tokenRec ? tokenRec.slice(0, 10) : 'unknown',
                             errorCode: resp.error?.code,
-                            errorMessage: resp.error?.message
+                            errorMessage: resp.error?.message,
+                            messageId: payload.data?.messageId ?? null
                         });
                     }
+                });
+            }
+            if (successCount > 0) {
+                firebase_functions_1.logger.info('[push] FCM delivery successful', {
+                    successCount,
+                    failureCount,
+                    totalTokens: fcmTokens.length,
+                    messageId: payload.data?.messageId ?? null
                 });
             }
             return response;
