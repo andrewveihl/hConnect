@@ -23,13 +23,10 @@ export type NotificationSettings = {
  allowHereMentionPush: boolean;
  allowEveryoneMentionPush: boolean;
  allowChannelMessagePush: boolean;
-  pushChannelMentionsOnly: boolean;
   emailEnabled: boolean;
   emailForDMs: boolean;
   emailForMentions: boolean;
   emailForChannelMessages: boolean;
-  emailForAllChannelMessages: boolean;
-  emailChannelMentionsOnly: boolean;
   emailOnlyWhenNoPush: boolean;
   doNotDisturbUntil: number | null;
 };
@@ -51,13 +48,10 @@ export const defaultNotificationSettings: NotificationSettings = {
   allowHereMentionPush: true,
   allowEveryoneMentionPush: true,
   allowChannelMessagePush: true,
-  pushChannelMentionsOnly: false,
   emailEnabled: false,
   emailForDMs: true,
   emailForMentions: true,
   emailForChannelMessages: false,
-  emailForAllChannelMessages: false,
-  emailChannelMentionsOnly: false,
   emailOnlyWhenNoPush: true,
   doNotDisturbUntil: null
 };

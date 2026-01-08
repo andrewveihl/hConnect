@@ -1473,7 +1473,28 @@
 														{@const entryAvatar = replyAvatar(entry)}
 														{@const entryAuthor = replyAuthorLabel(entry)}
 														{@const entryUid = entry.authorId ?? `reply-${chainIndex}`}
-														<div class="reply-inline" title="Jump to message">
+														<!-- svelte-ignore a11y_no_static_element_interactions -->
+														<div 
+															class="reply-inline" 
+															title="Jump to message"
+															role="button"
+															tabindex="0"
+															onclick={(event) => {
+																event.stopPropagation();
+																if (entry.messageId) {
+																	scrollToMessage(entry.messageId);
+																}
+															}}
+															onkeydown={(event) => {
+																if (event.key === 'Enter' || event.key === ' ') {
+																	event.preventDefault();
+																	event.stopPropagation();
+																	if (entry.messageId) {
+																		scrollToMessage(entry.messageId);
+																	}
+																}
+															}}
+														>
 															<i class="bx bx-reply reply-inline__icon" aria-hidden="true"></i>
 															<div class="reply-inline__avatar">
 																<Avatar 
@@ -1881,7 +1902,7 @@
 																disabled={!currentUserId}
 																title={reactionUsersTooltip(reaction.users)}
 															>
-																<span>{reaction.emoji}</span>
+																<span class="reaction-emoji">{reaction.emoji}</span>
 																<span class="count">{reaction.count}</span>
 															</button>
 														{/each}
@@ -2008,12 +2029,15 @@
 			style={`top: ${reactionMenuPosition.top}px; left: ${reactionMenuPosition.left}px`}
 		>
 			<div class="reaction-grid">
-				{#each QUICK_REACTIONS as emoji}
+				{#each QUICK_REACTIONS as emoji, index}
 					<button
 						type="button"
 						class="reaction-button"
-						onclick={() => chooseReaction(reactionMenuFor!, emoji)}>{emoji}</button
+						style={`animation-delay: ${index * 30}ms`}
+						onclick={() => chooseReaction(reactionMenuFor!, emoji)}
 					>
+						<span class="reaction-button__emoji">{emoji}</span>
+					</button>
 				{/each}
 			</div>
 			<div class="reaction-menu__actions">
@@ -2450,9 +2474,15 @@
 		display: grid;
 		place-items: center;
 		font-size: 0.95rem;
+		cursor: pointer;
 		transition:
 			color 100ms ease,
-			background 100ms ease;
+			background 100ms ease,
+			transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+	
+	.message-action i {
+		transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
 	.message-action:not(:disabled):hover,
@@ -2460,6 +2490,16 @@
 		color: var(--color-accent);
 		background: color-mix(in srgb, var(--color-accent) 15%, transparent);
 		outline: none;
+		transform: scale(1.1);
+	}
+	
+	.message-action:not(:disabled):hover i,
+	.message-action:not(:disabled):focus-visible i {
+		transform: scale(1.05);
+	}
+	
+	.message-action:not(:disabled):active {
+		transform: scale(0.95);
 	}
 
 	.message-action--ticket:not(:disabled):hover,
@@ -3812,21 +3852,48 @@
 		color: var(--chat-bubble-other-text);
 		font-size: 0.85rem;
 		line-height: 1.1;
+		cursor: pointer;
+		animation: emoji-reaction-pop 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
 		transition:
-			transform 120ms ease,
+			transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1),
 			background 120ms ease,
-			border 120ms ease;
+			border 120ms ease,
+			box-shadow 120ms ease;
+	}
+	
+	.reaction-emoji {
+		display: inline-block;
+		font-size: 1rem;
+		line-height: 1;
+		transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
 	.reaction-chip:hover {
-		transform: translateY(-1px);
+		transform: translateY(-2px) scale(1.05);
 		background: color-mix(in srgb, var(--chat-bubble-other-bg) 70%, transparent);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	}
+	
+	.reaction-chip:hover .reaction-emoji {
+		animation: emoji-reaction-wiggle 400ms ease-in-out;
+	}
+	
+	.reaction-chip:active {
+		transform: scale(0.95);
+	}
+	
+	.reaction-chip:active .reaction-emoji {
+		transform: scale(0.9);
 	}
 
 	.reaction-chip.active {
 		border-color: color-mix(in srgb, var(--chat-bubble-self-bg) 55%, transparent);
 		background: color-mix(in srgb, var(--chat-bubble-self-bg) 35%, transparent);
 		color: var(--chat-bubble-self-text);
+	}
+	
+	.reaction-chip.active .reaction-emoji {
+		animation: emoji-pulse 600ms ease-in-out infinite;
 	}
 
 	.reaction-chip .count {
@@ -3981,9 +4048,30 @@
 		color: inherit;
 		border: 0;
 		padding: 0.35rem;
+		cursor: pointer;
+		opacity: 0;
+		transform: scale(0.5) translateY(8px);
+		animation: reaction-button-appear 250ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 		transition:
 			background 120ms ease,
-			transform 120ms ease;
+			transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			box-shadow 120ms ease;
+	}
+	
+	@keyframes reaction-button-appear {
+		0% {
+			opacity: 0;
+			transform: scale(0.5) translateY(8px);
+		}
+		100% {
+			opacity: 1;
+			transform: scale(1) translateY(0);
+		}
+	}
+	
+	.reaction-button__emoji {
+		display: inline-block;
+		transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
 	.reaction-button:focus-visible {
@@ -3993,7 +4081,20 @@
 
 	.reaction-button:hover {
 		background: rgba(255, 255, 255, 0.16);
-		transform: translateY(-1px);
+		transform: translateY(-3px) scale(1.15);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+	}
+	
+	.reaction-button:hover .reaction-button__emoji {
+		animation: emoji-reaction-wiggle 400ms ease-in-out;
+	}
+	
+	.reaction-button:active {
+		transform: scale(0.9);
+	}
+	
+	.reaction-button:active .reaction-button__emoji {
+		transform: scale(0.85);
 	}
 
 	@media (max-width: 640px) {

@@ -22,6 +22,7 @@
 	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import TicketAIModal from '$lib/components/servers/TicketAIModal.svelte';
 	import TicketAIEnablePopup from '$lib/components/servers/TicketAIEnablePopup.svelte';
+	import SlackSettingsPanel from '$lib/components/integrations/SlackSettingsPanel.svelte';
 	import { subscribeTicketAiSettings } from '$lib/firestore/ticketAi';
 	import { bitsAsNumber, PERMISSION_KEYS, toPermissionBits } from '$lib/permissions/permissions';
 
@@ -103,6 +104,7 @@
 	let chatSlowModeSeconds = $state(0);
 	let inviteAutomationEnabled = $state(false);
 	let ticketAiEnabled = $state(false);
+	let slackModalOpen = $state(false);
 	const ticketAiGloballyEnabled = $derived($featureFlags.enableTicketAI !== false);
 	let inviteDomains: string[] = $state([]);
 	let inviteDomainInput = $state('');
@@ -3823,6 +3825,31 @@
 												<i class="bx bx-chevron-right"></i>
 											</div>
 										</button>
+
+										<!-- Slack Integration -->
+										<button
+											type="button"
+											class="integration-card"
+											onclick={() => (slackModalOpen = true)}
+										>
+											<div class="integration-card__icon integration-card__icon--slack">
+												<svg viewBox="0 0 24 24" width="24" height="24">
+													<path fill="currentColor" d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zm10.124 2.521a2.528 2.528 0 0 1 2.52-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.52V8.834zm-1.271 0a2.528 2.528 0 0 1-2.521 2.521 2.528 2.528 0 0 1-2.521-2.521V2.522A2.528 2.528 0 0 1 15.166 0a2.528 2.528 0 0 1 2.521 2.522v6.312zm-2.521 10.124a2.528 2.528 0 0 1 2.521 2.52A2.528 2.528 0 0 1 15.166 24a2.528 2.528 0 0 1-2.521-2.522v-2.52h2.521zm0-1.271a2.528 2.528 0 0 1-2.521-2.521 2.528 2.528 0 0 1 2.521-2.521h6.313A2.528 2.528 0 0 1 24 15.166a2.528 2.528 0 0 1-2.522 2.521h-6.313z"/>
+												</svg>
+											</div>
+											<div class="integration-card__content">
+												<div class="integration-card__header">
+													<span class="integration-card__title">Slack</span>
+													<span class="integration-card__badge">New</span>
+												</div>
+												<p class="integration-card__description">
+													Bridge Slack channels to sync messages with hConnect channels.
+												</p>
+											</div>
+											<div class="integration-card__arrow">
+												<i class="bx bx-chevron-right"></i>
+											</div>
+										</button>
 									</div>
 								</div>
 
@@ -5215,6 +5242,33 @@
 	</div>
 {/if}
 
+{#if slackModalOpen}
+	<div
+		class="role-modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		tabindex="0"
+		onclick={(event) => {
+			if (event.target === event.currentTarget) slackModalOpen = false;
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				slackModalOpen = false;
+			}
+		}}
+	>
+		<div class="role-modal role-modal--wide role-modal--tall">
+			<SlackSettingsPanel
+				serverId={serverId ?? ''}
+				serverName={serverName}
+				channels={channels.map(c => ({ id: c.id, name: c.name, type: c.type }))}
+				onClose={() => (slackModalOpen = false)}
+			/>
+		</div>
+	</div>
+{/if}
+
 <style>
 	/* Integration Page Styles */
 	.integrations-page {
@@ -5323,6 +5377,23 @@
 	.integration-card__icon--muted {
 		background: rgba(255, 255, 255, 0.03);
 		color: rgba(255, 255, 255, 0.4);
+	}
+
+	.integration-card__icon--slack {
+		background: linear-gradient(135deg, #e01e5a 0%, #36c5f0 50%, #2eb67d 100%);
+		color: white;
+		box-shadow: 0 4px 16px rgba(224, 30, 90, 0.25);
+	}
+
+	.integration-card__badge {
+		font-size: 0.65rem;
+		padding: 0.15rem 0.4rem;
+		border-radius: 4px;
+		background: linear-gradient(135deg, #7c5cff 0%, #5c3fd4 100%);
+		color: white;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
 	}
 
 	.integration-card__content {
@@ -6844,6 +6915,9 @@
 		max-height: 85vh;
 		display: flex;
 		flex-direction: column;
+	}
+	.role-modal--tall {
+		height: min(700px, 85vh);
 	}
 	.role-modal--mid {
 		width: min(460px, 92vw);

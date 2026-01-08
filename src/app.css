@@ -3344,3 +3344,73 @@ body {
     opacity: 1;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Emoji Animations - Cross-platform animated emoji effects                   */
+/* -------------------------------------------------------------------------- */
+@keyframes emoji-float-up {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -120%) scale(1.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -200%) scale(0.8);
+  }
+}
+
+@keyframes emoji-reaction-pop {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(0.9);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes emoji-reaction-wiggle {
+  0%, 100% {
+    transform: rotate(0deg) scale(1);
+  }
+  20% {
+    transform: rotate(-12deg) scale(1.1);
+  }
+  40% {
+    transform: rotate(12deg) scale(1.1);
+  }
+  60% {
+    transform: rotate(-8deg) scale(1.05);
+  }
+  80% {
+    transform: rotate(8deg) scale(1.05);
+  }
+}
+
+@keyframes emoji-pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.15);
+  }
+}
+
+/* Floating emoji element (injected via JS) */
+.emoji-floater {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", sans-serif;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  will-change: transform, opacity;
+}

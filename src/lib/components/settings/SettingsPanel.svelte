@@ -781,13 +781,10 @@
 		dms: boolean;
 		mentions: boolean;
 		allMessages: boolean;
-		pushChannelMentionsOnly: boolean;
 		emailEnabled: boolean;
 		emailForDMs: boolean;
 		emailForMentions: boolean;
 		emailForChannelMessages: boolean;
-		emailForAllChannelMessages: boolean;
-		emailChannelMentionsOnly: boolean;
 		emailOnlyWhenNoPush: boolean;
 	};
 
@@ -797,13 +794,10 @@
 		dms: true,
 		mentions: true,
 		allMessages: true,
-		pushChannelMentionsOnly: false,
 		emailEnabled: false,
 		emailForDMs: true,
 		emailForMentions: true,
 		emailForChannelMessages: false,
-		emailForAllChannelMessages: false,
-		emailChannelMentionsOnly: false,
 		emailOnlyWhenNoPush: true
 	});
 
@@ -986,13 +980,10 @@
 			mentions: prefs.mentions ?? true,
 			// Default to on so channel messages send push notifications unless explicitly disabled.
 			allMessages: prefs.allMessages ?? true,
-			pushChannelMentionsOnly: prefs.pushChannelMentionsOnly ?? false,
 			emailEnabled: prefs.emailEnabled ?? false,
 			emailForDMs: prefs.emailForDMs ?? true,
 			emailForMentions: prefs.emailForMentions ?? true,
 			emailForChannelMessages: prefs.emailForChannelMessages ?? false,
-			emailForAllChannelMessages: prefs.emailForAllChannelMessages ?? false,
-			emailChannelMentionsOnly: prefs.emailChannelMentionsOnly ?? false,
 			emailOnlyWhenNoPush: prefs.emailOnlyWhenNoPush ?? true
 		};
 
@@ -1082,13 +1073,10 @@
 			allowChannelMessagePush: notif.allMessages,
 			allowMentionPush: notif.mentions,
 			muteDMs: !notif.dms,
-			pushChannelMentionsOnly: notif.pushChannelMentionsOnly,
 			emailEnabled: notif.emailEnabled,
 			emailForDMs: notif.emailForDMs,
 			emailForMentions: notif.emailForMentions,
 			emailForChannelMessages: notif.emailForChannelMessages,
-			emailForAllChannelMessages: notif.emailForAllChannelMessages,
-			emailChannelMentionsOnly: notif.emailChannelMentionsOnly,
 			emailOnlyWhenNoPush: notif.emailOnlyWhenNoPush
 		});
 	}
@@ -2009,17 +1997,17 @@
 						</div>
 					</div>
 
-					<!-- Email notification preferences - Simple toggle -->
+					<!-- Email notification preferences -->
 					<div class="space-y-3">
 						<div
 							class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
 						>
 							<div class="space-y-1">
 								<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
-									📧 Email notifications
+									Email alerts
 								</h3>
 								<p class={mutedTextClasses}>
-									Get email alerts at <span class="font-medium text-[color:var(--color-text-primary)]">{$user?.email ?? 'your email'}</span> for DMs and mentions when you're away.
+									Email {$user?.email ?? 'your account email'} when push can't reach you.
 								</p>
 							</div>
 							<label class="flex items-center gap-3">
@@ -2029,12 +2017,6 @@
 									checked={notif.emailEnabled}
 									onchange={() => {
 										notif.emailEnabled = !notif.emailEnabled;
-										// When enabling, turn on DMs and mentions by default
-										if (notif.emailEnabled) {
-											notif.emailForDMs = true;
-											notif.emailForMentions = true;
-											notif.emailOnlyWhenNoPush = true;
-										}
 										queueAutoSave();
 									}}
 								/>
@@ -2046,126 +2028,134 @@
 									></span>
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
-									{notif.emailEnabled ? 'On' : 'Off'}
+									{notif.emailEnabled ? 'Email fallback on' : 'Off for now'}
 								</span>
 							</label>
 						</div>
 
-						<!-- Sub-toggle: Always send emails -->
-						{#if notif.emailEnabled}
+						<div class="grid gap-3 md:grid-cols-2">
 							<div
-								class="ml-4 flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/50 p-3"
+								class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
 							>
 								<div class="space-y-1">
-									<h4 class="text-xs font-semibold text-[color:var(--color-text-primary)]">
-										Always send emails
-									</h4>
-									<p class="text-xs text-[color:var(--text-50)]">
-										{#if notif.emailOnlyWhenNoPush}
-											Only when push notifications can't reach you (iOS/Safari)
-										{:else}
-											Send emails for every notification, even if push works
-										{/if}
-									</p>
+									<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+										Direct messages
+									</h3>
+									<p class={mutedTextClasses}>Send me an email for new DMs.</p>
 								</div>
-								<label class="flex items-center gap-2">
+								<label class="flex items-center gap-3">
 									<input
 										type="checkbox"
 										class="peer sr-only"
-										checked={!notif.emailOnlyWhenNoPush}
+										checked={notif.emailForDMs}
+										disabled={!notif.emailEnabled}
+										onchange={() => {
+											notif.emailForDMs = !notif.emailForDMs;
+											queueAutoSave();
+										}}
+									/>
+									<span
+										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									>
+										<span
+											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										></span>
+									</span>
+								</label>
+							</div>
+
+							<div
+								class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+							>
+								<div class="space-y-1">
+									<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+										Mentions
+									</h3>
+									<p class={mutedTextClasses}>Email me when I'm mentioned.</p>
+								</div>
+								<label class="flex items-center gap-3">
+									<input
+										type="checkbox"
+										class="peer sr-only"
+										checked={notif.emailForMentions}
+										disabled={!notif.emailEnabled}
+										onchange={() => {
+											notif.emailForMentions = !notif.emailForMentions;
+											queueAutoSave();
+										}}
+									/>
+									<span
+										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									>
+										<span
+											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										></span>
+									</span>
+								</label>
+							</div>
+
+							<div
+								class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+							>
+								<div class="space-y-1">
+									<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+										All channel messages
+									</h3>
+									<p class={mutedTextClasses}>Email me for every channel message.</p>
+								</div>
+								<label class="flex items-center gap-3">
+									<input
+										type="checkbox"
+										class="peer sr-only"
+										checked={notif.emailForChannelMessages}
+										disabled={!notif.emailEnabled}
+										onchange={() => {
+											notif.emailForChannelMessages = !notif.emailForChannelMessages;
+											queueAutoSave();
+										}}
+									/>
+									<span
+										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									>
+										<span
+											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										></span>
+									</span>
+								</label>
+							</div>
+
+							<div
+								class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"
+							>
+								<div class="space-y-1">
+									<h3 class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+										Only when push fails
+									</h3>
+									<p class={mutedTextClasses}>
+										Skip emails if any of your devices can receive push.
+									</p>
+								</div>
+								<label class="flex items-center gap-3">
+									<input
+										type="checkbox"
+										class="peer sr-only"
+										checked={notif.emailOnlyWhenNoPush}
+										disabled={!notif.emailEnabled}
 										onchange={() => {
 											notif.emailOnlyWhenNoPush = !notif.emailOnlyWhenNoPush;
 											queueAutoSave();
 										}}
 									/>
 									<span
-										class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
 									>
 										<span
-											class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
+											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
 										></span>
 									</span>
 								</label>
 							</div>
-
-							<!-- Sub-toggle: Email for all channel messages -->
-							<div
-								class="ml-4 flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/50 p-3"
-							>
-								<div class="space-y-1">
-									<h4 class="text-xs font-semibold text-[color:var(--color-text-primary)]">
-										Email for all channel messages
-									</h4>
-									<p class="text-xs text-[color:var(--text-50)]">
-										{#if notif.emailForAllChannelMessages}
-											Get an email for every message in channels you have access to
-										{:else}
-											Only email for DMs and @mentions
-										{/if}
-									</p>
-								</div>
-								<label class="flex items-center gap-2">
-									<input
-										type="checkbox"
-										class="peer sr-only"
-										checked={notif.emailForAllChannelMessages}
-										onchange={() => {
-											notif.emailForAllChannelMessages = !notif.emailForAllChannelMessages;
-											// If disabling all channel messages, also disable mentions-only
-											if (!notif.emailForAllChannelMessages) {
-												notif.emailChannelMentionsOnly = false;
-											}
-											queueAutoSave();
-										}}
-									/>
-									<span
-										class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
-									>
-										<span
-											class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
-										></span>
-									</span>
-								</label>
-							</div>
-
-							<!-- Sub-sub-toggle: Only mentions, reactions & replies -->
-							{#if notif.emailForAllChannelMessages}
-								<div
-									class="ml-8 flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/30 p-3"
-								>
-									<div class="space-y-1">
-										<h4 class="text-xs font-semibold text-[color:var(--color-text-primary)]">
-											Only mentions, reactions & replies
-										</h4>
-										<p class="text-xs text-[color:var(--text-50)]">
-											{#if notif.emailChannelMentionsOnly}
-												Only email when you're @mentioned, reacted to, or replied to
-											{:else}
-												Email for every message in channels
-											{/if}
-										</p>
-									</div>
-									<label class="flex items-center gap-2">
-										<input
-											type="checkbox"
-											class="peer sr-only"
-											checked={notif.emailChannelMentionsOnly}
-											onchange={() => {
-												notif.emailChannelMentionsOnly = !notif.emailChannelMentionsOnly;
-												queueAutoSave();
-											}}
-										/>
-										<span
-											class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
-										>
-											<span
-												class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
-											></span>
-										</span>
-									</label>
-								</div>
-							{/if}
-						{/if}
+						</div>
 					</div>
 
 					<!-- Push notification preferences -->
@@ -2193,10 +2183,6 @@
 									checked={notif.allMessages}
 									onchange={() => {
 										notif.allMessages = !notif.allMessages;
-										// If disabling all channel messages, also disable mentions-only
-										if (!notif.allMessages) {
-											notif.pushChannelMentionsOnly = false;
-										}
 										queueAutoSave();
 									}}
 								/>
@@ -2209,44 +2195,6 @@
 								</span>
 							</label>
 						</div>
-
-						<!-- Sub-toggle: Only mentions, reactions & replies for push -->
-						{#if notif.allMessages}
-							<div
-								class="ml-4 flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)]/50 p-3"
-							>
-								<div class="space-y-1">
-									<h4 class="text-xs font-semibold text-[color:var(--color-text-primary)]">
-										Only mentions, reactions & replies
-									</h4>
-									<p class="text-xs text-[color:var(--text-50)]">
-										{#if notif.pushChannelMentionsOnly}
-											Only notify when you're @mentioned, reacted to, or replied to
-										{:else}
-											Push for every message in channels
-										{/if}
-									</p>
-								</div>
-								<label class="flex items-center gap-2">
-									<input
-										type="checkbox"
-										class="peer sr-only"
-										checked={notif.pushChannelMentionsOnly}
-										onchange={() => {
-											notif.pushChannelMentionsOnly = !notif.pushChannelMentionsOnly;
-											queueAutoSave();
-										}}
-									/>
-									<span
-										class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
-									>
-										<span
-											class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
-										></span>
-									</span>
-								</label>
-							</div>
-						{/if}
 
 						<div
 							class="flex items-start justify-between gap-4 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] p-4"

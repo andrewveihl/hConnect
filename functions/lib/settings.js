@@ -66,10 +66,14 @@ async function fetchDeviceTokens(uid, deviceId) {
                 return [];
             }
             const doc = docSnap.data();
-            if (doc &&
-                (hasValidToken(doc) || hasSafariSubscription(doc)) &&
-                (doc.permission === 'granted' || doc.permission === undefined) &&
-                doc.enabled !== false) {
+            const hasToken = hasValidToken(doc);
+            const hasSubscription = hasSafariSubscription(doc);
+            const permission = doc?.permission;
+            const enabled = doc?.enabled;
+            if ((hasToken || hasSubscription) &&
+                (permission === 'granted' || permission === undefined) &&
+                enabled !== false) {
+                console.info('[fetchDeviceTokens] Device included', { uid, deviceId, platform: doc?.platform, hasToken, hasSubscription });
                 return [
                     {
                         token: doc.token ?? null,
@@ -81,10 +85,17 @@ async function fetchDeviceTokens(uid, deviceId) {
             console.info('[fetchDeviceTokens] Device filtered out', {
                 uid,
                 deviceId,
-                hasToken: hasValidToken(doc),
-                hasSubscription: hasSafariSubscription(doc),
-                permission: doc?.permission,
-                enabled: doc?.enabled
+                platform: doc?.platform,
+                hasToken,
+                hasSubscription,
+                permission,
+                enabled,
+                reasons: {
+                    noTokenOrSubscription: !hasToken && !hasSubscription,
+                    permissionDenied: permission === 'denied',
+                    permissionDefault: permission === 'default',
+                    disabled: enabled === false
+                }
             });
             return [];
         }

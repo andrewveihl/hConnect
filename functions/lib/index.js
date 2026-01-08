@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.requestDomainAutoInvite = void 0;
+exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
@@ -46,6 +46,9 @@ const ticketAi_1 = require("./ticketAi");
 const email_1 = require("./email");
 var domainInvites_1 = require("./domainInvites");
 Object.defineProperty(exports, "requestDomainAutoInvite", { enumerable: true, get: function () { return domainInvites_1.requestDomainAutoInvite; } });
+var slack_1 = require("./slack");
+Object.defineProperty(exports, "slackWebhook", { enumerable: true, get: function () { return slack_1.slackWebhook; } });
+Object.defineProperty(exports, "slackOAuth", { enumerable: true, get: function () { return slack_1.slackOAuth; } });
 // Define secrets for functions that need them
 const openaiApiKey = (0, params_1.defineSecret)('OPENAI_API_KEY');
 const resendApiKey = (0, params_1.defineSecret)('RESEND_API_KEY');
@@ -391,6 +394,68 @@ exports.sendTestPush = (0, https_1.onCall)({
         return { ok: false, reason: result.reason ?? 'device_not_registered' };
     }
     return { ok: true, tokens: result.sent, messageId: result.messageId ?? null };
+});
+/**
+ * Diagnostic function: get details about all devices registered for a user.
+ * Returns comprehensive info about token status, platform, and why devices might be filtered.
+ */
+exports.getPushDeviceDiagnostics = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: true
+}, async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    try {
+        const devicesRef = firebase_1.db.collection(`profiles/${uid}/devices`);
+        const devicesSnap = await devicesRef.get();
+        const diagnostics = {
+            uid,
+            timestamp: new Date().toISOString(),
+            totalDevices: devicesSnap.size,
+            devices: []
+        };
+        for (const docSnap of devicesSnap.docs) {
+            const deviceId = docSnap.id;
+            const device = docSnap.data();
+            diagnostics.devices.push({
+                deviceId,
+                platform: device.platform ?? 'unknown',
+                userAgent: device.userAgent?.slice(0, 100) ?? null,
+                permission: device.permission ?? 'unknown',
+                enabled: device.enabled ?? true,
+                hasToken: Boolean(device.token),
+                tokenPrefix: device.token ? device.token.slice(0, 12) : null,
+                hasSubscription: Boolean(device.subscription?.endpoint),
+                subscriptionEndpointPrefix: device.subscription?.endpoint ? device.subscription.endpoint.slice(0, 30) : null,
+                lastSeen: device.lastSeen?.toDate?.().toISOString?.() ?? null,
+                createdAt: device.createdAt?.toDate?.().toISOString?.() ?? null,
+                tokenUpdatedAt: device.tokenUpdatedAt?.toDate?.().toISOString?.() ?? null,
+                isStandalone: device.isStandalone ?? false,
+                filterReasons: {
+                    noTokenOrSubscription: !device.token && !device.subscription?.endpoint,
+                    permissionDenied: device.permission === 'denied',
+                    permissionDefault: device.permission === 'default',
+                    disabled: device.enabled === false,
+                    willReceivePush: Boolean((device.token || device.subscription?.endpoint) &&
+                        (device.permission === 'granted' || device.permission === undefined) &&
+                        device.enabled !== false)
+                }
+            });
+        }
+        firebase_functions_1.logger.info('[getPushDeviceDiagnostics] Diagnostics retrieved', {
+            uid,
+            totalDevices: diagnostics.totalDevices,
+            willReceivePush: diagnostics.devices.filter(d => d.filterReasons.willReceivePush).length
+        });
+        return diagnostics;
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[getPushDeviceDiagnostics] Error', { uid, error: err });
+        throw new https_1.HttpsError('internal', 'Failed to retrieve device diagnostics');
+    }
 });
 /**
  * Super Admin callable: send a test email notification to a specified address.
