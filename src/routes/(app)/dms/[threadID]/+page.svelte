@@ -1507,8 +1507,8 @@
 	});
 </script>
 
-<div class="flex flex-1 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
-	<div class="hidden md:flex md:w-80 flex-col border-r border-subtle panel-muted">
+<div class="flex flex-1 h-full overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
+	<div class="hidden md:flex md:w-80 h-full flex-col border-r border-subtle panel-muted">
 		<DMsSidebar
 			bind:this={sidebarRef}
 			activeThreadId={threadID}
@@ -1604,7 +1604,7 @@
 			</div>
 		</main>
 
-		<div class="chat-input-region border-t border-subtle panel" bind:this={composerEl}>
+		<div class="chat-input-region shrink-0 border-t border-subtle panel" bind:this={composerEl}>
 			<ChatInput
 				placeholder={`Message`}
 				{mentionOptions}

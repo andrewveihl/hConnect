@@ -5258,7 +5258,7 @@
 			}
 		}}
 	>
-		<div class="role-modal role-modal--wide role-modal--tall">
+		<div class="role-modal role-modal--wide role-modal--tall role-modal--no-padding">
 			<SlackSettingsPanel
 				serverId={serverId ?? ''}
 				serverName={serverName}
@@ -6908,6 +6908,10 @@
 		animation: pop 140ms ease-out;
 		display: grid;
 		gap: 14px;
+	}
+
+	.role-modal--no-padding {
+		padding: 0;
 	}
 
 	.role-modal--wide {

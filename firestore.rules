@@ -718,6 +718,25 @@ service cloud.firestore {
         allow create, update: if canManageTicketAi(serverId);
         allow delete: if isSuperAdminUser() || isServerOwner(serverId);
       }
+
+      // Per-server Slack integration config
+      match /integrations/slack {
+        // Server admins/owners can read/write Slack config
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
+
+      // Per-server Slack workspaces (contains tokens)
+      match /integrations/slack/workspaces/{workspaceId} {
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
+
+      // Per-server Slack bridges
+      match /integrations/slack/bridges/{bridgeId} {
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
     }
 
     /* ---------------- Direct Messages (deterministic id tolerant) ---------------- */
@@ -759,6 +778,12 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && request.resource.data.userId == request.auth.uid;
       allow read, update, delete: if false;
+    }
+
+    /* ---------------- User settings (slackAvatarUrl, etc.) ---------------- */
+    match /users/{uid}/settings/{settingDoc} {
+      // Users can read and write their own settings
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
     /* ---------------- User mailbox invites ---------------- */
@@ -860,6 +885,16 @@ service cloud.firestore {
     match /announcements/{announcementId} {
       allow read: if isSignedIn();
       allow create, update, delete: if isSuperAdminUser();
+
+      match /views/{uid} {
+        allow read: if isSuperAdminUser();
+        allow create, update: if isSignedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.seenAt is timestamp
+          && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'seenAt']);
+        allow delete: if isSuperAdminUser();
+      }
     }
 
     /* ---------------- Admin telemetry ---------------- */

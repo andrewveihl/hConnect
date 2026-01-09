@@ -111,7 +111,10 @@ export function closeOverlay(id: MobileOverlayId) {
 export function clearAllOverlays({ notify = true }: { notify?: boolean } = {}) {
 	if (!browser) return;
 	ensureInit();
-	if (!stackSnapshot.length) return;
+	if (!stackSnapshot.length) {
+		document.documentElement.classList.remove('mobile-overlay-active');
+		return;
+	}
 	const ids = notify ? stackSnapshot.map((entry) => entry.id) : [];
 	entryDirectory.clear();
 	stackStore.set([]);

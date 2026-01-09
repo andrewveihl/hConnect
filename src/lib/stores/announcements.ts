@@ -1,6 +1,8 @@
 import { writable, derived } from 'svelte/store';
 import { browser } from '$app/environment';
 import type { AnnouncementDisplay } from '$lib/components/app/AnnouncementModal.svelte';
+import { user } from '$lib/stores/user';
+import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 
 const DISMISSED_ANNOUNCEMENTS_KEY = 'hconnect:dismissed-announcements';
 
@@ -23,6 +25,7 @@ export const announcements = writable<StoredAnnouncement[]>([]);
 
 // Store for dismissed announcement IDs (persisted per user)
 export const dismissedAnnouncementIds = writable<Set<string>>(new Set());
+const seenAnnouncementCache = new Set<string>();
 
 // Derived store for the next unread announcement to show
 export const nextAnnouncement = derived(
@@ -92,6 +95,45 @@ export function dismissAnnouncement(announcementId: string, userId: string): voi
 	});
 }
 
+export async function markAnnouncementSeen(params: {
+	announcementId: string;
+	uid: string;
+	email?: string | null;
+	displayName?: string | null;
+	photoURL?: string | null;
+}): Promise<void> {
+	if (!browser) return;
+	if (!params.announcementId || !params.uid) return;
+
+	const cacheKey = `${params.announcementId}:${params.uid}`;
+	if (seenAnnouncementCache.has(cacheKey)) return;
+
+	try {
+		const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
+		const { ensureFirebaseReady, getDb } = await import('$lib/firebase');
+
+		await ensureFirebaseReady();
+		const db = getDb();
+		const viewRef = doc(db, 'announcements', params.announcementId, 'views', params.uid);
+
+		await setDoc(
+			viewRef,
+			{
+				uid: params.uid,
+				email: params.email ?? null,
+				displayName: params.displayName ?? null,
+				photoURL: params.photoURL ?? null,
+				seenAt: serverTimestamp()
+			},
+			{ merge: true }
+		);
+
+		seenAnnouncementCache.add(cacheKey);
+	} catch (e) {
+		console.warn('Failed to mark announcement seen:', e);
+	}
+}
+
 // Subscribe to active announcements from Firestore
 let unsubscribeAnnouncements: (() => void) | null = null;
 
@@ -105,30 +147,43 @@ export async function startAnnouncementListener(): Promise<() => void> {
 	}
 	
 	try {
-		const { collection, query, where, onSnapshot, orderBy } = await import('firebase/firestore');
+		const { collection, query, where, onSnapshot } = await import('firebase/firestore');
 		const { ensureFirebaseReady, getDb } = await import('$lib/firebase');
 		
 		await ensureFirebaseReady();
 		const db = getDb();
+
+		const superAdminEmails = superAdminEmailsStore();
+		let adminAllowList: string[] = [];
+		let currentUserEmail: string | null = null;
+		const stopSuperAdminEmails = superAdminEmails.subscribe((list) => {
+			adminAllowList = Array.isArray(list)
+				? list
+						.filter((email) => typeof email === 'string')
+						.map((email) => email.toLowerCase())
+				: [];
+		});
+		const stopUserListener = user.subscribe((value) => {
+			currentUserEmail = value?.email?.toLowerCase() ?? null;
+		});
 		
-		// Query for active announcements targeting all users
-		const q = query(
-			collection(db, 'announcements'),
-			where('active', '==', true),
-			orderBy('createdAt', 'desc')
-		);
+		// Query for active announcements (audience is filtered client-side)
+		const q = query(collection(db, 'announcements'), where('active', '==', true));
 		
 		unsubscribeAnnouncements = onSnapshot(q, (snapshot) => {
 			const results: StoredAnnouncement[] = [];
+			const isSuperAdmin =
+				Boolean(currentUserEmail) && adminAllowList.includes(currentUserEmail as string);
 			
 			snapshot.docs.forEach((doc) => {
 				const data = doc.data();
 				const scheduledAt = data.scheduledAt?.toDate?.() ?? null;
 				const expiresAt = data.expiresAt?.toDate?.() ?? null;
 				
-				// Only include if targeting all users (we'll handle admins separately if needed)
+				// Filter by target audience for this user
 				const audience = data.targetAudience ?? 'all';
-				if (audience !== 'all') return;
+				if (audience === 'admins' && !isSuperAdmin) return;
+				if (audience === 'users' && isSuperAdmin) return;
 				
 				results.push({
 					id: doc.id,
@@ -149,12 +204,14 @@ export async function startAnnouncementListener(): Promise<() => void> {
 		}, (error) => {
 			console.error('Failed to subscribe to announcements:', error);
 		});
-		
+
 		return () => {
 			if (unsubscribeAnnouncements) {
 				unsubscribeAnnouncements();
 				unsubscribeAnnouncements = null;
 			}
+			stopSuperAdminEmails();
+			stopUserListener();
 		};
 	} catch (e) {
 		console.error('Failed to start announcement listener:', e);

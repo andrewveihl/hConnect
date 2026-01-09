@@ -262,14 +262,17 @@
 	// Alt text
 	const altText = $derived(alt || (displayName ? `${displayName}'s avatar` : 'Avatar'));
 
-	// Reset error state when props change
+	const fallbackUrlsKey = $derived.by(() => JSON.stringify(fallbackUrls));
+	let lastFallbackKey: string | null = $state(null);
+
+	// Reset only when the actual fallback URL set changes to avoid flicker on unrelated updates.
 	$effect(() => {
-		// Track dependencies
-		src;
-		user;
-		// Reset state
-		imgError = false;
-		fallbackIndex = 0;
+		const key = fallbackUrlsKey;
+		if (key !== lastFallbackKey) {
+			lastFallbackKey = key;
+			imgError = false;
+			fallbackIndex = 0;
+		}
 	});
 
 	// Size classes mapping

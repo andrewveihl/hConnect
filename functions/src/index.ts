@@ -15,8 +15,9 @@ import {
 } from './notifications';
 import { handleTicketAiThreadMessage, handleTicketAiChannelMessage, createManualTicket } from './ticketAi';
 import { sendEmail } from './email';
+import { syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack } from './slack';
 export { requestDomainAutoInvite } from './domainInvites';
-export { slackWebhook, slackOAuth } from './slack';
+export { slackWebhook, slackOAuth, syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack, getSlackChannels } from './slack';
 
 // Define secrets for functions that need them
 const openaiApiKey = defineSecret('OPENAI_API_KEY');
@@ -133,7 +134,34 @@ export const onChannelMessageCreated = onDocumentCreated(
     secrets: [openaiApiKey, resendApiKey]
   },
   async (event) => {
-    await Promise.all([handleServerMessage(event), handleTicketAiChannelMessage(event as any)]);
+    const { serverId, channelId, messageId } = event.params;
+    const messageData = event.data?.data();
+    
+    logger.info('[onChannelMessageCreated] Trigger fired', {
+      serverId,
+      channelId,
+      messageId,
+      hasMessageData: !!messageData
+    });
+    
+    // Run Slack sync separately to capture any errors
+    const slackSyncPromise = (async () => {
+      try {
+        if (messageData) {
+          await syncHConnectMessageToSlack(serverId, channelId, messageId, messageData as any);
+        } else {
+          logger.warn('[onChannelMessageCreated] No messageData for Slack sync', { messageId });
+        }
+      } catch (err) {
+        logger.error('[onChannelMessageCreated] Slack sync error', { messageId, error: err });
+      }
+    })();
+    
+    await Promise.all([
+      handleServerMessage(event),
+      handleTicketAiChannelMessage(event as any),
+      slackSyncPromise
+    ]);
   }
 );
 
@@ -143,7 +171,22 @@ export const onThreadMessageCreated = onDocumentCreated(
     secrets: [resendApiKey]
   },
   async (event) => {
-    await Promise.all([handleThreadMessage(event as any), handleTicketAiThreadMessage(event as any)]);
+    const { serverId, channelId, threadId, messageId } = event.params;
+    const messageData = event.data?.data() || {};
+    
+    logger.info('[onThreadMessageCreated] Trigger fired', {
+      serverId, channelId, threadId, messageId,
+      hasMessageData: !!messageData,
+      isSlackMessage: !!messageData.isSlackMessage
+    });
+    
+    await Promise.all([
+      handleThreadMessage(event as any), 
+      handleTicketAiThreadMessage(event as any),
+      // Sync thread messages to Slack as thread replies
+      syncHConnectThreadMessageToSlack(serverId, channelId, threadId, messageId, messageData as any)
+        .catch(err => logger.error('[onThreadMessageCreated] Slack sync error', { error: err?.message || err }))
+    ]);
   }
 );
 

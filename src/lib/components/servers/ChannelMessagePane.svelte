@@ -205,6 +205,7 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 						on:submitForm={onSubmitForm}
 						on:react={onReact}
 						on:loadMore={onLoadMore}
+						on:atBottom={(event) => dispatch('atBottom', event.detail)}
 						on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
 						on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
 						on:ticketCreated={onTicketCreated}

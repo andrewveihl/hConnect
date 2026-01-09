@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
+exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
@@ -44,11 +44,15 @@ const firestore_2 = require("firebase-admin/firestore");
 const notifications_1 = require("./notifications");
 const ticketAi_1 = require("./ticketAi");
 const email_1 = require("./email");
+const slack_1 = require("./slack");
 var domainInvites_1 = require("./domainInvites");
 Object.defineProperty(exports, "requestDomainAutoInvite", { enumerable: true, get: function () { return domainInvites_1.requestDomainAutoInvite; } });
-var slack_1 = require("./slack");
-Object.defineProperty(exports, "slackWebhook", { enumerable: true, get: function () { return slack_1.slackWebhook; } });
-Object.defineProperty(exports, "slackOAuth", { enumerable: true, get: function () { return slack_1.slackOAuth; } });
+var slack_2 = require("./slack");
+Object.defineProperty(exports, "slackWebhook", { enumerable: true, get: function () { return slack_2.slackWebhook; } });
+Object.defineProperty(exports, "slackOAuth", { enumerable: true, get: function () { return slack_2.slackOAuth; } });
+Object.defineProperty(exports, "syncHConnectMessageToSlack", { enumerable: true, get: function () { return slack_2.syncHConnectMessageToSlack; } });
+Object.defineProperty(exports, "syncHConnectThreadMessageToSlack", { enumerable: true, get: function () { return slack_2.syncHConnectThreadMessageToSlack; } });
+Object.defineProperty(exports, "getSlackChannels", { enumerable: true, get: function () { return slack_2.getSlackChannels; } });
 // Define secrets for functions that need them
 const openaiApiKey = (0, params_1.defineSecret)('OPENAI_API_KEY');
 const resendApiKey = (0, params_1.defineSecret)('RESEND_API_KEY');
@@ -144,13 +148,52 @@ exports.onChannelMessageCreated = (0, firestore_1.onDocumentCreated)({
     document: 'servers/{serverId}/channels/{channelId}/messages/{messageId}',
     secrets: [openaiApiKey, resendApiKey]
 }, async (event) => {
-    await Promise.all([(0, notifications_1.handleServerMessage)(event), (0, ticketAi_1.handleTicketAiChannelMessage)(event)]);
+    const { serverId, channelId, messageId } = event.params;
+    const messageData = event.data?.data();
+    firebase_functions_1.logger.info('[onChannelMessageCreated] Trigger fired', {
+        serverId,
+        channelId,
+        messageId,
+        hasMessageData: !!messageData
+    });
+    // Run Slack sync separately to capture any errors
+    const slackSyncPromise = (async () => {
+        try {
+            if (messageData) {
+                await (0, slack_1.syncHConnectMessageToSlack)(serverId, channelId, messageId, messageData);
+            }
+            else {
+                firebase_functions_1.logger.warn('[onChannelMessageCreated] No messageData for Slack sync', { messageId });
+            }
+        }
+        catch (err) {
+            firebase_functions_1.logger.error('[onChannelMessageCreated] Slack sync error', { messageId, error: err });
+        }
+    })();
+    await Promise.all([
+        (0, notifications_1.handleServerMessage)(event),
+        (0, ticketAi_1.handleTicketAiChannelMessage)(event),
+        slackSyncPromise
+    ]);
 });
 exports.onThreadMessageCreated = (0, firestore_1.onDocumentCreated)({
     document: 'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}',
     secrets: [resendApiKey]
 }, async (event) => {
-    await Promise.all([(0, notifications_1.handleThreadMessage)(event), (0, ticketAi_1.handleTicketAiThreadMessage)(event)]);
+    const { serverId, channelId, threadId, messageId } = event.params;
+    const messageData = event.data?.data() || {};
+    firebase_functions_1.logger.info('[onThreadMessageCreated] Trigger fired', {
+        serverId, channelId, threadId, messageId,
+        hasMessageData: !!messageData,
+        isSlackMessage: !!messageData.isSlackMessage
+    });
+    await Promise.all([
+        (0, notifications_1.handleThreadMessage)(event),
+        (0, ticketAi_1.handleTicketAiThreadMessage)(event),
+        // Sync thread messages to Slack as thread replies
+        (0, slack_1.syncHConnectThreadMessageToSlack)(serverId, channelId, threadId, messageId, messageData)
+            .catch(err => firebase_functions_1.logger.error('[onThreadMessageCreated] Slack sync error', { error: err?.message || err }))
+    ]);
 });
 exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)({
     document: 'dms/{threadID}/messages/{messageId}',

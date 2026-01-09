@@ -786,7 +786,12 @@
 		const prevUnsub = untrack(() => unsubThreads);
 		prevUnsub?.();
 		if (me?.uid) {
-			threadsLoading = true;
+			// Only show loading state if we don't have any threads yet
+			// This prevents the loading flash when navigating back to DMs
+			const currentThreads = untrack(() => threads);
+			if (!currentThreads || currentThreads.length === 0) {
+				threadsLoading = true;
+			}
 			unsubThreads = streamMyDMs(me.uid, (t) => {
 				threads = t;
 				threadsLoading = false;
@@ -936,7 +941,7 @@
 </script>
 
 <aside
-	class="relative w-full md:w-80 shrink-0 sidebar-surface h-[100dvh] flex flex-col text-primary"
+	class="relative w-full md:w-80 shrink-0 sidebar-surface h-full flex flex-col text-primary"
 >
 	<!-- Minimalistic header -->
 	<div class="dms-sidebar-header px-4 py-3 flex items-center justify-between gap-2">
@@ -998,10 +1003,10 @@
 
 		<section>
 			<ul class="space-y-0.5">
-				{#if threadsLoading}
+				{#if threadsLoading && filteredThreads.length === 0}
 					{#each THREAD_PLACEHOLDERS as idx}
 						<li>
-							<div class="flex items-center gap-3 px-2 py-2 animate-pulse">
+							<div class="flex items-center gap-3 px-2 py-2">
 								<div class="w-9 h-9 rounded-full bg-white/10"></div>
 								<div class="flex-1 min-w-0 space-y-1">
 									<div class="h-3 rounded bg-white/15 w-1/2"></div>
@@ -1057,8 +1062,14 @@
 												<i class="bx bx-group"></i>
 											</div>
 										{:else}
+											{@const avatarUser = peopleMap[otherUid ?? ''] ?? {
+												uid: otherUid,
+												photoURL: t.otherPhotoURL ?? t.profile?.photoURL ?? null,
+												displayName: t.otherDisplayName ?? t.profile?.displayName ?? t.profile?.name ?? null,
+												email: t.otherEmail ?? t.profile?.email ?? null
+											}}
 											<Avatar
-												user={peopleMap[otherUid ?? ''] ?? t.profile ?? t}
+												user={avatarUser}
 												name={otherOf(t)}
 												size="sm"
 												showPresence={Boolean(otherUid)}

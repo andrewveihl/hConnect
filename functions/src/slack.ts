@@ -1,20 +1,28 @@
 /**
  * Slack Integration - Cloud Functions
  * Handles incoming Slack webhooks and syncs messages to hConnect
+ * Credentials are stored per-server in Firestore
  */
 
 import { logger } from 'firebase-functions';
-import { onRequest } from 'firebase-functions/v2/https';
-import { defineSecret } from 'firebase-functions/params';
+import { onRequest, onCall, HttpsError } from 'firebase-functions/v2/https';
 import type { Request, Response } from 'express';
 import { db } from './firebase';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import * as crypto from 'crypto';
 
-// Define secrets
-const slackSigningSecret = defineSecret('SLACK_SIGNING_SECRET');
-
 // ============ Types ============
+
+interface SlackAppCredentials {
+	clientId: string;
+	clientSecret: string;
+	signingSecret: string;
+}
+
+interface ServerSlackConfig {
+	enabled: boolean;
+	credentials?: SlackAppCredentials;
+}
 
 interface SlackEventPayload {
 	token: string;
@@ -38,6 +46,15 @@ interface SlackEvent {
 	subtype?: string;
 	bot_id?: string;
 	files?: SlackFile[];
+	// Reaction events
+	reaction?: string;
+	item?: {
+		type: string;
+		channel: string;
+		ts: string;
+	};
+	item_user?: string;
+	event_ts?: string;
 }
 
 interface SlackFile {
@@ -58,10 +75,14 @@ interface SlackChannelBridge {
 	syncDirection: 'slack-to-hconnect' | 'hconnect-to-slack' | 'bidirectional';
 	status: 'active' | 'paused' | 'error' | 'disconnected';
 	showSlackUsernames: boolean;
+	syncReactions?: boolean;
+	syncThreads?: boolean;
+	syncAttachments?: boolean;
 }
 
 interface SlackWorkspace {
 	id: string;
+	serverId: string; // Which hConnect server this workspace belongs to
 	teamId: string;
 	accessToken: string;
 	botAccessToken: string;
@@ -79,6 +100,41 @@ interface SlackUserCache {
 // In-memory cache for Slack users (refresh every hour)
 const slackUserCache: SlackUserCache = {};
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+// ============ Credentials Helpers ============
+
+/**
+ * Get server config with credentials for a server
+ */
+async function getServerSlackConfig(serverId: string): Promise<ServerSlackConfig | null> {
+	const configDoc = await db.doc(`servers/${serverId}/integrations/slack`).get();
+	if (!configDoc.exists) {
+		return null;
+	}
+	return configDoc.data() as ServerSlackConfig;
+}
+
+/**
+ * Find server ID by Slack team ID (look through all workspaces)
+ */
+async function findServerByTeamId(teamId: string): Promise<string | null> {
+	// Search across all servers for a workspace with this team ID
+	const serversSnapshot = await db.collection('servers').get();
+	
+	for (const serverDoc of serversSnapshot.docs) {
+		const workspacesSnapshot = await db
+			.collection(`servers/${serverDoc.id}/integrations/slack/workspaces`)
+			.where('teamId', '==', teamId)
+			.limit(1)
+			.get();
+		
+		if (!workspacesSnapshot.empty) {
+			return serverDoc.id;
+		}
+	}
+	
+	return null;
+}
 
 // ============ Verification ============
 
@@ -207,33 +263,43 @@ function convertSlackToHConnect(text: string): string {
 // ============ Bridge Lookup ============
 
 /**
- * Find bridge for a Slack channel
+ * Find bridge for a Slack channel (searches across all servers)
+ * Returns the bridge and its server ID
  */
 async function findBridgeForSlackChannel(
 	teamId: string,
 	channelId: string
-): Promise<SlackChannelBridge | null> {
-	const bridgesSnapshot = await db
-		.collection('integrations/slack/bridges')
-		.where('slackTeamId', '==', teamId)
-		.where('slackChannelId', '==', channelId)
-		.where('status', '==', 'active')
-		.get();
+): Promise<{ bridge: SlackChannelBridge; serverId: string } | null> {
+	// Search across all servers
+	const serversSnapshot = await db.collection('servers').get();
+	
+	for (const serverDoc of serversSnapshot.docs) {
+		const bridgesSnapshot = await db
+			.collection(`servers/${serverDoc.id}/integrations/slack/bridges`)
+			.where('slackTeamId', '==', teamId)
+			.where('slackChannelId', '==', channelId)
+			.where('status', '==', 'active')
+			.limit(1)
+			.get();
 
-	if (bridgesSnapshot.empty) {
-		return null;
+		if (!bridgesSnapshot.empty) {
+			const doc = bridgesSnapshot.docs[0];
+			return {
+				bridge: { id: doc.id, ...doc.data() } as SlackChannelBridge,
+				serverId: serverDoc.id
+			};
+		}
 	}
 
-	const doc = bridgesSnapshot.docs[0];
-	return { id: doc.id, ...doc.data() } as SlackChannelBridge;
+	return null;
 }
 
 /**
- * Get workspace by team ID
+ * Get workspace by team ID for a specific server
  */
-async function getWorkspaceByTeamId(teamId: string): Promise<SlackWorkspace | null> {
+async function getWorkspaceByTeamId(serverId: string, teamId: string): Promise<SlackWorkspace | null> {
 	const workspacesSnapshot = await db
-		.collection('integrations/slack/workspaces')
+		.collection(`servers/${serverId}/integrations/slack/workspaces`)
 		.where('teamId', '==', teamId)
 		.limit(1)
 		.get();
@@ -243,7 +309,7 @@ async function getWorkspaceByTeamId(teamId: string): Promise<SlackWorkspace | nu
 	}
 
 	const doc = workspacesSnapshot.docs[0];
-	return { id: doc.id, ...doc.data() } as SlackWorkspace;
+	return { id: doc.id, serverId, ...doc.data() } as SlackWorkspace;
 }
 
 // ============ Message Sync ============
@@ -254,7 +320,8 @@ async function getWorkspaceByTeamId(teamId: string): Promise<SlackWorkspace | nu
 async function syncSlackMessageToHConnect(
 	event: SlackEvent,
 	bridge: SlackChannelBridge,
-	workspace: SlackWorkspace
+	workspace: SlackWorkspace,
+	serverId: string
 ): Promise<void> {
 	// Skip bot messages to avoid loops
 	if (event.bot_id || event.subtype === 'bot_message') {
@@ -289,6 +356,23 @@ async function syncSlackMessageToHConnect(
 		.collection(`servers/${bridge.hconnectServerId}/channels/${bridge.hconnectChannelId}/messages`)
 		.doc();
 
+	// Check if this is a thread reply and find the parent message
+	let replyToId: string | null = null;
+	let isThreadReply = false;
+	
+	if (event.thread_ts && event.thread_ts !== event.ts) {
+		isThreadReply = true;
+		// Find the parent message in hConnect
+		const parentMessage = await findHConnectMessageBySlackTs(
+			serverId,
+			bridge.hconnectChannelId,
+			event.thread_ts
+		);
+		if (parentMessage) {
+			replyToId = parentMessage.id;
+		}
+	}
+
 	const messageData = {
 		// Core fields
 		uid: `slack:${event.user}`, // Special UID format for Slack users
@@ -305,6 +389,10 @@ async function syncSlackMessageToHConnect(
 		},
 		displayName: authorName,
 
+		// Thread/reply info
+		...(replyToId && { replyTo: replyToId }),
+		...(isThreadReply && { isThreadReply: true }),
+
 		// Slack metadata
 		slackMeta: {
 			teamId: event.team || bridge.slackTeamId,
@@ -312,7 +400,8 @@ async function syncSlackMessageToHConnect(
 			userId: event.user,
 			messageTs: event.ts,
 			threadTs: event.thread_ts || null,
-			bridgeId: bridge.id
+			bridgeId: bridge.id,
+			isThreadReply
 		},
 
 		// Timestamps
@@ -326,8 +415,8 @@ async function syncSlackMessageToHConnect(
 
 	await messageRef.set(messageData);
 
-	// Update bridge stats
-	await db.doc(`integrations/slack/bridges/${bridge.id}`).update({
+	// Update bridge stats (using per-server path)
+	await db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
 		lastSyncAt: Timestamp.now(),
 		messageCount: FieldValue.increment(1)
 	});
@@ -339,19 +428,121 @@ async function syncSlackMessageToHConnect(
 	});
 }
 
+/**
+ * Find hConnect message by Slack timestamp
+ */
+async function findHConnectMessageBySlackTs(
+	serverId: string,
+	channelId: string,
+	slackTs: string
+): Promise<{ id: string; reactions?: Record<string, string[]> } | null> {
+	const messagesSnapshot = await db
+		.collection(`servers/${serverId}/channels/${channelId}/messages`)
+		.where('slackMeta.messageTs', '==', slackTs)
+		.limit(1)
+		.get();
+
+	if (messagesSnapshot.empty) {
+		return null;
+	}
+
+	const doc = messagesSnapshot.docs[0];
+	const data = doc.data();
+	return {
+		id: doc.id,
+		reactions: data.reactions || {}
+	};
+}
+
+/**
+ * Sync a Slack reaction to hConnect
+ */
+async function syncSlackReactionToHConnect(
+	event: SlackEvent,
+	bridge: SlackChannelBridge,
+	workspace: SlackWorkspace,
+	serverId: string,
+	isAdd: boolean
+): Promise<void> {
+	if (!event.item || !event.reaction) {
+		logger.warn('[slack] Missing item or reaction in reaction event');
+		return;
+	}
+
+	// Only handle reactions on messages
+	if (event.item.type !== 'message') {
+		logger.info('[slack] Ignoring reaction on non-message item', { type: event.item.type });
+		return;
+	}
+
+	// Find the corresponding hConnect message
+	const message = await findHConnectMessageBySlackTs(
+		serverId,
+		bridge.hconnectChannelId,
+		event.item.ts
+	);
+
+	if (!message) {
+		logger.info('[slack] No matching hConnect message for reaction', { slackTs: event.item.ts });
+		return;
+	}
+
+	// Convert Slack emoji name to a simpler format
+	// Slack uses names like "thumbsup" while we might use "👍"
+	const emoji = `:${event.reaction}:`;
+	const slackUserId = `slack:${event.user}`;
+
+	// Get current reactions on the message
+	const messageRef = db.doc(
+		`servers/${serverId}/channels/${bridge.hconnectChannelId}/messages/${message.id}`
+	);
+
+	if (isAdd) {
+		// Add reaction
+		await messageRef.update({
+			[`reactions.${event.reaction}`]: FieldValue.arrayUnion(slackUserId),
+			updatedAt: Timestamp.now()
+		});
+		logger.info('[slack] Reaction added to hConnect message', {
+			messageId: message.id,
+			emoji,
+			user: slackUserId
+		});
+	} else {
+		// Remove reaction
+		await messageRef.update({
+			[`reactions.${event.reaction}`]: FieldValue.arrayRemove(slackUserId),
+			updatedAt: Timestamp.now()
+		});
+		logger.info('[slack] Reaction removed from hConnect message', {
+			messageId: message.id,
+			emoji,
+			user: slackUserId
+		});
+	}
+}
+
 // ============ Main Webhook Handler ============
 
 /**
  * Main Slack Events API webhook handler
  * Receives events from Slack and syncs to hConnect
+ * Credentials are loaded from per-server Firestore config
  */
 export const slackWebhook = onRequest(
 	{
 		region: 'us-central1',
-		cors: false,
-		secrets: [slackSigningSecret]
+		cors: false
 	},
 	async (req: Request, res: Response) => {
+		// Log all incoming requests for debugging
+		logger.info('[slack] Webhook received', { 
+			method: req.method,
+			payloadType: req.body?.type,
+			hasSignature: !!req.headers['x-slack-signature'],
+			hasTimestamp: !!req.headers['x-slack-request-timestamp']
+		});
+
 		// Only accept POST requests
 		if (req.method !== 'POST') {
 			res.status(405).send('Method not allowed');
@@ -361,20 +552,58 @@ export const slackWebhook = onRequest(
 		const rawBody = JSON.stringify(req.body);
 		const timestamp = req.headers['x-slack-request-timestamp'] as string;
 		const signature = req.headers['x-slack-signature'] as string;
+		const payload = req.body as SlackEventPayload;
 
-		// Verify signature
-		if (!verifySlackSignature(slackSigningSecret.value(), signature, timestamp, rawBody)) {
-			logger.warn('[slack] Invalid signature');
-			res.status(401).send('Invalid signature');
+		logger.info('[slack] Processing payload', { 
+			type: payload.type, 
+			teamId: payload.team_id,
+			eventType: payload.event?.type,
+			eventChannel: payload.event?.channel,
+			eventUser: payload.event?.user
+		});
+
+		// Handle URL verification challenge (no signature verification needed for this)
+		// Slack sends this when you first configure the Events URL
+		if (payload.type === 'url_verification') {
+			logger.info('[slack] URL verification challenge received', { challenge: payload.challenge });
+			// Respond with just the challenge value as plain text
+			res.setHeader('Content-Type', 'text/plain');
+			res.status(200).send(payload.challenge);
 			return;
 		}
 
-		const payload = req.body as SlackEventPayload;
+		// For events, we need to find the server to get signing secret
+		const teamId = payload.team_id;
+		if (!teamId) {
+			logger.warn('[slack] No team_id in payload');
+			res.status(400).send('Missing team_id');
+			return;
+		}
 
-		// Handle URL verification challenge
-		if (payload.type === 'url_verification') {
-			logger.info('[slack] URL verification challenge');
-			res.status(200).send({ challenge: payload.challenge });
+		// Find which server this team belongs to
+		const serverId = await findServerByTeamId(teamId);
+		if (!serverId) {
+			logger.warn('[slack] No server found for team', { teamId });
+			res.status(404).send('No server configured for this Slack team');
+			return;
+		}
+
+		// Get server's Slack config with signing secret
+		const config = await getServerSlackConfig(serverId);
+		if (!config?.credentials?.signingSecret) {
+			logger.warn('[slack] No signing secret configured for server', { serverId });
+			res.status(500).send('Server not properly configured');
+			return;
+		}
+
+		// Verify signature using server's signing secret
+		if (!verifySlackSignature(config.credentials.signingSecret, signature, timestamp, rawBody)) {
+			logger.warn('[slack] Invalid signature', {
+				signingSecretPrefix: config.credentials.signingSecret?.substring(0, 8),
+				signaturePrefix: signature?.substring(0, 20),
+				bodyLength: rawBody?.length
+			});
+			res.status(401).send('Invalid signature');
 			return;
 		}
 
@@ -382,17 +611,62 @@ export const slackWebhook = onRequest(
 		if (payload.type === 'event_callback') {
 			const event = payload.event;
 
-			// Only handle message events for now
-			if (event.type !== 'message') {
-				res.status(200).send('OK');
-				return;
-			}
+			// Handle different event types
+			const eventType = event.type;
+			logger.info('[slack] Processing event', { type: eventType, subtype: event.subtype });
 
 			try {
-				// Find bridge for this channel
-				const bridge = await findBridgeForSlackChannel(payload.team_id, event.channel);
+				// Handle reaction events
+				if (eventType === 'reaction_added' || eventType === 'reaction_removed') {
+					const channelId = event.item?.channel || event.channel;
+					
+					// Find bridge for this channel
+					const bridgeResult = await findBridgeForSlackChannel(payload.team_id, channelId);
+					if (!bridgeResult) {
+						logger.info('[slack] No active bridge for reaction channel', { channelId });
+						res.status(200).send('OK');
+						return;
+					}
 
-				if (!bridge) {
+					const { bridge } = bridgeResult;
+
+					// Check if reactions sync is enabled (via bridge settings)
+					// For now, always sync if bridge exists and is bidirectional or slack-to-hconnect
+					if (bridge.syncDirection === 'hconnect-to-slack') {
+						logger.info('[slack] Bridge is outbound only, skipping reaction');
+						res.status(200).send('OK');
+						return;
+					}
+
+					const workspace = await getWorkspaceByTeamId(serverId, payload.team_id);
+					if (!workspace) {
+						logger.error('[slack] Workspace not found for reaction', { teamId: payload.team_id });
+						res.status(200).send('OK');
+						return;
+					}
+
+					await syncSlackReactionToHConnect(
+						event,
+						bridge,
+						workspace,
+						serverId,
+						eventType === 'reaction_added'
+					);
+
+					res.status(200).send('OK');
+					return;
+				}
+
+				// Handle message events
+				if (eventType !== 'message') {
+					res.status(200).send('OK');
+					return;
+				}
+
+				// Find bridge for this channel
+				const bridgeResult = await findBridgeForSlackChannel(payload.team_id, event.channel);
+
+				if (!bridgeResult) {
 					logger.info('[slack] No active bridge for channel', {
 						teamId: payload.team_id,
 						channelId: event.channel
@@ -400,6 +674,8 @@ export const slackWebhook = onRequest(
 					res.status(200).send('OK');
 					return;
 				}
+
+				const { bridge } = bridgeResult;
 
 				// Check sync direction
 				if (bridge.syncDirection === 'hconnect-to-slack') {
@@ -409,15 +685,15 @@ export const slackWebhook = onRequest(
 				}
 
 				// Get workspace for API calls
-				const workspace = await getWorkspaceByTeamId(payload.team_id);
+				const workspace = await getWorkspaceByTeamId(serverId, payload.team_id);
 				if (!workspace) {
-					logger.error('[slack] Workspace not found', { teamId: payload.team_id });
+					logger.error('[slack] Workspace not found', { teamId: payload.team_id, serverId });
 					res.status(200).send('OK');
 					return;
 				}
 
 				// Sync the message
-				await syncSlackMessageToHConnect(event, bridge, workspace);
+				await syncSlackMessageToHConnect(event, bridge, workspace, serverId);
 
 				res.status(200).send('OK');
 			} catch (err) {
@@ -435,6 +711,7 @@ export const slackWebhook = onRequest(
 
 /**
  * OAuth callback handler for Slack app installation
+ * State parameter format: JSON with { returnUrl, serverId }
  */
 export const slackOAuth = onRequest(
 	{
@@ -442,23 +719,763 @@ export const slackOAuth = onRequest(
 		cors: true
 	},
 	async (req: Request, res: Response) => {
-		const { code, state } = req.query;
+		const { code, state, error: oauthError } = req.query;
+
+		// Parse state to get serverId and returnUrl
+		let stateData: { returnUrl?: string; serverId?: string } = {};
+		let returnUrl = 'https://hconnect-6212b.web.app';
+		let serverId: string | undefined;
+
+		if (state) {
+			try {
+				stateData = JSON.parse(decodeURIComponent(String(state)));
+				returnUrl = stateData.returnUrl || returnUrl;
+				serverId = stateData.serverId;
+			} catch {
+				// State might be just a URL for backward compatibility
+				returnUrl = String(state);
+			}
+		}
+
+		// Handle OAuth errors
+		if (oauthError) {
+			logger.error('[slack] OAuth error from Slack', { error: oauthError });
+			res.redirect(302, `${returnUrl}?slack_error=${encodeURIComponent(String(oauthError))}`);
+			return;
+		}
 
 		if (!code) {
 			res.status(400).send('Missing authorization code');
 			return;
 		}
 
-		// TODO: Exchange code for access token
-		// For now, redirect to app with instructions
+		if (!serverId) {
+			logger.error('[slack] No serverId in OAuth state');
+			res.redirect(302, `${returnUrl}?slack_error=missing_server_id`);
+			return;
+		}
 
-		logger.info('[slack] OAuth callback received', { state });
+		logger.info('[slack] OAuth callback received', { serverId, returnUrl });
 
-		// Redirect back to hConnect with success
-		const redirectUrl = state
-			? `${state}?slack_connected=true`
-			: 'https://hconnect-6212b.web.app?slack_connected=true';
+		// Get server's Slack credentials
+		const config = await getServerSlackConfig(serverId);
+		if (!config?.credentials?.clientId || !config?.credentials?.clientSecret) {
+			logger.error('[slack] Server missing Slack credentials', { serverId });
+			res.redirect(302, `${returnUrl}?slack_error=missing_credentials`);
+			return;
+		}
 
-		res.redirect(302, redirectUrl);
+		try {
+			// Exchange code for access token
+			const tokenResponse = await fetch('https://slack.com/api/oauth.v2.access', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded'
+				},
+				body: new URLSearchParams({
+					client_id: config.credentials.clientId,
+					client_secret: config.credentials.clientSecret,
+					code: String(code),
+					redirect_uri: 'https://slackoauth-xpac7ukbha-uc.a.run.app'
+				})
+			});
+
+			const tokenData = await tokenResponse.json() as {
+				ok: boolean;
+				error?: string;
+				access_token?: string;
+				token_type?: string;
+				scope?: string;
+				bot_user_id?: string;
+				app_id?: string;
+				team?: {
+					id: string;
+					name: string;
+				};
+				authed_user?: {
+					id: string;
+					access_token?: string;
+				};
+			};
+
+			if (!tokenData.ok || !tokenData.access_token) {
+				logger.error('[slack] Token exchange failed', { error: tokenData.error });
+				res.redirect(302, `${returnUrl}?slack_error=${encodeURIComponent(tokenData.error || 'token_exchange_failed')}`);
+				return;
+			}
+
+			// Fetch team info for more details
+			const teamInfoResponse = await fetch('https://slack.com/api/team.info', {
+				headers: {
+					'Authorization': `Bearer ${tokenData.access_token}`,
+					'Content-Type': 'application/json'
+				}
+			});
+
+			const teamInfo = await teamInfoResponse.json() as {
+				ok: boolean;
+				team?: {
+					id: string;
+					name: string;
+					domain: string;
+					icon?: {
+						image_44?: string;
+						image_68?: string;
+					};
+				};
+			};
+
+			// Store the workspace in Firestore under the server's path
+			const workspaceRef = db.collection(`servers/${serverId}/integrations/slack/workspaces`).doc();
+			
+			await workspaceRef.set({
+				serverId,
+				teamId: tokenData.team?.id || '',
+				teamName: tokenData.team?.name || teamInfo.team?.name || 'Unknown Workspace',
+				teamDomain: teamInfo.team?.domain || '',
+				teamIcon: teamInfo.team?.icon?.image_68 || teamInfo.team?.icon?.image_44 || null,
+				accessToken: tokenData.access_token, // TODO: Encrypt this in production
+				botAccessToken: tokenData.access_token,
+				botUserId: tokenData.bot_user_id || '',
+				installedBy: tokenData.authed_user?.id || '',
+				installedAt: Timestamp.now(),
+				scopes: (tokenData.scope || '').split(',')
+			});
+
+			logger.info('[slack] Workspace connected successfully', {
+				serverId,
+				teamId: tokenData.team?.id,
+				teamName: tokenData.team?.name,
+				workspaceId: workspaceRef.id
+			});
+
+			// Redirect back to hConnect with success
+			res.redirect(302, `${returnUrl}?slack_connected=true&workspace=${encodeURIComponent(tokenData.team?.name || '')}`);
+		} catch (err) {
+			logger.error('[slack] OAuth error', { error: err });
+			res.redirect(302, `${returnUrl}?slack_error=server_error`);
+		}
 	}
 );
+
+// ============ Outbound Sync (hConnect → Slack) ============
+
+/**
+ * Convert hConnect markdown to Slack mrkdwn format
+ */
+function convertHConnectToSlack(text: string): string {
+	if (!text) return '';
+
+	let converted = text;
+
+	// Convert markdown bold **text** to Slack *text*
+	converted = converted.replace(/\*\*([^*]+)\*\*/g, '*$1*');
+
+	// Convert markdown italic *text* to Slack _text_
+	// Be careful not to convert already-converted bold
+	converted = converted.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '_$1_');
+
+	// Convert markdown strikethrough ~~text~~ to Slack ~text~
+	converted = converted.replace(/~~([^~]+)~~/g, '~$1~');
+
+	// Convert markdown links [text](url) to Slack <url|text>
+	converted = converted.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
+
+	// Keep code blocks and inline code as-is (compatible)
+
+	return converted;
+}
+
+/**
+ * Post a message to Slack channel
+ */
+async function postToSlack(
+	botToken: string,
+	channelId: string,
+	text: string,
+	username?: string,
+	iconUrl?: string,
+	threadTs?: string
+): Promise<{ ok: boolean; ts?: string; error?: string }> {
+	const payload: Record<string, unknown> = {
+		channel: channelId,
+		text: text,
+		unfurl_links: false,
+		unfurl_media: true
+	};
+
+	// Add username display if provided
+	if (username) {
+		payload.username = username;
+	}
+	if (iconUrl) {
+		payload.icon_url = iconUrl;
+	}
+	// Add thread_ts for thread replies
+	if (threadTs) {
+		payload.thread_ts = threadTs;
+	}
+
+	const response = await fetch('https://slack.com/api/chat.postMessage', {
+		method: 'POST',
+		headers: {
+			'Authorization': `Bearer ${botToken}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify(payload)
+	});
+
+	return response.json() as Promise<{ ok: boolean; ts?: string; error?: string }>;
+}
+
+/**
+ * Find bridges for an hConnect channel that sync outbound
+ */
+async function findBridgesForHConnectChannel(
+	serverId: string,
+	channelId: string
+): Promise<SlackChannelBridge[]> {
+	const bridgesSnapshot = await db
+		.collection(`servers/${serverId}/integrations/slack/bridges`)
+		.where('hconnectServerId', '==', serverId)
+		.where('hconnectChannelId', '==', channelId)
+		.where('status', '==', 'active')
+		.get();
+
+	if (bridgesSnapshot.empty) {
+		return [];
+	}
+
+	return bridgesSnapshot.docs.map(doc => ({
+		id: doc.id,
+		...doc.data()
+	})) as SlackChannelBridge[];
+}
+
+/**
+ * Sync an hConnect message to Slack
+ * Called from Firestore trigger in index.ts
+ */
+export async function syncHConnectMessageToSlack(
+	serverId: string,
+	channelId: string,
+	messageId: string,
+	messageData: {
+		uid: string;
+		text?: string;
+		content?: string;
+		displayName?: string;
+		authorId?: string;
+		isSlackMessage?: boolean;
+		slackMeta?: { messageTs?: string };
+		photoURL?: string;
+		replyTo?: string | { messageId?: string }; // Parent message ID or reply reference object
+	}
+): Promise<void> {
+	logger.info('[slack-outbound] syncHConnectMessageToSlack called', { 
+		serverId, 
+		channelId, 
+		messageId,
+		isSlackMessage: !!messageData.isSlackMessage,
+		hasSlackMeta: !!messageData.slackMeta?.messageTs
+	});
+
+	// Skip if this message came from Slack (prevent loops)
+	if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {
+		logger.info('[slack-outbound] Skipping message from Slack', { messageId });
+		return;
+	}
+
+	// Find active bridges for this channel that sync outbound
+	const bridges = await findBridgesForHConnectChannel(serverId, channelId);
+	logger.info('[slack-outbound] Found bridges', { 
+		channelId, 
+		bridgeCount: bridges.length,
+		bridges: bridges.map(b => ({ id: b.id, direction: b.syncDirection, status: b.status }))
+	});
+	
+	const outboundBridges = bridges.filter(b => 
+		b.syncDirection === 'hconnect-to-slack' || b.syncDirection === 'bidirectional'
+	);
+
+	if (outboundBridges.length === 0) {
+		logger.info('[slack-outbound] No outbound bridges configured', { channelId });
+		return; // No outbound bridges configured
+	}
+
+	const text = messageData.text || messageData.content || '';
+	if (!text.trim()) {
+		return; // Skip empty messages
+	}
+
+	const slackText = convertHConnectToSlack(text);
+
+	// Get server-level Slack config for avatar override
+	let avatarUrl = messageData.photoURL;
+	try {
+		const configDoc = await db.doc(`servers/${serverId}/integrations/slack`).get();
+		if (configDoc.exists) {
+			const config = configDoc.data();
+			// Use server-level avatar override if set
+			if (config?.hconnectAvatarUrl) {
+				avatarUrl = config.hconnectAvatarUrl;
+			}
+		}
+	} catch (err) {
+		logger.warn('[slack-outbound] Could not read server Slack config for avatar', { serverId });
+	}
+
+	// Check if this is a thread reply and find parent's Slack timestamp
+	// replyTo can be an object { messageId: string, ... } or just a string
+	let parentSlackTs: string | undefined;
+	const replyToId = typeof messageData.replyTo === 'object' 
+		? messageData.replyTo?.messageId 
+		: messageData.replyTo;
+	
+	if (replyToId) {
+		try {
+			const parentDoc = await db
+				.doc(`servers/${serverId}/channels/${channelId}/messages/${replyToId}`)
+				.get();
+			if (parentDoc.exists) {
+				const parentData = parentDoc.data();
+				// Check if parent has a Slack timestamp (either from original sync or from slackMeta)
+				if (parentData?.slackMeta?.messageTs) {
+					parentSlackTs = parentData.slackMeta.messageTs;
+				} else if (parentData?.slackTs) {
+					parentSlackTs = parentData.slackTs;
+				}
+				logger.info('[slack-outbound] Found parent message for thread', {
+					messageId,
+					replyToId,
+					parentSlackTs: parentSlackTs || 'not found'
+				});
+			}
+		} catch (err) {
+			logger.warn('[slack-outbound] Could not find parent message for thread', { 
+				messageId, 
+				replyToId 
+			});
+		}
+	}
+
+	for (const bridge of outboundBridges) {
+		try {
+			// Skip thread sync if bridge explicitly has it disabled
+			if (replyToId && bridge.syncThreads === false) {
+				logger.info('[slack-outbound] Skipping thread reply - syncThreads disabled', {
+					bridgeId: bridge.id,
+					messageId
+				});
+				continue;
+			}
+
+			// Get workspace for bot token (now from per-server path)
+			const workspace = await getWorkspaceByTeamId(serverId, bridge.slackTeamId);
+			if (!workspace) {
+				logger.warn('[slack-outbound] Workspace not found', {
+					bridgeId: bridge.id,
+					teamId: bridge.slackTeamId,
+					serverId
+				});
+				continue;
+			}
+
+			// Post to Slack - always show the hConnect user's display name
+			// Pass parentSlackTs for thread replies
+			const result = await postToSlack(
+				workspace.botAccessToken,
+				bridge.slackChannelId,
+				slackText,
+				messageData.displayName || 'hConnect User',
+				avatarUrl,
+				parentSlackTs
+			);
+
+			if (!result.ok) {
+				logger.error('[slack-outbound] Failed to post to Slack', {
+					bridgeId: bridge.id,
+					error: result.error
+				});
+				
+				// Update bridge status on persistent errors (using per-server path)
+				if (result.error === 'channel_not_found' || result.error === 'not_in_channel') {
+					await db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
+						status: 'error',
+						lastError: result.error,
+						updatedAt: Timestamp.now()
+					});
+				}
+				continue;
+			}
+
+			// Store the Slack timestamp on the hConnect message for future thread replies
+			if (result.ts) {
+				try {
+					await db.doc(`servers/${serverId}/channels/${channelId}/messages/${messageId}`).update({
+						slackTs: result.ts,
+						'slackMeta.messageTs': result.ts,
+						'slackMeta.channelId': bridge.slackChannelId,
+						'slackMeta.teamId': bridge.slackTeamId
+					});
+				} catch (err) {
+					logger.warn('[slack-outbound] Could not store Slack timestamp on message', { messageId });
+				}
+			}
+
+			// Update bridge stats (using per-server path)
+			await db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
+				lastSyncAt: Timestamp.now(),
+				messageCount: FieldValue.increment(1)
+			});
+
+			logger.info('[slack-outbound] Message synced to Slack', {
+				bridgeId: bridge.id,
+				slackTs: result.ts,
+				isThreadReply: !!parentSlackTs
+			});
+		} catch (err) {
+			logger.error('[slack-outbound] Error syncing to Slack', {
+				bridgeId: bridge.id,
+				error: err
+			});
+		}
+	}
+}
+
+/**
+ * Sync an hConnect thread message to Slack
+ * Called from Firestore trigger for thread messages
+ * Thread messages are stored at: servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}
+ * The threadId is the parent message ID in hConnect
+ */
+export async function syncHConnectThreadMessageToSlack(
+	serverId: string,
+	channelId: string,
+	threadId: string, // This is the parent message ID in hConnect
+	messageId: string,
+	messageData: {
+		uid: string;
+		text?: string;
+		content?: string;
+		displayName?: string;
+		authorId?: string;
+		isSlackMessage?: boolean;
+		slackMeta?: { messageTs?: string };
+		photoURL?: string;
+	}
+): Promise<void> {
+	logger.info('[slack-outbound-thread] syncHConnectThreadMessageToSlack called', {
+		serverId,
+		channelId,
+		threadId,
+		messageId,
+		isSlackMessage: !!messageData.isSlackMessage,
+		hasSlackMeta: !!messageData.slackMeta?.messageTs
+	});
+
+	// Skip if this message came from Slack (prevent loops)
+	if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {
+		logger.info('[slack-outbound-thread] Skipping message from Slack', { messageId, threadId });
+		return;
+	}
+
+	// Find active bridges for this channel that sync outbound
+	const bridges = await findBridgesForHConnectChannel(serverId, channelId);
+	logger.info('[slack-outbound-thread] Found bridges', {
+		channelId,
+		threadId,
+		bridgeCount: bridges.length,
+		bridges: bridges.map(b => ({ id: b.id, direction: b.syncDirection, status: b.status, syncThreads: b.syncThreads }))
+	});
+	
+	const outboundBridges = bridges.filter(b => 
+		(b.syncDirection === 'hconnect-to-slack' || b.syncDirection === 'bidirectional') &&
+		b.syncThreads !== false // Default to true if not specified
+	);
+
+	if (outboundBridges.length === 0) {
+		logger.info('[slack-outbound-thread] No outbound bridges with thread sync enabled', { 
+			channelId, 
+			threadId 
+		});
+		return;
+	}
+
+	const text = messageData.text || messageData.content || '';
+	if (!text.trim()) {
+		return; // Skip empty messages
+	}
+
+	const slackText = convertHConnectToSlack(text);
+
+	// Get server-level Slack config for avatar override
+	let avatarUrl = messageData.photoURL;
+	try {
+		const configDoc = await db.doc(`servers/${serverId}/integrations/slack`).get();
+		if (configDoc.exists) {
+			const config = configDoc.data();
+			if (config?.hconnectAvatarUrl) {
+				avatarUrl = config.hconnectAvatarUrl;
+			}
+		}
+	} catch (err) {
+		logger.warn('[slack-outbound-thread] Could not read server Slack config for avatar', { serverId });
+	}
+
+	// Find parent message's Slack timestamp
+	// The threadId is the parent message ID in hConnect
+	let parentSlackTs: string | undefined;
+	try {
+		const parentDoc = await db
+			.doc(`servers/${serverId}/channels/${channelId}/messages/${threadId}`)
+			.get();
+		if (parentDoc.exists) {
+			const parentData = parentDoc.data();
+			if (parentData?.slackMeta?.messageTs) {
+				parentSlackTs = parentData.slackMeta.messageTs;
+			} else if (parentData?.slackTs) {
+				parentSlackTs = parentData.slackTs;
+			}
+			logger.info('[slack-outbound-thread] Found parent message', {
+				threadId,
+				parentSlackTs: parentSlackTs || 'not found'
+			});
+		} else {
+			logger.warn('[slack-outbound-thread] Parent message not found', { threadId });
+		}
+	} catch (err) {
+		logger.warn('[slack-outbound-thread] Could not find parent message', { 
+			threadId,
+			error: err
+		});
+	}
+
+	if (!parentSlackTs) {
+		logger.warn('[slack-outbound-thread] Cannot sync thread - parent has no Slack timestamp', {
+			threadId,
+			messageId
+		});
+		return;
+	}
+
+	for (const bridge of outboundBridges) {
+		try {
+			const workspace = await getWorkspaceByTeamId(serverId, bridge.slackTeamId);
+			if (!workspace) {
+				logger.warn('[slack-outbound-thread] Workspace not found', {
+					bridgeId: bridge.id,
+					teamId: bridge.slackTeamId,
+					serverId
+				});
+				continue;
+			}
+
+			// Post to Slack as a thread reply
+			const result = await postToSlack(
+				workspace.botAccessToken,
+				bridge.slackChannelId,
+				slackText,
+				messageData.displayName || 'hConnect User',
+				avatarUrl,
+				parentSlackTs // This makes it a thread reply
+			);
+
+			if (!result.ok) {
+				logger.error('[slack-outbound-thread] Failed to post to Slack', {
+					bridgeId: bridge.id,
+					error: result.error
+				});
+				continue;
+			}
+
+			// Store the Slack timestamp on the thread message
+			if (result.ts) {
+				try {
+					await db.doc(`servers/${serverId}/channels/${channelId}/threads/${threadId}/messages/${messageId}`).update({
+						slackTs: result.ts,
+						'slackMeta.messageTs': result.ts,
+						'slackMeta.channelId': bridge.slackChannelId,
+						'slackMeta.teamId': bridge.slackTeamId,
+						'slackMeta.threadTs': parentSlackTs
+					});
+				} catch (err) {
+					logger.warn('[slack-outbound-thread] Could not store Slack timestamp', { messageId });
+				}
+			}
+
+			// Update bridge stats
+			await db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
+				lastSyncAt: Timestamp.now(),
+				messageCount: FieldValue.increment(1)
+			});
+
+			logger.info('[slack-outbound-thread] Thread message synced to Slack', {
+				bridgeId: bridge.id,
+				slackTs: result.ts,
+				parentSlackTs
+			});
+		} catch (err) {
+			logger.error('[slack-outbound-thread] Error syncing to Slack', {
+				bridgeId: bridge.id,
+				error: err
+			});
+		}
+	}
+}
+
+// ============ Channel List API ============
+
+interface SlackChannel {
+	id: string;
+	name: string;
+	is_private: boolean;
+	is_member: boolean;
+	num_members?: number;
+	topic?: string;
+	purpose?: string;
+}
+
+/**
+ * Fetch list of Slack channels for a workspace
+ * Called from frontend to populate channel picker
+ */
+export const getSlackChannels = onCall(
+	{
+		region: 'us-central1'
+	},
+	async (request) => {
+		// Require authentication
+		if (!request.auth) {
+			throw new HttpsError('unauthenticated', 'Must be logged in');
+		}
+
+		const { serverId, workspaceId } = request.data as { serverId: string; workspaceId: string };
+
+		if (!serverId || !workspaceId) {
+			throw new HttpsError('invalid-argument', 'Missing serverId or workspaceId');
+		}
+
+		logger.info('[slack] Fetching channels', { serverId, workspaceId });
+
+		try {
+			// Get workspace to get the bot token
+			const workspaceDoc = await db
+				.doc(`servers/${serverId}/integrations/slack/workspaces/${workspaceId}`)
+				.get();
+
+			if (!workspaceDoc.exists) {
+				throw new HttpsError('not-found', 'Workspace not found');
+			}
+
+			const workspace = workspaceDoc.data() as SlackWorkspace;
+			const botToken = workspace.botAccessToken || workspace.accessToken;
+
+			if (!botToken) {
+				throw new HttpsError('failed-precondition', 'No bot token available');
+			}
+
+			// Fetch public channels
+			const publicChannels = await fetchSlackChannelList(botToken, false);
+			
+			// Fetch private channels the bot is in
+			const privateChannels = await fetchSlackChannelList(botToken, true);
+
+			const allChannels = [...publicChannels, ...privateChannels];
+
+			// Sort by name
+			allChannels.sort((a, b) => a.name.localeCompare(b.name));
+
+			logger.info('[slack] Fetched channels', { 
+				count: allChannels.length,
+				public: publicChannels.length,
+				private: privateChannels.length
+			});
+
+			return { channels: allChannels };
+		} catch (err) {
+			logger.error('[slack] Failed to fetch channels', { error: err });
+			if (err instanceof HttpsError) throw err;
+			throw new HttpsError('internal', 'Failed to fetch Slack channels');
+		}
+	}
+);
+
+/**
+ * Fetch channel list from Slack API
+ */
+async function fetchSlackChannelList(
+	botToken: string,
+	isPrivate: boolean
+): Promise<SlackChannel[]> {
+	const channels: SlackChannel[] = [];
+	let cursor: string | undefined;
+
+	do {
+		const params = new URLSearchParams({
+			types: isPrivate ? 'private_channel' : 'public_channel',
+			exclude_archived: 'true',
+			limit: '200'
+		});
+		if (cursor) params.append('cursor', cursor);
+
+		logger.info('[slack] Calling conversations.list', { isPrivate, cursor: cursor || 'none' });
+
+		const response = await fetch(
+			`https://slack.com/api/conversations.list?${params.toString()}`,
+			{
+				headers: {
+					'Authorization': `Bearer ${botToken}`,
+					'Content-Type': 'application/json'
+				}
+			}
+		);
+
+		const data = await response.json() as {
+			ok: boolean;
+			error?: string;
+			channels?: Array<{
+				id: string;
+				name: string;
+				is_private: boolean;
+				is_member: boolean;
+				num_members?: number;
+				topic?: { value: string };
+				purpose?: { value: string };
+			}>;
+			response_metadata?: {
+				next_cursor?: string;
+			};
+		};
+
+		logger.info('[slack] conversations.list response', { 
+			ok: data.ok, 
+			error: data.error,
+			channelCount: data.channels?.length || 0,
+			isPrivate 
+		});
+
+		if (!data.ok) {
+			logger.warn('[slack] conversations.list failed', { error: data.error, isPrivate });
+			break;
+		}
+
+		if (data.channels) {
+			for (const ch of data.channels) {
+				channels.push({
+					id: ch.id,
+					name: ch.name,
+					is_private: ch.is_private,
+					is_member: ch.is_member,
+					num_members: ch.num_members,
+					topic: ch.topic?.value,
+					purpose: ch.purpose?.value
+				});
+			}
+		}
+
+		cursor = data.response_metadata?.next_cursor;
+	} while (cursor);
+
+	return channels;
+}

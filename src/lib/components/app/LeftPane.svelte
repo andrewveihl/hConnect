@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { run } from 'svelte/legacy';
 	import { onDestroy, onMount, untrack } from 'svelte';
+	import { get } from 'svelte/store';
 	import { flip } from 'svelte/animate';
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
@@ -26,6 +27,7 @@
 	import type { NotificationItem } from '$lib/stores/notifications';
 	import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
 	import { defaultSettingsSection } from '$lib/settings/sections';
+	import { serverRailCache, type ServerRailEntry } from '$lib/stores/serverRailCache';
 	import {
 		presenceFromSources,
 		presenceLabels,
@@ -50,6 +52,7 @@
 		threadId: string;
 		title: string;
 		photoURL: string | null;
+		otherUid: string | null;
 		unread: number;
 		href: string;
 		lastActivity: number;
@@ -63,15 +66,12 @@
 		showBottomActions = true
 	}: Props = $props();
 
-	type ServerRailEntry = {
-		id: string;
-		name: string;
-		icon?: string | null;
-		position?: number | null;
-		joinedAt?: number | null;
-	};
+	const initialServerUid = get(user)?.uid ?? null;
+	const initialServerList = initialServerUid ? serverRailCache.get(initialServerUid) ?? [] : [];
 
-	let servers: ServerRailEntry[] = $state([]);
+	let subscribedServerUid: string | null = initialServerUid;
+
+	let servers: ServerRailEntry[] = $state(initialServerList);
 	let unsub: (() => void) | undefined = $state();
 	let localCreateOpen = $state(false);
 	let myPresenceState: PresenceState = $state('offline');
@@ -85,8 +85,8 @@
 	let statusMenuEl: HTMLDivElement | null = $state(null);
 	let presenceUnsub: (() => void) | null = null;
 	let dmRailUnsub: Unsubscribe | null = null;
-	let dmMetadata: Record<string, { title: string; photoURL: string | null; isGroup?: boolean; groupName?: string | null }> = $state({});
-	let serverList: ServerRailEntry[] = $state([]);
+	let dmMetadata: Record<string, { title: string; photoURL: string | null; otherUid: string | null; isGroup?: boolean; groupName?: string | null }> = $state({});
+	let serverList: ServerRailEntry[] = $state(initialServerList);
 	let stopUserWatch: (() => void) | null = null;
 	let dragPreview: ServerRailEntry[] = $state([]);
 	let draggingServerId: string | null = $state(null);
@@ -124,7 +124,7 @@
 		})()
 	);
 
-	function handleServerRows(rows: ServerRailEntry[] = []) {
+	function handleServerRows(rows: ServerRailEntry[] = [], cacheUid?: string | null) {
 		servers = rows ?? [];
 		const incomingIds = servers.map((entry) => entry.id);
 		if (pendingOrderIds) {
@@ -140,18 +140,35 @@
 		} else {
 			serverList = mergeServerData(serverList.length ? serverList : servers, servers);
 		}
+		const uid = cacheUid ?? subscribedServerUid;
+		if (uid) {
+			serverRailCache.set(uid, servers);
+		}
 	}
 
 	function restartServerSubscription(uid: string | null) {
+		if (uid && uid === subscribedServerUid && unsub) return;
 		unsub?.();
 		unsub = undefined;
-		servers = [];
-		serverList = [];
+		subscribedServerUid = uid;
+		if (uid) {
+			const cached = serverRailCache.get(uid);
+			if (cached) {
+				servers = cached;
+				serverList = cached;
+			} else {
+				servers = [];
+				serverList = [];
+			}
+		} else {
+			servers = [];
+			serverList = [];
+		}
 		if (!uid) {
 			pendingOrderIds = null;
 			return;
 		}
-		unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? []));
+		unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? [], uid));
 	}
 
 	function updateFabSnapZone() {
@@ -307,6 +324,7 @@
 				const meta = dmMetadata[threadId];
 				const title = meta?.title ?? item.title ?? item.preview ?? item.context ?? 'Direct message';
 				const photoURL = meta?.photoURL ?? item.photoURL ?? null;
+				const otherUid = meta?.otherUid ?? null;
 				const unread = item.unread ?? item.highCount ?? 0;
 				const lastActivity = item.lastActivity ?? Date.now();
 				const isGroup = meta?.isGroup ?? false;
@@ -315,6 +333,7 @@
 					threadId,
 					title,
 					photoURL,
+					otherUid,
 					unread,
 					href: item.href,
 					lastActivity,
@@ -347,11 +366,12 @@
 		const uid = $user?.uid;
 		if (!uid) return;
 		dmRailUnsub = streamMyDMs(uid, (rows) => {
-			const next: Record<string, { title: string; photoURL: string | null; isGroup?: boolean; groupName?: string | null }> = {};
+			const next: Record<string, { title: string; photoURL: string | null; otherUid: string | null; isGroup?: boolean; groupName?: string | null }> = {};
 			rows.forEach((row) => {
 				const data = row as Record<string, any>;
 				const isGroup = data.isGroup ?? false;
 				const groupName = data.groupName ?? null;
+				const otherUid = typeof data.otherUid === 'string' ? data.otherUid : null;
 				const rawName =
 					typeof data.otherDisplayName === 'string' ? data.otherDisplayName.trim() : '';
 				const rawEmail = typeof data.otherEmail === 'string' ? data.otherEmail.trim() : '';
@@ -365,6 +385,7 @@
 						typeof data.otherPhotoURL === 'string' && data.otherPhotoURL.length
 							? data.otherPhotoURL
 							: null,
+					otherUid,
 					isGroup,
 					groupName
 				};
@@ -844,7 +865,12 @@
 									<i class="bx bx-group text-lg text-muted-foreground"></i>
 								</div>
 							{:else}
-								<Avatar user={dm} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
+								{@const avatarUser = {
+									uid: dm.otherUid,
+									photoURL: dm.photoURL,
+									displayName: dm.title
+								}}
+								<Avatar user={avatarUser} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
 							{/if}
 							<span class="rail-badge">{formatBadge(dm.unread)}</span>
 						</a>

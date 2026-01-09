@@ -62,20 +62,30 @@
 	});
 
 	// Prefer the largest available viewport metric so iOS URL bars don't shrink the app.
+	// On desktop, just use innerHeight directly for accurate resizing.
 	const setAppHeight = () => {
 		if (typeof window === 'undefined') return;
 		const vv = window.visualViewport;
-		const candidates = [
-			window.innerHeight,
-			document.documentElement.clientHeight,
-			window.outerHeight,
-			vv?.height ?? 0,
-			window.screen?.height ?? 0,
-			window.screen?.availHeight ?? 0
-		].filter((n) => typeof n === 'number' && n > 0);
+		const isMobile = window.matchMedia('(max-width: 767px)').matches;
+		
+		let height: number;
+		if (isMobile) {
+			// On mobile, prefer the largest value to avoid shrinking when keyboard opens
+			const candidates = [
+				window.innerHeight,
+				document.documentElement.clientHeight,
+				window.outerHeight,
+				vv?.height ?? 0,
+				window.screen?.height ?? 0,
+				window.screen?.availHeight ?? 0
+			].filter((n) => typeof n === 'number' && n > 0);
+			height = candidates.length ? Math.max(...candidates) : window.innerHeight;
+		} else {
+			// On desktop, use actual window height for accurate resize behavior
+			height = window.innerHeight;
+		}
 
-		const maxHeight = candidates.length ? Math.max(...candidates) : window.innerHeight;
-		const next = `${maxHeight}px`;
+		const next = `${height}px`;
 		document.documentElement.style.setProperty('--app-height', next);
 		document.documentElement.style.height = next;
 		document.documentElement.style.minHeight = next;

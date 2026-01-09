@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import { channelUnreadCount, dmUnreadCount } from '$lib/stores/notifications';
 	import {
 		activityEntries,
@@ -439,10 +438,6 @@
 </script>
 
 <div class="activity-shell">
-	<div class="hidden md:flex md:shrink-0" aria-label="Navigation">
-		<LeftPane activeServerId={null} />
-	</div>
-
 	<div class="activity-surface" role="main">
 		<header class="activity-header">
 			<div class="activity-header__copy">

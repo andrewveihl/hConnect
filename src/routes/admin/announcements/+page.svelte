@@ -11,6 +11,11 @@
 		collection,
 		deleteDoc,
 		doc,
+		getCountFromServer,
+		getDocs,
+		limit,
+		orderBy,
+		query,
 		serverTimestamp,
 		updateDoc
 	} from 'firebase/firestore';
@@ -28,6 +33,26 @@
 	let isCreating = $state(false);
 	let saving = $state(false);
 	let deleteConfirm: Announcement | null = $state(null);
+	let actionBusy = $state(false);
+	let actionType = $state<'send' | 'retract' | null>(null);
+	let viewsOpen = $state(false);
+	let viewsLoading = $state(false);
+	let viewsError = $state<string | null>(null);
+	let viewsCountError = $state<string | null>(null);
+	let viewsAnnouncementTitle = $state('');
+	let viewsCount = $state<number | null>(null);
+	let views = $state<
+		Array<{
+			uid: string;
+			displayName: string | null;
+			email: string | null;
+			photoURL: string | null;
+			seenAt: Date | null;
+		}>
+	>([]);
+	const VIEW_PAGE_LIMIT = 200;
+	let lastViewsCountId: string | null = null;
+	let viewsRequestId = 0;
 
 	// AI Generation state
 	let aiGenerating = $state(false);
@@ -90,6 +115,11 @@
 	};
 
 	const selectAnnouncement = (announcement: Announcement | null) => {
+		viewsOpen = false;
+		viewsError = null;
+		viewsCountError = null;
+		views = [];
+		viewsAnnouncementTitle = '';
 		selectedAnnouncement = announcement;
 		isCreating = false;
 
@@ -116,6 +146,12 @@
 	};
 
 	const startCreate = () => {
+		viewsOpen = false;
+		viewsError = null;
+		viewsCountError = null;
+		views = [];
+		viewsAnnouncementTitle = '';
+		viewsCount = null;
 		selectedAnnouncement = null;
 		isCreating = true;
 		resetForm();
@@ -265,6 +301,174 @@
 	const formatDate = (date: Date | null) => {
 		if (!date) return '--';
 		return date.toLocaleDateString();
+	};
+
+	const formatDateInput = (date: Date | null) =>
+		date ? date.toISOString().slice(0, 16) : '';
+
+	const formatDateTime = (date: Date | null) => {
+		if (!date) return '--';
+		return date.toLocaleString();
+	};
+
+	const loadViewsCount = async (announcementId: string) => {
+		viewsCountError = null;
+		try {
+			await ensureFirebaseReady();
+			const db = getDb();
+			const viewsRef = collection(db, 'announcements', announcementId, 'views');
+			const countSnap = await getCountFromServer(viewsRef);
+			viewsCount = countSnap.data().count ?? 0;
+		} catch (err) {
+			console.error(err);
+			viewsCountError = (err as Error)?.message ?? 'Failed to load views count.';
+		}
+	};
+
+	const openViews = async () => {
+		const target = selectedAnnouncement;
+		if (!target) return;
+		viewsOpen = true;
+		viewsLoading = true;
+		viewsError = null;
+		viewsAnnouncementTitle = target.title;
+		const requestId = ++viewsRequestId;
+
+		try {
+			await ensureFirebaseReady();
+			const db = getDb();
+			const viewsRef = collection(db, 'announcements', target.id, 'views');
+			const listQuery = query(viewsRef, orderBy('seenAt', 'desc'), limit(VIEW_PAGE_LIMIT));
+
+			const [countSnap, listSnap] = await Promise.all([
+				getCountFromServer(viewsRef),
+				getDocs(listQuery)
+			]);
+
+			if (requestId !== viewsRequestId) return;
+
+			viewsCount = countSnap.data().count ?? 0;
+			views = listSnap.docs.map((docSnap) => {
+				const data = docSnap.data();
+				return {
+					uid: data.uid ?? docSnap.id,
+					displayName: data.displayName ?? null,
+					email: data.email ?? null,
+					photoURL: data.photoURL ?? null,
+					seenAt: data.seenAt?.toDate?.() ?? null
+				};
+			});
+		} catch (err) {
+			console.error(err);
+			if (requestId !== viewsRequestId) return;
+			viewsError = (err as Error)?.message ?? 'Failed to load viewers.';
+		} finally {
+			if (requestId === viewsRequestId) {
+				viewsLoading = false;
+			}
+		}
+	};
+
+	const closeViews = () => {
+		viewsOpen = false;
+	};
+
+	const handleViewsBackdrop = (event: MouseEvent) => {
+		if (event.target === event.currentTarget) {
+			closeViews();
+		}
+	};
+
+	const applyAnnouncementUpdate = (announcementId: string, updates: Partial<Announcement>) => {
+		announcements = announcements.map((announcement) =>
+			announcement.id === announcementId ? { ...announcement, ...updates } : announcement
+		);
+
+		if (selectedAnnouncement?.id === announcementId) {
+			selectedAnnouncement = { ...selectedAnnouncement, ...updates };
+
+			if (typeof updates.active === 'boolean') {
+				form.active = updates.active;
+			}
+			if ('scheduledAt' in updates) {
+				form.scheduledAt = formatDateInput(updates.scheduledAt ?? null);
+			}
+			if ('expiresAt' in updates) {
+				form.expiresAt = formatDateInput(updates.expiresAt ?? null);
+			}
+			if (updates.targetAudience) {
+				form.targetAudience = updates.targetAudience;
+			}
+		}
+	};
+
+	const sendNow = async () => {
+		const target = selectedAnnouncement;
+		if (!target) return;
+
+		actionBusy = true;
+		actionType = 'send';
+		try {
+			await ensureFirebaseReady();
+			const db = getDb();
+			const now = new Date();
+
+			await updateDoc(doc(db, 'announcements', target.id), {
+				active: true,
+				scheduledAt: now,
+				updatedAt: serverTimestamp()
+			});
+
+			applyAnnouncementUpdate(target.id, {
+				active: true,
+				scheduledAt: now,
+				updatedAt: new Date()
+			});
+
+			showAdminToast({ type: 'success', message: 'Announcement sent now.' });
+		} catch (err) {
+			console.error(err);
+			showAdminToast({
+				type: 'error',
+				message: (err as Error)?.message ?? 'Failed to send announcement now.'
+			});
+		} finally {
+			actionBusy = false;
+			actionType = null;
+		}
+	};
+
+	const retractAnnouncement = async () => {
+		const target = selectedAnnouncement;
+		if (!target) return;
+
+		actionBusy = true;
+		actionType = 'retract';
+		try {
+			await ensureFirebaseReady();
+			const db = getDb();
+
+			await updateDoc(doc(db, 'announcements', target.id), {
+				active: false,
+				updatedAt: serverTimestamp()
+			});
+
+			applyAnnouncementUpdate(target.id, {
+				active: false,
+				updatedAt: new Date()
+			});
+
+			showAdminToast({ type: 'success', message: 'Announcement retracted.' });
+		} catch (err) {
+			console.error(err);
+			showAdminToast({
+				type: 'error',
+				message: (err as Error)?.message ?? 'Failed to retract announcement.'
+			});
+		} finally {
+			actionBusy = false;
+			actionType = null;
+		}
 	};
 
 	const typeConfig = {
@@ -483,6 +687,20 @@
 	const isScheduledFuture = $derived(
 		form.scheduledAt ? new Date(form.scheduledAt) > new Date() : false
 	);
+	const canSendNow = $derived(
+		!isCreating && Boolean(selectedAnnouncement) && (isScheduledFuture || !form.active)
+	);
+	const canRetract = $derived(!isCreating && Boolean(selectedAnnouncement) && form.active);
+
+	$effect(() => {
+		const id = selectedAnnouncement?.id ?? null;
+		if (id === lastViewsCountId) return;
+		lastViewsCountId = id;
+		viewsCount = null;
+		viewsCountError = null;
+		if (!id) return;
+		loadViewsCount(id);
+	});
 </script>
 
 <div class="admin-page">
@@ -1126,6 +1344,34 @@
 							{/if}
 						</div>
 
+						{#if !isCreating && selectedAnnouncement}
+							<!-- Views Summary -->
+							<div class="rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)85%,transparent)] p-4">
+								<div class="flex flex-wrap items-center justify-between gap-3">
+									<div>
+										<p class="text-xs font-semibold uppercase tracking-wider text-[color:var(--text-50,#94a3b8)]">
+											Seen by
+										</p>
+										<p class="text-lg font-semibold text-[color:var(--color-text-primary)]">
+											{viewsCount ?? '--'} user{viewsCount === 1 ? '' : 's'}
+										</p>
+										{#if viewsCountError}
+											<p class="text-xs text-rose-400">{viewsCountError}</p>
+										{/if}
+									</div>
+									<button
+										type="button"
+										class="flex items-center gap-2 rounded-xl border border-violet-500/30 px-4 py-2.5 text-sm font-medium text-violet-300 transition hover:bg-violet-500/10 disabled:opacity-50"
+										onclick={openViews}
+										disabled={viewsLoading}
+									>
+										<i class="bx bx-user-detail"></i>
+										View users
+									</button>
+								</div>
+							</div>
+						{/if}
+
 						<!-- Toggles -->
 						<div class="flex flex-wrap gap-4">
 							<label class="flex cursor-pointer items-center gap-2">
@@ -1164,7 +1410,7 @@
 							<button
 								type="submit"
 								class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90 disabled:opacity-50"
-								disabled={saving}
+								disabled={saving || actionBusy}
 							>
 								{#if saving}
 									<i class="bx bx-loader-alt animate-spin"></i>
@@ -1174,11 +1420,46 @@
 								{isCreating ? 'Create' : 'Save Changes'}
 							</button>
 
+							{#if canSendNow}
+								<button
+									type="button"
+									class="flex items-center gap-2 rounded-xl border border-emerald-500/30 px-4 py-2.5 text-sm font-medium text-emerald-400 transition hover:bg-emerald-500/10 disabled:opacity-50"
+									onclick={sendNow}
+									disabled={actionBusy || saving}
+								>
+									{#if actionBusy && actionType === 'send'}
+										<i class="bx bx-loader-alt animate-spin"></i>
+										Sending...
+									{:else}
+										<i class="bx bx-bolt-circle"></i>
+										Send Now
+									{/if}
+								</button>
+							{/if}
+
+							{#if canRetract}
+								<button
+									type="button"
+									class="flex items-center gap-2 rounded-xl border border-amber-500/30 px-4 py-2.5 text-sm font-medium text-amber-400 transition hover:bg-amber-500/10 disabled:opacity-50"
+									onclick={retractAnnouncement}
+									disabled={actionBusy || saving}
+								>
+									{#if actionBusy && actionType === 'retract'}
+										<i class="bx bx-loader-alt animate-spin"></i>
+										Retracting...
+									{:else}
+										<i class="bx bx-undo"></i>
+										Retract
+									{/if}
+								</button>
+							{/if}
+
 							{#if !isCreating && selectedAnnouncement}
 								<button
 									type="button"
 									class="flex items-center gap-2 rounded-xl border border-rose-500/30 px-4 py-2.5 text-sm font-medium text-rose-500 transition hover:bg-rose-500/10"
 									onclick={() => (deleteConfirm = selectedAnnouncement)}
+									disabled={actionBusy || saving}
 								>
 									<i class="bx bx-trash"></i>
 									Delete
@@ -1194,6 +1475,7 @@
 									resetForm();
 									if (mobileViewport) adminNav.showContent();
 								}}
+								disabled={actionBusy || saving}
 							>
 								Cancel
 							</button>
@@ -1228,6 +1510,76 @@
 		</div>
 	</div>
 </div>
+
+{#if viewsOpen}
+	<div
+		class="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4"
+		role="presentation"
+		onclick={handleViewsBackdrop}
+	>
+		<div
+			class="w-full max-w-xl rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:var(--bg-base,#0f172a)] p-5 shadow-2xl"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Announcement viewers"
+		>
+			<div class="flex items-start justify-between gap-4">
+				<div>
+					<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+						Announcement viewers
+					</p>
+					<p class="text-xs text-[color:var(--text-60,#6b7280)]">
+						{viewsAnnouncementTitle || 'Announcement'}
+					</p>
+				</div>
+				<button
+					type="button"
+					class="flex h-9 w-9 items-center justify-center rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] text-[color:var(--text-60,#6b7280)] transition hover:bg-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)]"
+					onclick={closeViews}
+					aria-label="Close"
+				>
+					<i class="bx bx-x text-lg"></i>
+				</button>
+			</div>
+
+			<div class="mt-4">
+				{#if viewsLoading}
+					<div class="flex items-center gap-2 text-sm text-[color:var(--text-60,#6b7280)]">
+						<i class="bx bx-loader-alt animate-spin"></i>
+						Loading viewers...
+					</div>
+				{:else if viewsError}
+					<p class="text-sm text-rose-400">{viewsError}</p>
+				{:else if views.length === 0}
+					<p class="text-sm text-[color:var(--text-60,#6b7280)]">No views yet.</p>
+				{:else}
+					<div class="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+						{#each views as view (view.uid)}
+							<div class="flex items-center justify-between gap-3 rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)90%,transparent)] px-3 py-2.5">
+								<div class="min-w-0">
+									<p class="truncate text-sm font-semibold text-[color:var(--color-text-primary)]">
+										{view.displayName ?? view.email ?? view.uid}
+									</p>
+									<p class="truncate text-xs text-[color:var(--text-60,#6b7280)]">
+										{view.email ?? view.uid}
+									</p>
+								</div>
+								<span class="shrink-0 text-xs text-[color:var(--text-60,#6b7280)]">
+									{formatDateTime(view.seenAt)}
+								</span>
+							</div>
+						{/each}
+					</div>
+					{#if viewsCount !== null && viewsCount > views.length}
+						<p class="mt-3 text-xs text-[color:var(--text-60,#6b7280)]">
+							Showing {views.length} of {viewsCount} viewers.
+						</p>
+					{/if}
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
 
 <ConfirmDialog
 	open={Boolean(deleteConfirm)}
