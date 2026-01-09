@@ -1,13 +1,46 @@
 /**
  * Slack Integration Types
  * Defines data structures for Slack <-> hConnect channel bridging
+ * Each server has its own Slack app configuration
  */
 
 export type SlackConnectionStatus = 'pending' | 'active' | 'paused' | 'error' | 'disconnected';
 export type SyncDirection = 'slack-to-hconnect' | 'hconnect-to-slack' | 'bidirectional';
 
+/**
+ * Per-server Slack app credentials
+ * Users configure their own Slack app per server
+ */
+export interface SlackAppCredentials {
+	clientId: string;
+	clientSecret: string;
+	signingSecret: string;
+}
+
+/**
+ * Per-server Slack integration configuration
+ * Stored at: servers/{serverId}/integrations/slack
+ */
+export interface ServerSlackConfig {
+	enabled: boolean;
+	// Slack App credentials (user provides these)
+	credentials?: SlackAppCredentials;
+	// Settings
+	defaultSyncDirection: SyncDirection;
+	defaultSyncReactions: boolean;
+	defaultSyncThreads: boolean;
+	defaultSyncAttachments: boolean;
+	// Custom avatar for hConnect messages synced to Slack
+	hconnectAvatarUrl?: string;
+	// Metadata
+	configuredBy?: string;
+	configuredAt?: number;
+	updatedAt?: number;
+}
+
 export interface SlackWorkspace {
 	id: string;
+	serverId: string; // Which hConnect server this workspace belongs to
 	teamId: string;
 	teamName: string;
 	teamDomain: string;
@@ -110,7 +143,21 @@ export interface SlackUser {
 	};
 }
 
-// Firestore document paths
+// Firestore document paths - now per-server
+// Config: servers/{serverId}/integrations/slack
+// Workspaces: servers/{serverId}/integrations/slack/workspaces/{workspaceId}
+// Bridges: servers/{serverId}/integrations/slack/bridges/{bridgeId}
+export function getServerSlackConfigPath(serverId: string): string {
+	return `servers/${serverId}/integrations/slack`;
+}
+export function getServerSlackWorkspacesPath(serverId: string): string {
+	return `servers/${serverId}/integrations/slack/workspaces`;
+}
+export function getServerSlackBridgesPath(serverId: string): string {
+	return `servers/${serverId}/integrations/slack/bridges`;
+}
+
+// Legacy global paths (kept for backwards compatibility)
 export const SLACK_COLLECTION = 'integrations/slack';
 export const SLACK_WORKSPACES_COLLECTION = 'integrations/slack/workspaces';
 export const SLACK_BRIDGES_COLLECTION = 'integrations/slack/bridges';

@@ -21,6 +21,12 @@ service firebase.storage {
       allow write: if false; // Only Cloud Functions can write
     }
 
+    // Server integration assets (e.g., Slack avatars) - public read for external services
+    match /servers/{serverId}/integrations/{rest=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
     // Super admin uploaded global assets (themes, sounds, splash). Reads are public so the app can load before auth.
     match /admin/sounds/{rest=**} {
       allow read: if true;

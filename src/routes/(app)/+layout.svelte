@@ -24,6 +24,7 @@
 		closeServerSettings,
 		setServerSettingsSection
 	} from '$lib/stores/serverSettingsUI';
+	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import VoiceMiniPanel from '$lib/components/voice/VoiceMiniPanel.svelte';
 	import MobileNavBar from '$lib/components/app/MobileNavBar.svelte';
 	import DomainInvitePrompt from '$lib/components/app/DomainInvitePrompt.svelte';
@@ -53,7 +54,8 @@
 		nextAnnouncement,
 		dismissAnnouncement,
 		loadDismissedAnnouncements,
-		toDisplayAnnouncement
+		toDisplayAnnouncement,
+		markAnnouncementSeen
 	} from '$lib/stores/announcements';
 	import {
 		customizationConfigStore,
@@ -72,6 +74,19 @@
 	const serverSettingsState = $derived($serverSettingsUI);
 	const mobileViewport = $derived($isMobileViewport);
 	const currentPath = $derived($page?.url?.pathname ?? '/');
+	const isDmRoute = $derived(currentPath.startsWith('/dms'));
+	const showLeftPane = $derived(
+		currentPath === '/' || currentPath.startsWith('/servers/') || currentPath.startsWith('/dms')
+	);
+	const activeServerId = $derived.by(() => {
+		const match = currentPath.match(/^\/servers\/([^/]+)/);
+		return match ? match[1] : null;
+	});
+	const leftPaneClasses = $derived(
+		showLeftPane
+			? `h-full ${isDmRoute ? 'hidden lg:flex' : 'hidden md:flex'} md:shrink-0`
+			: 'hidden'
+	);
 
 	let activeVoice: VoiceSession | null = $state(null);
 	const stopVoice = voiceSession.subscribe((value) => {
@@ -294,6 +309,21 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 		if (uid) {
 			loadDismissedAnnouncements(uid);
 		}
+	});
+
+	// Record announcement views for analytics
+	run(() => {
+		if (!browser) return;
+		const announcement = currentAnnouncement;
+		const uid = $user?.uid ?? null;
+		if (!announcement || !uid) return;
+		markAnnouncementSeen({
+			announcementId: announcement.id,
+			uid,
+			email: $user?.email ?? null,
+			displayName: $userProfile?.displayName ?? $user?.displayName ?? null,
+			photoURL: $userProfile?.photoURL ?? $user?.photoURL ?? null
+		});
 	});
 
 	async function acceptDomainInvite() {
@@ -591,13 +621,20 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 </svelte:head>
 
 <!-- Full-screen app surface -->
-<div
-	class="app-shell has-mobile-dock app-bg"
-	class:has-mobile-dock--suppressed={$mobileDockSuppressed}
->
-	<div class="app-shell__body">
-		{@render children?.()}
-	</div>
+	<div
+		class="app-shell has-mobile-dock app-bg"
+		class:has-mobile-dock--suppressed={$mobileDockSuppressed}
+	>
+		<div class="app-shell__body">
+			<div class="flex min-h-0 h-full">
+				<div class={leftPaneClasses}>
+					<LeftPane activeServerId={activeServerId} />
+				</div>
+				<div class="flex-1 min-h-0 h-full flex flex-col overflow-hidden">
+					{@render children?.()}
+				</div>
+			</div>
+		</div>
 
 	<MobileNavBar />
 

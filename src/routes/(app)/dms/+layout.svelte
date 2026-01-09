@@ -2,7 +2,6 @@
 	import { onMount } from 'svelte';
 	import { user } from '$lib/stores/user';
 
-	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import { requestDMNotificationPermission, enableDMNotifications } from '$lib/notify/dms';
 
 	interface Props {
@@ -12,8 +11,6 @@
 	let { children }: Props = $props();
 
 	let stopNotify: (() => void) | null = null;
-	const leftPaneClasses = 'h-full hidden lg:flex';
-
 	onMount(() => {
 		(async () => {
 			try {
@@ -36,11 +33,6 @@
 	});
 </script>
 
-<div class="h-dvh app-bg text-primary flex overflow-hidden">
-	<div class={leftPaneClasses}>
-		<LeftPane activeServerId={null} />
-	</div>
-	<div class="flex-1 flex flex-col overflow-hidden panel">
-		{@render children?.()}
-	</div>
+<div class="flex-1 h-full flex flex-col overflow-hidden panel">
+	{@render children?.()}
 </div>

@@ -12,7 +12,6 @@
 	import ChannelHeader from '$lib/components/servers/ChannelHeader.svelte';
 	import MembersPane from '$lib/components/servers/MembersPane.svelte';
 	import ThreadMembersPane from '$lib/components/servers/ThreadMembersPane.svelte';
-	import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
 	import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
 	import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 	import ChannelSettingsSheet from '$lib/components/servers/ChannelSettingsSheet.svelte';
@@ -142,6 +141,7 @@
 	let channelListServerId: string | null = null;
 	let routerReady = false;
 	let messages: any[] = $state([]);
+	let lastReadMessageIds: Record<string, string | null> = {};
 	let messagesLoadError: string | null = $state(null);
 	let lastSidebarChannels: ChannelEventDetail | null = $state(null);
 	let channelThreads: ChannelThread[] = $state([]);
@@ -1071,7 +1071,6 @@
 			}
 		};
 	}
-	let showCreate = $state(false);
 	let voiceState: VoiceSession | null = $state(null);
 	let isVoiceChannelView = $state(false);
 	let isViewingActiveVoiceChannel = $state(false);
@@ -1406,12 +1405,8 @@
 
 				// Mark as read when viewing this channel
 				try {
-					if ($user?.uid && activeChannel?.id === channelId) {
-						const last = nextMessages[nextMessages.length - 1];
-						const at = last?.createdAt ?? null;
-						const lastId = last?.id ?? null;
-						void markChannelRead($user.uid, currServerId, channelId, { at, lastMessageId: lastId });
-						void markChannelActivityRead(currServerId, channelId);
+					if (activeChannel?.id === channelId) {
+						markChannelReadFromMessages(currServerId, channelId, nextMessages);
 					}
 				} catch {}
 			},
@@ -1824,13 +1819,7 @@
 			subscribeThreads(serverId, id);
 			voiceSession.setVisible(false);
 			// Optimistically mark as read on navigation to the channel
-			if ($user?.uid) {
-				const last = messages[messages.length - 1];
-				const at = last?.createdAt ?? null;
-				const lastId = last?.id ?? null;
-				void markChannelRead($user.uid, serverId, id, { at, lastMessageId: lastId });
-				void markChannelActivityRead(serverId, id);
-			}
+			markChannelReadFromMessages(serverId, id, messages);
 		}
 
 		// close channels panel on mobile
@@ -3062,15 +3051,28 @@
 		memberPermsServer = null;
 	});
 
+	function markChannelReadFromMessages(
+		sId: string | null,
+		channelId: string | null,
+		list: any[]
+	) {
+		if (!sId || !channelId || !$user?.uid) return;
+		if (!Array.isArray(list) || list.length === 0) return;
+		const last = list[list.length - 1];
+		const at = last?.createdAt ?? null;
+		const lastId = last?.id ?? null;
+		if (!lastId) return;
+		if (lastReadMessageIds[channelId] === lastId) return;
+		lastReadMessageIds[channelId] = lastId;
+		void markChannelRead($user.uid, sId, channelId, { at, lastMessageId: lastId });
+		void markChannelActivityRead(sId, channelId);
+	}
+
 	// Persist read state when tab is hidden
 	if (typeof window !== 'undefined') {
 		const onVis = () => {
-			if (document.visibilityState === 'hidden' && serverId && activeChannel?.id && $user?.uid) {
-				const last = messages[messages.length - 1];
-				const at = last?.createdAt ?? null;
-				const lastId = last?.id ?? null;
-				void markChannelRead($user.uid, serverId, activeChannel.id, { at, lastMessageId: lastId });
-				void markChannelActivityRead(serverId, activeChannel.id);
+			if (document.visibilityState === 'hidden' && serverId && activeChannel?.id) {
+				markChannelReadFromMessages(serverId, activeChannel.id, messages);
 			}
 		};
 		window.addEventListener('visibilitychange', onVis);
@@ -5282,9 +5284,6 @@
   - Desktop (>=1024px): server rail + channels stay pinned; members pane opens at large breakpoints.
 -->
 <div class="server-workspace flex h-dvh app-bg text-primary overflow-hidden">
-	<div class="hidden md:flex md:shrink-0">
-		<LeftPane activeServerId={serverId} onCreateServer={() => (showCreate = true)} />
-	</div>
 	<div class="server-columns flex flex-1 overflow-hidden">
 		<div class="server-columns__sidebar hidden md:flex md:w-80 xl:w-80 shrink-0 flex-col">
 			{#if serverId}
@@ -5430,6 +5429,15 @@
 											onCreatePoll={handleCreatePoll}
 											onCreateForm={handleCreateForm}
 											onUploadFiles={handleUploadFiles}
+											on:atBottom={(event) => {
+												if (event.detail?.atBottom) {
+													markChannelReadFromMessages(
+														serverId,
+														activeChannel?.id ?? null,
+														messages
+													);
+												}
+											}}
 											on:reply={handleReplyRequest}
 											on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
 											on:cancelReply={() => (replyTarget = null)}
@@ -5596,6 +5604,15 @@
 												onCreatePoll={handlePopoutCreatePoll}
 												onCreateForm={handlePopoutCreateForm}
 												onUploadFiles={handlePopoutUploadFiles}
+												on:atBottom={(event) => {
+													if (event.detail?.atBottom) {
+														markChannelReadFromMessages(
+															serverId,
+															channelMessagesPopoutChannelId,
+															popoutMessages
+														);
+													}
+												}}
 												on:reply={handlePopoutReplyRequest}
 										on:thread={(event) =>
 											void openThreadFromMessage(
@@ -5661,6 +5678,15 @@
 										onCreatePoll={handleCreatePoll}
 										onCreateForm={handleCreateForm}
 										onUploadFiles={handleUploadFiles}
+										on:atBottom={(event) => {
+											if (event.detail?.atBottom) {
+												markChannelReadFromMessages(
+													serverId,
+													activeChannel?.id ?? null,
+													messages
+												);
+											}
+										}}
 										on:reply={handleReplyRequest}
 										on:thread={(event) => void openThreadFromMessage(event.detail?.message)}
 										on:cancelReply={() => (replyTarget = null)}
@@ -5763,7 +5789,6 @@
 			<div class="mobile-panel__servers">
 				<LeftPane
 					activeServerId={serverId}
-					onCreateServer={() => (showCreate = true)}
 					padForDock={false}
 					showBottomActions={false}
 				/>
@@ -5983,8 +6008,6 @@
 		</div>
 	</div>
 {/if}
-
-<NewServerModal bind:open={showCreate} onClose={() => (showCreate = false)} />
 
 <!-- Popup mode: show only the thread in a minimal window -->
 {#if isPopupMode && floatingThread && floatingThreadVisible}

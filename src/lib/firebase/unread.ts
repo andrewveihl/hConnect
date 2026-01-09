@@ -449,6 +449,21 @@ export function subscribeUnreadForServer(
 
 	startAllChannels();
 
+	const hasFullAccess = () => {
+		return isAdminLike() || isMember || profileMembership;
+	};
+
+	const ensureChannelList = () => {
+		if (!hasServerAccess()) return;
+		if (!stopChannels && stopPublicChannels && hasFullAccess()) {
+			stopPublicChannels();
+			stopPublicChannels = null;
+		}
+		if (!stopChannels && !stopPublicChannels) {
+			startAllChannels();
+		}
+	};
+
 	const reevaluateChannels = () => {
 		if (!hasServerAccess()) {
 			for (const channelId of Array.from(channelStates.keys())) {
@@ -478,12 +493,14 @@ export function subscribeUnreadForServer(
 			isMember = snap.exists();
 			memberRoleIds = Array.isArray(data?.roleIds) ? data.roleIds : [];
 			memberPerms = data?.perms ?? data?.permissions ?? null;
+			ensureChannelList();
 			reevaluateChannels();
 		},
 		() => {
 			isMember = false;
 			memberRoleIds = [];
 			memberPerms = null;
+			ensureChannelList();
 			reevaluateChannels();
 		}
 	);
@@ -492,14 +509,12 @@ export function subscribeUnreadForServer(
 		doc(db, 'profiles', uid, 'servers', serverId),
 		(snap) => {
 			profileMembership = snap.exists();
-			if (profileMembership && !hasServerAccess()) {
-				// membership gained, restart all channels
-				startAllChannels();
-			}
+			ensureChannelList();
 			reevaluateChannels();
 		},
 		() => {
 			profileMembership = false;
+			ensureChannelList();
 			reevaluateChannels();
 		}
 	);
@@ -517,6 +532,7 @@ export function subscribeUnreadForServer(
 			defaultRoleId = typeof data?.defaultRoleId === 'string' ? data.defaultRoleId : null;
 			everyoneRoleId = typeof data?.everyoneRoleId === 'string' ? data.everyoneRoleId : null;
 			serverIsPublic = data?.isPublic === true;
+			ensureChannelList();
 			reevaluateChannels();
 		},
 		() => {
@@ -524,6 +540,7 @@ export function subscribeUnreadForServer(
 			defaultRoleId = null;
 			everyoneRoleId = null;
 			serverIsPublic = false;
+			ensureChannelList();
 			reevaluateChannels();
 		}
 	);

@@ -138,6 +138,7 @@
 	let isRequestingMore = false;
 	let lastScrollSignal = $state(0);
 	let shouldStickToBottom = true;
+	let lastBottomState: boolean | null = null;
 	let pendingPrependAdjustment: { height: number; top: number } | null = null;
 	let lastFirstMessageId: string | null = null;
 	let highlightedMessageId = $state<string | null>(null);
@@ -337,6 +338,12 @@
 		}
 	};
 
+	function emitBottomState(next: boolean) {
+		if (next === lastBottomState) return;
+		lastBottomState = next;
+		dispatch('atBottom', { atBottom: next });
+	}
+
 	// Re-scroll when images load to ensure full content is visible
 	const handleImageLoad = () => {
 		if (shouldStickToBottom && scroller) {
@@ -348,6 +355,15 @@
 		// Initial scroll to bottom - use robust method for reliability
 		// This handles cases where the component mounts with messages already present
 		scrollToBottomRobust();
+
+		requestAnimationFrame(() => {
+			if (!scroller) return;
+			const distanceFromBottom =
+				scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+			const atBottom = distanceFromBottom < 120;
+			shouldStickToBottom = atBottom;
+			emitBottomState(atBottom);
+		});
 		
 		// Also ensure lastLen is synced if messages were passed in on mount
 		if (messages.length > 0 && lastLen === 0) {
@@ -1290,6 +1306,7 @@
 		if (!scroller) return;
 		const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
 		shouldStickToBottom = distanceFromBottom < 120;
+		emitBottomState(shouldStickToBottom);
 
 		if (scroller.scrollTop <= 24 && !isRequestingMore) {
 			pendingPrependAdjustment = {
