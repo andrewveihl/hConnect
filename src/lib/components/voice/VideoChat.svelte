@@ -10358,12 +10358,6 @@
 		color: white;
 	}
 
-	.call-avatar__image img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-
 	.call-avatar__hint {
 		text-transform: uppercase;
 		font-size: 10px;
@@ -10794,12 +10788,6 @@
 		align-items: center;
 		justify-content: center;
 		overflow: hidden;
-	}
-
-	.call-empty__avatar img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
 	}
 
 	.call-empty__avatar i {

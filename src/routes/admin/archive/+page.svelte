@@ -21,7 +21,13 @@
 		dms: { search: '' },
 		attachments: { search: '' }
 	});
-	let archiveData: Record<ArchiveTab, ArchiveEntry[]> = $state(data.initialArchive);
+	let archiveData: Record<ArchiveTab, ArchiveEntry[]> = $state({
+		servers: [],
+		channels: [],
+		messages: [],
+		dms: [],
+		attachments: []
+	});
 	let loading = $state(false);
 	let confirmAction: {
 		tab: ArchiveTab;
@@ -29,6 +35,10 @@
 		mode: 'restore' | 'delete';
 		label: string;
 	} | null = $state(null);
+
+	$effect(() => {
+		archiveData = data.initialArchive;
+	});
 
 	const filteredEntries = $derived(
 		(archiveData[activeTab] ?? []).filter((entry) => {

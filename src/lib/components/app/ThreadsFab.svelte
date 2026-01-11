@@ -37,6 +37,7 @@
 	const FAB_ID = 'threads-fab';
 	const FAB_SIZE = 48; // 3rem - matches rail-button size when snapped
 	const MIN_MARGIN = 8;
+	const SNAP_THRESHOLD_PX = 150; // Distance in pixels to trigger snap (increased for easier snapping)
 
 	type Position = { x: number; y: number };
 	type BulkAction = 'idle' | 'clearingNotifications' | 'clearingThreads';
@@ -50,8 +51,15 @@
 	let dragOffset: Position = { x: 0, y: 0 };
 	let dragStartTime = 0;
 	let isSnapped = $state(false);
-	let snappedZoneId: string | null = $state(null);
+	let snappedZoneId = $state<string | null>(null);
 	let nearSnapZone: SnapZone | null = $state(null);
+	let trayOpen = $state(false); // Track if FAB tray is open (to hide when snapped and tray closed)
+	let userClosedTray = $state(true); // Start true so FABs snapped to tray are hidden until user opens tray or drags them out
+	
+	
+	// Hide FAB when it's snapped to tray, tray is closed, AND user explicitly closed it
+	// (Don't hide if tray just auto-closed after drag - wait for user to toggle)
+	let hiddenInTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray);
 
 	let showPopover = $state(false);
 	let recentThreads = $state<ThreadWithMeta[]>([]);
@@ -208,29 +216,52 @@
 	}
 
 	async function initPosition() {
-		if (!browser || !fabEl) {
+		if (!browser) {
 			ready = true;
 			return;
 		}
 		await tick();
 
 		// Check if we were snapped to a zone (only if snapping is enabled)
+		// Do this BEFORE checking fabEl - we need to restore snap state even without element
 		const wasSnapped = !$isFabSnappingDisabled && fabSnapStore.isSnappedToRail(FAB_ID);
 		const savedZoneId = fabSnapStore.getSnappedZoneId(FAB_ID);
 		if (wasSnapped && savedZoneId) {
+			// If snapped to a tray slot, stay snapped even if tray isn't in DOM
+			// This keeps the FAB hidden when navigating to pages without the tray
+			if (savedZoneId.startsWith('fab-tray-slot-')) {
+				isSnapped = true;
+				snappedZoneId = savedZoneId;
+				userClosedTray = true;
+				// Don't set position - FAB will be hidden anyway
+				ready = true;
+				return;
+			}
+			
 			// Wait a bit for zones to be registered
 			await new Promise((resolve) => setTimeout(resolve, 100));
+			fabSnapStore.ensureZone(savedZoneId);
 			const zones = fabSnapStore.getZones();
-			const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+			const zone =
+				zones.find((z) => z.id === savedZoneId) ||
+				(!savedZoneId.includes('-stack-') ? zones[0] : null);
 			if (zone) {
 				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
 				position = clampToViewport(snapPos);
 				isSnapped = true;
 				snappedZoneId = zone.id;
 				fabSnapStore.occupyZone(zone.id, FAB_ID);
+				// If restoring snapped state, treat as if user had closed tray (so FAB is hidden until opened)
+				userClosedTray = true;
 				ready = true;
 				return;
 			}
+		}
+
+		// Need fabEl for position calculations
+		if (!fabEl) {
+			ready = true;
+			return;
 		}
 
 		// Load saved position or use default
@@ -250,21 +281,96 @@
 
 	// Check if current FAB center is near a snap zone
 	function checkNearSnapZone(): SnapZone | null {
-		if (!browser || $isFabSnappingDisabled) return null;
+		if (!browser) return null;
+		
 		const fabCenterX = position.x + FAB_SIZE / 2;
 		const fabCenterY = position.y + FAB_SIZE / 2;
-		return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+		
+		// Directly query tray slots in DOM - don't check feature flag here
+		// The feature flag check happens when the tray opens, not during detection
+		const traySlots = document.querySelectorAll('.fab-tray__slot');
+		
+		if (traySlots.length > 0) {
+			let bestSlot: { index: number; rect: DOMRect; distance: number } | null = null;
+			
+			for (let i = 0; i < traySlots.length; i++) {
+				const slot = traySlots[i] as HTMLElement;
+				const rect = slot.getBoundingClientRect();
+				
+				// Skip if slot is not visible (hidden tray)
+				if (rect.width === 0 || rect.height === 0) continue;
+				
+				const slotCenterX = rect.left + rect.width / 2;
+				const slotCenterY = rect.top + rect.height / 2;
+				const distance = Math.sqrt((fabCenterX - slotCenterX) ** 2 + (fabCenterY - slotCenterY) ** 2);
+				
+				if (distance < SNAP_THRESHOLD_PX && (!bestSlot || distance < bestSlot.distance)) {
+					bestSlot = { index: i, rect, distance };
+				}
+			}
+			
+			if (bestSlot) {
+				// Check if slot is already occupied by another FAB
+				const zoneId = `fab-tray-slot-${bestSlot.index}`;
+				const snappedFabs = fabSnapStore.getSnappedFabs();
+				const slotOccupied = snappedFabs.some(f => 
+					f.zoneId === zoneId && f.fabId !== FAB_ID
+				);
+				
+				// Don't snap to occupied slots
+				if (slotOccupied) {
+					return null;
+				}
+				
+				return {
+					id: zoneId,
+					x: bestSlot.rect.left,
+					y: bestSlot.rect.top,
+					width: bestSlot.rect.width,
+					height: bestSlot.rect.height
+				} as SnapZone;
+			}
+		}
+		
+		// Fallback to store-based zones if DOM query found nothing
+		if (!$isFabSnappingDisabled) {
+			return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+		}
+		
+		return null;
 	}
 
 	// Snap to a zone
 	function snapToZone(zone: SnapZone) {
-		const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
-		position = clampToViewport(snapPos);
+		// Calculate snap position: center the FAB on the zone
+		const snapX = zone.x + (zone.width - FAB_SIZE) / 2;
+		const snapY = zone.y + (zone.height - FAB_SIZE) / 2;
+		
+		position = clampToViewport({ x: snapX, y: snapY });
 		isSnapped = true;
 		snappedZoneId = zone.id;
+		
+		// Also register with the store
+		if (zone.id.startsWith('fab-tray-slot-')) {
+			fabSnapStore.registerZone({
+				id: zone.id,
+				x: zone.x,
+				y: zone.y,
+				width: zone.width,
+				height: zone.height
+			});
+		}
 		fabSnapStore.occupyZone(zone.id, FAB_ID);
 		persistPosition(position, true, zone.id);
 	}
+	
+	// Long-press detection for unsnapping
+	const HOLD_DURATION_MS = 300; // Hold for 300ms to start unsnap drag
+	const DRAG_THRESHOLD = 5; // Minimum pixels to consider it a drag
+	let holdTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingPointerEvent: PointerEvent | null = null;
+	let hasMoved = false; // Track if actual drag movement occurred
+	let dragStartPos = { x: 0, y: 0 }; // Track initial position
 
 	// Drag handlers - only for the FAB button itself
 	function handlePointerDown(event: PointerEvent) {
@@ -273,25 +379,73 @@
 		if (event.target !== fabBtnEl && !fabBtnEl.contains(event.target as Node)) return;
 		event.stopPropagation();
 		dragStartTime = Date.now();
+		hasMoved = false;
+		dragStartPos = { x: event.clientX, y: event.clientY };
 		dragOffset = {
 			x: event.clientX - position.x,
 			y: event.clientY - position.y
 		};
 		fabBtnEl.setPointerCapture(event.pointerId);
-		dragging = true;
 		
-		// Release from snap zone when starting to drag
+		// If snapped, require a hold before starting drag (to unsnap)
 		if (isSnapped) {
-			fabSnapStore.releaseZone(FAB_ID);
-			isSnapped = false;
-			snappedZoneId = null;
+			pendingPointerEvent = event;
+			holdTimer = setTimeout(() => {
+				// Hold completed - start dragging
+				dragging = true;
+				
+				// Release from snap zone
+				fabSnapStore.releaseZone(FAB_ID);
+				isSnapped = false;
+				snappedZoneId = null;
+				
+				// Visual feedback - slight scale up
+				if (fabBtnEl) {
+					fabBtnEl.style.transform = 'scale(1.1)';
+					setTimeout(() => {
+						if (fabBtnEl) fabBtnEl.style.transform = '';
+					}, 150);
+				}
+			}, HOLD_DURATION_MS);
+		} else {
+			// Not snapped - mark as dragging but don't dispatch fabDragStart yet
+			// Wait for actual movement to exceed threshold
+			dragging = true;
 		}
 	}
 
 	function handlePointerMove(event: PointerEvent) {
+		// If holding but not yet dragging, cancel hold if moved too far
+		if (holdTimer && !dragging) {
+			const dx = event.clientX - (pendingPointerEvent?.clientX ?? 0);
+			const dy = event.clientY - (pendingPointerEvent?.clientY ?? 0);
+			if (Math.sqrt(dx * dx + dy * dy) > 10) {
+				clearTimeout(holdTimer);
+				holdTimer = null;
+				pendingPointerEvent = null;
+			}
+			return;
+		}
+		
 		if (!dragging) return;
 		event.stopPropagation();
 		event.preventDefault();
+		
+		// Check if movement exceeds threshold (actual drag vs tap)
+		const dx = Math.abs(event.clientX - dragStartPos.x);
+		const dy = Math.abs(event.clientY - dragStartPos.y);
+		
+		if (!hasMoved && (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD)) {
+			hasMoved = true;
+			
+			// NOW dispatch fabDragStart - only when actual dragging starts
+			if (browser) {
+				window.dispatchEvent(new CustomEvent('fabDragStart', { detail: { fabId: FAB_ID } }));
+			}
+		}
+		
+		if (!hasMoved) return; // Don't update position until threshold is exceeded
+		
 		position = clampToViewport({
 			x: event.clientX - dragOffset.x,
 			y: event.clientY - dragOffset.y
@@ -309,37 +463,60 @@
 	}
 
 	function handlePointerUp(event: PointerEvent) {
-		if (!dragging) return;
+		// Track if we had a pending hold (for snapped FAB tap detection)
+		const wasHolding = holdTimer !== null;
+		
+		// Clear hold timer if active
+		if (holdTimer) {
+			clearTimeout(holdTimer);
+			holdTimer = null;
+			pendingPointerEvent = null;
+		}
+		
+		// If we weren't dragging (just a tap), handle tap behavior
+		if (!dragging) {
+			fabBtnEl?.releasePointerCapture(event.pointerId);
+			
+			// For snapped FAB: tap toggles popover (regardless of tray state - if visible, it's clickable)
+			// For un-snapped FAB: tap toggles popover
+			if (wasHolding || isSnapped) {
+				// This was a tap on a snapped FAB (hold timer didn't complete)
+				showPopover = !showPopover;
+			} else {
+				// Quick tap on un-snapped FAB
+				const tapDuration = Date.now() - dragStartTime;
+				if (tapDuration < 200) {
+					showPopover = !showPopover;
+				}
+			}
+			return;
+		}
+		
 		event.stopPropagation();
 		fabBtnEl?.releasePointerCapture(event.pointerId);
 		
-		const dragDuration = Date.now() - dragStartTime;
-		const wasDrag = dragDuration > 200;
-		
-		console.log('[ThreadsFab] handlePointerUp - dragDuration:', dragDuration, 'wasDrag:', wasDrag);
-		
-		// Clear snap zone highlight
+		// Clear snap zone highlight - only dispatch drag end if we actually moved
 		nearSnapZone = null;
-		if (browser) {
+		if (hasMoved && browser) {
 			window.dispatchEvent(new CustomEvent('fabNearSnapZone', { detail: { zoneId: null } }));
+			window.dispatchEvent(new CustomEvent('fabDragEnd', { detail: { fabId: FAB_ID } }));
 		}
 		
-		if (wasDrag) {
+		if (hasMoved) {
 			// Check if we should snap to a zone
-			const snapZone = checkNearSnapZone();
+			let snapZone = checkNearSnapZone();
 			if (snapZone) {
 				snapToZone(snapZone);
 			} else {
 				persistPosition(position, false);
 			}
-		}
-		dragging = false;
-		
-		// If it was a quick tap (not a drag), toggle the popover
-		if (!wasDrag) {
-			console.log('[ThreadsFab] Toggling popover, current:', showPopover, 'new:', !showPopover);
+		} else {
+			// Was a tap (no significant movement) - toggle popover
 			showPopover = !showPopover;
 		}
+		
+		dragging = false;
+		hasMoved = false;
 	}
 
 	function stopTouchPropagation(event: TouchEvent) {
@@ -355,6 +532,12 @@
 			const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
 			position = clampToViewport(snapPos);
 		}
+	}
+
+	function handleFabSnapSynced(event: CustomEvent<{ fabIds: string[] }>) {
+		if (!event?.detail?.fabIds?.includes(FAB_ID)) return;
+		if (dragging) return;
+		void initPosition();
 	}
 
 	// Calculate unread messages
@@ -819,6 +1002,13 @@
 			return;
 		}
 
+		// Register this FAB with the snap store so tray knows how many slots to show
+		fabSnapStore.registerFab({
+			id: FAB_ID,
+			label: 'Threads',
+			icon: 'bx-message-square-dots'
+		});
+
 		// Initialize position (handles snapped state restoration)
 		initPosition();
 		console.log('[ThreadsFab] Position initialized');
@@ -837,6 +1027,48 @@
 		
 		// Listen for snap zone position updates
 		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+		
+		// Listen for tray state changes (to hide FAB when snapped and tray is closed)
+		const handleTrayStateChange = (e: CustomEvent<{ open: boolean; userAction?: boolean }>) => {
+			const wasOpen = trayOpen;
+			trayOpen = e.detail.open;
+			
+			// Track if user explicitly closed the tray (for hiding snapped FABs)
+			if (wasOpen && !trayOpen) {
+				// Tray is closing - if there's a userAction flag or it's from toggle button, mark as user-closed
+				userClosedTray = true;
+			} else if (!wasOpen && trayOpen) {
+				// Tray is opening - reset the user closed flag
+				userClosedTray = false;
+			}
+			
+			// When tray opens and FAB is snapped, update position to match current slot position
+			if (trayOpen && isSnapped && snappedZoneId?.startsWith('fab-tray-slot-')) {
+				// Small delay to let tray animation complete
+				setTimeout(() => {
+					const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+					const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+					if (slot) {
+						const rect = slot.getBoundingClientRect();
+						const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+						const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+						position = { x: snapX, y: snapY };
+						
+						// Re-register the zone occupation now that the zone exists
+						fabSnapStore.registerZone({
+							id: snappedZoneId!,
+							x: rect.left,
+							y: rect.top,
+							width: rect.width,
+							height: rect.height
+						});
+						fabSnapStore.occupyZone(snappedZoneId!, FAB_ID);
+					}
+				}, 250);
+			}
+		};
+		window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		
 		// Update expiration times every minute
 		expirationInterval = setInterval(() => {
@@ -847,12 +1079,16 @@
 			document.removeEventListener('click', handleClickOutside);
 			window.removeEventListener('resize', handleResize);
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		};
 	});
 
 	onDestroy(() => {
 		threadsUnsub?.();
 		if (expirationInterval) clearInterval(expirationInterval);
+		// Unregister FAB from snap store
+		fabSnapStore.unregisterFab(FAB_ID);
 	});
 
 	// Re-subscribe when user changes
@@ -916,7 +1152,7 @@
 		if (!browser) return { vertical: 'above', horizontal: 'center' };
 		const vh = window.innerHeight;
 		const vw = window.innerWidth;
-		const fabSize = 50;
+		const fabSize = FAB_SIZE;
 		const popoverHeight = 400;
 		const popoverWidth = 320;
 		
@@ -939,7 +1175,7 @@
 <div
 	class="threads-fab-wrapper"
 	class:threads-fab-wrapper--snapped={isSnapped}
-	class:threads-fab-wrapper--near-snap={nearSnapZone !== null}
+	class:threads-fab-wrapper--hidden={hiddenInTray}
 	bind:this={fabEl}
 	data-ready={ready}
 	data-dragging={dragging}
@@ -1215,6 +1451,12 @@
 		z-index: 64;
 		touch-action: none;
 		--floating-fab-size: 3.1rem;
+		--floating-fab-snapped-size: 3rem;
+	}
+	
+	/* When snapped, increase z-index to appear above tray content */
+	.threads-fab-wrapper--snapped {
+		z-index: 100;
 	}
 
 	.threads-fab-wrapper[data-ready='false'] {
@@ -1224,6 +1466,14 @@
 
 	.threads-fab-wrapper[data-dragging='true'] {
 		cursor: grabbing;
+		z-index: 110; /* Even higher when dragging */
+	}
+	
+	/* Hide FAB when it's snapped to tray and tray is closed */
+	.threads-fab-wrapper--hidden {
+		opacity: 0;
+		pointer-events: none;
+		visibility: hidden;
 	}
 
 	.threads-fab {
@@ -1243,6 +1493,20 @@
 			box-shadow 180ms ease;
 		position: relative;
 	}
+	
+	/* Snapped FAB styling - smaller to fit in tray slot */
+	.threads-fab--snapped {
+		width: var(--floating-fab-snapped-size);
+		height: var(--floating-fab-snapped-size);
+		cursor: pointer;
+		box-shadow: 0 0 0 2px var(--color-accent, #a855f7);
+	}
+	
+	/* Hint that hold is needed to drag out */
+	.threads-fab--snapped:active {
+		cursor: grabbing;
+		transform: scale(0.95);
+	}
 
 	.threads-fab:hover,
 	.threads-fab:focus-visible,
@@ -1250,6 +1514,12 @@
 		transform: translateY(-2px);
 		box-shadow: 0 18px 32px rgba(139, 92, 246, 0.45);
 		outline: none;
+	}
+	
+	/* Snapped FAB hover - don't translate, just glow */
+	.threads-fab--snapped:hover {
+		transform: scale(1.05);
+		box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
 	}
 
 	.threads-fab--empty {
@@ -1679,22 +1949,14 @@
 		transition: transform 200ms ease-out;
 	}
 
-	.threads-fab-wrapper--near-snap {
-		filter: drop-shadow(0 0 8px var(--color-accent, #a855f7));
-	}
-
-	.threads-fab--snapped {
-		/* Match rail-button size when docked */
-		width: 3rem;
-		height: 3rem;
-		box-shadow: 0 0 0 2px var(--color-accent, #a855f7);
+	@media (max-width: 767px) {
+		.threads-fab-wrapper {
+			--floating-fab-size: 3rem;
+			--floating-fab-snapped-size: 3rem;
+		}
 	}
 
 	@media (max-width: 640px) {
-		.threads-fab-wrapper {
-			--floating-fab-size: 3.25rem;
-		}
-
 		.threads-popover {
 			width: min(360px, calc(100vw - 24px));
 			max-height: calc(100vh - 140px);

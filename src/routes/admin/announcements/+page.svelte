@@ -28,7 +28,7 @@
 	}
 
 	let { data }: Props = $props();
-	let announcements = $state<Announcement[]>([...data.announcements]);
+	let announcements = $state<Announcement[]>([]);
 	let selectedAnnouncement: Announcement | null = $state(null);
 	let isCreating = $state(false);
 	let saving = $state(false);
@@ -77,6 +77,10 @@
 	let typeDropdownOpen = $state(false);
 	let audienceDropdownOpen = $state(false);
 	let branchDropdownOpen = $state(false);
+
+	$effect(() => {
+		announcements = [...data.announcements];
+	});
 
 	const mobileViewport = $derived($isMobileViewport);
 

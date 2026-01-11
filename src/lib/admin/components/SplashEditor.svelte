@@ -69,10 +69,10 @@
 	}
 
 	// Editable values
-	let gifUrl = $state(config.gifUrl);
-	let gifDuration = $state(config.gifDuration);
-	let themeBackgrounds = $state<Record<string, string>>(initThemeBackgrounds());
-	let enabled = $state(config.enabled);
+	let gifUrl = $state('');
+	let gifDuration = $state(0);
+	let themeBackgrounds = $state<Record<string, string>>({});
+	let enabled = $state(false);
 
 	// Sync with prop changes
 	$effect(() => {

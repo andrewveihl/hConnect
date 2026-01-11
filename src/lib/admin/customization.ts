@@ -67,6 +67,8 @@ export interface CustomizationConfig {
 	splashGifs: CachedSplashGif[];
 	// Global sound overrides
 	sounds: SoundSources;
+	// Global default avatar URL
+	defaultAvatarUrl?: string | null;
 	// Last updated
 	updatedAt?: Date;
 	updatedBy?: string;
@@ -88,7 +90,8 @@ const DEFAULT_CONFIG: CustomizationConfig = {
 	customThemes: [],
 	splash: DEFAULT_SPLASH,
 	splashGifs: [],
-	sounds: DEFAULT_SOUND_SOURCES
+	sounds: DEFAULT_SOUND_SOURCES,
+	defaultAvatarUrl: null
 };
 
 // Base theme colors for reference/reset
@@ -229,6 +232,47 @@ export async function saveSplashConfig(
 	};
 
 	await saveCustomizationConfig({ splash: newSplash }, user);
+}
+
+export async function saveDefaultAvatarUrl(
+	defaultAvatarUrl: string | null,
+	user: User | null
+): Promise<void> {
+	if (!user) throw new Error('Must be authenticated');
+	await ensureFirebaseReady();
+
+	await saveCustomizationConfig({ defaultAvatarUrl: defaultAvatarUrl || null }, user);
+}
+
+/**
+ * Upload an image file as the default avatar and save its URL
+ */
+export async function uploadDefaultAvatarImage(
+	file: File,
+	user: User | null
+): Promise<string> {
+	if (!user) throw new Error('Must be authenticated');
+	await ensureFirebaseReady();
+
+	const storage = getStorageInstance();
+	const ext = (file.name.split('.').pop() || 'png').toLowerCase();
+	const id = `default-avatar-${Date.now()}`;
+	const storageRef = ref(storage, `admin/avatars/${id}.${ext}`);
+
+	await uploadBytes(storageRef, file, { contentType: file.type || 'image/png' });
+	const url = await getDownloadURL(storageRef);
+
+	// Save the URL to the customization config
+	await saveCustomizationConfig({ defaultAvatarUrl: url }, user);
+
+	return url;
+}
+
+export async function resetDefaultAvatarUrl(user: User | null): Promise<void> {
+	if (!user) throw new Error('Must be authenticated');
+	await ensureFirebaseReady();
+
+	await saveCustomizationConfig({ defaultAvatarUrl: null }, user);
 }
 
 export async function resetThemeToDefault(themeId: string, user: User | null): Promise<void> {
