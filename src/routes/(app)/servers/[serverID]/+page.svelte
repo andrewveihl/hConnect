@@ -4896,21 +4896,22 @@
 	// to avoid recursion warnings
 	let lastSyncedServer: string | null = null;
 	let lastSyncedUser: string | null = null;
-	run(() => {
-		const currentServer = serverId ?? null;
-		const currentUser = $user?.uid ?? null;
-		const cachedChannels = untrack(() => lastSidebarChannels);
-		// Only sync when the combination of server/user actually changes, not on every reactive run
-		if (currentServer && currentUser && cachedChannels) {
-			const needsSync = currentServer !== lastSyncedServer || currentUser !== lastSyncedUser;
-			if (
-				needsSync ||
-				(cachedChannels.serverId === currentServer &&
-					!channels.length &&
-					cachedChannels.channels?.length)
-			) {
-				lastSyncedServer = currentServer;
-				lastSyncedUser = currentUser;
+run(() => {
+	const currentServer = serverId ?? null;
+	const currentUser = $user?.uid ?? null;
+	const cachedChannels = untrack(() => lastSidebarChannels);
+	const hasChannels = untrack(() => channels.length > 0);
+	// Only sync when the combination of server/user actually changes, not on every reactive run
+	if (currentServer && currentUser && cachedChannels) {
+		const needsSync = currentServer !== lastSyncedServer || currentUser !== lastSyncedUser;
+		if (
+			needsSync ||
+			(cachedChannels.serverId === currentServer &&
+				!hasChannels &&
+				cachedChannels.channels?.length)
+		) {
+			lastSyncedServer = currentServer;
+			lastSyncedUser = currentUser;
 				syncVisibleChannels(cachedChannels, false);
 			}
 		}
@@ -5316,6 +5317,7 @@
 						membersVisible={!voiceState?.visible &&
 							(isMobile ? showMembers : desktopMembersVisible)}
 						showMessageShortcut={true}
+						hideMembersToggle={!isMobile && !desktopMembersWideEnough}
 						onToggleChannels={() => {
 							showChannels = true;
 							showMembers = false;

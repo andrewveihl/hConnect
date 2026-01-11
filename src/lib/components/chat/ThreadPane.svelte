@@ -104,7 +104,8 @@
 	}
 
 	const handleComposerFocus = () => {
-		focusScrollSignal += 1;
+		// Don't auto-scroll when focusing input - let users stay where they are while composing
+		// focusScrollSignal += 1;
 	};
 
 	function handleDocumentPointerDown(event: PointerEvent) {

@@ -10,6 +10,7 @@
 	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
 	import SuperAdminFab from '$lib/components/app/SuperAdminFab.svelte';
 	import VoiceDebugFab from '$lib/components/app/VoiceDebugFab.svelte';
+	import DesktopUserBar from '$lib/components/app/DesktopUserBar.svelte';
 	import {
 		initClientErrorReporting,
 		teardownClientErrorReporting
@@ -21,7 +22,7 @@
 	} from '$lib/admin/customization';
 	import { theme } from '$lib/stores/theme';
 	import { setSoundOverrides } from '$lib/utils/sounds';
-	import { initFabSnappingSettings } from '$lib/stores/fabSnap';
+	import { initFabSnappingSettings, initFabSnapSync } from '$lib/stores/fabSnap';
 
 	interface Props {
 		children?: import('svelte').Snippet;
@@ -134,6 +135,7 @@
 		const teardownNavigation = initMobileNavigation();
 		initClientErrorReporting();
 		initFabSnappingSettings();
+		initFabSnapSync();
 		const isMobile = shouldUseMobileSplash();
 
 		if (!isMobile) {
@@ -221,6 +223,7 @@
 		<VoiceDebugFab />
 		{#if !isAdminPage}
 			<SuperAdminFab />
+			<DesktopUserBar />
 		{/if}
 	{/if}
 </div>

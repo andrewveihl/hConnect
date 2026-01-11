@@ -12,9 +12,9 @@
 
 	let { data }: Props = $props();
 	let search = $state('');
-	let authorId = $state(data.initialFilters?.authorId ?? '');
-	let serverId = $state(data.initialFilters?.serverId ?? '');
-	let dmId = $state(data.initialFilters?.dmId ?? '');
+	let authorId = $state('');
+	let serverId = $state('');
+	let dmId = $state('');
 	let pendingAction: {
 		messageId: string;
 		path: string;
@@ -22,6 +22,12 @@
 		preview: string;
 	} | null = $state(null);
 	let busy = $state(false);
+
+	$effect(() => {
+		authorId = data.initialFilters?.authorId ?? '';
+		serverId = data.initialFilters?.serverId ?? '';
+		dmId = data.initialFilters?.dmId ?? '';
+	});
 
 	const filteredMessages = $derived(
 		data.messages.filter((message) => {
@@ -110,10 +116,10 @@
 								<p class="font-semibold">{message.text || `[${message.type}]`}</p>
 								<p class="text-xs text-slate-500 truncate">{message.id}</p>
 							</td>
-							<td class="px-4 py-4 text-sm text-slate-500">{message.authorId ?? '—'}</td>
+							<td class="px-4 py-4 text-sm text-slate-500">{message.authorId ?? 'Unknown'}</td>
 							<td class="px-4 py-4 text-sm text-slate-500">
 								{#if message.serverId}
-									Server {message.serverId} / Channel {message.channelId ?? '—'}
+									Server {message.serverId} / Channel {message.channelId ?? 'Unknown'}
 								{:else if message.dmId}
 									DM {message.dmId}
 								{:else}
@@ -121,7 +127,7 @@
 								{/if}
 							</td>
 							<td class="px-4 py-4 text-sm text-slate-500">
-								{message.createdAt ? message.createdAt.toLocaleString() : '—'}
+								{message.createdAt ? message.createdAt.toLocaleString() : 'Unknown'}
 							</td>
 							<td class="px-4 py-4 text-right space-x-2">
 								<button

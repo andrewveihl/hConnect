@@ -13,6 +13,7 @@
 	import MessageList from '$lib/components/chat/MessageList.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import GroupChatInfoPanel from '$lib/components/dms/GroupChatInfoPanel.svelte';
 	import {
 		openOverlay,
 		closeOverlay,
@@ -28,7 +29,8 @@
 		markThreadRead,
 		voteOnDMPoll,
 		submitDMForm,
-		toggleDMReaction
+		toggleDMReaction,
+		type DMThread
 	} from '$lib/firestore/dms';
 	import { markDMActivityRead } from '$lib/stores/activityFeed';
 	import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -156,8 +158,11 @@
 	// Group chat state
 	let isGroupChat = $state(false);
 	let groupName = $state<string | null>(null);
+	let groupIconURL = $state<string | null>(null);
+	let groupDescription = $state<string | null>(null);
 	let groupParticipants = $state<string[]>([]);
 	let groupParticipantProfiles = $state<Record<string, any>>({});
+	let threadData = $state<(DMThread & { id: string }) | null>(null);
 
 	let showThreads = $state(false);
 	let showInfo = $state(false);
@@ -746,7 +751,29 @@
 			// Check if this is a group chat
 			isGroupChat = payload.isGroup === true || parts.length > 2;
 			groupName = payload.name ?? null;
+			groupIconURL = payload.iconURL ?? null;
+			groupDescription = payload.description ?? null;
 			groupParticipants = parts;
+			
+			// Store full thread data for group info panel
+			threadData = {
+				id: threadID,
+				key: payload.key ?? '',
+				participants: parts,
+				createdAt: payload.createdAt,
+				updatedAt: payload.updatedAt,
+				lastMessage: payload.lastMessage ?? null,
+				lastSender: payload.lastSender ?? null,
+				isGroup: payload.isGroup ?? false,
+				name: payload.name ?? null,
+				iconURL: payload.iconURL ?? null,
+				createdBy: payload.createdBy ?? null,
+				description: payload.description ?? null,
+				pinnedMessageId: payload.pinnedMessageId ?? null,
+				allowMemberInvites: payload.allowMemberInvites ?? true,
+				mutedBy: payload.mutedBy ?? {},
+				adminUids: payload.adminUids ?? []
+			};
 
 			if (isGroupChat) {
 				// Load profiles for all other participants
@@ -792,9 +819,25 @@
 			otherProfile = null;
 			isGroupChat = false;
 			groupParticipantProfiles = {};
+			threadData = null;
 		} finally {
 			metaLoading = false;
 		}
+	}
+
+	// Handle group settings updates from the info panel
+	function handleGroupUpdate(updates: Partial<DMThread>) {
+		if (!threadData) return;
+		threadData = { ...threadData, ...updates };
+		if ('name' in updates) groupName = updates.name ?? null;
+		if ('iconURL' in updates) groupIconURL = updates.iconURL ?? null;
+		if ('description' in updates) groupDescription = updates.description ?? null;
+	}
+
+	// Handle leaving group
+	function handleLeaveGroup() {
+		syncInfoVisibility(false);
+		goto('/dms');
 	}
 
 	run(() => {
@@ -1542,9 +1585,17 @@
 				>
 					<div class="dm-header__avatar">
 						{#if isGroupChat}
-							<div class="dm-header__group-icon">
-								<i class="bx bx-group"></i>
-							</div>
+							{#if groupIconURL}
+								<img
+									src={groupIconURL}
+									alt="Group icon"
+									class="dm-header__group-icon-img"
+								/>
+							{:else}
+								<div class="dm-header__group-icon">
+									<i class="bx bx-group"></i>
+								</div>
+							{/if}
 						{:else}
 							<Avatar
 								user={otherProfile}
@@ -1628,21 +1679,32 @@
 
 	{#if showInfo}
 		<aside class="hidden lg:flex lg:w-72 panel border-l border-subtle/50 overflow-y-auto">
-			<div class="p-5 w-full">
-				<div class="flex items-center justify-between mb-5">
-					<div class="text-xs font-medium uppercase tracking-wider text-white/50">Profile</div>
-					<button
-						class="w-7 h-7 grid place-items-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition"
-						type="button"
-						aria-label="Close profile panel"
-						onclick={() => syncInfoVisibility(false)}
-					>
-						<i class="bx bx-x text-lg"></i>
-					</button>
+			{#if metaLoading}
+				<div class="p-5 w-full">
+					<div class="animate-pulse text-white/50 text-sm">Loading...</div>
 				</div>
-				{#if metaLoading}
-					<div class="animate-pulse text-white/50 text-sm">Loading profile...</div>
-				{:else if otherProfile}
+			{:else if isGroupChat && threadData}
+				<GroupChatInfoPanel
+					thread={threadData}
+					currentUid={me?.uid ?? ''}
+					participantProfiles={groupParticipantProfiles}
+					onClose={() => syncInfoVisibility(false)}
+					on:update={(e) => handleGroupUpdate(e.detail)}
+					on:leave={handleLeaveGroup}
+				/>
+			{:else if otherProfile}
+				<div class="p-5 w-full">
+					<div class="flex items-center justify-between mb-5">
+						<div class="text-xs font-medium uppercase tracking-wider text-white/50">Profile</div>
+						<button
+							class="w-7 h-7 grid place-items-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition"
+							type="button"
+							aria-label="Close profile panel"
+							onclick={() => syncInfoVisibility(false)}
+						>
+							<i class="bx bx-x text-lg"></i>
+						</button>
+					</div>
 					<div class="flex flex-col items-center gap-3 text-center py-4">
 						<Avatar
 							user={otherProfile}
@@ -1673,10 +1735,12 @@
 							</a>
 						{/if}
 					</div>
-				{:else}
+				</div>
+			{:else}
+				<div class="p-5 w-full">
 					<div class="text-white/50">Profile unavailable.</div>
-				{/if}
-			</div>
+				</div>
+			{/if}
 		</aside>
 	{/if}
 </div>
@@ -1723,23 +1787,34 @@
 		style:transition-duration={`${PANEL_DURATION}ms`}
 		style:transitionTimingFunction={PANEL_EASING}
 		style:pointer-events={showInfo ? 'auto' : 'none'}
-		aria-label="Profile"
+		aria-label={isGroupChat ? 'Group Info' : 'Profile'}
 	>
-		<div class="mobile-panel__header md:hidden">
-			<button
-				class="mobile-panel__close -ml-2"
-				aria-label="Close"
-				type="button"
-				onclick={() => syncInfoVisibility(false)}
-			>
-				<i class="bx bx-chevron-left text-xl"></i>
-			</button>
-			<div class="mobile-panel__title">Profile</div>
-		</div>
+		{#if !isGroupChat}
+			<div class="mobile-panel__header md:hidden">
+				<button
+					class="mobile-panel__close -ml-2"
+					aria-label="Close"
+					type="button"
+					onclick={() => syncInfoVisibility(false)}
+				>
+					<i class="bx bx-chevron-left text-xl"></i>
+				</button>
+				<div class="mobile-panel__title">Profile</div>
+			</div>
+		{/if}
 
-		<div class="flex-1 overflow-y-auto p-5 touch-pan-y">
+		<div class="flex-1 overflow-y-auto touch-pan-y" class:p-5={!isGroupChat}>
 			{#if metaLoading}
-				<div class="animate-pulse text-soft text-sm">Loading profile...</div>
+				<div class="animate-pulse text-soft text-sm p-5">Loading...</div>
+			{:else if isGroupChat && threadData}
+				<GroupChatInfoPanel
+					thread={threadData}
+					currentUid={me?.uid ?? ''}
+					participantProfiles={groupParticipantProfiles}
+					onClose={() => syncInfoVisibility(false)}
+					on:update={(e) => handleGroupUpdate(e.detail)}
+					on:leave={handleLeaveGroup}
+				/>
 			{:else if otherProfile}
 				<div class="flex flex-col items-center gap-3 text-center py-4">
 					<Avatar
@@ -1772,7 +1847,7 @@
 					{/if}
 				</div>
 			{:else}
-				<div class="text-white/50 text-sm">Profile unavailable.</div>
+				<div class="text-white/50 text-sm p-5">Profile unavailable.</div>
 			{/if}
 		</div>
 	</div>
@@ -1873,6 +1948,14 @@
 		flex-shrink: 0;
 	}
 
+	.dm-header__group-icon-img {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.5rem;
+		object-fit: cover;
+		flex-shrink: 0;
+	}
+
 	.dm-header__chevron {
 		color: var(--color-text-tertiary);
 		font-size: 1.125rem;
@@ -1918,6 +2001,11 @@
 		.dm-page .chat-input-region {
 			position: relative;
 			z-index: 10;
+		}
+
+		/* Add extra bottom padding for DesktopUserBar on DM pages */
+		.dm-page .message-scroll-region {
+			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 2.5rem);
 		}
 	}
 

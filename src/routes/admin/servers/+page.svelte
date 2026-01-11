@@ -13,7 +13,7 @@
 	}
 
 	let { data }: Props = $props();
-	let servers = $state([...data.servers]);
+	let servers = $state<typeof data.servers>([]);
 	let search = $state('');
 	let pendingAction: { serverId: string; mode: 'archive' | 'delete'; label: string } | null =
 		$state(null);
@@ -21,6 +21,10 @@
 	let selectedServer: (typeof data.servers)[number] | null = $state(null);
 	let settingsBusy = $state(false);
 	let showDetailPanel = $state(false);
+
+	$effect(() => {
+		servers = [...data.servers];
+	});
 
 	let settingsForm = $state({
 		isPublic: false,

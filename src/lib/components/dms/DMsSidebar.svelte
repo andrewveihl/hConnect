@@ -12,6 +12,7 @@
 		getOrCreateDMThread,
 		createGroupDM,
 		streamMyDMs,
+		streamMyThreadsLoose,
 		streamUnreadCount,
 		streamProfiles,
 		getProfile,
@@ -19,6 +20,7 @@
 		streamThreadMeta,
 		triggerDMRailBackfill
 	} from '$lib/firestore/dms';
+	import { dmRailCache } from '$lib/stores/dmRailCache';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
@@ -74,7 +76,7 @@
 		if (!partner) return;
 		const resolved = meta.displayName ?? meta.name ?? meta.email ?? partner;
 		nameCache = { ...nameCache, [partner]: resolved };
-		threads = threads.map((thread) => {
+		const nextThreads = threads.map((thread) => {
 			const other =
 				thread.otherUid || (thread.participants || []).find((p: string) => p !== me?.uid);
 			if (other !== partner) return thread;
@@ -85,6 +87,7 @@
 				otherEmail: meta.email ?? thread.otherEmail ?? null
 			};
 		});
+		syncThreadState(nextThreads);
 	}
 
 	/* ---------------- Search ---------------- */
@@ -174,7 +177,7 @@
 			
 			// Add to local threads list
 			if (!threads.find((x) => x.id === thread.id)) {
-				threads = [
+				const nextThreads = [
 					{
 						id: thread.id,
 						participants: thread.participants,
@@ -185,6 +188,11 @@
 					},
 					...threads
 				];
+				syncThreadState(nextThreads);
+				if (me?.uid) {
+					dmRailCache.set(me.uid, nextThreads);
+					persistStoredRail(me.uid, nextThreads);
+				}
 			}
 
 			activeThreadId = thread.id;
@@ -226,8 +234,14 @@
 
 	/* ---------------- Threads ---------------- */
 	let threads: any[] = $state([]);
+	let threadOrder: string[] = $state([]);
+	let latestThreadsSnapshot: any[] = $state([]);
+	let orderLocked = $state(true);
 	let threadsLoading = $state(true);
 	let unsubThreads: (() => void) | null = null;
+	let fallbackUnsub: (() => void) | null = null;
+	let railHasThreads = false;
+	let lastUid: string | null = null;
 	let threadMeta: Record<
 		string,
 		{ lastMessage: string | null; lastSender: string | null; updatedAt: any | null }
@@ -237,6 +251,7 @@
 	let sortedThreads: any[] = $state([]);
 
 	onDestroy(() => unsubThreads?.());
+	onDestroy(() => fallbackUnsub?.());
 	onDestroy(() => {
 		Object.values(metaUnsubs).forEach((stop) => stop());
 		metaUnsubs = {};
@@ -245,6 +260,76 @@
 
 	// Resolve names for "other" participant so the list shows names, not UIDs.
 	let nameCache: Record<string, string> = $state({});
+
+	const DM_RAIL_STORAGE_PREFIX = 'dm-rail:';
+	const DM_RAIL_STORAGE_LIMIT = 120;
+
+	function loadStoredRail(uid: string): any[] | null {
+		if (typeof window === 'undefined') return null;
+		try {
+			const raw = sessionStorage.getItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`);
+			if (!raw) return null;
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	function persistStoredRail(uid: string, rows: any[]) {
+		if (typeof window === 'undefined') return;
+		try {
+			const trimmed = Array.isArray(rows) ? rows.slice(0, DM_RAIL_STORAGE_LIMIT) : [];
+			sessionStorage.setItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`, JSON.stringify(trimmed));
+		} catch {
+			// ignore storage errors
+		}
+	}
+
+	function lockOrder() {
+		orderLocked = true;
+	}
+
+	function unlockOrder() {
+		orderLocked = false;
+		if (latestThreadsSnapshot.length) {
+			applyThreads(latestThreadsSnapshot, threadOrder.length > 0);
+		}
+	}
+
+	function applyThreads(next: any[], preserveOrder: boolean) {
+		const rows = Array.isArray(next) ? next.filter((t) => t && typeof t.id === 'string') : [];
+		latestThreadsSnapshot = rows;
+		const nextMap = new Map(rows.map((t) => [t.id, t]));
+		const nextIds = rows.map((t) => t.id as string);
+		let order: string[] = [];
+		if (preserveOrder && threadOrder.length > 0) {
+			const seen = new Set<string>();
+			for (const id of threadOrder) {
+				if (nextMap.has(id)) {
+					order.push(id);
+					seen.add(id);
+				}
+			}
+			for (const id of nextIds) {
+				if (!seen.has(id)) {
+					order.push(id);
+					seen.add(id);
+				}
+			}
+		} else {
+			order = nextIds;
+		}
+		threadOrder = order;
+		threads = order.map((id) => nextMap.get(id)).filter(Boolean);
+	}
+
+	function syncThreadState(next: any[]) {
+		const rows = Array.isArray(next) ? next.filter((t) => t && typeof t.id === 'string') : [];
+		latestThreadsSnapshot = rows;
+		threadOrder = rows.map((t) => t.id as string);
+		threads = rows;
+	}
 
 	function pickDisplayCandidate(source: any): string | null {
 		if (!source) return null;
@@ -297,7 +382,9 @@
 	function threadDisplayName(t: any): string {
 		// For group chats, use the group name if set, otherwise list participant names
 		if (isGroupThread(t)) {
+			// Check both 'name' (from DM thread doc) and 'groupName' (from rail doc)
 			if (t.name) return t.name;
+			if (t.groupName) return t.groupName;
 			return getGroupParticipantNames(t);
 		}
 		// For 1:1 chats, use the other person's name
@@ -698,7 +785,7 @@
 			const t = await getOrCreateDMThread([me.uid, targetUid], me.uid);
 
 			if (!threads.find((x) => x.id === t.id)) {
-				threads = [
+				const nextThreads = [
 					{
 						id: t.id,
 						participants: [me.uid, targetUid].sort(),
@@ -707,6 +794,11 @@
 					},
 					...threads
 				];
+				syncThreadState(nextThreads);
+				if (me?.uid) {
+					dmRailCache.set(me.uid, nextThreads);
+					persistStoredRail(me.uid, nextThreads);
+				}
 			}
 
 			activeThreadId = t.id;
@@ -732,7 +824,12 @@
 
 		try {
 			await deleteThreadForUser(threadId, me.uid);
-			threads = threads.filter((t) => t.id !== threadId);
+			const nextThreads = threads.filter((t) => t.id !== threadId);
+			syncThreadState(nextThreads);
+			if (me?.uid) {
+				dmRailCache.set(me.uid, nextThreads);
+				persistStoredRail(me.uid, nextThreads);
+			}
 			const nextMap = { ...unreadMap };
 			delete nextMap[threadId];
 			unreadMap = nextMap;
@@ -747,6 +844,7 @@
 
 	async function refreshConversations() {
 		if (isRefreshing) return;
+		lockOrder();
 		isRefreshing = true;
 		try {
 			const result = await triggerDMRailBackfill();
@@ -756,6 +854,7 @@
 			console.error('[DMs] Failed to refresh conversations:', err);
 		} finally {
 			isRefreshing = false;
+			unlockOrder();
 		}
 	}
 
@@ -769,6 +868,13 @@
 		
 		// Wait a short delay to avoid race conditions
 		await new Promise(resolve => setTimeout(resolve, 500));
+
+		if (threads.length > 0) {
+			return;
+		}
+
+		lockOrder();
+		isRefreshing = true;
 		
 		try {
 			console.log('[DMs] Running auto-backfill on mount...');
@@ -776,32 +882,87 @@
 			console.log('[DMs] Auto-backfill complete:', result);
 		} catch (err) {
 			console.warn('[DMs] Auto-backfill failed (non-critical):', err);
+		} finally {
+			isRefreshing = false;
+			unlockOrder();
 		}
+	}
+
+	function stopFallbackStream() {
+		fallbackUnsub?.();
+		fallbackUnsub = null;
+	}
+
+	function startFallbackStream(uid: string) {
+		if (fallbackUnsub) return;
+		fallbackUnsub = streamMyThreadsLoose(uid, (rows) => {
+			if (railHasThreads) return;
+			const preserve = orderLocked || isRefreshing || threadOrder.length > 0 || !railHasThreads;
+			applyThreads(rows, preserve);
+			threadsLoading = false;
+			dmRailCache.set(uid, rows);
+			persistStoredRail(uid, rows);
+		});
 	}
 
 	run(() => {
 		me = $user;
 	});
 	run(() => {
+		const uid = me?.uid ?? null;
+		if (uid === lastUid) {
+			return;
+		}
+		lastUid = uid;
+		hasAutoBackfilled = false;
 		const prevUnsub = untrack(() => unsubThreads);
 		prevUnsub?.();
-		if (me?.uid) {
+		stopFallbackStream();
+		railHasThreads = false;
+		threadOrder = [];
+		latestThreadsSnapshot = [];
+		orderLocked = false;
+		if (uid) {
+			const cachedThreads = dmRailCache.get(uid) ?? loadStoredRail(uid);
+			if (cachedThreads?.length) {
+				applyThreads(cachedThreads, true);
+				railHasThreads = true;
+				threadsLoading = false;
+			}
 			// Only show loading state if we don't have any threads yet
 			// This prevents the loading flash when navigating back to DMs
 			const currentThreads = untrack(() => threads);
 			if (!currentThreads || currentThreads.length === 0) {
 				threadsLoading = true;
 			}
-			unsubThreads = streamMyDMs(me.uid, (t) => {
-				threads = t;
+			unsubThreads = streamMyDMs(uid, (t, meta) => {
+				const fromCache = meta?.fromCache ?? false;
+				if (fromCache && threads.length > 0) {
+					latestThreadsSnapshot = t;
+					railHasThreads = true;
+					return;
+				}
+				railHasThreads = t.length > 0;
+				if (railHasThreads) {
+					stopFallbackStream();
+					const preserve = orderLocked || isRefreshing || threadOrder.length > 0;
+					applyThreads(t, preserve);
+					threadsLoading = false;
+					dmRailCache.set(uid, t);
+					persistStoredRail(uid, t);
+					return;
+				}
 				threadsLoading = false;
+				const preserve = orderLocked || isRefreshing || threadOrder.length > 0 || !railHasThreads;
+				applyThreads(t, preserve);
+				startFallbackStream(uid);
 			});
 			// Trigger auto-backfill when user is set
-			if (!hasAutoBackfilled) {
+			if (!untrack(() => hasAutoBackfilled)) {
 				autoBackfillOnMount();
 			}
 		} else {
-			threads = [];
+			syncThreadState([]);
 			threadsLoading = false;
 		}
 	});
@@ -859,17 +1020,12 @@
 				...thread,
 				lastMessage,
 				lastSender,
-				updatedAt,
-				_sortValue: timestampValue(updatedAt)
+				updatedAt
 			};
 		});
 	});
 	run(() => {
-		sortedThreads = decoratedThreads.slice().sort((a, b) => {
-			const diff = (b._sortValue ?? 0) - (a._sortValue ?? 0);
-			if (diff !== 0) return diff;
-			return (a.id || '').localeCompare(b.id || '');
-		});
+		sortedThreads = decoratedThreads.slice();
 	});
 	run(() => {
 		const prevStops = untrack(() => unsubsUnread);
@@ -1058,15 +1214,29 @@
 								>
 									<div class="dm-thread__avatar">
 										{#if isGroup}
-											<div class="dm-thread__group-icon">
-												<i class="bx bx-group"></i>
-											</div>
+											{#if t.iconURL}
+												<img
+													src={t.iconURL}
+													alt="Group icon"
+													class="dm-thread__group-icon-img"
+												/>
+											{:else}
+												<div class="dm-thread__group-icon">
+													<i class="bx bx-group"></i>
+												</div>
+											{/if}
 										{:else}
-											{@const avatarUser = peopleMap[otherUid ?? ''] ?? {
+											{@const fallbackData = {
 												uid: otherUid,
-												photoURL: t.otherPhotoURL ?? t.profile?.photoURL ?? null,
+												photoURL: t.otherPhotoURL,
+												cachedPhotoURL: t.profile?.cachedPhotoURL,
+												authPhotoURL: t.profile?.authPhotoURL,
 												displayName: t.otherDisplayName ?? t.profile?.displayName ?? t.profile?.name ?? null,
 												email: t.otherEmail ?? t.profile?.email ?? null
+											}}
+											{@const avatarUser = peopleMap[otherUid ?? ''] ?? {
+												...fallbackData,
+												photoURL: resolveProfilePhotoURL(fallbackData)
 											}}
 											<Avatar
 												user={avatarUser}
@@ -1398,6 +1568,13 @@
 		font-weight: 500;
 	}
 
+	/* Desktop: add extra padding for the DesktopUserBar */
+	@media (min-width: 768px) {
+		.dms-sidebar-scroll {
+			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 3rem);
+		}
+	}
+
 	@media (max-width: 767px) {
 		.dms-sidebar-header {
 			padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
@@ -1581,13 +1758,21 @@
 	.dm-thread__group-icon {
 		width: 2rem;
 		height: 2rem;
-		border-radius: 0.5rem;
+		border-radius: 50%;
 		background: linear-gradient(135deg, var(--color-accent, #5865f2) 0%, #7c3aed 100%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		color: white;
 		font-size: 1rem;
+		flex-shrink: 0;
+	}
+
+	.dm-thread__group-icon-img {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 50%;
+		object-fit: cover;
 		flex-shrink: 0;
 	}
 
@@ -1855,6 +2040,7 @@
 		grid-template-columns: auto 1fr auto;
 		align-items: center;
 		gap: 0.5rem;
+		margin-top: 0.5rem;
 		padding: 0.35rem 0.75rem;
 		background: color-mix(in srgb, var(--color-sidebar) 90%, rgba(255, 255, 255, 0.06));
 		border: 1px solid var(--color-border-subtle);

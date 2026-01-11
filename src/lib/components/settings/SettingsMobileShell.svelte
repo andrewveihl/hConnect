@@ -28,7 +28,7 @@
 	);
 	let activeTab = $state('User Settings');
 	let search = $state('');
-	let detailSection: SettingsSectionId | null = $state(startInSection ? activeSection : null);
+	let detailSection: SettingsSectionId | null = $state(null);
 	let seededSection = $state(false);
 	const EDGE_ZONE = 120;
 	const SWIPE = 48;
