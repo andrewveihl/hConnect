@@ -26,15 +26,6 @@
 	const tabs: string[] = $derived(
 		Array.from(new Set(settingsSections.map((section) => section.group)))
 	);
-	const sectionIcons: Record<SettingsSectionId, string> = {
-		account: 'bx-user-circle',
-		notifications: 'bx-bell',
-		voice: 'bx-microphone',
-		keybinds: 'bx-slider-alt',
-		appearance: 'bx-palette',
-		ai: 'bx-bot',
-		invites: 'bx-link'
-	};
 	let activeTab = $state('User Settings');
 	let search = $state('');
 	let detailSection: SettingsSectionId | null = $state(null);
@@ -286,18 +277,11 @@
 									class="flex w-full items-center justify-between rounded-xl border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel)] px-4 py-3 text-left transition hover:bg-[color:var(--color-panel-muted)]"
 									onclick={() => openSection(section.id)}
 								>
-									<div class="flex items-center gap-3">
-										<span
-											class="grid h-9 w-9 place-items-center rounded-full border border-[color:var(--color-border-subtle)] bg-[color:var(--color-panel-muted)] text-[color:var(--color-text-primary)]"
-										>
-											<i class={`bx ${sectionIcons[section.id] ?? 'bx-cog'} text-lg`} aria-hidden="true"></i>
-										</span>
-										<div>
-											<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
-												{section.label}
-											</p>
-											<p class="text-xs text-[color:var(--text-70)]">{section.group}</p>
-										</div>
+									<div>
+										<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
+											{section.label}
+										</p>
+										<p class="text-xs text-[color:var(--text-70)]">{section.group}</p>
 									</div>
 									<i
 										class="bx bx-chevron-right text-xl text-[color:var(--text-70)]"

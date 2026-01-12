@@ -12,7 +12,6 @@ import {
 	setDoc,
 	where,
 	limit,
-	writeBatch,
 	type Unsubscribe
 } from 'firebase/firestore';
 import type { DocumentData, DocumentSnapshot, Timestamp } from 'firebase/firestore';
@@ -558,39 +557,4 @@ export function subscribeUnreadForServer(
 		deniedChannels.clear();
 		channelDocs.clear();
 	};
-}
-
-/**
- * Mark multiple channels as read at once.
- * @param uid - The user's uid
- * @param serverId - The server id
- * @param channelIds - Array of channel ids to mark as read
- */
-export async function markMultipleChannelsRead(
-	uid: string,
-	serverId: string,
-	channelIds: string[]
-): Promise<void> {
-	if (!channelIds.length) return;
-	const db = getDb();
-	const batch = writeBatch(db);
-	const now = serverTimestamp();
-
-	for (const channelId of channelIds) {
-		const id = keyFor(serverId, channelId);
-		const ref = doc(db, 'profiles', uid, 'reads', id);
-		batch.set(
-			ref,
-			{
-				serverId,
-				channelId,
-				lastReadAt: now,
-				lastReadMessageId: null,
-				updatedAt: now
-			},
-			{ merge: true }
-		);
-	}
-
-	await batch.commit();
 }

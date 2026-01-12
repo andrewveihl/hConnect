@@ -46,7 +46,6 @@
 		hasDMCache,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
-	import { scheduleIdlePreload, cancelIdlePreload } from '$lib/stores/preloadService';
 
 	interface Props {
 		data: { threadID: string };
@@ -227,8 +226,6 @@
 			mobileDockSuppressed.release();
 			dockClaimed = false;
 		}
-		// Cancel any pending idle preloads
-		cancelIdlePreload();
 	});
 
 	$effect(() => {
@@ -1226,13 +1223,6 @@
 			messages = [];
 			earliestLoadedDoc = null;
 			messagesLoading = false;
-		}
-	});
-	// Schedule idle preloading for other DMs when viewing a thread
-	run(() => {
-		const uid = me?.uid ?? null;
-		if (threadID && uid) {
-			scheduleIdlePreload(null, null, uid);
 		}
 	});
 

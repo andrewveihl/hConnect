@@ -551,9 +551,8 @@
 				await registerTraySnapZones();
 				// Clear inline styles so tray returns to CSS-controlled hidden state
 				clearTrayInlineStyles();
-				// Dispatch tray mounting event so FABs know tray is available again
-				// This tells FABs to reset trayUnmounted flag even though tray is closed
-				window.dispatchEvent(new CustomEvent('fabTrayStateChange', { detail: { open: fabTrayOpen, mounting: true } }));
+				// Dispatch initial tray state so any snapped FABs know whether to show
+				window.dispatchEvent(new CustomEvent('fabTrayStateChange', { detail: { open: fabTrayOpen } }));
 			}, 200);
 		}
 	});
@@ -562,9 +561,8 @@
 		presenceUnsub?.();
 		unregisterTraySnapZones();
 		if (browser) {
-			// Dispatch tray unmounting event - FABs should NOT hide, just know tray is gone temporarily
-			// This distinguishes unmount from user closing the tray
-			window.dispatchEvent(new CustomEvent('fabTrayStateChange', { detail: { open: false, unmounting: true } }));
+			// Dispatch tray closed event so FABs know to hide
+			window.dispatchEvent(new CustomEvent('fabTrayStateChange', { detail: { open: false } }));
 			window.removeEventListener('fabDragStart', handleFabDragStart as EventListener);
 			window.removeEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
 			window.removeEventListener('fabDragEnd', handleFabDragEnd as EventListener);

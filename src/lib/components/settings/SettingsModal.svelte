@@ -25,7 +25,6 @@
 		account: 'bx-user-circle',
 		notifications: 'bx-bell',
 		voice: 'bx-microphone',
-		keybinds: 'bx-slider-alt',
 		appearance: 'bx-palette',
 		ai: 'bx-bot',
 		invites: 'bx-link'
