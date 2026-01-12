@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { run } from 'svelte/legacy';
 
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { user } from '$lib/stores/user';
 	import { getDb } from '$lib/firebase';
-	import { doc, getDoc, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
+	import { doc, getDoc, getDocFromCache, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
@@ -44,9 +44,17 @@
 		getCachedDMMessages,
 		updateDMCache,
 		hasDMCache,
+		addMessageToDMCache,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
 	import { scheduleIdlePreload, cancelIdlePreload } from '$lib/stores/preloadService';
+	import {
+		getProfile,
+		setProfile,
+		fetchProfiles,
+		preloadProfiles
+	} from '$lib/stores/profileCache';
+	import { markDMAsRead } from '$lib/stores/notifications';
 
 	interface Props {
 		data: { threadID: string };
@@ -118,31 +126,66 @@
 		const prev = messageUsers[uid] ?? {};
 		const next = { ...prev, ...patch };
 		messageUsers = { ...messageUsers, [uid]: next };
+		// Also update global profile cache
+		setProfile(uid, patch);
 	}
 
+	// Batch profile loading queue for efficiency
+	let pendingProfileUids: string[] = [];
+	let profileBatchTimer: ReturnType<typeof setTimeout> | null = null;
+
 	function ensureProfileSubscription(database: ReturnType<typeof getDb>, uid: string) {
-		if (!uid || profileUnsubs[uid]) return;
-		profileUnsubs[uid] = onSnapshot(
-			doc(database, 'profiles', uid),
-			(snap) => {
-				const data: any = snap.data() ?? {};
-				const displayName =
-					pickString(data?.name) ?? pickString(data?.displayName) ?? pickString(data?.email);
-				const photoURL = resolveProfilePhotoURL(data);
-				updateMessageUserCache(uid, {
-					uid,
-					displayName,
-					name: displayName,
-					photoURL,
-					authPhotoURL: data?.authPhotoURL ?? null,
-					settings: data?.settings ?? undefined
-				});
-			},
-			() => {
-				profileUnsubs[uid]?.();
-				delete profileUnsubs[uid];
-			}
-		);
+		if (!uid || profileUnsubs[uid] || messageUsers[uid]) return;
+		
+		// Check global cache first
+		const cached = getProfile(uid);
+		if (cached) {
+			const displayName =
+				pickString(cached?.name) ?? pickString(cached?.displayName) ?? pickString(cached?.email);
+			const photoURL = resolveProfilePhotoURL(cached);
+			updateMessageUserCache(uid, {
+				uid,
+				displayName,
+				name: displayName,
+				photoURL,
+				authPhotoURL: cached?.authPhotoURL ?? null,
+				settings: cached?.settings ?? undefined
+			});
+			return;
+		}
+		
+		// Queue for batch loading
+		if (!pendingProfileUids.includes(uid)) {
+			pendingProfileUids.push(uid);
+		}
+		
+		// Schedule batch fetch
+		if (!profileBatchTimer) {
+			profileBatchTimer = setTimeout(async () => {
+				profileBatchTimer = null;
+				const uidsToFetch = pendingProfileUids.splice(0, 20);
+				if (uidsToFetch.length === 0) return;
+				
+				try {
+					const fetchedProfiles = await fetchProfiles(uidsToFetch);
+					for (const [fetchedUid, profile] of fetchedProfiles) {
+						const displayName =
+							pickString(profile?.name) ?? pickString(profile?.displayName) ?? pickString(profile?.email);
+						const photoURL = resolveProfilePhotoURL(profile);
+						updateMessageUserCache(fetchedUid, {
+							uid: fetchedUid,
+							displayName,
+							name: displayName,
+							photoURL,
+							authPhotoURL: profile?.authPhotoURL ?? null,
+							settings: profile?.settings ?? undefined
+						});
+					}
+				} catch {
+					// Ignore errors
+				}
+			}, 30);
+		}
 	}
 	let unsub: (() => void) | null = $state(null);
 	let mounted = $state(false);
@@ -448,6 +491,8 @@
 			lastMessageId: opts?.lastMessageId ?? null
 		};
 		markThreadRead(threadID, me.uid, payload).catch(() => {});
+		// Immediately update notification store for instant badge update
+		markDMAsRead(threadID);
 		// Also mark activity feed entries for this DM as read
 		void markDMActivityRead(threadID);
 	}
@@ -747,7 +792,17 @@
 		metaLoading = true;
 		try {
 			const database = getDb();
-			const snap = await getDoc(doc(database, 'dms', threadID));
+			const threadRef = doc(database, 'dms', threadID);
+			
+			// Try to get from cache first for faster initial load
+			let snap;
+			try {
+				snap = await getDocFromCache(threadRef);
+			} catch {
+				// Cache miss - fetch from server
+				snap = await getDoc(threadRef);
+			}
+			
 			const payload: any = snap.data() ?? {};
 			const parts: string[] = payload.participants ?? [];
 			
@@ -779,11 +834,17 @@
 			};
 
 			if (isGroupChat) {
-				// Load profiles for all other participants
+				// Load profiles for all other participants (try cache first)
 				const otherUids = parts.filter(p => p !== me?.uid);
 				const profilePromises = otherUids.map(async (uid) => {
 					try {
-						const profileDoc = await getDoc(doc(database, 'profiles', uid));
+						const profileRef = doc(database, 'profiles', uid);
+						let profileDoc;
+						try {
+							profileDoc = await getDocFromCache(profileRef);
+						} catch {
+							profileDoc = await getDoc(profileRef);
+						}
 						if (profileDoc.exists()) {
 							return { uid, profile: normalizeUserRecord(profileDoc.id, profileDoc.data()) };
 						}
@@ -807,7 +868,14 @@
 				groupParticipantProfiles = {};
 
 				if (otherUid) {
-					const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
+					// Try cache first for faster display
+					const profileRef = doc(database, 'profiles', otherUid);
+					let profileDoc;
+					try {
+						profileDoc = await getDocFromCache(profileRef);
+					} catch {
+						profileDoc = await getDoc(profileRef);
+					}
 					if (profileDoc.exists()) {
 						otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
 					} else {
@@ -916,19 +984,25 @@
 	});
 
 	run(() => {
+		// Read dependencies
+		const currentMe = me;
+		const currentOtherProfile = otherProfile;
+		const currentMessages = messages;
+		
+		// Compute new value without triggering reactivity
 		const next: Record<string, any> = {};
-		if (me?.uid) {
-			next[me.uid] = normalizeUserRecord(me.uid, {
+		if (currentMe?.uid) {
+			next[currentMe.uid] = normalizeUserRecord(currentMe.uid, {
 				displayName: deriveMeDisplayName(),
 				name: deriveMeDisplayName(),
 				photoURL: deriveMePhotoURL(),
-				email: pickString(me?.email) ?? undefined
+				email: pickString(currentMe?.email) ?? undefined
 			});
 		}
-		if (otherProfile?.uid) {
-			next[otherProfile.uid] = normalizeUserRecord(otherProfile.uid, otherProfile);
+		if (currentOtherProfile?.uid) {
+			next[currentOtherProfile.uid] = normalizeUserRecord(currentOtherProfile.uid, currentOtherProfile);
 		}
-		for (const m of messages) {
+		for (const m of currentMessages) {
 			if (!m?.uid) continue;
 			const existing = next[m.uid] ?? { uid: m.uid };
 			const displayName = pickString(existing.displayName) ?? pickString(m.displayName);
@@ -941,7 +1015,10 @@
 				photoURL: photoURL ?? existing.photoURL ?? null
 			};
 		}
-		messageUsers = next;
+		// Write without creating feedback loop
+		untrack(() => {
+			messageUsers = next;
+		});
 	});
 
 	run(() => {
@@ -956,29 +1033,39 @@
 			}
 		};
 
-		if (me?.uid) {
-			addCandidate(me.uid, {
+		// Read dependencies
+		const currentMe = me;
+		const currentIsGroupChat = isGroupChat;
+		const currentGroupParticipantProfiles = groupParticipantProfiles;
+		const currentOtherProfile = otherProfile;
+		const currentMessageUsers = messageUsers;
+
+		if (currentMe?.uid) {
+			addCandidate(currentMe.uid, {
 				displayName: deriveMeDisplayName(),
 				photoURL: deriveMePhotoURL(),
-				email: pickString(me?.email) ?? null
+				email: pickString(currentMe?.email) ?? null
 			});
 		}
 		
 		// For group chats, add all participants
-		if (isGroupChat && Object.keys(groupParticipantProfiles).length > 0) {
-			Object.entries(groupParticipantProfiles).forEach(([uid, profile]) => {
+		if (currentIsGroupChat && Object.keys(currentGroupParticipantProfiles).length > 0) {
+			Object.entries(currentGroupParticipantProfiles).forEach(([uid, profile]) => {
 				addCandidate(uid, profile);
 			});
-		} else if (otherProfile?.uid) {
+		} else if (currentOtherProfile?.uid) {
 			// For 1:1 chats, add the other person
-			addCandidate(otherProfile.uid, otherProfile);
+			addCandidate(currentOtherProfile.uid, currentOtherProfile);
 		}
 		
-		Object.values(messageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
+		Object.values(currentMessageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
 
-		mentionOptions = Array.from(map.values()).sort((a, b) =>
-			a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
-		);
+		// Write without triggering reactivity feedback
+		untrack(() => {
+			mentionOptions = Array.from(map.values()).sort((a, b) =>
+				a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+			);
+		});
 	});
 
 	function setupGestures(target: HTMLDivElement | null) {
@@ -1166,6 +1253,12 @@
 			overlayThreads?.();
 			overlayInfo?.();
 			for (const uid in profileUnsubs) profileUnsubs[uid]?.();
+			// Cleanup batch timer
+			if (profileBatchTimer) {
+				clearTimeout(profileBatchTimer);
+				profileBatchTimer = null;
+			}
+			pendingProfileUids = [];
 		};
 	});
 
@@ -1285,6 +1378,27 @@
 			const allowed = new Set(mentionOptions.map((entry) => entry.uid));
 			mentionList = mentionList.filter((item) => allowed.has(item.uid));
 		}
+		
+		// Create optimistic message for instant feedback
+		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const optimisticMessage: CachedMessage = {
+			id: optimisticId,
+			uid: me.uid,
+			type: 'text',
+			text: trimmed,
+			displayName: deriveMeDisplayName(),
+			photoURL: deriveMePhotoURL(),
+			createdAt: new Date(),
+			mentions: mentionList.length ? mentionList : undefined,
+			replyTo: replyRef ?? undefined,
+			_optimistic: true
+		};
+		
+		// Add to local messages immediately
+		messages = [...messages, optimisticMessage];
+		addMessageToDMCache(threadID, optimisticMessage);
+		scrollResumeSignal++;
+		
 		try {
 			await sendDMMessage(threadID, {
 				type: 'text',
@@ -1295,9 +1409,13 @@
 				mentions: mentionList.length ? mentionList : undefined,
 				replyTo: replyRef ?? undefined
 			});
+			// Send successful - remove optimistic message (real one comes via onSnapshot)
+			messages = messages.filter(m => m.id !== optimisticId);
 			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
+			// Remove optimistic message on failure
+			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to send message: ${err}`);
@@ -1310,6 +1428,26 @@
 		const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
 		if (!trimmed || !me?.uid) return;
 		const replyRef = consumeReply(typeof detail === 'object' ? (detail?.replyTo ?? null) : null);
+		
+		// Create optimistic GIF message
+		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const optimisticMessage: CachedMessage = {
+			id: optimisticId,
+			uid: me.uid,
+			type: 'gif',
+			url: trimmed,
+			displayName: deriveMeDisplayName(),
+			photoURL: deriveMePhotoURL(),
+			createdAt: new Date(),
+			replyTo: replyRef ?? undefined,
+			_optimistic: true
+		};
+		
+		// Add to local messages immediately
+		messages = [...messages, optimisticMessage];
+		addMessageToDMCache(threadID, optimisticMessage);
+		scrollResumeSignal++;
+		
 		try {
 			await sendDMMessage(threadID, {
 				type: 'gif',
@@ -1319,9 +1457,12 @@
 				photoURL: deriveMePhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
+			// Send successful - remove optimistic message
+			messages = messages.filter(m => m.id !== optimisticId);
 			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
+			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to share GIF: ${err}`);

@@ -1030,8 +1030,8 @@ async function persistDeviceDoc(uid: string, update: DeviceDocUpdate) {
 	
 	logPushDebug('persistDeviceDoc starting', { uid, deviceId });
 	
-	// Add timeout to prevent hanging on Firestore operations
-	const timeoutMs = 10000;
+	// Reduced timeout - fail fast if Firestore is congested
+	const timeoutMs = 5000;
 	const timeoutPromise = new Promise<void>((_, reject) => 
 		setTimeout(() => reject(new Error('persistDeviceDoc timeout')), timeoutMs)
 	);
