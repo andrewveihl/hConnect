@@ -19,7 +19,13 @@ type ServerDoc = {
 const callableConfig = {
   region: 'us-central1',
   invoker: 'public' as const,
-  cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+  cors: [
+    'https://hconnect-6212b.web.app',
+    'https://hconnect-6212b.firebaseapp.com',
+    'https://hconnect.healthspaces.io',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+  ]
 };
 
 export const requestDomainAutoInvite = onCall(callableConfig, async (request) => {

@@ -57,6 +57,14 @@ Object.defineProperty(exports, "getSlackChannels", { enumerable: true, get: func
 // Define secrets for functions that need them
 const openaiApiKey = (0, params_1.defineSecret)('OPENAI_API_KEY');
 const resendApiKey = (0, params_1.defineSecret)('RESEND_API_KEY');
+// Shared CORS config for all callable functions
+const ALLOWED_ORIGINS = [
+    'https://hconnect-6212b.web.app',
+    'https://hconnect-6212b.firebaseapp.com',
+    'https://hconnect.healthspaces.io',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+];
 /**
  * Check if a URL is a Google profile photo URL
  */
@@ -249,7 +257,7 @@ exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)({
 exports.backfillMyDMRail = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     if (!callerUid) {
@@ -385,7 +393,7 @@ exports.backfillMyDMRail = (0, https_1.onCall)({
 exports.syncServerMemberPhotos = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     if (!callerUid) {
@@ -452,7 +460,7 @@ exports.syncServerMemberPhotos = (0, https_1.onCall)({
 exports.sendTestPush = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const uid = request.auth?.uid;
     if (!uid) {
@@ -687,7 +695,7 @@ exports.sendTestEmailNotificationHttp = (0, https_1.onRequest)({
 exports.getEmailNotificationLogs = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     const callerEmail = request.auth?.token?.email;
@@ -740,7 +748,7 @@ exports.createTicketFromMessage = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
     secrets: [openaiApiKey],
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     if (!callerUid) {
@@ -779,7 +787,7 @@ exports.createTicketFromMessage = (0, https_1.onCall)({
 exports.refreshAllGooglePhotos = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173'],
+    cors: ALLOWED_ORIGINS,
     timeoutSeconds: 540 // 9 minutes - this could take a while
 }, async (request) => {
     const callerUid = request.auth?.uid;
@@ -879,7 +887,7 @@ exports.refreshAllGooglePhotos = (0, https_1.onCall)({
 exports.refreshUserGooglePhoto = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     if (!callerUid) {
@@ -1019,7 +1027,7 @@ exports.refreshUserGooglePhoto = (0, https_1.onCall)({
 exports.repairUserAvatarTokens = (0, https_1.onCall)({
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
 }, async (request) => {
     const callerUid = request.auth?.uid;
     if (!callerUid) {

@@ -24,6 +24,15 @@ export { slackWebhook, slackOAuth, syncHConnectMessageToSlack, syncHConnectThrea
 const openaiApiKey = defineSecret('OPENAI_API_KEY');
 const resendApiKey = defineSecret('RESEND_API_KEY');
 
+// Shared CORS config for all callable functions
+const ALLOWED_ORIGINS = [
+  'https://hconnect-6212b.web.app',
+  'https://hconnect-6212b.firebaseapp.com',
+  'https://hconnect.healthspaces.io',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+];
+
 /**
  * Check if a URL is a Google profile photo URL
  */
@@ -252,7 +261,7 @@ export const backfillMyDMRail = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
@@ -396,7 +405,7 @@ export const syncServerMemberPhotos = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
@@ -477,7 +486,7 @@ export const sendTestPush = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const uid = request.auth?.uid;
@@ -752,7 +761,7 @@ export const getEmailNotificationLogs = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
@@ -814,7 +823,7 @@ export const createTicketFromMessage = onCall(
     region: 'us-central1',
     invoker: 'public',
     secrets: [openaiApiKey],
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
@@ -863,7 +872,7 @@ export const refreshAllGooglePhotos = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173'],
+    cors: ALLOWED_ORIGINS,
     timeoutSeconds: 540 // 9 minutes - this could take a while
   },
   async (request) => {
@@ -980,7 +989,7 @@ export const refreshUserGooglePhoto = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
@@ -1145,7 +1154,7 @@ export const repairUserAvatarTokens = onCall(
   {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: ALLOWED_ORIGINS
   },
   async (request) => {
     const callerUid = request.auth?.uid;
