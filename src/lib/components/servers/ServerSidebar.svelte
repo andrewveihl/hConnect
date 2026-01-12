@@ -2018,17 +2018,6 @@ run(() => {
 		}
 	});
 	run(() => {
-		const nextServer = computedServerId ?? null;
-		if (nextServer && $user?.uid) {
-			watchMyMember(nextServer);
-		}
-	});
-	run(() => {
-		if (computedServerId) {
-			watchChannels(computedServerId);
-		}
-	});
-	run(() => {
 		if (browser && window.matchMedia('(min-width: 768px)').matches && computedServerId) {
 			if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
 				const fallback = visibleChannels[0];
