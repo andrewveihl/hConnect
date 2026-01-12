@@ -23,8 +23,7 @@
 	import { dmRailCache } from '$lib/stores/dmRailCache';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
-	import { onDMHover } from '$lib/stores/preloadService';
-
+	
 	const dispatch = createEventDispatcher();
 	let me: any = $state(null);
 	let isRefreshing = $state(false);
@@ -1213,8 +1212,7 @@
 								ontouchmove={handleSwipeMove}
 								ontouchend={handleSwipeEnd}
 								ontouchcancel={handleSwipeEnd}
-								onpointerenter={() => onDMHover(t.id)}
-							>
+								>
 								<button
 									class="dm-thread__button"
 									onclick={(event) => handleThreadClick(event, t.id)}

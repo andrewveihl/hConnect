@@ -22,7 +22,6 @@
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
 	import { markChannelActivityRead, markMultipleChannelsActivityRead, markServerActivityRead } from '$lib/stores/activityFeed';
 	import { getCachedServerChannels, updateServerChannelCache } from '$lib/stores/messageCache';
-	import { onChannelHover } from '$lib/stores/preloadService';
 	import { markMultipleChannelsRead } from '$lib/firebase/unread';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
@@ -2064,7 +2063,6 @@ run(() => {
 		draggable={false}
 		use:channelRowRefAction={c.id}
 		onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
-		onpointerenter={() => { if (serverId && c.type === 'text') onChannelHover(serverId, c.id); }}
 	>
 		<button
 			type="button"
