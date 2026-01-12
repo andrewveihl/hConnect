@@ -16,6 +16,7 @@ export type UserProfile = {
 	settings?: {
 		theme?: string;
 		customThemeId?: string;
+		keybinds?: Record<string, string | null>;
 	};
 } | null;
 
@@ -70,7 +71,8 @@ export async function startProfileListener() {
 					email: data.email ?? null,
 					settings: settings ? {
 						theme: settings.theme ?? undefined,
-						customThemeId: settings.customThemeId ?? undefined
+						customThemeId: settings.customThemeId ?? undefined,
+						keybinds: settings.keybinds ?? undefined
 					} : undefined
 				});
 			});

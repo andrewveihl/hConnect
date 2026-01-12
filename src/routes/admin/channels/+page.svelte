@@ -34,13 +34,19 @@
 	}
 
 	let { data }: Props = $props();
-	const initialServerId = data.initialServerId ?? data.servers[0]?.id ?? '';
-	let selectedServerId = $state(initialServerId);
+	const initialServerId = $derived(data.initialServerId ?? data.servers[0]?.id ?? '');
+	let selectedServerId = $state('');
 	let serverSearch = $state('');
 	let channels: ChannelRow[] = $state([]);
 	let loading = $state(false);
 	let presetBusy = $state(false);
 	let pendingArchive: ChannelRow | null = $state(null);
+
+	$effect(() => {
+		if (!selectedServerId && initialServerId) {
+			selectedServerId = initialServerId;
+		}
+	});
 
 	const selectedServer = $derived(
 		data.servers.find((server) => server.id === selectedServerId) ?? null

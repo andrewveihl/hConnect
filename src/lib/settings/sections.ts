@@ -2,6 +2,7 @@ export type SettingsSectionId =
 	| 'account'
 	| 'notifications'
 	| 'voice'
+	| 'keybinds'
 	| 'appearance'
 	| 'ai'
 	| 'invites';
@@ -33,6 +34,12 @@ export const settingsSections: SettingsSection[] = [
 		label: 'Voice & Video',
 		keywords: ['voice', 'video', 'call', 'mic', 'camera'],
 		path: '/settings/voice-video'
+	},
+	{
+		id: 'keybinds',
+		group: 'User Settings',
+		label: 'Keybinds',
+		keywords: ['shortcut', 'shortcuts', 'keyboard', 'hotkey', 'hotkeys']
 	},
 	{
 		id: 'appearance',

@@ -10,7 +10,12 @@
 	 * - Optional presence indicator
 	 * - Accessible by default
 	 */
-	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, getDefaultAvatarUrl, isDefaultAvatarUrl } from '$lib/utils/profile';
+	import {
+		markAvatarUrlFailed,
+		shouldLogAvatarFailure,
+		shouldSkipAvatarUrl
+	} from '$lib/utils/avatarFailureCache';
 	import type { PresenceState } from '$lib/presence/state';
 
 	type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl' | '2xl';
@@ -69,8 +74,13 @@
 
 	// Check if this is a Firebase Storage URL that requires auth token but doesn't have one
 	function isUnauthenticatedFirebaseUrl(url: string): boolean {
-		// storage.googleapis.com URLs need auth token to work
-		if (url.includes('storage.googleapis.com/') && !url.includes('token=')) {
+		// Firebase Storage URLs need auth token to work
+		if (
+			(url.includes('storage.googleapis.com/') ||
+				url.includes('firebasestorage.googleapis.com/') ||
+				url.includes('firebasestorage.app/')) &&
+			!url.includes('token=')
+		) {
 			return true;
 		}
 		return false;
@@ -168,7 +178,7 @@
 		if (!url) return false;
 		const lower = url.toLowerCase();
 		if (['undefined', 'null', 'none', 'false', '0'].includes(lower)) return false;
-		if (lower === '/default-avatar.svg') return false; // Skip legacy default avatar URL
+		if (isDefaultAvatarUrl(url)) return false; // Skip default avatar URLs
 		if (url.startsWith('blob:') && url.includes('undefined')) return false;
 		if (!url.startsWith('http') && !url.startsWith('/') && !url.startsWith('data:')) return false;
 		
@@ -187,7 +197,7 @@
 		const seen = new Set<string>();
 
 		const addUrl = (url: string | null | undefined) => {
-			if (url && isValidUrl(url) && !seen.has(url)) {
+			if (url && isValidUrl(url) && !seen.has(url) && !shouldSkipAvatarUrl(url)) {
 				seen.add(url);
 				urls.push(url);
 			}
@@ -223,7 +233,7 @@
 		addUrl(getString(userRecord, 'cachedPhotoURL'));
 
 		// 7. Final fallback: app logo
-		addUrl(DEFAULT_AVATAR_URL);
+		addUrl(getDefaultAvatarUrl());
 
 		return urls;
 	});
@@ -305,16 +315,22 @@
 
 	function handleImageError(event: Event) {
 		const img = event.target as HTMLImageElement;
-		console.warn('[Avatar] Image failed to load:', {
-			src: img?.src,
-			fullUrl: img?.currentSrc,
-			naturalWidth: img?.naturalWidth,
-			naturalHeight: img?.naturalHeight,
-			complete: img?.complete,
-			fallbackIndex,
-			totalFallbacks: fallbackUrls.length,
-			name: displayName
-		});
+		const failedUrl = img?.currentSrc || img?.src || '';
+		if (failedUrl) {
+			markAvatarUrlFailed(failedUrl);
+		}
+		if (shouldLogAvatarFailure(failedUrl)) {
+			console.warn('[Avatar] Image failed to load:', {
+				src: img?.src,
+				fullUrl: img?.currentSrc,
+				naturalWidth: img?.naturalWidth,
+				naturalHeight: img?.naturalHeight,
+				complete: img?.complete,
+				fallbackIndex,
+				totalFallbacks: fallbackUrls.length,
+				name: displayName
+			});
+		}
 		
 		// Try next fallback URL
 		const nextIndex = fallbackIndex + 1;
@@ -383,7 +399,6 @@
 						alt={altText}
 						class="w-full h-full object-cover"
 						draggable="false"
-						crossorigin="anonymous"
 						referrerpolicy="no-referrer"
 						onerror={handleImageError}
 						onload={handleImageLoad}
@@ -472,18 +487,25 @@
 	}
 
 	.presence-dot--online {
-		background-color: #23a55a;
+		background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+		box-shadow: 0 0 8px rgba(16, 185, 129, 0.6),
+			0 0 3px rgba(16, 185, 129, 0.4) inset;
 	}
 
 	.presence-dot--busy {
-		background-color: #f23f43;
+		background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+		box-shadow: 0 0 8px rgba(239, 68, 68, 0.6),
+			0 0 3px rgba(239, 68, 68, 0.4) inset;
 	}
 
 	.presence-dot--idle {
-		background-color: #f0b232;
+		background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+		box-shadow: 0 0 8px rgba(245, 158, 11, 0.6),
+			0 0 3px rgba(245, 158, 11, 0.4) inset;
 	}
 
 	.presence-dot--offline {
-		background-color: #80848e;
+		background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+		box-shadow: 0 0 6px rgba(107, 114, 128, 0.3);
 	}
 </style>

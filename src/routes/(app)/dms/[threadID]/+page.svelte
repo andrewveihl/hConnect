@@ -1,18 +1,19 @@
 <script lang="ts">
 	import { run } from 'svelte/legacy';
 
-	import { onMount, onDestroy, untrack } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { user } from '$lib/stores/user';
 	import { getDb } from '$lib/firebase';
-	import { doc, getDoc, getDocFromCache, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
+	import { doc, getDoc, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
 	import MessageList from '$lib/components/chat/MessageList.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import GroupChatInfoPanel from '$lib/components/dms/GroupChatInfoPanel.svelte';
 	import {
 		openOverlay,
 		closeOverlay,
@@ -28,7 +29,8 @@
 		markThreadRead,
 		voteOnDMPoll,
 		submitDMForm,
-		toggleDMReaction
+		toggleDMReaction,
+		type DMThread
 	} from '$lib/firestore/dms';
 	import { markDMActivityRead } from '$lib/stores/activityFeed';
 	import type { ReplyReferenceInput } from '$lib/firestore/messages';
@@ -42,9 +44,9 @@
 		getCachedDMMessages,
 		updateDMCache,
 		hasDMCache,
-		addMessageToDMCache,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
+	import { scheduleIdlePreload, cancelIdlePreload } from '$lib/stores/preloadService';
 
 	interface Props {
 		data: { threadID: string };
@@ -116,66 +118,31 @@
 		const prev = messageUsers[uid] ?? {};
 		const next = { ...prev, ...patch };
 		messageUsers = { ...messageUsers, [uid]: next };
-		// Also update global profile cache
-		setProfile(uid, patch);
 	}
 
-	// Batch profile loading queue for efficiency
-	let pendingProfileUids: string[] = [];
-	let profileBatchTimer: ReturnType<typeof setTimeout> | null = null;
-
 	function ensureProfileSubscription(database: ReturnType<typeof getDb>, uid: string) {
-		if (!uid || profileUnsubs[uid] || messageUsers[uid]) return;
-		
-		// Check global cache first
-		const cached = getProfile(uid);
-		if (cached) {
-			const displayName =
-				pickString(cached?.name) ?? pickString(cached?.displayName) ?? pickString(cached?.email);
-			const photoURL = resolveProfilePhotoURL(cached);
-			updateMessageUserCache(uid, {
-				uid,
-				displayName,
-				name: displayName,
-				photoURL,
-				authPhotoURL: cached?.authPhotoURL ?? null,
-				settings: cached?.settings ?? undefined
-			});
-			return;
-		}
-		
-		// Queue for batch loading
-		if (!pendingProfileUids.includes(uid)) {
-			pendingProfileUids.push(uid);
-		}
-		
-		// Schedule batch fetch
-		if (!profileBatchTimer) {
-			profileBatchTimer = setTimeout(async () => {
-				profileBatchTimer = null;
-				const uidsToFetch = pendingProfileUids.splice(0, 20);
-				if (uidsToFetch.length === 0) return;
-				
-				try {
-					const fetchedProfiles = await fetchProfiles(uidsToFetch);
-					for (const [fetchedUid, profile] of fetchedProfiles) {
-						const displayName =
-							pickString(profile?.name) ?? pickString(profile?.displayName) ?? pickString(profile?.email);
-						const photoURL = resolveProfilePhotoURL(profile);
-						updateMessageUserCache(fetchedUid, {
-							uid: fetchedUid,
-							displayName,
-							name: displayName,
-							photoURL,
-							authPhotoURL: profile?.authPhotoURL ?? null,
-							settings: profile?.settings ?? undefined
-						});
-					}
-				} catch {
-					// Ignore errors
-				}
-			}, 30);
-		}
+		if (!uid || profileUnsubs[uid]) return;
+		profileUnsubs[uid] = onSnapshot(
+			doc(database, 'profiles', uid),
+			(snap) => {
+				const data: any = snap.data() ?? {};
+				const displayName =
+					pickString(data?.name) ?? pickString(data?.displayName) ?? pickString(data?.email);
+				const photoURL = resolveProfilePhotoURL(data);
+				updateMessageUserCache(uid, {
+					uid,
+					displayName,
+					name: displayName,
+					photoURL,
+					authPhotoURL: data?.authPhotoURL ?? null,
+					settings: data?.settings ?? undefined
+				});
+			},
+			() => {
+				profileUnsubs[uid]?.();
+				delete profileUnsubs[uid];
+			}
+		);
 	}
 	let unsub: (() => void) | null = $state(null);
 	let mounted = $state(false);
@@ -192,8 +159,11 @@
 	// Group chat state
 	let isGroupChat = $state(false);
 	let groupName = $state<string | null>(null);
+	let groupIconURL = $state<string | null>(null);
+	let groupDescription = $state<string | null>(null);
 	let groupParticipants = $state<string[]>([]);
 	let groupParticipantProfiles = $state<Record<string, any>>({});
+	let threadData = $state<(DMThread & { id: string }) | null>(null);
 
 	let showThreads = $state(false);
 	let showInfo = $state(false);
@@ -257,6 +227,8 @@
 			mobileDockSuppressed.release();
 			dockClaimed = false;
 		}
+		// Cancel any pending idle preloads
+		cancelIdlePreload();
 	});
 
 	$effect(() => {
@@ -476,8 +448,6 @@
 			lastMessageId: opts?.lastMessageId ?? null
 		};
 		markThreadRead(threadID, me.uid, payload).catch(() => {});
-		// Immediately update notification store for instant badge update
-		markDMAsRead(threadID);
 		// Also mark activity feed entries for this DM as read
 		void markDMActivityRead(threadID);
 	}
@@ -777,37 +747,43 @@
 		metaLoading = true;
 		try {
 			const database = getDb();
-			const threadRef = doc(database, 'dms', threadID);
-			
-			// Try to get from cache first for faster initial load
-			let snap;
-			try {
-				snap = await getDocFromCache(threadRef);
-			} catch {
-				// Cache miss - fetch from server
-				snap = await getDoc(threadRef);
-			}
-			
+			const snap = await getDoc(doc(database, 'dms', threadID));
 			const payload: any = snap.data() ?? {};
 			const parts: string[] = payload.participants ?? [];
 			
 			// Check if this is a group chat
 			isGroupChat = payload.isGroup === true || parts.length > 2;
 			groupName = payload.name ?? null;
+			groupIconURL = payload.iconURL ?? null;
+			groupDescription = payload.description ?? null;
 			groupParticipants = parts;
+			
+			// Store full thread data for group info panel
+			threadData = {
+				id: threadID,
+				key: payload.key ?? '',
+				participants: parts,
+				createdAt: payload.createdAt,
+				updatedAt: payload.updatedAt,
+				lastMessage: payload.lastMessage ?? null,
+				lastSender: payload.lastSender ?? null,
+				isGroup: payload.isGroup ?? false,
+				name: payload.name ?? null,
+				iconURL: payload.iconURL ?? null,
+				createdBy: payload.createdBy ?? null,
+				description: payload.description ?? null,
+				pinnedMessageId: payload.pinnedMessageId ?? null,
+				allowMemberInvites: payload.allowMemberInvites ?? true,
+				mutedBy: payload.mutedBy ?? {},
+				adminUids: payload.adminUids ?? []
+			};
 
 			if (isGroupChat) {
-				// Load profiles for all other participants (try cache first)
+				// Load profiles for all other participants
 				const otherUids = parts.filter(p => p !== me?.uid);
 				const profilePromises = otherUids.map(async (uid) => {
 					try {
-						const profileRef = doc(database, 'profiles', uid);
-						let profileDoc;
-						try {
-							profileDoc = await getDocFromCache(profileRef);
-						} catch {
-							profileDoc = await getDoc(profileRef);
-						}
+						const profileDoc = await getDoc(doc(database, 'profiles', uid));
 						if (profileDoc.exists()) {
 							return { uid, profile: normalizeUserRecord(profileDoc.id, profileDoc.data()) };
 						}
@@ -831,14 +807,7 @@
 				groupParticipantProfiles = {};
 
 				if (otherUid) {
-					// Try cache first for faster display
-					const profileRef = doc(database, 'profiles', otherUid);
-					let profileDoc;
-					try {
-						profileDoc = await getDocFromCache(profileRef);
-					} catch {
-						profileDoc = await getDoc(profileRef);
-					}
+					const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
 					if (profileDoc.exists()) {
 						otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
 					} else {
@@ -853,9 +822,25 @@
 			otherProfile = null;
 			isGroupChat = false;
 			groupParticipantProfiles = {};
+			threadData = null;
 		} finally {
 			metaLoading = false;
 		}
+	}
+
+	// Handle group settings updates from the info panel
+	function handleGroupUpdate(updates: Partial<DMThread>) {
+		if (!threadData) return;
+		threadData = { ...threadData, ...updates };
+		if ('name' in updates) groupName = updates.name ?? null;
+		if ('iconURL' in updates) groupIconURL = updates.iconURL ?? null;
+		if ('description' in updates) groupDescription = updates.description ?? null;
+	}
+
+	// Handle leaving group
+	function handleLeaveGroup() {
+		syncInfoVisibility(false);
+		goto('/dms');
 	}
 
 	run(() => {
@@ -931,25 +916,19 @@
 	});
 
 	run(() => {
-		// Read dependencies
-		const currentMe = me;
-		const currentOtherProfile = otherProfile;
-		const currentMessages = messages;
-		
-		// Compute new value without triggering reactivity
 		const next: Record<string, any> = {};
-		if (currentMe?.uid) {
-			next[currentMe.uid] = normalizeUserRecord(currentMe.uid, {
+		if (me?.uid) {
+			next[me.uid] = normalizeUserRecord(me.uid, {
 				displayName: deriveMeDisplayName(),
 				name: deriveMeDisplayName(),
 				photoURL: deriveMePhotoURL(),
-				email: pickString(currentMe?.email) ?? undefined
+				email: pickString(me?.email) ?? undefined
 			});
 		}
-		if (currentOtherProfile?.uid) {
-			next[currentOtherProfile.uid] = normalizeUserRecord(currentOtherProfile.uid, currentOtherProfile);
+		if (otherProfile?.uid) {
+			next[otherProfile.uid] = normalizeUserRecord(otherProfile.uid, otherProfile);
 		}
-		for (const m of currentMessages) {
+		for (const m of messages) {
 			if (!m?.uid) continue;
 			const existing = next[m.uid] ?? { uid: m.uid };
 			const displayName = pickString(existing.displayName) ?? pickString(m.displayName);
@@ -962,10 +941,7 @@
 				photoURL: photoURL ?? existing.photoURL ?? null
 			};
 		}
-		// Write without creating feedback loop
-		untrack(() => {
-			messageUsers = next;
-		});
+		messageUsers = next;
 	});
 
 	run(() => {
@@ -980,39 +956,29 @@
 			}
 		};
 
-		// Read dependencies
-		const currentMe = me;
-		const currentIsGroupChat = isGroupChat;
-		const currentGroupParticipantProfiles = groupParticipantProfiles;
-		const currentOtherProfile = otherProfile;
-		const currentMessageUsers = messageUsers;
-
-		if (currentMe?.uid) {
-			addCandidate(currentMe.uid, {
+		if (me?.uid) {
+			addCandidate(me.uid, {
 				displayName: deriveMeDisplayName(),
 				photoURL: deriveMePhotoURL(),
-				email: pickString(currentMe?.email) ?? null
+				email: pickString(me?.email) ?? null
 			});
 		}
 		
 		// For group chats, add all participants
-		if (currentIsGroupChat && Object.keys(currentGroupParticipantProfiles).length > 0) {
-			Object.entries(currentGroupParticipantProfiles).forEach(([uid, profile]) => {
+		if (isGroupChat && Object.keys(groupParticipantProfiles).length > 0) {
+			Object.entries(groupParticipantProfiles).forEach(([uid, profile]) => {
 				addCandidate(uid, profile);
 			});
-		} else if (currentOtherProfile?.uid) {
+		} else if (otherProfile?.uid) {
 			// For 1:1 chats, add the other person
-			addCandidate(currentOtherProfile.uid, currentOtherProfile);
+			addCandidate(otherProfile.uid, otherProfile);
 		}
 		
-		Object.values(currentMessageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
+		Object.values(messageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
 
-		// Write without triggering reactivity feedback
-		untrack(() => {
-			mentionOptions = Array.from(map.values()).sort((a, b) =>
-				a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
-			);
-		});
+		mentionOptions = Array.from(map.values()).sort((a, b) =>
+			a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+		);
 	});
 
 	function setupGestures(target: HTMLDivElement | null) {
@@ -1200,12 +1166,6 @@
 			overlayThreads?.();
 			overlayInfo?.();
 			for (const uid in profileUnsubs) profileUnsubs[uid]?.();
-			// Cleanup batch timer
-			if (profileBatchTimer) {
-				clearTimeout(profileBatchTimer);
-				profileBatchTimer = null;
-			}
-			pendingProfileUids = [];
 		};
 	});
 
@@ -1268,6 +1228,13 @@
 			messagesLoading = false;
 		}
 	});
+	// Schedule idle preloading for other DMs when viewing a thread
+	run(() => {
+		const uid = me?.uid ?? null;
+		if (threadID && uid) {
+			scheduleIdlePreload(null, null, uid);
+		}
+	});
 
 	async function handleLoadOlderMessages() {
 		if (!threadID || !earliestLoadedDoc) return;
@@ -1318,27 +1285,6 @@
 			const allowed = new Set(mentionOptions.map((entry) => entry.uid));
 			mentionList = mentionList.filter((item) => allowed.has(item.uid));
 		}
-		
-		// Create optimistic message for instant feedback
-		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-		const optimisticMessage: CachedMessage = {
-			id: optimisticId,
-			uid: me.uid,
-			type: 'text',
-			text: trimmed,
-			displayName: deriveMeDisplayName(),
-			photoURL: deriveMePhotoURL(),
-			createdAt: new Date(),
-			mentions: mentionList.length ? mentionList : undefined,
-			replyTo: replyRef ?? undefined,
-			_optimistic: true
-		};
-		
-		// Add to local messages immediately
-		messages = [...messages, optimisticMessage];
-		addMessageToDMCache(threadID, optimisticMessage);
-		scrollResumeSignal++;
-		
 		try {
 			await sendDMMessage(threadID, {
 				type: 'text',
@@ -1349,13 +1295,9 @@
 				mentions: mentionList.length ? mentionList : undefined,
 				replyTo: replyRef ?? undefined
 			});
-			// Send successful - remove optimistic message (real one comes via onSnapshot)
-			messages = messages.filter(m => m.id !== optimisticId);
 			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
-			// Remove optimistic message on failure
-			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to send message: ${err}`);
@@ -1368,26 +1310,6 @@
 		const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
 		if (!trimmed || !me?.uid) return;
 		const replyRef = consumeReply(typeof detail === 'object' ? (detail?.replyTo ?? null) : null);
-		
-		// Create optimistic GIF message
-		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-		const optimisticMessage: CachedMessage = {
-			id: optimisticId,
-			uid: me.uid,
-			type: 'gif',
-			url: trimmed,
-			displayName: deriveMeDisplayName(),
-			photoURL: deriveMePhotoURL(),
-			createdAt: new Date(),
-			replyTo: replyRef ?? undefined,
-			_optimistic: true
-		};
-		
-		// Add to local messages immediately
-		messages = [...messages, optimisticMessage];
-		addMessageToDMCache(threadID, optimisticMessage);
-		scrollResumeSignal++;
-		
 		try {
 			await sendDMMessage(threadID, {
 				type: 'gif',
@@ -1397,12 +1319,9 @@
 				photoURL: deriveMePhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
-			// Send successful - remove optimistic message
-			messages = messages.filter(m => m.id !== optimisticId);
 			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
-			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to share GIF: ${err}`);
@@ -1676,9 +1595,17 @@
 				>
 					<div class="dm-header__avatar">
 						{#if isGroupChat}
-							<div class="dm-header__group-icon">
-								<i class="bx bx-group"></i>
-							</div>
+							{#if groupIconURL}
+								<img
+									src={groupIconURL}
+									alt="Group icon"
+									class="dm-header__group-icon-img"
+								/>
+							{:else}
+								<div class="dm-header__group-icon">
+									<i class="bx bx-group"></i>
+								</div>
+							{/if}
 						{:else}
 							<Avatar
 								user={otherProfile}
@@ -1762,21 +1689,32 @@
 
 	{#if showInfo}
 		<aside class="hidden lg:flex lg:w-72 panel border-l border-subtle/50 overflow-y-auto">
-			<div class="p-5 w-full">
-				<div class="flex items-center justify-between mb-5">
-					<div class="text-xs font-medium uppercase tracking-wider text-white/50">Profile</div>
-					<button
-						class="w-7 h-7 grid place-items-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition"
-						type="button"
-						aria-label="Close profile panel"
-						onclick={() => syncInfoVisibility(false)}
-					>
-						<i class="bx bx-x text-lg"></i>
-					</button>
+			{#if metaLoading}
+				<div class="p-5 w-full">
+					<div class="animate-pulse text-white/50 text-sm">Loading...</div>
 				</div>
-				{#if metaLoading}
-					<div class="animate-pulse text-white/50 text-sm">Loading profile...</div>
-				{:else if otherProfile}
+			{:else if isGroupChat && threadData}
+				<GroupChatInfoPanel
+					thread={threadData}
+					currentUid={me?.uid ?? ''}
+					participantProfiles={groupParticipantProfiles}
+					onClose={() => syncInfoVisibility(false)}
+					on:update={(e) => handleGroupUpdate(e.detail)}
+					on:leave={handleLeaveGroup}
+				/>
+			{:else if otherProfile}
+				<div class="p-5 w-full">
+					<div class="flex items-center justify-between mb-5">
+						<div class="text-xs font-medium uppercase tracking-wider text-white/50">Profile</div>
+						<button
+							class="w-7 h-7 grid place-items-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition"
+							type="button"
+							aria-label="Close profile panel"
+							onclick={() => syncInfoVisibility(false)}
+						>
+							<i class="bx bx-x text-lg"></i>
+						</button>
+					</div>
 					<div class="flex flex-col items-center gap-3 text-center py-4">
 						<Avatar
 							user={otherProfile}
@@ -1807,10 +1745,12 @@
 							</a>
 						{/if}
 					</div>
-				{:else}
+				</div>
+			{:else}
+				<div class="p-5 w-full">
 					<div class="text-white/50">Profile unavailable.</div>
-				{/if}
-			</div>
+				</div>
+			{/if}
 		</aside>
 	{/if}
 </div>
@@ -1857,23 +1797,34 @@
 		style:transition-duration={`${PANEL_DURATION}ms`}
 		style:transitionTimingFunction={PANEL_EASING}
 		style:pointer-events={showInfo ? 'auto' : 'none'}
-		aria-label="Profile"
+		aria-label={isGroupChat ? 'Group Info' : 'Profile'}
 	>
-		<div class="mobile-panel__header md:hidden">
-			<button
-				class="mobile-panel__close -ml-2"
-				aria-label="Close"
-				type="button"
-				onclick={() => syncInfoVisibility(false)}
-			>
-				<i class="bx bx-chevron-left text-xl"></i>
-			</button>
-			<div class="mobile-panel__title">Profile</div>
-		</div>
+		{#if !isGroupChat}
+			<div class="mobile-panel__header md:hidden">
+				<button
+					class="mobile-panel__close -ml-2"
+					aria-label="Close"
+					type="button"
+					onclick={() => syncInfoVisibility(false)}
+				>
+					<i class="bx bx-chevron-left text-xl"></i>
+				</button>
+				<div class="mobile-panel__title">Profile</div>
+			</div>
+		{/if}
 
-		<div class="flex-1 overflow-y-auto p-5 touch-pan-y">
+		<div class="flex-1 overflow-y-auto touch-pan-y" class:p-5={!isGroupChat}>
 			{#if metaLoading}
-				<div class="animate-pulse text-soft text-sm">Loading profile...</div>
+				<div class="animate-pulse text-soft text-sm p-5">Loading...</div>
+			{:else if isGroupChat && threadData}
+				<GroupChatInfoPanel
+					thread={threadData}
+					currentUid={me?.uid ?? ''}
+					participantProfiles={groupParticipantProfiles}
+					onClose={() => syncInfoVisibility(false)}
+					on:update={(e) => handleGroupUpdate(e.detail)}
+					on:leave={handleLeaveGroup}
+				/>
 			{:else if otherProfile}
 				<div class="flex flex-col items-center gap-3 text-center py-4">
 					<Avatar
@@ -1906,7 +1857,7 @@
 					{/if}
 				</div>
 			{:else}
-				<div class="text-white/50 text-sm">Profile unavailable.</div>
+				<div class="text-white/50 text-sm p-5">Profile unavailable.</div>
 			{/if}
 		</div>
 	</div>
@@ -2007,6 +1958,14 @@
 		flex-shrink: 0;
 	}
 
+	.dm-header__group-icon-img {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.5rem;
+		object-fit: cover;
+		flex-shrink: 0;
+	}
+
 	.dm-header__chevron {
 		color: var(--color-text-tertiary);
 		font-size: 1.125rem;
@@ -2052,6 +2011,11 @@
 		.dm-page .chat-input-region {
 			position: relative;
 			z-index: 10;
+		}
+
+		/* Add extra bottom padding for DesktopUserBar on DM pages */
+		.dm-page .message-scroll-region {
+			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 2.5rem);
 		}
 	}
 

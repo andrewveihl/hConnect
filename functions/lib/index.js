@@ -33,8 +33,9 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
+exports.repairUserAvatarTokens = exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
+const crypto_1 = require("crypto");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
 const params_1 = require("firebase-functions/params");
@@ -67,6 +68,45 @@ function isGooglePhotoUrl(url) {
         url.includes('lh4.google.com') ||
         url.includes('lh5.google.com') ||
         url.includes('lh6.google.com');
+}
+function buildStorageDownloadUrl(bucketName, filePath, token) {
+    return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
+}
+function isStorageUrlMissingToken(url) {
+    if (!url)
+        return false;
+    const lowered = url.toLowerCase();
+    return ((lowered.includes('storage.googleapis.com/') ||
+        lowered.includes('firebasestorage.googleapis.com/') ||
+        lowered.includes('firebasestorage.app/')) &&
+        !lowered.includes('token='));
+}
+function parseStorageUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        const pathname = parsed.pathname;
+        if (host === 'storage.googleapis.com') {
+            const parts = pathname.split('/').filter(Boolean);
+            if (parts.length < 2)
+                return null;
+            const bucket = parts[0] ?? '';
+            const rawPath = parts.slice(1).join('/');
+            return { bucket, path: decodeURIComponent(rawPath) };
+        }
+        if (host === 'firebasestorage.googleapis.com' || host.endsWith('.firebasestorage.app')) {
+            const match = pathname.match(/\/v0\/b\/([^/]+)\/o\/(.+)/);
+            if (!match)
+                return null;
+            const bucket = match[1] ?? '';
+            const rawPath = match[2] ?? '';
+            return { bucket, path: decodeURIComponent(rawPath) };
+        }
+    }
+    catch {
+        return null;
+    }
+    return null;
 }
 /**
  * Cache a user's Google profile photo to Firebase Storage.
@@ -118,19 +158,19 @@ exports.cacheGoogleProfilePhoto = (0, firestore_1.onDocumentWritten)('profiles/{
         const bucket = storage.bucket();
         const filePath = `profile-uploads/${userId}/avatars/cached-${Date.now()}.${ext}`;
         const file = bucket.file(filePath);
+        const downloadToken = (0, crypto_1.randomUUID)();
         await file.save(buffer, {
             metadata: {
                 contentType,
                 metadata: {
                     originalUrl: googleUrl,
-                    cachedAt: new Date().toISOString()
+                    cachedAt: new Date().toISOString(),
+                    firebaseStorageDownloadTokens: downloadToken
                 }
             }
         });
-        // Make the file publicly readable
-        await file.makePublic();
-        // Get the public URL
-        const cachedUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+        // Use a Firebase Storage download URL so the app doesn't require public ACLs.
+        const cachedUrl = buildStorageDownloadUrl(bucket.name, filePath, downloadToken);
         // Update the profile with cached URL
         await firebase_1.db.doc(`profiles/${userId}`).update({
             cachedPhotoURL: cachedUrl,
@@ -268,7 +308,7 @@ exports.backfillMyDMRail = (0, https_1.onCall)({
                 otherUid,
                 participants,
                 lastMessage: dmData.lastMessage ?? null,
-                updatedAt: firestore_2.FieldValue.serverTimestamp()
+                updatedAt: dmData.updatedAt ?? dmData.createdAt ?? firestore_2.FieldValue.serverTimestamp()
             };
             // Fetch other participant's profile for display metadata
             if (otherUid) {
@@ -934,16 +974,18 @@ exports.refreshUserGooglePhoto = (0, https_1.onCall)({
         const bucket = (0, storage_1.getStorage)().bucket();
         const fileName = `avatars/${uid}/google-photo.jpg`;
         const file = bucket.file(fileName);
+        const downloadToken = (0, crypto_1.randomUUID)();
         await file.save(imageBuffer, {
             metadata: {
                 contentType,
                 cacheControl: 'no-cache, max-age=0', // Don't cache - always fetch fresh
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken
+                }
             },
         });
-        // Make the file publicly accessible
-        await file.makePublic();
-        // Get the public URL with cache-busting timestamp
-        cachedPhotoURL = `https://storage.googleapis.com/${bucket.name}/${fileName}?t=${Date.now()}`;
+        // Get the download URL with cache-busting timestamp
+        cachedPhotoURL = `${buildStorageDownloadUrl(bucket.name, fileName, downloadToken)}&t=${Date.now()}`;
         firebase_functions_1.logger.info('[refreshUserGooglePhoto] Photo cached to Storage', { cachedPhotoURL: cachedPhotoURL.substring(0, 80) });
     }
     catch (fetchError) {
@@ -969,6 +1011,122 @@ exports.refreshUserGooglePhoto = (0, https_1.onCall)({
         googleURL: authPhotoURL, // Original Google URL for debugging
         cached: !!cachedPhotoURL,
         message: cachedPhotoURL ? 'Profile photo refreshed and cached.' : 'Profile photo refreshed (not cached).'
+    };
+});
+/**
+ * Super Admin callable: repair token-missing Firebase Storage URLs stored in a user's profile.
+ */
+exports.repairUserAvatarTokens = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    const callerEmail = request.auth?.token?.email;
+    if (!callerEmail) {
+        throw new https_1.HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true ||
+        callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    const { uid } = request.data ?? {};
+    if (!uid || typeof uid !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'User ID required.');
+    }
+    const profileRef = firebase_1.db.doc(`profiles/${uid}`);
+    const profileSnap = await profileRef.get();
+    if (!profileSnap.exists) {
+        return { ok: false, reason: 'profile_not_found', message: 'Profile not found.' };
+    }
+    const profileData = profileSnap.data() ?? {};
+    const fieldsToCheck = [
+        'authPhotoURL',
+        'photoURL',
+        'cachedPhotoURL',
+        'customPhotoURL',
+        'avatar',
+        'avatarUrl',
+        'avatarURL'
+    ];
+    const objectMap = new Map();
+    for (const field of fieldsToCheck) {
+        const value = profileData[field];
+        if (typeof value !== 'string' || !value)
+            continue;
+        if (!isStorageUrlMissingToken(value))
+            continue;
+        const parsed = parseStorageUrl(value);
+        if (!parsed?.bucket || !parsed?.path)
+            continue;
+        const key = `${parsed.bucket}/${parsed.path}`;
+        const existing = objectMap.get(key);
+        if (existing) {
+            existing.fields.push(field);
+        }
+        else {
+            objectMap.set(key, { ...parsed, fields: [field] });
+        }
+    }
+    if (objectMap.size === 0) {
+        return {
+            ok: false,
+            reason: 'no_missing_tokens',
+            message: 'No token-missing Storage URLs found.'
+        };
+    }
+    const updates = {};
+    const failures = [];
+    for (const item of objectMap.values()) {
+        try {
+            const bucket = (0, storage_1.getStorage)().bucket(item.bucket);
+            const file = bucket.file(item.path);
+            const [exists] = await file.exists();
+            if (!exists) {
+                failures.push({ bucket: item.bucket, path: item.path, reason: 'object_not_found' });
+                continue;
+            }
+            const token = (0, crypto_1.randomUUID)();
+            await file.setMetadata({
+                metadata: {
+                    firebaseStorageDownloadTokens: token
+                }
+            });
+            const cacheBust = Date.now();
+            const downloadUrl = `${buildStorageDownloadUrl(item.bucket, item.path, token)}&t=${cacheBust}`;
+            for (const field of item.fields) {
+                updates[field] = downloadUrl;
+            }
+        }
+        catch (error) {
+            failures.push({
+                bucket: item.bucket,
+                path: item.path,
+                reason: error instanceof Error ? error.message : 'unknown_error'
+            });
+        }
+    }
+    if (Object.keys(updates).length > 0) {
+        await profileRef.set({
+            ...updates,
+            updatedAt: firestore_2.FieldValue.serverTimestamp()
+        }, { merge: true });
+    }
+    return {
+        ok: Object.keys(updates).length > 0,
+        updated: updates,
+        updatedCount: Object.keys(updates).length,
+        failures,
+        message: Object.keys(updates).length > 0
+            ? 'Repaired token-missing Storage URLs.'
+            : 'No Storage URLs were repaired.'
     };
 });
 //# sourceMappingURL=index.js.map

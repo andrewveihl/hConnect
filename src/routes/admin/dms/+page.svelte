@@ -36,11 +36,15 @@
 	const MESSAGE_BATCH = 100;
 	let hasMore = $state(false);
 	let nextCursor: QueryDocumentSnapshot | null = null;
-	let profileLookup = $state<Record<string, string>>({ ...(data.profileLookup ?? {}) });
+	let profileLookup = $state<Record<string, string>>({});
 	let messageSearch = $state('');
 	let messageScroller = $state<HTMLDivElement | null>(null);
 	let topSentinel = $state<HTMLDivElement | null>(null);
 	let showDetailPanel = $state(false);
+
+	$effect(() => {
+		profileLookup = { ...(data.profileLookup ?? {}) };
+	});
 
 	const filteredThreads = $derived(
 		data.threads.filter((thread) => {

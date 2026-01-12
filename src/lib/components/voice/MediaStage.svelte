@@ -66,10 +66,10 @@
 
 	let hoverEnabled = true;
 	let hovering = false;
-	let internalMute = muteActive;
-	let internalVideo = videoActive;
-	let internalShare = shareActive;
-	let internalMore = moreOpen;
+	let internalMute = $state(false);
+	let internalVideo = $state(false);
+	let internalShare = $state(false);
+	let internalMore = $state(false);
 
 	$effect(() => {
 		internalMute = muteActive;
@@ -352,13 +352,6 @@
 	.voice-grid--solo .voice-card__avatar {
 		width: 120px;
 		height: 120px;
-	}
-
-	.voice-card__avatar img {
-		width: 100%;
-		height: 100%;
-		border-radius: 50%;
-		object-fit: cover;
 	}
 
 	.voice-card__avatar span {
