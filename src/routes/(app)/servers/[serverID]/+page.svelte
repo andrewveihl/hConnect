@@ -79,11 +79,6 @@
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import {
-		scheduleIdlePreload,
-		cancelIdlePreload,
-		preloadServerDefault
-	} from '$lib/stores/preloadService';
-	import {
 		getCachedChannelMessages,
 		updateChannelCache,
 		hasChannelCache,
@@ -3056,8 +3051,6 @@
 		memberPermsUnsub?.();
 		memberPermsUnsub = null;
 		memberPermsServer = null;
-		// Cancel any pending idle preloads
-		cancelIdlePreload();
 	});
 
 	function markChannelReadFromMessages(
@@ -5285,15 +5278,6 @@ run(() => {
 		const name = findChannelName(channelMessagesPopoutChannelId);
 		if (name) {
 			channelMessagesPopoutChannelName = name;
-		}
-	});
-	// Schedule idle preloading when user is viewing a channel
-	// This preloads adjacent servers, channels, and DMs in the background
-	run(() => {
-		const uid = $user?.uid ?? null;
-		const currentChannelId = activeChannel?.id ?? null;
-		if (serverId && uid) {
-			scheduleIdlePreload(serverId, currentChannelId, uid);
 		}
 	});
 </script>
