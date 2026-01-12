@@ -55,11 +55,12 @@
 	let nearSnapZone: SnapZone | null = $state(null);
 	let trayOpen = $state(false); // Track if FAB tray is open (to hide when snapped and tray closed)
 	let userClosedTray = $state(true); // Start true so FABs snapped to tray are hidden until user opens tray or drags them out
+	let trayUnmounted = $state(false); // Track if tray component unmounted (vs user closing)
 	
 	
-	// Hide FAB when it's snapped to tray, tray is closed, AND user explicitly closed it
-	// (Don't hide if tray just auto-closed after drag - wait for user to toggle)
-	let hiddenInTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray);
+	// Hide FAB when it's snapped to tray, tray is closed, user explicitly closed it, AND tray is not just unmounted
+	// (Don't hide if tray component unmounted - FAB should stay visible in default position)
+	let hiddenInTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray && !trayUnmounted);
 
 	let showPopover = $state(false);
 	let recentThreads = $state<ThreadWithMeta[]>([]);
@@ -523,7 +524,7 @@
 		event.stopPropagation();
 	}
 
-	// Handler for snap zone position updates (e.g., when DMs come in)
+	// Handler for snap zone position updates (e.g., when DMs come in, or tray registers)
 	function handleSnapZoneUpdated() {
 		if (!isSnapped || !snappedZoneId) return;
 		const zones = fabSnapStore.getZones();
@@ -531,6 +532,8 @@
 		if (zone) {
 			const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
 			position = clampToViewport(snapPos);
+			// Re-occupy the zone to ensure it's marked as occupied
+			fabSnapStore.occupyZone(snappedZoneId, FAB_ID);
 		}
 	}
 
@@ -1019,9 +1022,39 @@
 		// Handle clicks outside
 		document.addEventListener('click', handleClickOutside);
 
-		// Handle resize
+		// Handle resize - also update snapped positions when viewport changes
+		let lastViewportWidth = window.innerWidth;
 		const handleResize = () => {
-			position = clampToViewport(position);
+			const newWidth = window.innerWidth;
+			const wasMobile = lastViewportWidth < 768;
+			const isMobileNow = newWidth < 768;
+			lastViewportWidth = newWidth;
+			
+			// If snapped to tray and viewport type changed (mobile <-> desktop), update position
+			if (isSnapped && snappedZoneId?.startsWith('fab-tray-slot-') && wasMobile !== isMobileNow) {
+				// Tray position changed - wait for tray to re-render then update position
+				setTimeout(() => {
+					const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+					const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+					if (slot) {
+						const rect = slot.getBoundingClientRect();
+						const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+						const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+						position = { x: snapX, y: snapY };
+						
+						// Re-register the zone with new coordinates
+						fabSnapStore.registerZone({
+							id: snappedZoneId!,
+							x: rect.left,
+							y: rect.top,
+							width: rect.width,
+							height: rect.height
+						});
+					}
+				}, 300);
+			} else {
+				position = clampToViewport(position);
+			}
 		};
 		window.addEventListener('resize', handleResize);
 		
@@ -1030,9 +1063,28 @@
 		window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 		
 		// Listen for tray state changes (to hide FAB when snapped and tray is closed)
-		const handleTrayStateChange = (e: CustomEvent<{ open: boolean; userAction?: boolean }>) => {
+		const handleTrayStateChange = (e: CustomEvent<{ open: boolean; userAction?: boolean; unmounting?: boolean; mounting?: boolean }>) => {
 			const wasOpen = trayOpen;
 			trayOpen = e.detail.open;
+			
+			// Track if tray is unmounting (vs user closing)
+			if (e.detail.unmounting) {
+				trayUnmounted = true;
+				// Don't change userClosedTray - FAB should show in default position when tray is gone
+				return;
+			}
+			
+			// Tray is mounting (back in DOM) - reset unmounted flag
+			if (e.detail.mounting) {
+				trayUnmounted = false;
+				// Don't change other state - let FAB stay hidden until user opens tray
+				return;
+			}
+			
+			// Tray is back (mounting) - reset unmounted flag (legacy check)
+			if (trayOpen && trayUnmounted) {
+				trayUnmounted = false;
+			}
 			
 			// Track if user explicitly closed the tray (for hiding snapped FABs)
 			if (wasOpen && !trayOpen) {

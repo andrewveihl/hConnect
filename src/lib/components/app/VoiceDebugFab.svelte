@@ -60,7 +60,8 @@ type QuickVoiceStats = {
 	// Tray awareness - for hiding when snapped to tray and tray is closed
 	let trayOpen = $state(false);
 	let userClosedTray = $state(true); // Start true so FABs snapped to tray are hidden until tray opens
-	const hiddenInTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray);
+	let trayUnmounted = $state(false); // Track if tray component unmounted (vs user closing)
+	const hiddenInTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray && !trayUnmounted);
 
 	let showPanel = $state(false);
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -382,6 +383,8 @@ type QuickVoiceStats = {
 			const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
 			const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
 			position = clampToViewport({ x: snapX, y: snapY });
+			// Re-occupy the zone to ensure it's marked as occupied
+			fabSnapStore.occupyZone(snappedZoneId, FAB_ID);
 		}
 	}
 
@@ -621,9 +624,28 @@ type QuickVoiceStats = {
 	});
 
 	// Handle tray state changes
-	function handleTrayStateChange(e: CustomEvent<{ open: boolean }>) {
+	function handleTrayStateChange(e: CustomEvent<{ open: boolean; unmounting?: boolean; mounting?: boolean }>) {
 		const wasOpen = trayOpen;
 		trayOpen = e.detail.open;
+		
+		// Track if tray is unmounting (vs user closing)
+		if (e.detail.unmounting) {
+			trayUnmounted = true;
+			// Don't change userClosedTray - FAB should show in default position when tray is gone
+			return;
+		}
+		
+		// Tray is mounting (back in DOM) - reset unmounted flag
+		if (e.detail.mounting) {
+			trayUnmounted = false;
+			// Don't change other state - let FAB stay hidden until user opens tray
+			return;
+		}
+		
+		// Tray is back (mounting) - reset unmounted flag (legacy check)
+		if (trayOpen && trayUnmounted) {
+			trayUnmounted = false;
+		}
 		
 		if (wasOpen && !trayOpen) {
 			userClosedTray = true;
@@ -684,6 +706,50 @@ type QuickVoiceStats = {
 				fabSnapStore.unregisterFab(FAB_ID);
 			}
 		}
+	});
+
+	// Resize handler with viewport change detection
+	$effect(() => {
+		if (!browser || !ready) return;
+		
+		let lastWasMobile = window.matchMedia('(max-width: 767px)').matches;
+		
+		const handleResize = () => {
+			const isMobile = window.matchMedia('(max-width: 767px)').matches;
+			const viewportChanged = isMobile !== lastWasMobile;
+			lastWasMobile = isMobile;
+			
+			// If viewport changed and we're snapped to a tray slot, handle re-positioning
+			if (viewportChanged && isSnapped && snappedZoneId?.startsWith('fab-tray-slot-')) {
+				// Viewport changed - need to wait for layout to stabilize
+				setTimeout(() => {
+					const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+					const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+					if (slot) {
+						const rect = slot.getBoundingClientRect();
+						const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+						const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+						position = { x: snapX, y: snapY };
+						
+						// Re-register the zone with updated position
+						fabSnapStore.registerZone({
+							id: snappedZoneId!,
+							x: rect.left,
+							y: rect.top,
+							width: rect.width,
+							height: rect.height
+						});
+						fabSnapStore.occupyZone(snappedZoneId!, FAB_ID);
+					}
+				}, 300);
+			} else {
+				// Just clamp to viewport
+				position = clampToViewport(position);
+			}
+		};
+		
+		window.addEventListener('resize', handleResize);
+		return () => window.removeEventListener('resize', handleResize);
 	});
 </script>
 

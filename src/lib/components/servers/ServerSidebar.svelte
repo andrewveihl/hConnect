@@ -20,9 +20,12 @@
 	import { voiceSession } from '$lib/stores/voice';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
-	import { markChannelActivityRead } from '$lib/stores/activityFeed';
+	import { markChannelActivityRead, markMultipleChannelsActivityRead, markServerActivityRead } from '$lib/stores/activityFeed';
 	import { getCachedServerChannels, updateServerChannelCache } from '$lib/stores/messageCache';
+	import { onChannelHover } from '$lib/stores/preloadService';
+	import { markMultipleChannelsRead } from '$lib/firebase/unread';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
 	import {
 		collection,
 		doc,
@@ -230,6 +233,17 @@
 	let categoryDropTarget: { type: 'before-item' | 'end'; itemIndex?: number } | null = $state(null);
 	let categoryDragStartY = 0;
 	let categoryDragMoved = false;
+
+	// Context menu state for "Mark All as Read"
+	let contextMenuRef: ContextMenu | null = $state(null);
+	let contextMenuTarget: { type: 'all' | 'category'; categoryId?: string } | null = $state(null);
+	let markingAsRead = $state(false);
+
+	// Long-press tracking for context menu on mobile
+	let contextMenuLongPressTimer: number | null = null;
+	let contextMenuLongPressStart: { x: number; y: number } | null = null;
+	const CONTEXT_MENU_LONG_PRESS_MS = 500;
+	const CONTEXT_MENU_LONG_PRESS_THRESHOLD = 10;
 
 	let voicePresence: Record<string, VoiceParticipant[]> = $state({});
 	const voiceUnsubs = new Map<string, Unsubscribe>();
@@ -873,6 +887,162 @@
 		await saveReorder();
 	}
 
+	// ==================== Context Menu Functions for Mark as Read ====================
+
+	function getChannelIdsForCategory(categoryId: string): string[] {
+		return visibleChannels
+			.filter((c) => c.categoryId === categoryId && c.type === 'text')
+			.map((c) => c.id);
+	}
+
+	function getAllTextChannelIds(): string[] {
+		return visibleChannels
+			.filter((c) => c.type === 'text')
+			.map((c) => c.id);
+	}
+
+	function getUnreadChannelIds(channelIds: string[]): string[] {
+		return channelIds.filter((id) => hasUnread(id));
+	}
+
+	async function markAllAsRead(target: 'all' | 'category', categoryId?: string) {
+		if (!$user?.uid || !computedServerId || markingAsRead) return;
+		
+		markingAsRead = true;
+		try {
+			let channelIds: string[];
+			if (target === 'all') {
+				channelIds = getAllTextChannelIds();
+			} else if (categoryId) {
+				channelIds = getChannelIdsForCategory(categoryId);
+			} else {
+				// Uncategorized channels
+				channelIds = visibleChannels
+					.filter((c) => !c.categoryId && c.type === 'text')
+					.map((c) => c.id);
+			}
+
+			const unreadIds = getUnreadChannelIds(channelIds);
+			if (!unreadIds.length) return;
+
+			// Mark channels as read in Firestore
+			await markMultipleChannelsRead($user.uid, computedServerId, unreadIds);
+
+			// Also mark activity feed entries as read
+			await markMultipleChannelsActivityRead(computedServerId, unreadIds);
+
+			// Clear local unread state immediately for responsive UI
+			const newLocalUnread = { ...localUnread };
+			for (const id of unreadIds) {
+				newLocalUnread[id] = false;
+			}
+			localUnread = newLocalUnread;
+
+			// Haptic feedback on mobile
+			if (browser && 'vibrate' in navigator) {
+				navigator.vibrate(30);
+			}
+		} catch (err) {
+			console.error('[ServerSidebar] Failed to mark channels as read:', err);
+		} finally {
+			markingAsRead = false;
+		}
+	}
+
+	function openContextMenu(
+		event: MouseEvent | PointerEvent,
+		target: 'all' | 'category',
+		categoryId?: string
+	) {
+		event.preventDefault();
+		event.stopPropagation();
+		contextMenuTarget = { type: target, categoryId };
+		contextMenuRef?.show(event.clientX, event.clientY);
+	}
+
+	function startContextMenuLongPress(
+		event: PointerEvent | TouchEvent,
+		target: 'all' | 'category',
+		categoryId?: string
+	) {
+		if (contextMenuLongPressTimer !== null) {
+			clearTimeout(contextMenuLongPressTimer);
+		}
+		
+		const touch = 'touches' in event ? event.touches[0] : event;
+		contextMenuLongPressStart = { x: touch.clientX, y: touch.clientY };
+		
+		contextMenuLongPressTimer = window.setTimeout(() => {
+			contextMenuLongPressTimer = null;
+			if (contextMenuLongPressStart) {
+				// Trigger haptic feedback
+				if (browser && 'vibrate' in navigator) {
+					navigator.vibrate(50);
+				}
+				contextMenuTarget = { type: target, categoryId };
+				contextMenuRef?.show(contextMenuLongPressStart.x, contextMenuLongPressStart.y);
+			}
+		}, CONTEXT_MENU_LONG_PRESS_MS);
+	}
+
+	function handleContextMenuPointerMove(event: PointerEvent | TouchEvent) {
+		if (!contextMenuLongPressStart) return;
+		
+		const touch = 'touches' in event ? event.touches[0] : event;
+		const dx = Math.abs(touch.clientX - contextMenuLongPressStart.x);
+		const dy = Math.abs(touch.clientY - contextMenuLongPressStart.y);
+		
+		if (dx > CONTEXT_MENU_LONG_PRESS_THRESHOLD || dy > CONTEXT_MENU_LONG_PRESS_THRESHOLD) {
+			cancelContextMenuLongPress();
+		}
+	}
+
+	function cancelContextMenuLongPress() {
+		if (contextMenuLongPressTimer !== null) {
+			clearTimeout(contextMenuLongPressTimer);
+			contextMenuLongPressTimer = null;
+		}
+		contextMenuLongPressStart = null;
+	}
+
+	function getContextMenuItems() {
+		if (!contextMenuTarget) return [];
+
+		const target = contextMenuTarget.type;
+		const categoryId = contextMenuTarget.categoryId;
+		
+		let channelIds: string[];
+		let label: string;
+		
+		if (target === 'all') {
+			channelIds = getAllTextChannelIds();
+			label = 'Mark All Channels as Read';
+		} else if (categoryId) {
+			const cat = categories.find((c) => c.id === categoryId);
+			channelIds = getChannelIdsForCategory(categoryId);
+			label = `Mark "${cat?.name ?? 'Folder'}" as Read`;
+		} else {
+			channelIds = visibleChannels
+				.filter((c) => !c.categoryId && c.type === 'text')
+				.map((c) => c.id);
+			label = 'Mark Uncategorized as Read';
+		}
+
+		const unreadCount = getUnreadChannelIds(channelIds).length;
+		const hasUnreadChannels = unreadCount > 0;
+
+		return [
+			{
+				label: hasUnreadChannels ? `${label} (${unreadCount})` : label,
+				icon: 'bx-check-double',
+				disabled: !hasUnreadChannels || markingAsRead,
+				action: () => markAllAsRead(target, categoryId)
+			}
+		];
+	}
+
+	// ==================== End Context Menu Functions ====================
+
 	function watchServerMeta(server: string) {
 		unsubServerMeta?.();
 		const db = getDb();
@@ -1444,6 +1614,7 @@
 		resetVoiceWatchers();
 		unsubscribeVoiceSession();
 		stopNotif?.();
+		cancelContextMenuLongPress();
 		removeVoiceDebugSection('serverSidebar.channels');
 		removeVoiceDebugSection('serverSidebar.voicePresence');
 		removeVoiceDebugSection('serverSidebar.voiceSession');
@@ -1904,6 +2075,7 @@ run(() => {
 		draggable={false}
 		use:channelRowRefAction={c.id}
 		onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
+		onpointerenter={() => { if (serverId && c.type === 'text') onChannelHover(serverId, c.id); }}
 	>
 		<button
 			type="button"
@@ -2074,16 +2246,29 @@ run(() => {
 	<div
 		class="channel-scroll-area flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3 -webkit-overflow-scrolling-touch"
 	>
-		<!-- Channels heading - clickable on mobile for admins to access server settings -->
+		<!-- Channels heading - right-click/long-press for mark all as read -->
 		{#if isAdminLike}
 			<button
 				type="button"
 				class="channel-heading channel-heading--clickable md:cursor-default"
 				onclick={openServerSettingsOverlay}
+				oncontextmenu={(e) => openContextMenu(e, 'all')}
+				onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'all'); }}
+				onpointermove={handleContextMenuPointerMove}
+				onpointerup={cancelContextMenuLongPress}
+				onpointercancel={cancelContextMenuLongPress}
 				aria-label="Open server settings">Channels</button
 			>
 		{:else}
-			<div class="channel-heading">Channels</div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div 
+				class="channel-heading"
+				oncontextmenu={(e) => openContextMenu(e, 'all')}
+				onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'all'); }}
+				onpointermove={handleContextMenuPointerMove}
+				onpointerup={cancelContextMenuLongPress}
+				onpointercancel={cancelContextMenuLongPress}
+			>Channels</div>
 		{/if}
 		<div class="channel-list space-y-0.5">
 			{#each unifiedDisplayList as item, itemIndex (item.type === 'category' ? `cat-${item.category.id}` : `ch-${item.channel.id}`)}
@@ -2103,7 +2288,7 @@ run(() => {
 				{#if item.type === 'category'}
 					{@const cat = item.category}
 					{@const categoryChannels = item.channels}
-					<!-- Category Header - Draggable for admins -->
+					<!-- Category Header - Draggable for admins, right-click/long-press for mark as read -->
 					<div
 						role="listitem"
 						class="category-header-wrapper {draggingCategoryId === cat.id ? 'category-header--dragging' : ''}"
@@ -2115,6 +2300,11 @@ run(() => {
 							type="button"
 							class="category-header"
 							onclick={() => toggleCategoryCollapse(cat.id)}
+							oncontextmenu={(e) => openContextMenu(e, 'category', cat.id)}
+							onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'category', cat.id); }}
+							onpointermove={handleContextMenuPointerMove}
+							onpointerup={cancelContextMenuLongPress}
+							onpointercancel={cancelContextMenuLongPress}
 							draggable="false"
 						>
 							<i
@@ -2166,6 +2356,13 @@ run(() => {
 		/>
 	</div>
 </aside>
+
+<!-- Context menu for Mark All as Read -->
+<ContextMenu
+	bind:this={contextMenuRef}
+	items={getContextMenuItems()}
+	onClose={() => { contextMenuTarget = null; }}
+/>
 
 <svelte:window
 	onpointermove={handleChannelPointerMove}

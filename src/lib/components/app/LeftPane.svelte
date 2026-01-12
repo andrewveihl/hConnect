@@ -38,6 +38,7 @@
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import { fabSnapStore, isFabSnappingDisabled } from '$lib/stores/fabSnap';
+	import { onServerHover, onDMHover, scheduleIdlePreload, cancelIdlePreload } from '$lib/stores/preloadService';
 
 	interface Props {
 		activeServerId?: string | null;
@@ -204,7 +205,9 @@
 		activeSnapZoneId = event.detail.zoneId;
 	}
 
-	function handleFabTrayStateChange(event: CustomEvent<{ open: boolean }>) {
+	function handleFabTrayStateChange(event: CustomEvent<{ open: boolean; unmounting?: boolean }>) {
+		// Ignore unmounting events - don't update local state when tray component unmounts
+		if (event.detail.unmounting) return;
 		fabTrayOpen = event.detail.open;
 	}
 
@@ -795,6 +798,7 @@
 					aria-label={dm.title}
 					title={dm.title}
 					aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
+					onpointerenter={() => onDMHover(dm.threadId)}
 				>
 					{#if dm.isGroup}
 						<div class="rail-button__avatar-wrap w-8 h-8 rounded-full bg-muted flex items-center justify-center">
@@ -831,6 +835,7 @@
 					onclick={(event) => handleServerClick(event, s.id)}
 					use:serverRefAction={s.id}
 					onpointerdown={(event) => handleServerPointerDown(event, s.id)}
+					onpointerenter={() => onServerHover(s.id)}
 					animate:flip={{ duration: 180 }}
 				>
 					{#if s.icon}

@@ -18,10 +18,11 @@
 	import { LAST_LOCATION_STORAGE_KEY, RESUME_DM_SCROLL_KEY } from '$lib/constants/navigation';
 	import { page } from '$app/stores';
 	import { isMobileViewport } from '$lib/stores/viewport';
-	import { settingsUI, closeSettings, setSettingsSection } from '$lib/stores/settingsUI';
+	import { settingsUI, closeSettings, setSettingsSection, openSettings } from '$lib/stores/settingsUI';
 	import {
 		serverSettingsUI,
 		closeServerSettings,
+		openServerSettings,
 		setServerSettingsSection
 	} from '$lib/stores/serverSettingsUI';
 	import LeftPane from '$lib/components/app/LeftPane.svelte';
@@ -37,6 +38,7 @@
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { clearAllOverlays } from '$lib/stores/mobileNav';
 	import { user, startProfileListener, userProfile } from '$lib/stores/user';
+	import { invokeVoiceClientControl } from '$lib/stores/voiceClient';
 	import {
 		acceptInvite,
 		declineInvite,
@@ -45,6 +47,15 @@
 	} from '$lib/firestore/invites';
 	import { requestDomainAutoInvites } from '$lib/servers/domainAutoInvite';
 	import type { SettingsSectionId } from '$lib/settings/sections';
+	import {
+		isEditableTarget,
+		isGlobalKeybind,
+		keybindDefinitions,
+		matchKeybind,
+		mergeKeybinds,
+		type KeybindActionId,
+		type KeybindMap
+	} from '$lib/settings/keybinds';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
 	import { primeSoundPlayback } from '$lib/utils/sounds';
@@ -91,6 +102,12 @@
 	let activeVoice: VoiceSession | null = $state(null);
 	const stopVoice = voiceSession.subscribe((value) => {
 		activeVoice = value;
+	});
+	let activeKeybinds: KeybindMap = mergeKeybinds(null);
+	const stopKeybindSync = userProfile.subscribe((profile) => {
+		if (!browser) return;
+		const keybindsData = profile?.settings?.keybinds;
+		activeKeybinds = mergeKeybinds(keybindsData ? (keybindsData as Record<string, string | null>) : null);
 	});
 
 	// Sync theme from user profile on initial load
@@ -464,6 +481,164 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 		setServerSettingsSection(event.detail);
 	}
 
+	const keybindActions: Partial<Record<KeybindActionId, () => void>> = {
+		openSettings: () => {
+			openSettings({ returnTo: currentPath });
+		},
+		openKeybinds: () => {
+			openSettings({ section: 'keybinds', returnTo: currentPath });
+		},
+		closeModal: () => {
+			// Close any open modals/settings
+			if (settingsState.open) {
+				closeSettings();
+				return;
+			}
+			if (serverSettingsState.open) {
+				closeServerSettings();
+				return;
+			}
+		},
+		quickSwitcher: () => {
+			// TODO: Implement quick switcher modal
+			// For now, focus search or go to servers
+			goto('/servers', { keepFocus: true, noScroll: true });
+		},
+		search: () => {
+			// TODO: Implement search modal
+			// For now, this is a placeholder
+		},
+		openServers: () => {
+			goto('/servers', { keepFocus: true, noScroll: true });
+		},
+		openDMs: () => {
+			goto('/dms', { keepFocus: true, noScroll: true });
+		},
+		goBack: () => {
+			if (browser) window.history.back();
+		},
+		goForward: () => {
+			if (browser) window.history.forward();
+		},
+		nextChannel: () => {
+			// Dispatch event for channel navigation (handled by channel list component)
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:nextChannel'));
+		},
+		prevChannel: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:prevChannel'));
+		},
+		nextUnreadChannel: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:nextUnreadChannel'));
+		},
+		prevUnreadChannel: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:prevUnreadChannel'));
+		},
+		nextServer: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:nextServer'));
+		},
+		prevServer: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:prevServer'));
+		},
+		jumpToServer1: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 0 }));
+		},
+		jumpToServer2: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 1 }));
+		},
+		jumpToServer3: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 2 }));
+		},
+		jumpToServer4: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 3 }));
+		},
+		jumpToServer5: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 4 }));
+		},
+		jumpToServer6: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 5 }));
+		},
+		jumpToServer7: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 6 }));
+		},
+		jumpToServer8: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 7 }));
+		},
+		jumpToServer9: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:jumpToServer', { detail: 8 }));
+		},
+		toggleMemberList: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:toggleMemberList'));
+		},
+		togglePinnedMessages: () => {
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:togglePinnedMessages'));
+		},
+		focusChatInput: () => {
+			// Focus the chat input - dispatch event for chat component to handle
+			if (browser) window.dispatchEvent(new CustomEvent('keybind:focusChatInput'));
+		},
+		openServerSettings: () => {
+			if (!activeServerId) return;
+			openServerSettings({ serverId: activeServerId, returnTo: currentPath });
+		},
+		openVoiceSettings: () => {
+			openSettings({ section: 'voice', returnTo: currentPath });
+		},
+		openNotificationSettings: () => {
+			openSettings({ section: 'notifications', returnTo: currentPath });
+		},
+		openAppearanceSettings: () => {
+			openSettings({ section: 'appearance', returnTo: currentPath });
+		},
+		toggleMute: () => {
+			invokeVoiceClientControl('toggleMute');
+		},
+		toggleDeafen: () => {
+			invokeVoiceClientControl('toggleDeafen');
+		},
+		toggleVideo: () => {
+			invokeVoiceClientControl('toggleVideo');
+		},
+		toggleScreenShare: () => {
+			invokeVoiceClientControl('toggleScreenShare');
+		},
+		leaveVoice: () => {
+			invokeVoiceClientControl('leave');
+		},
+		showVoicePanel: () => {
+			invokeVoiceClientControl('showCall');
+		},
+		openVoicePanelSettings: () => {
+			invokeVoiceClientControl('openSettings');
+		}
+	};
+
+	function handleGlobalKeybind(event: KeyboardEvent) {
+		if (!browser) return;
+		if (event.defaultPrevented || event.repeat) return;
+		
+		const inEditable = isEditableTarget(event.target);
+		const hasModifier = event.ctrlKey || event.metaKey || event.altKey;
+		
+		for (const def of keybindDefinitions) {
+			const action = keybindActions[def.id];
+			if (!action) continue;
+			const binding = activeKeybinds[def.id];
+			if (!binding) continue;
+			
+			// Skip non-global keybinds when in an editable field (unless using modifiers)
+			if (inEditable && !isGlobalKeybind(def.id) && !hasModifier) {
+				continue;
+			}
+			
+			if (matchKeybind(event, binding)) {
+				event.preventDefault();
+				event.stopPropagation();
+				action();
+				break;
+			}
+		}
+	}
+
 	async function resumeLastLocation() {
 		if (!browser || skipResumeRestore) return;
 		const stored = readStoredLocation();
@@ -502,6 +677,7 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 		let stopProfileListener: (() => void) | null = null;
 		let detachGestureGuards: (() => void) | null = null;
 		let detachSwipeGestures: (() => void) | null = null;
+		let detachKeybinds: (() => void) | null = null;
 
 		// Start listening to the current user's Firestore profile for cached avatars
 		startProfileListener().then((unsub) => {
@@ -525,6 +701,8 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 			// Best-effort register SW for push/notifications (no permission prompt here)
 			registerFirebaseMessagingSW().catch(() => {});
 			primeSoundPlayback();
+			window.addEventListener('keydown', handleGlobalKeybind);
+			detachKeybinds = () => window.removeEventListener('keydown', handleGlobalKeybind);
 
 			// Setup swipe gestures for mobile navigation
 			if (mobileViewport && typeof window !== 'undefined') {
@@ -599,6 +777,7 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 			stopProfileListener?.();
 			detachGestureGuards?.();
 			detachSwipeGestures?.();
+			detachKeybinds?.();
 			stopDeepLinkListener?.();
 			stopAnnouncementListener?.();
 		};
@@ -607,6 +786,7 @@ const stopUserProfileThemeSync = userProfile.subscribe((profile) => {
 	onDestroy(() => {
 		stopVoice?.();
 		stopUserProfileThemeSync?.();
+		stopKeybindSync?.();
 		domainInviteInboxStop?.();
 		detachDomainInviteTestListener?.();
 	});
