@@ -6,8 +6,6 @@
 import { writable, get, type Readable } from 'svelte/store';
 import { browser } from '$app/environment';
 import { featureFlagsStore } from '$lib/admin/featureFlags';
-import { user } from '$lib/stores/user';
-import { ensureFirebaseReady, getDb } from '$lib/firebase';
 
 export interface SnapZone {
 	id: string;
@@ -21,32 +19,16 @@ export interface SnapZone {
 	stackOrder?: number;
 }
 
-/** Information about a registered FAB */
-export interface RegisteredFab {
-	id: string;
-	label: string;
-	icon: string;
-}
-
 export interface FabSnapState {
 	zones: SnapZone[];
 	activeZoneId: string | null;
 	/** Track which FABs are currently snapped and their order */
 	snappedFabs: { fabId: string; zoneId: string; order: number }[];
-	/** Track all registered (available) FABs */
-	registeredFabs: RegisteredFab[];
 }
 
-const SNAP_THRESHOLD_PX = 150; // Increased for easier debugging - can reduce later
+const SNAP_THRESHOLD_PX = 100; // Increased from 60px for easier snapping
 const SNAP_STORAGE_PREFIX = 'hconnect:fab-snap:';
 const FAB_ZONE_SPACING = 56; // Vertical spacing between stacked snap zones (matches rail-button: 48px + 8px gap)
-const FAB_SNAP_SYNC_EVENT = 'fabSnapStateSynced';
-
-type LocalSnapState = {
-	snapped: boolean;
-	zoneId: string | null;
-	updatedAt: number;
-};
 
 // Store for FAB snapping disabled setting from feature flags
 const fabSnappingDisabledStore = writable<boolean>(false);
@@ -69,224 +51,15 @@ export function initFabSnappingSettings() {
  */
 export const isFabSnappingDisabled: Readable<boolean> = { subscribe: fabSnappingDisabledStore.subscribe };
 
-function parseUpdatedAt(value: unknown): number {
-	if (!value) return 0;
-	if (typeof value === 'number' && Number.isFinite(value)) return value;
-	const asAny = value as { toMillis?: () => number };
-	if (typeof asAny?.toMillis === 'function') return asAny.toMillis();
-	return 0;
-}
-
-function normalizeRemoteSnapState(value: unknown): LocalSnapState | null {
-	if (!value || typeof value !== 'object') return null;
-	const raw = value as { snapped?: unknown; zoneId?: unknown; updatedAt?: unknown };
-	const zoneId = typeof raw.zoneId === 'string' ? raw.zoneId : null;
-	const snapped = raw.snapped === true && !!zoneId;
-	return {
-		snapped,
-		zoneId: snapped ? zoneId : null,
-		updatedAt: parseUpdatedAt(raw.updatedAt)
-	};
-}
-
-function readLocalSnapState(fabId: string): LocalSnapState | null {
-	if (!browser) return null;
-	try {
-		const raw = localStorage.getItem(`${SNAP_STORAGE_PREFIX}${fabId}`);
-		if (!raw) return null;
-		const parsed = JSON.parse(raw) as Partial<LocalSnapState>;
-		const snapped = parsed.snapped === true;
-		const zoneId = typeof parsed.zoneId === 'string' ? parsed.zoneId : null;
-		return {
-			snapped,
-			zoneId: snapped ? zoneId : null,
-			updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0
-		};
-	} catch {
-		return null;
-	}
-}
-
-function readAllLocalSnapStates(): Record<string, LocalSnapState> {
-	if (!browser) return {};
-	const states: Record<string, LocalSnapState> = {};
-	try {
-		for (let i = 0; i < localStorage.length; i += 1) {
-			const key = localStorage.key(i);
-			if (!key || !key.startsWith(SNAP_STORAGE_PREFIX)) continue;
-			const fabId = key.slice(SNAP_STORAGE_PREFIX.length);
-			const state = readLocalSnapState(fabId);
-			if (state) states[fabId] = state;
-		}
-	} catch {
-		return states;
-	}
-	return states;
-}
-
-function writeLocalSnapState(fabId: string, state: LocalSnapState) {
-	if (!browser) return;
-	try {
-		localStorage.setItem(`${SNAP_STORAGE_PREFIX}${fabId}`, JSON.stringify(state));
-	} catch {
-		// ignore
-	}
-}
-
-async function writeRemoteSnapStates(uid: string, entries: Record<string, LocalSnapState>) {
-	if (!browser || !uid) return;
-	const fabIds = Object.keys(entries);
-	if (!fabIds.length) return;
-	try {
-		await ensureFirebaseReady();
-		const { setDoc, doc, serverTimestamp } = await import('firebase/firestore');
-		const db = getDb();
-		const profileRef = doc(db, 'profiles', uid);
-		const payload: Record<string, unknown> = {};
-		for (const fabId of fabIds) {
-			const state = entries[fabId];
-			payload[`settings.fabDock.${fabId}`] = {
-				snapped: state.snapped,
-				zoneId: state.zoneId ?? null,
-				updatedAt: serverTimestamp()
-			};
-		}
-		await setDoc(profileRef, payload, { merge: true });
-	} catch (error) {
-		console.warn('[fabSnap] Failed to sync snap state to Firestore:', error);
-	}
-}
-
-let fabSnapUserUnsub: (() => void) | null = null;
-let fabSnapProfileUnsub: (() => void) | null = null;
-let fabSnapSyncToken = 0;
-
-/**
- * Sync snap state with Firestore so it persists across devices.
- */
-export function initFabSnapSync() {
-	if (!browser || fabSnapUserUnsub) return;
-
-	fabSnapUserUnsub = user.subscribe((currentUser) => {
-		if (fabSnapProfileUnsub) {
-			fabSnapProfileUnsub();
-			fabSnapProfileUnsub = null;
-		}
-
-		if (!currentUser?.uid) return;
-
-		const token = (fabSnapSyncToken += 1);
-		void (async () => {
-			try {
-				await ensureFirebaseReady();
-				if (fabSnapSyncToken !== token) return;
-				const { doc, onSnapshot } = await import('firebase/firestore');
-				const db = getDb();
-				const profileRef = doc(db, 'profiles', currentUser.uid);
-
-				fabSnapProfileUnsub = onSnapshot(
-					profileRef,
-					(snap) => {
-						if (!snap.exists()) return;
-						const data = snap.data() as Record<string, any>;
-						const remoteDock = data?.settings?.fabDock;
-						const remoteStates =
-							remoteDock && typeof remoteDock === 'object' ? (remoteDock as Record<string, unknown>) : {};
-						const localStates = readAllLocalSnapStates();
-						const updatedFabIds: string[] = [];
-
-						for (const [fabId, remoteValue] of Object.entries(remoteStates)) {
-							const remoteState = normalizeRemoteSnapState(remoteValue);
-							if (!remoteState) continue;
-
-							const localState = localStates[fabId];
-							if (!localState || remoteState.updatedAt > localState.updatedAt) {
-								writeLocalSnapState(fabId, remoteState);
-								if (!remoteState.snapped) {
-									fabSnapStore.releaseZone(fabId);
-								}
-								updatedFabIds.push(fabId);
-							}
-						}
-
-						if (updatedFabIds.length && browser) {
-							window.dispatchEvent(
-								new CustomEvent(FAB_SNAP_SYNC_EVENT, { detail: { fabIds: updatedFabIds } })
-							);
-						}
-
-						if (snap.metadata.hasPendingWrites) return;
-
-						const toPush: Record<string, LocalSnapState> = {};
-						for (const [fabId, localState] of Object.entries(localStates)) {
-							const remoteState = normalizeRemoteSnapState(remoteStates[fabId]);
-							if (!remoteState || localState.updatedAt > remoteState.updatedAt) {
-								toPush[fabId] = localState;
-							}
-						}
-						void writeRemoteSnapStates(currentUser.uid, toPush);
-					},
-					(error) => {
-						console.warn('[fabSnap] Failed to subscribe to snap state:', error);
-					}
-				);
-			} catch (error) {
-				console.warn('[fabSnap] Failed to initialize snap sync:', error);
-			}
-		})();
-	});
-}
-
 function createFabSnapStore() {
 	const { subscribe, update } = writable<FabSnapState>({
 		zones: [],
 		activeZoneId: null,
-		snappedFabs: [],
-		registeredFabs: []
+		snappedFabs: []
 	});
 
 	return {
 		subscribe,
-
-		/**
-		 * Register a FAB as available (called by each FAB component on mount)
-		 */
-		registerFab(fab: RegisteredFab) {
-			update((state) => {
-				const existing = state.registeredFabs.findIndex((f) => f.id === fab.id);
-				if (existing >= 0) {
-					state.registeredFabs[existing] = fab;
-				} else {
-					state.registeredFabs.push(fab);
-				}
-				// Dispatch event so tray knows to update slots
-				if (browser) {
-					window.dispatchEvent(new CustomEvent('fabRegistryChanged', { detail: { count: state.registeredFabs.length } }));
-				}
-				return { ...state };
-			});
-		},
-
-		/**
-		 * Unregister a FAB (called on unmount)
-		 */
-		unregisterFab(fabId: string) {
-			update((state) => {
-				state.registeredFabs = state.registeredFabs.filter((f) => f.id !== fabId);
-				// Dispatch event so tray knows to update slots
-				if (browser) {
-					window.dispatchEvent(new CustomEvent('fabRegistryChanged', { detail: { count: state.registeredFabs.length } }));
-				}
-				return { ...state };
-			});
-		},
-
-		/**
-		 * Get all registered FABs
-		 */
-		getRegisteredFabs(): RegisteredFab[] {
-			return get({ subscribe }).registeredFabs;
-		},
 
 		/**
 		 * Register a snap zone (called by LeftPane or other containers)
@@ -299,39 +72,6 @@ function createFabSnapStore() {
 				} else {
 					state.zones.push({ ...zone, stackOrder: 0, occupiedBy: null });
 				}
-				return { ...state };
-			});
-		},
-
-		/**
-		 * Ensure a stacked zone exists for a saved snap ID.
-		 */
-		ensureZone(zoneId: string) {
-			if (!zoneId.includes('-stack-')) return;
-			update((state) => {
-				if (state.zones.find((z) => z.id === zoneId)) return state;
-
-				const [baseZoneId, orderRaw] = zoneId.split('-stack-');
-				const stackOrder = Number.parseInt(orderRaw ?? '', 10);
-				if (!Number.isFinite(stackOrder) || stackOrder <= 0) return state;
-
-				const baseZone = state.zones.find((z) => z.id === baseZoneId);
-				if (!baseZone) return state;
-
-				for (let order = 1; order <= stackOrder; order += 1) {
-					const stackedId = `${baseZoneId}-stack-${order}`;
-					if (state.zones.find((z) => z.id === stackedId)) continue;
-					state.zones.push({
-						id: stackedId,
-						x: baseZone.x,
-						y: baseZone.y - (FAB_ZONE_SPACING * order),
-						width: baseZone.width,
-						height: baseZone.height,
-						occupiedBy: null,
-						stackOrder: order
-					});
-				}
-
 				return { ...state };
 			});
 		},
@@ -505,32 +245,44 @@ function createFabSnapStore() {
 		 * Check if a FAB is currently snapped to the rail
 		 */
 		isSnappedToRail(fabId: string): boolean {
-			const state = readLocalSnapState(fabId);
-			return state?.snapped === true;
+			if (!browser) return false;
+			try {
+				const raw = localStorage.getItem(`${SNAP_STORAGE_PREFIX}${fabId}`);
+				if (!raw) return false;
+				const parsed = JSON.parse(raw);
+				return parsed?.snapped === true;
+			} catch {
+				return false;
+			}
 		},
 
 		/**
 		 * Get the zone ID a FAB was snapped to
 		 */
 		getSnappedZoneId(fabId: string): string | null {
-			const state = readLocalSnapState(fabId);
-			return state?.zoneId ?? null;
+			if (!browser) return null;
+			try {
+				const raw = localStorage.getItem(`${SNAP_STORAGE_PREFIX}${fabId}`);
+				if (!raw) return null;
+				const parsed = JSON.parse(raw);
+				return parsed?.zoneId ?? null;
+			} catch {
+				return null;
+			}
 		},
 
 		/**
 		 * Save snap state for a FAB
 		 */
 		setSnapped(fabId: string, snapped: boolean, zoneId?: string) {
-			const nextState: LocalSnapState = {
-				snapped,
-				zoneId: snapped ? zoneId ?? null : null,
-				updatedAt: Date.now()
-			};
-			writeLocalSnapState(fabId, nextState);
-
-			const currentUser = get(user);
-			if (currentUser?.uid) {
-				void writeRemoteSnapStates(currentUser.uid, { [fabId]: nextState });
+			if (!browser) return;
+			try {
+				localStorage.setItem(
+					`${SNAP_STORAGE_PREFIX}${fabId}`,
+					JSON.stringify({ snapped, zoneId: snapped ? zoneId : null })
+				);
+			} catch {
+				// ignore
 			}
 		},
 

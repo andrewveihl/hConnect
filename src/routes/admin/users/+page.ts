@@ -1,6 +1,5 @@
 import type { PageLoad } from './$types';
 import { ensureFirebaseReady, getDb } from '$lib/firebase';
-import { getDefaultAvatarUrl, resolveProfilePhotoURL } from '$lib/utils/profile';
 import { collection, getDocs } from 'firebase/firestore';
 
 export const load: PageLoad = async ({ parent }) => {
@@ -12,44 +11,15 @@ export const load: PageLoad = async ({ parent }) => {
 	const snapshot = await getDocs(collection(db, 'profiles'));
 
 	// Map and sort on the client side to include users with and without createdAt
-	const defaultAvatarUrl = getDefaultAvatarUrl();
 	const users = snapshot.docs
 		.map((docSnap) => {
 			const data = docSnap.data() as Record<string, any>;
-			const customPhotoURL = data.customPhotoURL ?? null;
-			const authPhotoURL = data.authPhotoURL ?? null;
-			const storedPhotoURL = data.photoURL ?? null;
-			const cachedPhotoURL = data.cachedPhotoURL ?? null;
-			const avatar = data.avatar ?? null;
-			const avatarUrl = data.avatarUrl ?? null;
-			const avatarURL = data.avatarURL ?? null;
-			const activePhotoSource = data.activePhotoSource ?? null;
-			const photoSourceOrder = Array.isArray(data.photoSourceOrder) ? data.photoSourceOrder : null;
-			const resolvedPhotoURL = resolveProfilePhotoURL({
-				avatar,
-				avatarUrl,
-				avatarURL,
-				customPhotoURL,
-				authPhotoURL,
-				photoURL: storedPhotoURL,
-				cachedPhotoURL
-			});
-
 			return {
 				uid: docSnap.id,
 				displayName: data.name ?? data.displayName ?? '',
 				email: data.email ?? '',
-				photoURL: resolvedPhotoURL === defaultAvatarUrl ? null : resolvedPhotoURL,
-				storedPhotoURL,
-				customPhotoURL,
-				authPhotoURL,
-				cachedPhotoURL,
-				avatar,
-				avatarUrl,
-				avatarURL,
-				activePhotoSource,
-				photoSourceOrder,
-				hasCustomPhoto: !!customPhotoURL,
+				photoURL: data.customPhotoURL ?? data.authPhotoURL ?? data.photoURL ?? null,
+				hasCustomPhoto: !!data.customPhotoURL,
 				createdAt: data.createdAt?.toDate?.() ?? null,
 				lastSeen: data.updatedAt?.toDate?.() ?? null,
 				roles: data.roles ?? [],

@@ -32,7 +32,7 @@
 	);
 	let activeTab = $state('Server');
 	let search = $state('');
-	let detailSection: ServerSettingsSectionId | null = $state(null);
+	let detailSection: ServerSettingsSectionId | null = $state(startInSection ? activeSection : null);
 	let seededSection = $state(false);
 
 	const EDGE_ZONE = 120;

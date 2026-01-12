@@ -172,6 +172,12 @@
 		font-weight: 600;
 	}
 
+	.mention-menu__avatar img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
 	.mention-menu__avatar--role {
 		padding: 0.2rem;
 	}

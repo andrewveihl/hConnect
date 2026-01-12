@@ -6,7 +6,6 @@
 	import { browser } from '$app/environment';
 	import { afterNavigate, goto } from '$app/navigation';
 	import { user, userProfile } from '$lib/stores/user';
-	import { matchKeybind, mergeKeybinds } from '$lib/settings/keybinds';
 
 	import LeftPane from '$lib/components/app/LeftPane.svelte';
 	import ServerSidebar from '$lib/components/servers/ServerSidebar.svelte';
@@ -80,11 +79,6 @@
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import {
-		scheduleIdlePreload,
-		cancelIdlePreload,
-		preloadServerDefault
-	} from '$lib/stores/preloadService';
-	import {
 		getCachedChannelMessages,
 		updateChannelCache,
 		hasChannelCache,
@@ -111,7 +105,6 @@
 	) => params.serverID ?? params.serversID ?? params.serverId ?? fallback ?? null;
 
 	let serverId = $state<string | null>(null);
-	let activeKeybinds = $state(mergeKeybinds(null));
 	run(() => {
 		serverId = resolveServerId(
 			$page.params as Record<string, string | undefined>,
@@ -120,9 +113,6 @@
 		// Notify notifications store that this is now the active server
 		// This enables detailed per-channel unread tracking only for this server
 		setActiveServerForUnread(serverId);
-	});
-	run(() => {
-		activeKeybinds = mergeKeybinds($userProfile?.settings?.keybinds ?? null);
 	});
 
 	type Channel = {
@@ -2790,10 +2780,13 @@
 					showThreadPanel = false;
 				}
 			}
-			const openThreadBinding = activeKeybinds.openLatestThread;
+			const key = e.key?.toLowerCase?.() ?? '';
 			if (
-				openThreadBinding &&
-				matchKeybind(e, openThreadBinding) &&
+				key === 't' &&
+				!e.metaKey &&
+				!e.ctrlKey &&
+				!e.altKey &&
+				!e.shiftKey &&
 				!e.repeat &&
 				!isMobile &&
 				!isTypingTarget(e.target)
@@ -3105,8 +3098,6 @@
 		memberPermsUnsub?.();
 		memberPermsUnsub = null;
 		memberPermsServer = null;
-		// Cancel any pending idle preloads
-		cancelIdlePreload();
 	});
 
 	function markChannelReadFromMessages(
@@ -5020,20 +5011,13 @@
 		const currentServer = serverId ?? null;
 		const currentUser = $user?.uid ?? null;
 		const cachedChannels = untrack(() => lastSidebarChannels);
-		const hasChannels = untrack(() => channels.length > 0);
 		// Only sync when the combination of server/user actually changes, not on every reactive run
 		if (currentServer && currentUser && cachedChannels) {
 			const needsSync = currentServer !== lastSyncedServer || currentUser !== lastSyncedUser;
 			if (
 				needsSync ||
 				(cachedChannels.serverId === currentServer &&
-					!hasChannels &&
-					cachedChannels.channels?.length)
-			) {
-				untrack(() => {
-					lastSyncedServer = currentServer;
-					lastSyncedUser = currentUser;
-				});
+
 				syncVisibleChannels(cachedChannels, false);
 			}
 		}
@@ -5417,15 +5401,6 @@
 			channelMessagesPopoutChannelName = name;
 		}
 	});
-	// Schedule idle preloading when user is viewing a channel
-	// This preloads adjacent servers, channels, and DMs in the background
-	run(() => {
-		const uid = $user?.uid ?? null;
-		const currentChannelId = activeChannel?.id ?? null;
-		if (serverId && uid) {
-			scheduleIdlePreload(serverId, currentChannelId, uid);
-		}
-	});
 </script>
 
 <!-- Layout summary:
@@ -5465,7 +5440,6 @@
 						membersVisible={!voiceState?.visible &&
 							(isMobile ? showMembers : desktopMembersVisible)}
 						showMessageShortcut={true}
-						hideMembersToggle={!isMobile && !desktopMembersWideEnough}
 						onToggleChannels={() => {
 							showChannels = true;
 							showMembers = false;

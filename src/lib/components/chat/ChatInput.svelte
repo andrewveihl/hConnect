@@ -1805,7 +1805,6 @@
 		const vv = window.visualViewport;
 		const vh = vv ? vv.height : window.innerHeight;
 		const vw = vv ? vv.width : window.innerWidth;
-		const layoutHeight = window.innerHeight;
 		const offsetX = vv?.offsetLeft ?? 0;
 		const offsetY = vv?.offsetTop ?? 0;
 		const menuWidth = Math.min(280, vw - 16);
@@ -1829,24 +1828,19 @@
 		const placeBelow = spaceBelow >= spaceAbove;
 
 		let maxHeight: number;
-		let top: number | null = null;
-		let bottom: number | null = null;
+		let top: number;
 
 		if (placeBelow) {
 			maxHeight = Math.min(260, Math.max(140, spaceBelow));
 			top = rect.bottom - offsetY + gap + verticalOffset;
 		} else {
 			maxHeight = Math.min(260, Math.max(140, spaceAbove));
-			bottom = layoutHeight - rect.top + gap + verticalOffset;
+			top = Math.max(pad, rect.top - offsetY - maxHeight - gap - verticalOffset);
 		}
 
 		// Clamp to viewport height
-		if (top !== null) {
-			const availableBelow = vh - top - pad;
-			maxHeight = Math.max(120, Math.min(maxHeight, availableBelow));
-		} else {
-			maxHeight = Math.max(120, Math.min(maxHeight, spaceAbove));
-		}
+		const availableBelow = vh - top - pad;
+		maxHeight = Math.max(120, Math.min(maxHeight, availableBelow));
 
 		// Align to anchor's left edge (like Discord), with a slight inset, clamped to viewport width
 		let left = leftWithinViewport + horizontalOffset;
@@ -1855,8 +1849,8 @@
 
 		mentionMenuPosition = {
 			left: `${Math.round(left)}px`,
-			top: top !== null ? `${Math.round(top + offsetY)}px` : 'auto',
-			bottom: bottom !== null ? `${Math.round(bottom)}px` : 'auto',
+			top: `${Math.round(top + offsetY)}px`,
+			bottom: 'auto',
 			maxHeight: `${Math.round(maxHeight)}px`
 		};
 	}
@@ -2133,7 +2127,6 @@
 <div
 	class="chat-input-root"
 	class:chat-input-root--dragging={dragActive}
-	class:chat-input-root--expanded={textareaExpanded}
 	bind:this={rootEl}
 	ondragenter={handleDragEnter}
 	ondragover={handleDragOver}
@@ -3123,7 +3116,7 @@
 	.textarea {
 		width: 100%;
 		min-height: 2.6rem;
-		max-height: min(40vh, 20rem);
+		max-height: min(60vh, 32rem);
 		resize: none;
 		line-height: 1.4;
 		font-family: inherit;
@@ -3298,11 +3291,6 @@
 		color: var(--text-50);
 	}
 
-	.chat-input-root--expanded .chat-input__textarea-wrapper textarea,
-	.chat-input-root--expanded .chat-input__mention-overlay {
-		border-radius: 1.1rem;
-	}
-
 	.chat-input__textarea-wrapper textarea.has-mentions {
 		color: transparent;
 		caret-color: var(--text-100);
@@ -3318,7 +3306,7 @@
 		font-size: inherit;
 		line-height: 1.4;
 		overflow: hidden;
-		z-index: 0;
+		z-index: 2;
 		white-space: pre-wrap;
 		word-break: break-word;
 		color: var(--text-100);
@@ -3333,28 +3321,24 @@
 
 	.chat-input__mention-tag {
 		display: inline;
-		font-weight: inherit;
+		font-weight: 600;
 		color: #2fd8c8;
 		background: color-mix(in srgb, #2fd8c8 18%, transparent);
 		border-radius: 4px;
-		padding: 0;
-		margin: 0;
-		box-decoration-break: clone;
-		-webkit-box-decoration-break: clone;
-		box-shadow: 0 0 0 0.12rem color-mix(in srgb, #2fd8c8 18%, transparent);
+		padding: 0.05rem 0.25rem;
+		margin: 0 0.05rem;
 	}
 
 	.chat-input__mention-tag--role {
 		color: var(--mention-color, #2fd8c8);
 		background: color-mix(in srgb, var(--mention-color, #2fd8c8) 18%, transparent);
-		box-shadow: 0 0 0 0.12rem
-			color-mix(in srgb, var(--mention-color, #2fd8c8) 18%, transparent);
+		font-weight: 700;
 	}
 
 	.chat-input__mention-tag--special {
 		color: #38bdf8;
 		background: color-mix(in srgb, #38bdf8 18%, transparent);
-		box-shadow: 0 0 0 0.12rem color-mix(in srgb, #38bdf8 18%, transparent);
+		font-weight: 700;
 	}
 
 	.chat-input__prediction {
@@ -3754,10 +3738,6 @@
 	}
 
 	@media (max-width: 767px) {
-		.textarea {
-			max-height: min(32vh, 14rem);
-		}
-
 		.chat-send-button {
 			display: none;
 		}

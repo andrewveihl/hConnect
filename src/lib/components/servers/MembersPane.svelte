@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { run } from 'svelte/legacy';
+
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
@@ -549,13 +551,11 @@
 		hideScrollbarForWheel = false;
 	}
 
-	$effect(() => {
-		// Track DOM element bindings and lazy load state
+	run(() => {
 		loadMoreSentinel;
 		memberScrollContainer;
 		shouldLazyLoad;
-		// Call refresh without tracking to avoid recursive updates
-		untrack(() => refreshLoadObserver());
+		refreshLoadObserver();
 	});
 
 	function subscribePresence(database: ReturnType<typeof db>, uid: string) {
@@ -664,9 +664,9 @@
 		);
 	}
 
-	$effect(() => {
+	run(() => {
 		if (serverId && $user?.uid) {
-			untrack(() => subscribeMembers(serverId));
+			subscribeMembers(serverId);
 		} else {
 			const prevMembersUnsub = untrack(() => membersUnsub);
 			prevMembersUnsub?.();
@@ -674,26 +674,22 @@
 			const prevRolesUnsub = untrack(() => rolesUnsub);
 			prevRolesUnsub?.();
 			rolesUnsub = null;
-			untrack(() => {
-				clearRolesIfAny();
-				cleanupProfiles();
-				resetMemberVisibility();
-			});
+			clearRolesIfAny();
+			cleanupProfiles();
+			resetMemberVisibility();
 		}
 	});
 
 	// Recompute visible members when the channel changes (for private channel filtering)
-	$effect(() => {
+	run(() => {
 		// Track channel changes
 		const _channelId = channel?.id;
 		const _isPrivate = channel?.isPrivate;
 		const _allowedRoles = channel?.allowedRoleIds;
-		// Recompute rows with the new channel filter - use untrack to avoid recursive updates
-		untrack(() => {
-			if (Object.keys(members).length > 0) {
-				updateRows();
-			}
-		});
+		// Recompute rows with the new channel filter
+		if (Object.keys(members).length > 0) {
+			updateRows();
+		}
 	});
 
 	onDestroy(() => {

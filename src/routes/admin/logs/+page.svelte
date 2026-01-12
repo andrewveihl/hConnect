@@ -15,18 +15,13 @@
 	}
 
 	let { data }: Props = $props();
-	let logs: AdminLogEntry[] = $state([]);
-	let clientErrors: ClientErrorLogEntry[] = $state([]);
+	let logs: AdminLogEntry[] = $state(data.initialLogs);
+	let clientErrors: ClientErrorLogEntry[] = $state(data.initialClientErrors ?? []);
 	let loading = $state(false);
 	let criticalLoading = $state(false);
 	let selectedLog: AdminLogEntry | null = $state(null);
 	let selectedClientError: ClientErrorLogEntry | null = $state(null);
 	let showFilters = $state(false);
-
-	$effect(() => {
-		logs = data.initialLogs ?? [];
-		clientErrors = data.initialClientErrors ?? [];
-	});
 
 	// Mobile tabs
 	type TabId = 'logs' | 'critical' | 'summary';
