@@ -1,75 +1,32 @@
-import { customizationConfigStore } from '$lib/admin/customization';
-
-export const DEFAULT_AVATAR_URL = '/default-avatar.svg';
-
-export function pickString(value: unknown): string | undefined {
-	if (typeof value !== 'string') return undefined;
-	const trimmed = value.trim();
-	return trimmed.length ? trimmed : undefined;
-}
-
-const DEFAULT_AVATAR_LOWER = DEFAULT_AVATAR_URL.toLowerCase();
-const DEFAULT_AVATAR_SUFFIX = '/default-avatar.svg';
-let defaultAvatarOverride: string | null = null;
-
-function isDefaultAvatarStatic(value: string): boolean {
-	const lowered = value.toLowerCase();
-	return lowered === DEFAULT_AVATAR_LOWER || lowered.endsWith(DEFAULT_AVATAR_SUFFIX);
-}
-
-if (typeof window !== 'undefined') {
-	const store = customizationConfigStore();
-	store.subscribe((config) => {
-		const candidate = pickString(config?.defaultAvatarUrl);
-		defaultAvatarOverride = candidate && !isDefaultAvatarStatic(candidate) ? candidate : null;
-	});
-}
-
-export function getDefaultAvatarUrl(): string {
-	return defaultAvatarOverride ?? DEFAULT_AVATAR_URL;
-}
-
-export function isDefaultAvatarUrl(value: unknown): boolean {
-	const str = pickString(value);
-	if (!str) return false;
-	if (isDefaultAvatarStatic(str)) return true;
-	return defaultAvatarOverride ? str.toLowerCase() === defaultAvatarOverride.toLowerCase() : false;
-}
-
-const DEFAULT_PHOTO_SOURCE_ORDER = [
-	'avatar',
-	'customPhotoURL',
-	'authPhotoURL',
-	'photoURL',
-	'cachedPhotoURL'
-] as const;
-
-type PhotoSourceKey = (typeof DEFAULT_PHOTO_SOURCE_ORDER)[number];
+export const DEFAULT_AVATAR_URL = '/avatars_7H7Gd9DZBCXT9FBg17czyOpAmLn2_google-photo.png';
 
 function cleanUrl(value: unknown): string | null {
 	const str = pickString(value);
 	if (!str) return null;
 	const lowered = str.toLowerCase();
 	if (['undefined', 'null', 'none', 'false', '0', '?'].includes(lowered)) return null;
-	if (isDefaultAvatarUrl(str)) return null;
-	// Filter out the old incorrect default avatar URL (user-specific cached photo used incorrectly as default)
-	if (lowered.includes('avatars_7h7gd9dzbcxt9fbg17czyopamln2_google-photo')) {
+	if (
+		lowered === DEFAULT_AVATAR_URL ||
+		lowered.endsWith(DEFAULT_AVATAR_URL.toLowerCase()) ||
+		lowered.endsWith('/default-avatar.svg')
+	) {
 		return null;
 	}
 	// Filter out placeholder/invalid URLs
 	if (str.startsWith('blob:') && str.includes('undefined')) return null;
 	
 	// Filter out Firebase Storage URLs without auth token (cached format that doesn't work)
-	if (
-		(str.includes('storage.googleapis.com/') ||
-			str.includes('firebasestorage.googleapis.com/') ||
-			str.includes('firebasestorage.app/')) &&
-		!str.includes('token=')
-	) {
+	if (str.includes('storage.googleapis.com/') && !str.includes('token=')) {
 		return null;
 	}
 	
 	return str;
+}
+
+export function pickString(value: unknown): string | undefined {
+	if (typeof value !== 'string') return undefined;
+	const trimmed = value.trim();
+	return trimmed.length ? trimmed : undefined;
 }
 
 /**
@@ -113,7 +70,10 @@ export function resolveProfilePhotoURL(
 	// Check for custom avatar first (user uploaded)
 	const avatar =
 		cleanUrl(record?.avatar) ?? cleanUrl(record?.avatarUrl) ?? cleanUrl(record?.avatarURL);
+	if (avatar) return avatar;
+
 	const custom = cleanUrl(record?.customPhotoURL) ?? cleanUrl(record?.customPhotoUrl);
+	if (custom) return custom;
 
 	// Auth provider photo (Google, etc.) - prefer live over cached
 	const provider =
@@ -135,47 +95,7 @@ export function resolveProfilePhotoURL(
 		!custom &&
 		(!provider || stored !== provider) &&
 		(!cached || stored !== cached);
-	const activeSource =
-		typeof record?.activePhotoSource === 'string' ? record.activePhotoSource : null;
-	if (activeSource) {
-		const sources: Record<PhotoSourceKey, string | null> = {
-			avatar,
-			customPhotoURL: custom,
-			authPhotoURL: provider,
-			photoURL: stored,
-			cachedPhotoURL: cached
-		};
-		const activeValue = sources[activeSource as PhotoSourceKey] ?? null;
-		if (activeValue) return activeValue;
-	}
-
-	const order: PhotoSourceKey[] = Array.isArray(record?.photoSourceOrder)
-		? (record.photoSourceOrder as unknown[]).filter((key: unknown): key is PhotoSourceKey =>
-				DEFAULT_PHOTO_SOURCE_ORDER.includes(key as PhotoSourceKey)
-			)
-		: [];
-
-	if (order.length > 0) {
-		const sources: Record<PhotoSourceKey, string | null> = {
-			avatar,
-			customPhotoURL: custom,
-			authPhotoURL: provider,
-			photoURL: stored,
-			cachedPhotoURL: cached
-		};
-		const fullOrder = [
-			...order,
-			...DEFAULT_PHOTO_SOURCE_ORDER.filter((key) => !order.includes(key))
-		];
-		for (const key of fullOrder) {
-			const value = sources[key];
-			if (value) return value;
-		}
-	} else {
-		if (avatar) return avatar;
-		if (custom) return custom;
-		if (storedOverrides) return stored;
-	}
+	if (storedOverrides) return stored;
 
 	// If preferGooglePhoto is set and we have a Google URL in auth, prioritize it
 	if (preferGooglePhoto && provider && isGooglePhotoUrl(provider)) {
@@ -191,7 +111,7 @@ export function resolveProfilePhotoURL(
 	const cleanedFallback = cleanUrl(fallback);
 	if (cleanedFallback) return cleanedFallback;
 
-	return getDefaultAvatarUrl();
+	return DEFAULT_AVATAR_URL;
 }
 
 /**

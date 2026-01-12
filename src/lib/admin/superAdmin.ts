@@ -274,38 +274,6 @@ export async function refreshUserGooglePhoto(uid: string, force = false): Promis
 }
 
 /**
- * Repair token-missing Firebase Storage URLs stored on a user's profile.
- */
-export async function repairUserAvatarTokens(uid: string): Promise<{
-	ok: boolean;
-	updated?: Record<string, string>;
-	updatedCount?: number;
-	failures?: Array<{ bucket: string; path: string; reason: string }>;
-	reason?: string;
-	message?: string;
-}> {
-	await ensureFirebaseReady();
-	const { functions } = getFirebase();
-
-	if (!functions) {
-		throw new Error('Firebase Functions not available');
-	}
-
-	const { httpsCallable } = await import('firebase/functions');
-	const callable = httpsCallable(functions, 'repairUserAvatarTokens');
-
-	const result = await callable({ uid });
-	return result.data as {
-		ok: boolean;
-		updated?: Record<string, string>;
-		updatedCount?: number;
-		failures?: Array<{ bucket: string; path: string; reason: string }>;
-		reason?: string;
-		message?: string;
-	};
-}
-
-/**
  * Super Admin utility to force add a user to a server.
  * This bypasses normal invite/join flows.
  */

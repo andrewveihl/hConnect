@@ -406,32 +406,6 @@ service cloud.firestore {
       );
     }
 
-    // Check if user is a group admin (creator or in adminUids)
-    function isGroupDMAdmin(docData, uid) {
-      return docData.createdBy == uid
-        || (docData.adminUids is list && uid in docData.adminUids);
-    }
-
-    // Validate group settings update - participants can update name, icon, description
-    // More sensitive fields like adminUids require admin privileges
-    function isValidGroupSettingsUpdate() {
-      let allowedFields = ['name', 'iconURL', 'description', 'updatedAt', 'pinnedMessageId', 'allowMemberInvites'];
-      let adminOnlyFields = ['adminUids', 'createdBy'];
-      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-      
-      // If changing admin-only fields, must be an admin
-      let hasAdminOnlyChanges = changedKeys.hasAny(adminOnlyFields.toSet());
-      
-      return !hasAdminOnlyChanges || isGroupDMAdmin(resource.data, request.auth.uid);
-    }
-
-    // Validate mute update - user can only update their own mute status
-    function isValidMuteUpdate() {
-      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-      // Only allow mutedBy changes along with updatedAt
-      return changedKeys.hasOnly(['mutedBy', 'updatedAt']);
-    }
-
     function newDMIsValidCreate(d) {
       return isSignedIn() && (
         (d.participants is list &&
@@ -485,7 +459,7 @@ service cloud.firestore {
     /* ---------------- Profiles ---------------- */
     match /profiles/{uid} {
       allow read: if true;
-      allow create, update: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
+      allow create, update: if isSignedIn() && request.auth.uid == uid;
       allow delete: if false;
 
       match /servers/{serverId} {

@@ -267,10 +267,4 @@
 			cursor: grab;
 		}
 	}
-
-	@media (max-width: 767px) {
-		.floating-action-dock {
-			--floating-fab-size: 3rem;
-		}
-	}
 </style>
