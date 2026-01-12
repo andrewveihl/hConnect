@@ -23,7 +23,6 @@
 	import { dmRailCache } from '$lib/stores/dmRailCache';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
-	import { onDMHover } from '$lib/stores/preloadService';
 
 	const dispatch = createEventDispatcher();
 	let me: any = $state(null);
@@ -1026,12 +1025,7 @@
 		});
 	});
 	run(() => {
-		// Sort threads by updatedAt descending (most recent first)
-		sortedThreads = decoratedThreads.slice().sort((a, b) => {
-			const aTime = timestampValue(a.updatedAt);
-			const bTime = timestampValue(b.updatedAt);
-			return bTime - aTime; // descending order
-		});
+		sortedThreads = decoratedThreads.slice();
 	});
 	run(() => {
 		const prevStops = untrack(() => unsubsUnread);
@@ -1213,7 +1207,6 @@
 								ontouchmove={handleSwipeMove}
 								ontouchend={handleSwipeEnd}
 								ontouchcancel={handleSwipeEnd}
-								onpointerenter={() => onDMHover(t.id)}
 							>
 								<button
 									class="dm-thread__button"
