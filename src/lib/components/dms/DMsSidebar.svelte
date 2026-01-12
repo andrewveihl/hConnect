@@ -12,14 +12,12 @@
 		getOrCreateDMThread,
 		createGroupDM,
 		streamMyDMs,
-		streamUnreadCount,
 		streamProfiles,
 		getProfile,
 		deleteThreadForUser,
-		streamThreadMeta,
 		triggerDMRailBackfill
 	} from '$lib/firestore/dms';
-	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
+
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
 	const dispatch = createEventDispatcher();
@@ -228,19 +226,12 @@
 	let threads: any[] = $state([]);
 	let threadsLoading = $state(true);
 	let unsubThreads: (() => void) | null = null;
-	let threadMeta: Record<
-		string,
-		{ lastMessage: string | null; lastSender: string | null; updatedAt: any | null }
-	> = $state({});
-	let metaUnsubs: Record<string, () => void> = {};
+
 	let decoratedThreads: any[] = $state([]);
 	let sortedThreads: any[] = $state([]);
 
 	onDestroy(() => unsubThreads?.());
-	onDestroy(() => {
-		Object.values(metaUnsubs).forEach((stop) => stop());
-		metaUnsubs = {};
-	});
+
 	onDestroy(() => cleanupPresence());
 
 	// Resolve names for "other" participant so the list shows names, not UIDs.
@@ -377,33 +368,6 @@
 		return summary;
 	}
 
-	function manageThreadMetaSubscriptions(currentThreads: any[]) {
-		if (!Array.isArray(currentThreads)) return;
-		const ids = new Set(
-			currentThreads
-				.map((t) => t?.id)
-				.filter((id): id is string => typeof id === 'string' && id.length > 0)
-		);
-		ids.forEach((id) => {
-			if (!metaUnsubs[id]) {
-				metaUnsubs[id] = streamThreadMeta(id, (meta) => {
-					threadMeta = { ...threadMeta, [id]: meta };
-				});
-			}
-		});
-		for (const id of Object.keys(metaUnsubs)) {
-			if (!ids.has(id)) {
-				metaUnsubs[id]?.();
-				delete metaUnsubs[id];
-				if (threadMeta[id]) {
-					const next = { ...threadMeta };
-					delete next[id];
-					threadMeta = next;
-				}
-			}
-		}
-	}
-
 	/* ---------------- Presence tracking ---------------- */
 	let presenceDocs: Record<string, PresenceDoc> = $state({});
 	const presenceUnsubs: Record<string, Unsubscribe> = {};
@@ -462,10 +426,11 @@
 		presenceDb = null;
 	}
 
-	function syncPresenceSubscriptions() {
+	function syncPresenceSubscriptions(sourceThreads: any[] = threads) {
 		if (typeof window === 'undefined') return;
+		const limitedThreads = sourceThreads.slice(0, PRESENCE_TRACK_LIMIT);
 		const partnerUids = new Set(
-			threads
+			limitedThreads
 				.map((t) => resolveOtherUid(t))
 				.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
 		);
@@ -490,12 +455,7 @@
 
 	const presenceClassFromState = (state: PresenceState) =>
 		presenceClassMap[state] ?? presenceClassMap.offline;
-
-	/* ---------------- Unread badges ---------------- */
-	let unreadMap: Record<string, number> = $state({});
-	let unsubsUnread: Array<() => void> = [];
-
-	onDestroy(() => unsubsUnread.forEach((u) => u()));
+	const PRESENCE_TRACK_LIMIT = 30;
 
 	/* ---------------- Everyone (profiles) ---------------- */
 	let people: any[] = $state([]);
@@ -684,9 +644,7 @@
 		activeThreadId = threadId;
 		dispatch('select', threadId);
 		// Optimistically clear unread
-		if (unreadMap[threadId] && unreadMap[threadId] > 0) {
-			unreadMap = { ...unreadMap, [threadId]: 0 };
-		}
+		markDMAsRead(threadId);
 		if (navigateOnSelect) {
 			void goto(`/dms/${threadId}`);
 		}
@@ -712,9 +670,7 @@
 			activeThreadId = t.id;
 			dispatch('select', t.id);
 			// Optimistically clear unread
-			if (unreadMap[t.id] && unreadMap[t.id] > 0) {
-				unreadMap = { ...unreadMap, [t.id]: 0 };
-			}
+			markDMAsRead(t.id);
 			closePeoplePicker();
 			await goto(`/dms/${t.id}`);
 		} catch (err: any) {
@@ -732,10 +688,7 @@
 
 		try {
 			await deleteThreadForUser(threadId, me.uid);
-			threads = threads.filter((t) => t.id !== threadId);
-			const nextMap = { ...unreadMap };
-			delete nextMap[threadId];
-			unreadMap = nextMap;
+
 			if (activeThreadId === threadId) {
 				activeThreadId = null;
 			}
@@ -844,17 +797,14 @@
 		})();
 	});
 	run(() => {
-		manageThreadMetaSubscriptions(threads);
-	});
-	run(() => {
-		syncPresenceSubscriptions();
+		const sourceThreads = sortedThreads.length ? sortedThreads : threads;
+		syncPresenceSubscriptions(sourceThreads);
 	});
 	run(() => {
 		decoratedThreads = threads.map((thread) => {
-			const meta = threadMeta[thread.id] ?? null;
-			const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
-			const lastSender = meta?.lastSender ?? thread.lastSender ?? null;
-			const updatedAt = meta?.updatedAt ?? thread.updatedAt ?? null;
+			const lastMessage = thread.lastMessage ?? null;
+			const lastSender = thread.lastSender ?? null;
+			const updatedAt = thread.updatedAt ?? null;
 			return {
 				...thread,
 				lastMessage,
@@ -872,22 +822,16 @@
 		});
 	});
 	run(() => {
-		const prevStops = untrack(() => unsubsUnread);
-		prevStops.forEach((u) => u());
-		unsubsUnread = [];
-		if (me?.uid) {
-			for (const t of threads) {
-				const stop = streamUnreadCount(t.id, me.uid, (n) => {
-					const prev = untrack(() => unreadMap);
-					unreadMap = { ...prev, [t.id]: n };
-				});
-				unsubsUnread.push(stop);
-			}
-		}
-	});
-	run(() => {
-		peopleLoading = true;
 		const prevUnsub = untrack(() => unsubPeople);
+		const shouldLoad = showPeoplePicker;
+		if (!shouldLoad) {
+			prevUnsub?.();
+			unsubPeople = null;
+			peopleLoading = false;
+			return;
+		}
+
+		peopleLoading = true;
 		prevUnsub?.();
 		unsubPeople = streamProfiles(
 			(list) => {
@@ -1027,6 +971,7 @@
 						{@const isSwipingThis = swipeThreadId === t.id}
 						{@const swipeOffset = isSwipingThis ? swipeDelta : 0}
 						{@const displayName = threadDisplayName(t)}
+						{@const unreadCount = $dmUnreadById?.[t.id] ?? 0}
 						<li class="dm-thread__item">
 							<!-- Delete action revealed by swipe -->
 							<div
@@ -1086,8 +1031,8 @@
 										</div>
 										<div class="dm-thread__preview">{previewTextFor(t)}</div>
 									</div>
-									{#if (unreadMap[t.id] ?? 0) > 0}
-										<span class="dm-thread__unread">{unreadMap[t.id]}</span>
+									{#if unreadCount > 0}
+										<span class="dm-thread__unread">{unreadCount}</span>
 									{/if}
 								</button>
 								<!-- Desktop-only delete button -->

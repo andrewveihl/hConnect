@@ -573,13 +573,15 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		dmId: cleanThreadId
 	};
 
-	await addDoc(messagesCol, docData);
-
+	// Run message write and thread data fetch in parallel for speed
 	const summary = summarizeMessageForThread(payload);
-
-	// bump thread meta
 	const tRef = doc(db, COL_DMS, cleanThreadId);
-	const tSnap = await getDoc(tRef);
+	
+	const [, tSnap] = await Promise.all([
+		addDoc(messagesCol, docData),
+		getDoc(tRef)
+	]);
+
 	const threadData: any = tSnap.exists() ? tSnap.data() : null;
 	const participants: string[] = threadData?.participants ?? [];
 	const resets: Record<string, any> = {};
@@ -587,6 +589,9 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		resets[`deletedFor.${participant}`] = deleteField();
 	}
 
+	// Run thread meta update and rail updates in parallel (don't await rails since it's non-critical)
+	const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
+	
 	await updateDoc(tRef, {
 		updatedAt: serverTimestamp(),
 		lastMessage: summary,
@@ -595,13 +600,10 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		...resets
 	});
 
-	// Update rail mapping for all participants so new DMs appear (and refresh metadata)
-	try {
-		const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
-		await upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta, {
-			forceVisible: true
-		});
-	} catch {}
+	// Fire and forget rail updates - these are non-critical for the sender's experience
+	upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta, {
+		forceVisible: true
+	}).catch(() => {});
 }
 
 /** Live messages for a thread (ascending). */
@@ -724,11 +726,13 @@ const DM_PAGE_SIZE = 50;
  * Subscribe to the latest DM messages (paginated).
  * Returns the newest PAGE_SIZE messages in real-time.
  * Callback receives messages and optionally the first doc snapshot for pagination.
+ * Uses includeMetadataChanges to get cached data immediately when available.
  */
 export function streamDMMessages(
 	threadId: string,
 	cb: (msgs: any[], firstDoc?: DocumentSnapshot) => void,
-	pageSize = DM_PAGE_SIZE
+	pageSize = DM_PAGE_SIZE,
+	onError?: (error: Error) => void
 ): Unsubscribe {
 	const db = getDb();
 	const q1 = query(
@@ -736,11 +740,25 @@ export function streamDMMessages(
 		orderBy('createdAt', 'asc'),
 		limitToLast(pageSize)
 	);
-	return onSnapshot(q1, (snap) => {
-		const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-		const firstDoc = snap.docs[0] ?? undefined;
-		cb(msgs, firstDoc);
-	});
+	// Use includeMetadataChanges to get cached data first for faster initial load
+	return onSnapshot(
+		q1,
+		{ includeMetadataChanges: true },
+		(snap) => {
+			const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+			const firstDoc = snap.docs[0] ?? undefined;
+			cb(msgs, firstDoc);
+		},
+		(error) => {
+			console.error('[streamDMMessages] Error:', error);
+			if (onError) {
+				onError(error);
+			} else {
+				// Default behavior: call callback with empty array to clear loading state
+				cb([]);
+			}
+		}
+	);
 }
 
 /**

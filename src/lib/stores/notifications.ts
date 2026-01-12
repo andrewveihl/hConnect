@@ -2,7 +2,7 @@ import { browser } from '$app/environment';
 import { writable, derived, type Readable } from 'svelte/store';
 import { user } from '$lib/stores/user';
 import { subscribeUserServers } from '$lib/firestore/servers';
-import { streamMyDMs, streamUnreadCount } from '$lib/firestore/dms';
+import { streamMyDMs } from '$lib/firestore/dms';
 import {
 	subscribeUnreadForServer,
 	type HighPriorityReason,
@@ -12,6 +12,7 @@ import { getDb } from '$lib/firebase';
 import {
 	collection,
 	doc,
+	getDoc,
 	getCountFromServer,
 	onSnapshot,
 	orderBy,
@@ -142,6 +143,7 @@ type ServerUnreadState = {
 const notificationsInternal = writable<NotificationItem[]>([]);
 const notificationCountInternal = writable(0);
 const dmUnreadCountInternal = writable(0);
+const dmUnreadByIdInternal = writable<Record<string, number>>({});
 const channelUnreadCountInternal = writable(0);
 const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>(
@@ -167,6 +169,8 @@ export const notificationCount: Readable<number> = {
 export const dmUnreadCount: Readable<number> = {
 	subscribe: dmUnreadCountInternal.subscribe
 };
+
+export const dmUnreadById = derived(dmUnreadByIdInternal, (value) => value);
 
 export const channelUnreadCount: Readable<number> = {
 	subscribe: channelUnreadCountInternal.subscribe
@@ -198,7 +202,9 @@ const serverChannelStops = new Map<string, Unsubscribe>();
 const serverUnreadStops = new Map<string, Unsubscribe>();
 const latestMessageStops = new Map<string, Map<string, Unsubscribe>>();
 let stopDMs: Unsubscribe | null = null;
-const dmUnreadStops = new Map<string, Unsubscribe>();
+
+// Track active server to limit detailed unread subscriptions
+let currentActiveServerId: string | null = null;
 let stopThreads: Unsubscribe | null = null;
 
 let activeUid: string | null = null;
@@ -454,9 +460,62 @@ function watchServerUnread(uid: string, serverId: string) {
 	serverUnreadStops.set(serverId, stop);
 }
 
+function stopServerUnread(serverId: string) {
+	const stop = serverUnreadStops.get(serverId);
+	if (stop) {
+		stop();
+		serverUnreadStops.delete(serverId);
+	}
+}
+
 function ensureServerWatchers(uid: string, serverId: string) {
+	// Always watch channel metadata (lightweight)
 	watchServerChannels(serverId);
-	watchServerUnread(uid, serverId);
+	// Only subscribe to detailed unread for the ACTIVE server to reduce listener count
+	// For non-active servers, we'll rely on server rail indicators set when they become active
+	if (serverId === currentActiveServerId) {
+		watchServerUnread(uid, serverId);
+	}
+}
+
+/**
+ * Set the currently active server ID to enable detailed unread subscriptions.
+ * Only the active server gets per-channel unread listeners to reduce Firestore load.
+ * Call this when navigating to a server.
+ */
+export function setActiveServerForUnread(serverId: string | null): void {
+	if (serverId === currentActiveServerId) return;
+	
+	// Stop detailed unread for previous active server
+	if (currentActiveServerId) {
+		stopServerUnread(currentActiveServerId);
+	}
+	
+	currentActiveServerId = serverId;
+	
+	// Start detailed unread for new active server
+	if (serverId && activeUid) {
+		watchServerUnread(activeUid, serverId);
+	}
+}
+
+/**
+ * Force refresh unread count for a specific DM thread.
+ * Call this when receiving a new message to update the badge immediately.
+ */
+export function refreshDMUnreadCount(threadId: string): void {
+	if (!activeUid || !threadId) return;
+	queueDMUnreadCheck(activeUid, threadId, true);
+}
+
+/**
+ * Mark a DM thread as read (sets unread count to 0 immediately).
+ * Call this when the user views a DM thread.
+ */
+export function markDMAsRead(threadId: string): void {
+	if (!threadId) return;
+	dmCounts.set(threadId, 0);
+	scheduleRecompute();
 }
 
 function stopServerWatchers(serverId: string) {
@@ -499,26 +558,143 @@ function startServerRail(uid: string) {
 	stopServers = subscribeUserServers(uid, (rows) => handleServersUpdate(uid, rows));
 }
 
+// Configuration for optimized DM unread tracking
+const DM_UNREAD_BATCH_SIZE = 5; // How many DMs to check per batch
+const DM_UNREAD_BATCH_INTERVAL = 2000; // ms between batches
+const DM_UNREAD_VISIBLE_PRIORITY_COUNT = 10; // Number of most recent DMs to prioritize
+
+let dmUnreadBatchTimer: ReturnType<typeof setTimeout> | null = null;
+let dmUnreadQueue: string[] = [];
+let dmUnreadCheckInProgress = false;
+
+/**
+ * Optimized DM unread tracking - instead of creating a Firestore listener per DM,
+ * we batch check unread counts on demand and periodically.
+ * This reduces from potentially 50+ concurrent listeners to periodic batched reads.
+ */
+async function batchCheckDMUnread(uid: string, threadIds: string[]): Promise<void> {
+	if (!threadIds.length || dmUnreadCheckInProgress) return;
+	
+	dmUnreadCheckInProgress = true;
+	const db = getDb();
+	
+	try {
+		// Process in parallel for efficiency
+		const results = await Promise.all(
+			threadIds.map(async (threadId) => {
+				try {
+					// Get last read timestamp
+					const readDocRef = doc(db, 'dms', threadId, 'reads', uid);
+					let lastReadAt: any = null;
+					
+					try {
+						const readSnap = await getDoc(readDocRef);
+						lastReadAt = readSnap.exists() ? (readSnap.data() as any)?.lastReadAt : null;
+					} catch {
+						// If read doc doesn't exist, count all messages
+					}
+					
+					// Count messages after lastReadAt
+					const base = collection(db, 'dms', threadId, 'messages');
+					let count = 0;
+					
+					if (lastReadAt) {
+						const q = query(base, where('createdAt', '>', lastReadAt), orderBy('createdAt', 'asc'));
+						const agg = await getCountFromServer(q);
+						count = agg.data().count ?? 0;
+					} else {
+						// First time: count all messages not from this user
+						const agg = await getCountFromServer(query(base));
+						count = agg.data().count ?? 0;
+					}
+					
+					return { threadId, count };
+				} catch (err) {
+					// On error, keep existing count or set to 0
+					return { threadId, count: dmCounts.get(threadId) ?? 0 };
+				}
+			})
+		);
+		
+		// Update counts
+		let hasChanges = false;
+		for (const { threadId, count } of results) {
+			const oldCount = dmCounts.get(threadId) ?? 0;
+			if (oldCount !== count) {
+				dmCounts.set(threadId, count);
+				hasChanges = true;
+			}
+		}
+		
+		if (hasChanges) {
+			scheduleRecompute();
+		}
+	} finally {
+		dmUnreadCheckInProgress = false;
+	}
+}
+
+function scheduleDMUnreadBatch(uid: string): void {
+	if (dmUnreadBatchTimer) return;
+	
+	dmUnreadBatchTimer = setTimeout(async () => {
+		dmUnreadBatchTimer = null;
+		
+		if (dmUnreadQueue.length === 0) return;
+		
+		// Take a batch from the queue
+		const batch = dmUnreadQueue.splice(0, DM_UNREAD_BATCH_SIZE);
+		await batchCheckDMUnread(uid, batch);
+		
+		// If more in queue, schedule next batch
+		if (dmUnreadQueue.length > 0) {
+			scheduleDMUnreadBatch(uid);
+		}
+	}, DM_UNREAD_BATCH_INTERVAL);
+}
+
+function queueDMUnreadCheck(uid: string, threadId: string, priority: boolean = false): void {
+	// Remove from queue if already there
+	const existingIndex = dmUnreadQueue.indexOf(threadId);
+	if (existingIndex !== -1) {
+		dmUnreadQueue.splice(existingIndex, 1);
+	}
+	
+	// Add to front (high priority) or back (low priority)
+	if (priority) {
+		dmUnreadQueue.unshift(threadId);
+	} else {
+		dmUnreadQueue.push(threadId);
+	}
+	
+	scheduleDMUnreadBatch(uid);
+}
+
 function startDMWatchers(uid: string) {
 	stopDMs = streamMyDMs(uid, (rows) => {
 		const seen = new Set<string>();
-		rows.forEach((row) => {
+		const sortedRows = [...rows].sort((a, b) => {
+			const aTime = timestampToMillis(a.updatedAt) ?? 0;
+			const bTime = timestampToMillis(b.updatedAt) ?? 0;
+			return bTime - aTime; // Most recent first
+		});
+		
+		sortedRows.forEach((row, index) => {
 			const id = row.id;
 			dmRows.set(id, row);
 			seen.add(id);
-			if (!dmUnreadStops.has(id)) {
-				const stop = streamUnreadCount(id, uid, (count) => {
-					dmCounts.set(id, count);
-					scheduleRecompute();
-				});
-				dmUnreadStops.set(id, stop);
+			
+			// Only queue unread check for DMs that don't have a count yet
+			// Prioritize the most recent DMs
+			if (!dmCounts.has(id)) {
+				const isPriority = index < DM_UNREAD_VISIBLE_PRIORITY_COUNT;
+				queueDMUnreadCheck(uid, id, isPriority);
 			}
 		});
 
-		for (const [threadId, stop] of dmUnreadStops) {
+		// Clean up removed DMs
+		for (const threadId of dmCounts.keys()) {
 			if (!seen.has(threadId)) {
-				stop();
-				dmUnreadStops.delete(threadId);
 				dmCounts.delete(threadId);
 				dmRows.delete(threadId);
 			}
@@ -756,17 +932,25 @@ function cleanupAll() {
 	stopDMs?.();
 	stopDMs = null;
 
-	dmUnreadStops.forEach((stop) => stop());
-	dmUnreadStops.clear();
+	// Clean up optimized DM unread tracking
+	if (dmUnreadBatchTimer) {
+		clearTimeout(dmUnreadBatchTimer);
+		dmUnreadBatchTimer = null;
+	}
+	dmUnreadQueue = [];
+	dmUnreadCheckInProgress = false;
+
 	dmRows.clear();
 	dmCounts.clear();
 	stopThreadWatchers();
 
 	setActivePushUser(null);
 	activeUid = null;
+	currentActiveServerId = null; // Reset active server tracking
 	notificationsInternal.set([]);
 	notificationCountInternal.set(0);
 	dmUnreadCountInternal.set(0);
+	dmUnreadByIdInternal.set({});
 	channelUnreadCountInternal.set(0);
 	channelIndicatorsInternal.set({});
 	serverUnreadInternal.set({});
@@ -833,6 +1017,7 @@ function recomputeNow() {
 	const list: NotificationItem[] = [];
 	let dmTotal = 0;
 	let channelTotal = 0;
+	const dmById: Record<string, number> = {};
 
 	for (const [serverId, activity] of serverChannelActivity) {
 		const serverInfo = servers.get(serverId);
@@ -916,6 +1101,7 @@ function recomputeNow() {
 
 	for (const [threadId, count] of dmCounts) {
 		if (!count) continue;
+		dmById[threadId] = count;
 		const row = dmRows.get(threadId);
 		const display = row?.otherDisplayName?.trim() || row?.otherEmail?.trim() || 'Direct message';
 		const preview = truncate(row?.lastMessage ?? '', 84) ?? 'New message';
@@ -999,6 +1185,7 @@ function recomputeNow() {
 	notificationsInternal.set(list);
 	notificationCountInternal.set(total);
 	dmUnreadCountInternal.set(dmTotal);
+	dmUnreadByIdInternal.set(dmById);
 	channelUnreadCountInternal.set(channelTotal);
 	threadUnreadCountInternal.set(threadTotal);
 	threadUnreadByIdInternal.set(threadById);

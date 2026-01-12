@@ -285,12 +285,31 @@ export function subscribeUnreadForServer(
 		return allowed.some((id) => roles.includes(id as string));
 	};
 
+	// Debounce recompute calls to reduce Firestore query load
+	const recomputeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	const RECOMPUTE_DEBOUNCE_MS = 500; // Wait 500ms before recomputing
+
 	const scheduleRecompute = (channelId: string) => {
 		if (!hasServerAccess()) return;
 		// If we have already observed a permission issue for this channel, do not retry until roles change.
 		if (deniedChannels.has(channelId)) return;
 		const state = channelStates.get(channelId);
 		if (!state) return;
+		
+		// Clear existing timer for this channel
+		const existingTimer = recomputeTimers.get(channelId);
+		if (existingTimer) {
+			clearTimeout(existingTimer);
+		}
+		
+		// Debounce the recompute
+		recomputeTimers.set(channelId, setTimeout(() => {
+			recomputeTimers.delete(channelId);
+			executeRecompute(channelId, state);
+		}, RECOMPUTE_DEBOUNCE_MS));
+	};
+	
+	const executeRecompute = (channelId: string, state: ChannelState) => {
 		if (state.recomputeRunning) {
 			state.recomputeQueued = true;
 			return;
@@ -326,6 +345,12 @@ export function subscribeUnreadForServer(
 		if (!state) return;
 		state.stopLatest?.();
 		state.stopRead?.();
+		// Clear any pending recompute timer
+		const timer = recomputeTimers.get(channelId);
+		if (timer) {
+			clearTimeout(timer);
+			recomputeTimers.delete(channelId);
+		}
 		channelStates.delete(channelId);
 		delete counts[channelId];
 		emit();

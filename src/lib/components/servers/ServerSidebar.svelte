@@ -30,7 +30,6 @@
 		orderBy,
 		query,
 		where,
-		limit,
 		type Unsubscribe,
 		setDoc,
 		writeBatch
@@ -148,6 +147,8 @@
 	let channelVisibilityHint: string | null = $state(null);
 	let currentChannelServer: string | null = null;
 	let lastChannelRoleKey: string | null = null;
+	// Track which server we've received actual Firestore data for (vs just cache)
+	let channelsLoadedForServer: string | null = null;
 
 	// Categories (folders) for channel grouping
 	let categories: Category[] = $state([]);
@@ -1115,10 +1116,6 @@
 			channelFetchDenied = true;
 			channelVisibilityHint =
 				'You do not have permission to view channels. Ask an admin to allow @everyone/default role to view channels or add you to the server.';
-			// Only clear if actually blocked - don't clear cached data from other servers
-			if (currentChannelServer === server) {
-				channels = [];
-			}
 			syncVoicePresenceWatchers(channels);
 			return;
 		}
@@ -1129,6 +1126,7 @@
 		let channelWatchBlocked = false;
 		channelVisibilityHint = null;
 		currentChannelServer = server;
+
 
 		const db = getDb();
 		const baseCol = collection(db, 'servers', server, 'channels');
@@ -1165,6 +1163,7 @@
 				channelWatchBlocked = true;
 				stopChannelUnsubs();
 				channels = [];
+				channelsLoadedForServer = server; // Mark as loaded (permission denied = no channels)
 				syncVoicePresenceWatchers(channels);
 			}
 		};
@@ -1456,141 +1455,19 @@
 		return serverKey ? (indicators[serverKey] ?? {}) : {};
 	});
 
-	// Simple local unread tracking - watches latest message per channel
-	let localUnread: Record<string, boolean> = $state({});
-	let channelWatchers = new Map<string, Unsubscribe>();
-	let channelReadWatchers = new Map<string, Unsubscribe>();
-	let lastReadTimestamps: Record<string, number | null> = {};
-	let initialLoadComplete: Set<string> = new Set();
 	let lastViewedChannel: string | null = null;
 
-	// Track when user views a channel - mark it as read
-	run(() => {
-		if (activeChannelId && activeChannelId !== lastViewedChannel) {
-			lastViewedChannel = activeChannelId;
-			// Mark channel as read when user views it
-			localUnread = { ...localUnread, [activeChannelId]: false };
-			// Update local timestamp to "now" so we don't show as unread after refresh
-			lastReadTimestamps[activeChannelId] = Date.now();
-			// Also mark activity entries as read
+ main
 			if (computedServerId) {
 				void markChannelActivityRead(computedServerId, activeChannelId);
 			}
 		}
 	});
 
-	// Helper to convert Firestore timestamp to millis
-	function toMillis(value: any): number | null {
-		if (!value) return null;
-		if (typeof value === 'number') return value;
-		if (value instanceof Date) return value.getTime();
-		if (typeof value?.toMillis === 'function') return value.toMillis();
-		if (typeof value?.seconds === 'number') return value.seconds * 1000;
-		return null;
-	}
-
-	// Set up watchers for each text channel to detect new messages
-	function setupChannelWatchers(chans: Chan[], sId: string | null, uid: string | null) {
-		if (!browser || !sId || !uid) return;
-
-		const db = getDb();
-		const textChannels = chans.filter((c) => c.type === 'text');
-
-		// Clean up old watchers for channels no longer in list
-		for (const [channelId, unsub] of channelWatchers) {
-			if (!textChannels.find((c) => c.id === channelId)) {
-				unsub();
-				channelWatchers.delete(channelId);
-				channelReadWatchers.get(channelId)?.();
-				channelReadWatchers.delete(channelId);
-				initialLoadComplete.delete(channelId);
-			}
-		}
-
-		// Set up new watchers
-		for (const chan of textChannels) {
-			if (channelWatchers.has(chan.id)) continue;
-
-			// First, watch the user's read state for this channel
-			const readDocRef = doc(db, 'profiles', uid, 'reads', `${sId}__${chan.id}`);
-			const readUnsub = onSnapshot(
-				readDocRef,
-				(snap) => {
-					const data = snap.data();
-					lastReadTimestamps[chan.id] = toMillis(data?.lastReadAt) ?? null;
-				},
-				() => {
-					// If no read doc exists, that's fine - they haven't read it yet
-					lastReadTimestamps[chan.id] = null;
-				}
-			);
-			channelReadWatchers.set(chan.id, readUnsub);
-
-			// Then watch for latest messages
-			const messagesRef = collection(db, 'servers', sId, 'channels', chan.id, 'messages');
-			const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
-
-			const unsub = onSnapshot(
-				q,
-				(snap) => {
-					if (snap.empty) return;
-					const latestMsg = snap.docs[0].data();
-					const msgTimestamp = toMillis(latestMsg?.createdAt);
-					const lastRead = lastReadTimestamps[chan.id];
-					const currentUid = $user?.uid;
-					const isFirstLoad = !initialLoadComplete.has(chan.id);
-
-					// Mark initial load complete
-					initialLoadComplete.add(chan.id);
-
-					// Skip if this is the active channel
-					if (chan.id === activeChannelId) return;
-
-					// Skip if message is from current user
-					if (latestMsg?.authorId === currentUid) return;
-
-					// Check if this message is newer than when user last read
-					if (msgTimestamp && lastRead && msgTimestamp > lastRead) {
-						localUnread = { ...localUnread, [chan.id]: true };
-					} else if (!isFirstLoad && msgTimestamp) {
-						// New message came in after initial load - mark as unread
-						localUnread = { ...localUnread, [chan.id]: true };
-					}
-				},
-				(err) => {
-					// Silently ignore permission errors
-				}
-			);
-
-			channelWatchers.set(chan.id, unsub);
-		}
-	}
-
-	// Watch for channel list changes
-	run(() => {
-		if (browser && computedServerId && channels.length > 0) {
-			setupChannelWatchers(channels, computedServerId, $user?.uid ?? null);
-		}
-	});
-
-	// Cleanup on destroy
-	onDestroy(() => {
-		for (const unsub of channelWatchers.values()) {
-			unsub();
-		}
-		channelWatchers.clear();
-		for (const unsub of channelReadWatchers.values()) {
-			unsub();
-		}
-		channelReadWatchers.clear();
-		initialLoadComplete.clear();
-	});
-
-	// Combined unread check - use local tracking OR global store
+	// Combined unread check - use global store
 	function hasUnread(channelId: string): boolean {
 		const global = unreadByChannel[channelId];
-		const globalUnread = (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
-		return globalUnread || localUnread[channelId] === true;
+		return (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
 	}
 
 	function hasHighPriority(channelId: string): number {
@@ -1729,17 +1606,36 @@
 		// Re-filter channels when any role-related state changes
 		visibleChannels = orderedChannels.filter(canSeeChannel);
 	});
+	
+	// Track last dispatched server to detect server changes
+	let lastDispatchedServer: string | null = null;
 	run(() => {
-		dispatch('channels', {
-			serverId: computedServerId ?? null,
-			channels: visibleChannels
-		});
+		const currentServer = computedServerId ?? null;
+		const serverChanged = currentServer !== lastDispatchedServer;
+		const hasLoadedFromFirestore = channelsLoadedForServer === currentServer;
+		
+		// Only dispatch if:
+		// 1. We have channels to show, OR
+		// 2. We've confirmed from Firestore there are no channels (empty list after load)
+		// Don't dispatch empty channels if we're just waiting for Firestore to load
+		if (visibleChannels.length > 0 || (serverChanged && hasLoadedFromFirestore)) {
+			dispatch('channels', {
+				serverId: currentServer,
+				channels: visibleChannels
+			});
+			untrack(() => {
+				lastDispatchedServer = currentServer;
+			});
+		}
 	});
 	run(() => {
 		const prevServer = untrack(() => lastServerId);
 		const nextServer = computedServerId ?? null;
-		if (nextServer && $user?.uid && nextServer !== prevServer) {
-			lastServerId = nextServer;
+		const currentUid = $user?.uid;
+		if (nextServer && currentUid && nextServer !== prevServer) {
+			untrack(() => {
+				lastServerId = nextServer;
+			});
 			subscribeAll(nextServer);
 		}
 	});
@@ -1790,7 +1686,9 @@
 				}
 			} catch {}
 		}
-		prevUnread = totals;
+		untrack(() => {
+			prevUnread = totals;
+		});
 	});
 </script>
 

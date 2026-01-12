@@ -70,6 +70,7 @@
 	import { subscribeTicketAiSettings, subscribeToTicketedMessageIds, type TicketAiSettings } from '$lib/firestore/ticketAi';
 	import { markChannelRead } from '$lib/firebase/unread';
 	import { markChannelActivityRead } from '$lib/stores/activityFeed';
+	import { setActiveServerForUnread } from '$lib/stores/notifications';
 	import { uploadChannelFile } from '$lib/firebase/storage';
 	import { looksLikeImage } from '$lib/utils/fileType';
 	import type { PendingUploadPreview } from '$lib/components/chat/types';
@@ -81,8 +82,16 @@
 		getCachedChannelMessages,
 		updateChannelCache,
 		hasChannelCache,
+		addMessageToChannelCache,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
+	import {
+		getProfile,
+		setProfile,
+		fetchProfiles,
+		preloadProfiles,
+		type CachedProfile
+	} from '$lib/stores/profileCache';
 
 	interface Props {
 		data: { serverId: string | null };
@@ -101,6 +110,9 @@
 			$page.params as Record<string, string | undefined>,
 			data?.serverId ?? null
 		);
+		// Notify notifications store that this is now the active server
+		// This enables detailed per-channel unread tracking only for this server
+		setActiveServerForUnread(serverId);
 	});
 
 	type Channel = {
@@ -514,6 +526,8 @@
 		const prev = profiles[uid];
 		if (!prev) {
 			profiles = { ...profiles, [uid]: next };
+			// Also update the global profile cache
+			setProfile(uid, patch);
 			return;
 		}
 		if (
@@ -529,20 +543,58 @@
 			return;
 		}
 		profiles = { ...profiles, [uid]: next };
+		// Also update the global profile cache
+		setProfile(uid, patch);
 	}
 
+	// Batch profile loading queue for efficiency
+	let pendingProfileUids: string[] = [];
+	let profileBatchTimer: ReturnType<typeof setTimeout> | null = null;
+	
 	function ensureProfileSubscription(database: ReturnType<typeof db>, uid: string) {
-		if (!uid || profileUnsubs[uid]) return;
-		profileUnsubs[uid] = onSnapshot(
-			doc(database, 'profiles', uid),
-			(snap) => {
-				updateProfileCache(uid, snap.data() ?? {});
-			},
-			() => {
-				profileUnsubs[uid]?.();
-				delete profileUnsubs[uid];
-			}
-		);
+		if (!uid || profileUnsubs[uid] || profiles[uid]) return;
+		
+		// Check global cache first
+		const cached = getProfile(uid);
+		if (cached) {
+			updateProfileCache(uid, cached);
+			return;
+		}
+		
+		// Queue for batch loading instead of creating individual listeners
+		if (!pendingProfileUids.includes(uid)) {
+			pendingProfileUids.push(uid);
+		}
+		
+		// Schedule batch fetch
+		if (!profileBatchTimer) {
+			profileBatchTimer = setTimeout(async () => {
+				profileBatchTimer = null;
+				const uidsToFetch = pendingProfileUids.splice(0, 20); // Batch of 20
+				if (uidsToFetch.length === 0) return;
+				
+				try {
+					const fetchedProfiles = await fetchProfiles(uidsToFetch);
+					for (const [fetchedUid, profile] of fetchedProfiles) {
+						updateProfileCache(fetchedUid, profile);
+					}
+				} catch {
+					// Ignore errors
+				}
+				
+				// If more pending, schedule another batch
+				if (pendingProfileUids.length > 0) {
+					profileBatchTimer = setTimeout(() => {
+						const nextBatch = pendingProfileUids.splice(0, 20);
+						fetchProfiles(nextBatch).then(profiles => {
+							for (const [uid, profile] of profiles) {
+								updateProfileCache(uid, profile);
+							}
+						}).catch(() => {});
+					}, 50);
+				}
+			}, 30);
+		}
 	}
 
 	function cleanupProfileSubscriptions() {
@@ -550,6 +602,12 @@
 			profileUnsubs[uid]?.();
 			delete profileUnsubs[uid];
 		}
+		// Clear batch timer
+		if (profileBatchTimer) {
+			clearTimeout(profileBatchTimer);
+			profileBatchTimer = null;
+		}
+		pendingProfileUids = [];
 	}
 
 	function normalizePopoutProfile(
@@ -1094,18 +1152,21 @@
 		const visible = !!voiceState?.visible;
 		const inLobby = showVoiceLobby;
 		const hasVoiceSession = !!voiceState;
+		const currentIsMobile = isMobile;
 
-		if (!hasVoiceSession && !inLobby) {
-			callPanelOpen = false;
-			closeFloatingCallChat();
-		} else if (isMobile) {
-			callPanelOpen = false;
-			closeFloatingCallChat();
-		} else if (!visible && !inLobby) {
-			// Keep open when minimized/hidden on desktop, just record last visibility.
-		}
+		untrack(() => {
+			if (!hasVoiceSession && !inLobby) {
+				callPanelOpen = false;
+				closeFloatingCallChat();
+			} else if (currentIsMobile) {
+				callPanelOpen = false;
+				closeFloatingCallChat();
+			} else if (!visible && !inLobby) {
+				// Keep open when minimized/hidden on desktop, just record last visibility.
+			}
 
-		lastVoiceVisible = visible;
+			lastVoiceVisible = visible;
+		});
 	});
 
 	// listeners
@@ -1328,21 +1389,15 @@
 		// Increment subscription version to track this subscription
 		const subscriptionVersion = ++messagesSubscriptionVersion;
 		
-		if (memberEnsurePromise) {
-			try {
-				await memberEnsurePromise;
-			} catch {
+		// Don't block on membership - Firestore rules will handle unauthorized access
+		// Let membership check run in parallel for faster channel loading
+		const membershipPromise = memberEnsurePromise;
+		if (membershipPromise) {
+			membershipPromise.catch(() => {
 				// Ignore membership bootstrap failures; Firestore will surface permissions if still unauthorized.
-			}
+			});
 		}
-		// Guard: if context changed while awaiting membership, abort
-		if (serverId !== currServerId || activeChannel?.id !== channelId) {
-			return;
-		}
-		// Guard: if a newer subscription was started, abort this one
-		if (subscriptionVersion !== messagesSubscriptionVersion) {
-			return;
-		}
+		
 		const database = db();
 		const q = query(
 			collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
@@ -1567,12 +1622,9 @@
 	async function subscribeThreads(currServerId: string, channelId: string) {
 		clearThreadsUnsub();
 		if (blockedChannels.has(channelId)) return;
+		// Don't block on membership - let it run in parallel
 		if (memberEnsurePromise) {
-			try {
-				await memberEnsurePromise;
-			} catch {
-				// Membership bootstrap may fail for guests; Firestore will enforce permissions.
-			}
+			memberEnsurePromise.catch(() => {});
 		}
 		channelThreads = [];
 		const stop = streamChannelThreads(
@@ -1691,12 +1743,9 @@
 		clearThreadMessagesUnsub();
 		lastThreadStreamChannel = activeChannel.id;
 		lastThreadStreamId = thread.id;
+		// Don't block on membership - let it run in parallel
 		if (memberEnsurePromise) {
-			try {
-				await memberEnsurePromise;
-			} catch {
-				// proceed; Firestore will enforce permissions
-			}
+			memberEnsurePromise.catch(() => {});
 		}
 		threadMessagesUnsub = streamThreadMessages(
 			serverId,
@@ -3113,6 +3162,27 @@
 		const mentionList = normalizeMentionSendList(
 			typeof payload === 'object' ? (payload?.mentions ?? []) : []
 		);
+		
+		// Create optimistic message for instant feedback
+		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const optimisticMessage: CachedMessage = {
+			id: optimisticId,
+			uid: $user.uid,
+			type: 'text',
+			text: trimmed,
+			displayName: deriveCurrentDisplayName(),
+			photoURL: deriveCurrentPhotoURL(),
+			createdAt: new Date(),
+			mentions: mentionList.length ? mentionList : undefined,
+			replyTo: replyRef ?? undefined,
+			_optimistic: true
+		};
+		
+		// Add to local messages immediately for instant UI feedback
+		messages = [...messages, optimisticMessage];
+		addMessageToChannelCache(serverId, activeChannel.id, optimisticMessage);
+		scrollToBottomSignal++;
+		
 		try {
 			await sendChannelMessage(serverId, activeChannel.id, {
 				type: 'text',
@@ -3123,7 +3193,11 @@
 				mentions: mentionList,
 				replyTo: replyRef ?? undefined
 			});
+			// Send successful - remove optimistic message (real one comes via onSnapshot)
+			messages = messages.filter(m => m.id !== optimisticId);
 		} catch (err) {
+			// Remove optimistic message on failure
+			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to send message: ${err}`);
@@ -3148,6 +3222,26 @@
 			return;
 		}
 		const replyRef = consumeReply(typeof detail === 'object' ? (detail?.replyTo ?? null) : null);
+		
+		// Create optimistic GIF message for instant feedback
+		const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const optimisticMessage: CachedMessage = {
+			id: optimisticId,
+			uid: $user.uid,
+			type: 'gif',
+			url: trimmed,
+			displayName: deriveCurrentDisplayName(),
+			photoURL: deriveCurrentPhotoURL(),
+			createdAt: new Date(),
+			replyTo: replyRef ?? undefined,
+			_optimistic: true
+		};
+		
+		// Add to local messages immediately
+		messages = [...messages, optimisticMessage];
+		addMessageToChannelCache(serverId, activeChannel.id, optimisticMessage);
+		scrollToBottomSignal++;
+		
 		try {
 			await sendChannelMessage(serverId, activeChannel.id, {
 				type: 'gif',
@@ -3157,7 +3251,10 @@
 				photoURL: deriveCurrentPhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
+			// Send successful - remove optimistic message
+			messages = messages.filter(m => m.id !== optimisticId);
 		} catch (err) {
+			messages = messages.filter(m => m.id !== optimisticId);
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to share GIF: ${err}`);
@@ -4693,10 +4790,14 @@
 		const currentChannelId = activeChannel?.id ?? null;
 		const prev = untrack(() => lastScrollChannelId);
 		if (currentChannelId && currentChannelId !== prev) {
-			lastScrollChannelId = currentChannelId;
+			untrack(() => {
+				lastScrollChannelId = currentChannelId;
+			});
 			triggerScrollToBottom();
 		} else if (!currentChannelId && prev !== null) {
-			lastScrollChannelId = null;
+			untrack(() => {
+				lastScrollChannelId = null;
+			});
 		}
 	});
 
@@ -4723,7 +4824,9 @@
 		const scope = serverId ?? null;
 		const prev = untrack(() => threadServerScope);
 		if (scope !== prev) {
-			threadServerScope = scope;
+			untrack(() => {
+				threadServerScope = scope;
+			});
 			resetThreadState({ resetCache: true });
 		}
 	});
@@ -4742,7 +4845,9 @@
 					) ?? null)
 				: null);
 		if (updated && currentFloating.thread !== updated) {
-			floatingThread = { ...currentFloating, thread: updated };
+			untrack(() => {
+				floatingThread = { ...currentFloating, thread: updated };
+			});
 		}
 	});
 	run(() => {
@@ -4752,11 +4857,13 @@
 		if (currentMentionServer !== prevMentionServer) {
 			mentionDirectoryStop?.();
 			mentionRolesStop?.();
-			memberMentionOptions = [];
-			roleMentionOptions = [];
-			mentionOptions = [];
-			lastMentionServer = currentUid ? currentMentionServer : null;
-			isCurrentServerMember = false;
+			untrack(() => {
+				memberMentionOptions = [];
+				roleMentionOptions = [];
+				mentionOptions = [];
+				lastMentionServer = currentUid ? currentMentionServer : null;
+				isCurrentServerMember = false;
+			});
 			if (currentMentionServer && currentUid) {
 				mentionDirectoryStop = subscribeServerDirectory(currentMentionServer, (entries) => {
 					memberMentionOptions = entries;
@@ -4803,12 +4910,16 @@
 		const prevServerForChannels = untrack(() => channelListServerId);
 		const currentServer = serverId ?? null;
 		if (!currentServer || !$user?.uid) {
-			channelListServerId = currentServer;
+			untrack(() => {
+				channelListServerId = currentServer;
+			});
 			resetChannelState();
 			return;
 		}
 		if (currentServer !== prevServerForChannels) {
-			channelListServerId = currentServer;
+			untrack(() => {
+				channelListServerId = currentServer;
+			});
 			resetChannelState();
 		}
 	});
@@ -4906,11 +5017,7 @@
 			if (
 				needsSync ||
 				(cachedChannels.serverId === currentServer &&
-					!channels.length &&
-					cachedChannels.channels?.length)
-			) {
-				lastSyncedServer = currentServer;
-				lastSyncedUser = currentUser;
+
 				syncVisibleChannels(cachedChannels, false);
 			}
 		}
@@ -4919,52 +5026,63 @@
 		const channelId = activeChannel?.id ?? null;
 		const prevReply = untrack(() => lastReplyChannelId);
 		const prevPending = untrack(() => lastPendingChannelId);
-		if (channelId !== prevReply) {
-			lastReplyChannelId = channelId;
-			replyTarget = null;
-		}
-		if (channelId !== prevPending) {
-			lastPendingChannelId = channelId;
-			pendingUploads = [];
-		}
+		untrack(() => {
+			if (channelId !== prevReply) {
+				lastReplyChannelId = channelId;
+				replyTarget = null;
+			}
+			if (channelId !== prevPending) {
+				lastPendingChannelId = channelId;
+				pendingUploads = [];
+			}
+		});
 	});
 	run(() => {
 		const channelId = channelMessagesPopoutChannelId;
 		const prevReply = untrack(() => lastPopoutReplyChannelId);
 		const prevPending = untrack(() => lastPopoutPendingChannelId);
-		if (channelId !== prevReply) {
-			lastPopoutReplyChannelId = channelId;
-			popoutReplyTarget = null;
-		}
-		if (channelId !== prevPending) {
-			lastPopoutPendingChannelId = channelId;
-			popoutPendingUploads = [];
-		}
+		untrack(() => {
+			if (channelId !== prevReply) {
+				lastPopoutReplyChannelId = channelId;
+				popoutReplyTarget = null;
+			}
+			if (channelId !== prevPending) {
+				lastPopoutPendingChannelId = channelId;
+				popoutPendingUploads = [];
+			}
+		});
 	});
 	run(() => {
 		const threadId = activeThread?.id ?? null;
 		const prev = untrack(() => lastThreadUploadThreadId);
 		if (threadId !== prev) {
-			lastThreadUploadThreadId = threadId;
-			threadPendingUploads = [];
+			untrack(() => {
+				lastThreadUploadThreadId = threadId;
+				threadPendingUploads = [];
+			});
 		}
 	});
 	run(() => {
 		const floatingId = floatingThread?.thread?.id ?? null;
 		const prev = untrack(() => lastFloatingUploadThreadId);
 		if (floatingId !== prev) {
-			lastFloatingUploadThreadId = floatingId;
-			floatingThreadPendingUploads = [];
+			untrack(() => {
+				lastFloatingUploadThreadId = floatingId;
+				floatingThreadPendingUploads = [];
+			});
 		}
 	});
 	run(() => {
 		const visible = !!(voiceState && voiceState.visible);
+		const currentIsMobile = isMobile;
 		const prev = untrack(() => lastVoiceVisible);
 		if (visible !== prev) {
-			lastVoiceVisible = visible;
-			if (isMobile) {
-				mobileVoicePane = visible ? 'call' : 'chat';
-			}
+			untrack(() => {
+				lastVoiceVisible = visible;
+				if (currentIsMobile) {
+					mobileVoicePane = visible ? 'call' : 'chat';
+				}
+			});
 		}
 	});
 	run(() => {
@@ -5007,22 +5125,28 @@
 	});
 	run(() => {
 		const prev = untrack(() => lastIsMobile);
-		if (isMobile === prev) return;
-		lastIsMobile = isMobile;
-		if (!isMobile) {
-			mobileVoicePane = 'chat';
-		} else if (voiceState?.visible) {
-			mobileVoicePane = 'call';
-		}
+		const currentIsMobile = isMobile;
+		const currentVoiceVisible = voiceState?.visible;
+		if (currentIsMobile === prev) return;
+		untrack(() => {
+			lastIsMobile = currentIsMobile;
+			if (!currentIsMobile) {
+				mobileVoicePane = 'chat';
+			} else if (currentVoiceVisible) {
+				mobileVoicePane = 'call';
+			}
+		});
 	});
 	run(() => {
 		const shouldShow = isMobile && mobileVoicePane === 'chat' && !!activeThread;
-		showThreadPanel = shouldShow;
 		const prev = untrack(() => lastShowThreadPanel);
-		if (shouldShow && !prev) {
-			scheduleThreadRead();
-		}
-		lastShowThreadPanel = shouldShow;
+		untrack(() => {
+			showThreadPanel = shouldShow;
+			if (shouldShow && !prev) {
+				scheduleThreadRead();
+			}
+			lastShowThreadPanel = shouldShow;
+		});
 	});
 	run(() => {
 		if ($user?.uid) {
