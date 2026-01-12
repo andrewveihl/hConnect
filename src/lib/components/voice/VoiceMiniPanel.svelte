@@ -28,6 +28,7 @@
 	const STORAGE_KEY = 'hconnect:voice-mini-panel:position';
 	const FAB_ID = 'voice-mini-panel';
 	const PANEL_SIZE = 200; // Approximate panel width for snap calculations
+	const SNAP_THRESHOLD_PX = 150;
 
 	type VoiceParticipant = {
 		uid: string;
@@ -53,6 +54,7 @@
 	let pointerId: number | null = null;
 	let isSnapped = $state(false);
 	let nearSnapZone: SnapZone | null = $state(null);
+	let trayOpen = $state(false);
 
 	const callState = $derived($voiceClientState);
 
@@ -123,6 +125,12 @@
 		}
 	}
 
+	function handleFabSnapSynced(event: CustomEvent<{ fabIds: string[] }>) {
+		if (!event?.detail?.fabIds?.includes(FAB_ID)) return;
+		if (isDragging) return;
+		loadSavedPosition();
+	}
+
 	onDestroy(() => {
 		unsub?.();
 		unsub = null;
@@ -131,6 +139,8 @@
 			window.removeEventListener('pointermove', handlePointerMove);
 			window.removeEventListener('pointerup', handlePointerUp);
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		}
 	});
 
@@ -138,6 +148,8 @@
 		if (browser && draggable) {
 			loadSavedPosition();
 			window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+			window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+			window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		}
 	});
 
@@ -151,8 +163,38 @@
 			if (wasSnapped && savedZoneId) {
 				// Wait for zones to be registered
 				setTimeout(() => {
+					if (savedZoneId.startsWith('fab-tray-slot-')) {
+						const slotIndex = parseInt(savedZoneId.replace('fab-tray-slot-', ''), 10);
+						const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+						if (slot && slot.getBoundingClientRect().width > 0) {
+							const rect = slot.getBoundingClientRect();
+							const snapX = rect.left + (rect.width - PANEL_SIZE) / 2;
+							const snapY = rect.top + (rect.height - PANEL_SIZE) / 2;
+							const vw = window.innerWidth;
+							const vh = window.innerHeight;
+							const defaultX = vw / 2;
+							const defaultY = vh - 100;
+							positionX = snapX - defaultX + PANEL_SIZE / 2;
+							positionY = snapY - defaultY + PANEL_SIZE / 2;
+							isSnapped = true;
+							snappedZoneId = savedZoneId;
+							fabSnapStore.registerZone({
+								id: savedZoneId,
+								x: rect.left,
+								y: rect.top,
+								width: rect.width,
+								height: rect.height
+							});
+							fabSnapStore.occupyZone(savedZoneId, FAB_ID);
+							return;
+						}
+					}
+
+					fabSnapStore.ensureZone(savedZoneId);
 					const zones = fabSnapStore.getZones();
-					const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+					const zone =
+						zones.find((z) => z.id === savedZoneId) ||
+						(!savedZoneId.includes('-stack-') ? zones[0] : null);
 					if (zone) {
 						// Calculate offset from default center position to snap zone
 						const snapPos = fabSnapStore.getSnapPosition(zone, PANEL_SIZE);
@@ -206,8 +248,44 @@
 
 	// Check if we're near a snap zone
 	function checkNearSnapZone(): SnapZone | null {
-		if (!browser || $isFabSnappingDisabled) return null;
+		if (!browser) return null;
 		const center = getPanelCenterPosition();
+
+		const traySlots = document.querySelectorAll('.fab-tray__slot');
+		if (traySlots.length > 0) {
+			let bestSlot: { index: number; rect: DOMRect; distance: number } | null = null;
+
+			for (let i = 0; i < traySlots.length; i++) {
+				const slot = traySlots[i] as HTMLElement;
+				const rect = slot.getBoundingClientRect();
+				if (rect.width === 0 || rect.height === 0) continue;
+
+				const slotCenterX = rect.left + rect.width / 2;
+				const slotCenterY = rect.top + rect.height / 2;
+				const distance = Math.sqrt((center.x - slotCenterX) ** 2 + (center.y - slotCenterY) ** 2);
+
+				if (distance < SNAP_THRESHOLD_PX && (!bestSlot || distance < bestSlot.distance)) {
+					bestSlot = { index: i, rect, distance };
+				}
+			}
+
+			if (bestSlot) {
+				const zoneId = `fab-tray-slot-${bestSlot.index}`;
+				const snappedFabs = fabSnapStore.getSnappedFabs();
+				const slotOccupied = snappedFabs.some((f) => f.zoneId === zoneId && f.fabId !== FAB_ID);
+				if (!slotOccupied) {
+					return {
+						id: zoneId,
+						x: bestSlot.rect.left,
+						y: bestSlot.rect.top,
+						width: bestSlot.rect.width,
+						height: bestSlot.rect.height
+					} as SnapZone;
+				}
+			}
+		}
+
+		if ($isFabSnappingDisabled) return null;
 		return fabSnapStore.findSnapZone(center.x, center.y, FAB_ID);
 	}
 
@@ -223,6 +301,15 @@
 		positionY = snapPos.y - baseY + PANEL_SIZE / 2;
 		isSnapped = true;
 		snappedZoneId = zone.id;
+		if (zone.id.startsWith('fab-tray-slot-')) {
+			fabSnapStore.registerZone({
+				id: zone.id,
+				x: zone.x,
+				y: zone.y,
+				width: zone.width,
+				height: zone.height
+			});
+		}
 		fabSnapStore.occupyZone(zone.id, FAB_ID);
 		savePosition(true, zone.id);
 	}
@@ -231,6 +318,12 @@
 		if (!draggable) return;
 		event.preventDefault();
 		isDragging = true;
+		
+		// Dispatch fab drag start event for tray auto-open
+		if (browser) {
+			window.dispatchEvent(new CustomEvent('fabDragStart', { detail: { fabId: FAB_ID } }));
+		}
+		
 		// Release zone when starting to drag
 		if (isSnapped) {
 			fabSnapStore.releaseZone(FAB_ID);
@@ -279,14 +372,43 @@
 				savePosition(false);
 			}
 
-			// Clear snap zone highlight
+			// Clear snap zone highlight and dispatch drag end
 			if (browser) {
 				window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
 					detail: { zoneId: null }
 				}));
+				window.dispatchEvent(new CustomEvent('fabDragEnd', { detail: { fabId: FAB_ID } }));
 			}
 			nearSnapZone = null;
 		}
+	}
+
+	function handleTrayStateChange(e: CustomEvent<{ open: boolean }>) {
+		trayOpen = e.detail.open;
+		if (!trayOpen || !isSnapped || !snappedZoneId?.startsWith('fab-tray-slot-')) return;
+		setTimeout(() => {
+			const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+			const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+			if (!slot) return;
+			const rect = slot.getBoundingClientRect();
+			if (rect.width === 0 || rect.height === 0) return;
+			const snapX = rect.left + (rect.width - PANEL_SIZE) / 2;
+			const snapY = rect.top + (rect.height - PANEL_SIZE) / 2;
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const baseX = vw / 2;
+			const baseY = vh - 100;
+			positionX = snapX - baseX + PANEL_SIZE / 2;
+			positionY = snapY - baseY + PANEL_SIZE / 2;
+			fabSnapStore.registerZone({
+				id: snappedZoneId!,
+				x: rect.left,
+				y: rect.top,
+				width: rect.width,
+				height: rect.height
+			});
+			fabSnapStore.occupyZone(snappedZoneId!, FAB_ID);
+		}, 250);
 	}
 
 	function leaveCall() {

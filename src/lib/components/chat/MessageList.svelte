@@ -6,7 +6,7 @@
 	import EmojiPicker from './EmojiPicker.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import { formatBytes, looksLikeImage } from '$lib/utils/fileType';
-	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, getDefaultAvatarUrl, isDefaultAvatarUrl } from '$lib/utils/profile';
 	import { SPECIAL_MENTIONS } from '$lib/data/specialMentions';
 	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 	import { createTicketFromMessage } from '$lib/firestore/ticketAi';
@@ -420,21 +420,18 @@
 		const trimmed = value.trim();
 		if (!trimmed) return false;
 		const lowered = trimmed.toLowerCase();
-		if (
-			[
-				'undefined',
-				'null',
-				'none',
-				'false',
-				'0',
-				'?',
-				'/default-avatar.svg',
-				DEFAULT_AVATAR_URL.toLowerCase()
-			].includes(lowered)
-		) {
+		if (['undefined', 'null', 'none', 'false', '0', '?'].includes(lowered)) {
 			return false;
 		}
-		if (trimmed.includes('storage.googleapis.com/') && !trimmed.includes('token=')) {
+		if (isDefaultAvatarUrl(trimmed)) {
+			return false;
+		}
+		if (
+			(trimmed.includes('storage.googleapis.com/') ||
+				trimmed.includes('firebasestorage.googleapis.com/') ||
+				trimmed.includes('firebasestorage.app/')) &&
+			!trimmed.includes('token=')
+		) {
 			return false;
 		}
 		return true;
@@ -464,11 +461,11 @@
 		]);
 
 		const resolved = resolveProfilePhotoURL(user ?? {}, fallback);
-		if (resolved && resolved !== DEFAULT_AVATAR_URL) {
+		if (resolved && !isDefaultAvatarUrl(resolved)) {
 			return resolved;
 		}
 
-		return fallback;
+		return fallback ?? getDefaultAvatarUrl();
 	}
 
 	function isMine(m: any) {

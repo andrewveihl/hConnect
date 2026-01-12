@@ -16,12 +16,16 @@
 		removeVoiceDebugSection,
 		setVoiceDebugSection
 	} from '$lib/utils/voiceDebugContext';
-	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, isDefaultAvatarUrl } from '$lib/utils/profile';
 	import { voiceSession } from '$lib/stores/voice';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
-	import { markChannelActivityRead } from '$lib/stores/activityFeed';
+	import { markChannelActivityRead, markMultipleChannelsActivityRead, markServerActivityRead } from '$lib/stores/activityFeed';
+	import { getCachedServerChannels, updateServerChannelCache } from '$lib/stores/messageCache';
+	import { onChannelHover } from '$lib/stores/preloadService';
+	import { markMultipleChannelsRead } from '$lib/firebase/unread';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
 	import {
 		collection,
 		doc,
@@ -30,6 +34,7 @@
 		orderBy,
 		query,
 		where,
+		limit,
 		type Unsubscribe,
 		setDoc,
 		writeBatch
@@ -84,6 +89,76 @@
 		allowedRoleIds?: string[];
 		categoryId?: string | null;
 	};
+
+	const CHANNEL_CACHE_STORAGE_PREFIX = 'server-channels:';
+	const CHANNEL_CACHE_STORAGE_LIMIT = 200;
+
+	function sortChannelsByPosition(list: Chan[]) {
+		return list.slice().sort((a, b) => {
+			const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+			const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+			return ap - bp || a.id.localeCompare(b.id);
+		});
+	}
+
+	function normalizeChannelForStorage(chan: Chan): Chan {
+		return {
+			id: chan.id,
+			name: chan.name,
+			type: chan.type,
+			position: typeof chan.position === 'number' ? chan.position : undefined,
+			isPrivate: chan.isPrivate === true,
+			allowedRoleIds: Array.isArray(chan.allowedRoleIds) ? chan.allowedRoleIds : undefined,
+			categoryId: chan.categoryId ?? null
+		};
+	}
+
+	function loadStoredChannels(server: string): Chan[] {
+		if (typeof window === 'undefined') return [];
+		try {
+			const raw = sessionStorage.getItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`);
+			if (!raw) return [];
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed)
+				? parsed.filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
+				: [];
+		} catch {
+			return [];
+		}
+	}
+
+	function persistStoredChannels(server: string, list: Chan[]) {
+		if (typeof window === 'undefined') return;
+		try {
+			const trimmed = list.slice(0, CHANNEL_CACHE_STORAGE_LIMIT).map(normalizeChannelForStorage);
+			sessionStorage.setItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`, JSON.stringify(trimmed));
+		} catch {
+			// ignore storage errors
+		}
+	}
+
+	function readCachedChannels(server: string, allowPrivate: boolean): Chan[] {
+		let cached = (getCachedServerChannels(server) as Chan[]) ?? [];
+		if (!cached.length) {
+			const stored = loadStoredChannels(server);
+			if (stored.length) {
+				cached = stored;
+				updateServerChannelCache(server, stored);
+			}
+		}
+		if (!allowPrivate) {
+			cached = cached.filter((chan) => chan?.isPrivate !== true);
+		}
+		return sortChannelsByPosition(cached);
+	}
+
+	function applyChannelList(server: string, list: Chan[]) {
+		const sorted = sortChannelsByPosition(list);
+		channels = sorted;
+		updateServerChannelCache(server, sorted);
+		persistStoredChannels(server, sorted);
+		syncVoicePresenceWatchers(channels);
+	}
 
 	type Category = {
 		id: string;
@@ -147,8 +222,6 @@
 	let channelVisibilityHint: string | null = $state(null);
 	let currentChannelServer: string | null = null;
 	let lastChannelRoleKey: string | null = null;
-	// Track which server we've received actual Firestore data for (vs just cache)
-	let channelsLoadedForServer: string | null = null;
 
 	// Categories (folders) for channel grouping
 	let categories: Category[] = $state([]);
@@ -160,6 +233,17 @@
 	let categoryDropTarget: { type: 'before-item' | 'end'; itemIndex?: number } | null = $state(null);
 	let categoryDragStartY = 0;
 	let categoryDragMoved = false;
+
+	// Context menu state for "Mark All as Read"
+	let contextMenuRef: ContextMenu | null = $state(null);
+	let contextMenuTarget: { type: 'all' | 'category'; categoryId?: string } | null = $state(null);
+	let markingAsRead = $state(false);
+
+	// Long-press tracking for context menu on mobile
+	let contextMenuLongPressTimer: number | null = null;
+	let contextMenuLongPressStart: { x: number; y: number } | null = null;
+	const CONTEXT_MENU_LONG_PRESS_MS = 500;
+	const CONTEXT_MENU_LONG_PRESS_THRESHOLD = 10;
 
 	let voicePresence: Record<string, VoiceParticipant[]> = $state({});
 	const voiceUnsubs = new Map<string, Unsubscribe>();
@@ -310,11 +394,7 @@
 				participant.displayName === 'Member' ||
 				participant.displayName === '?';
 			const photo = typeof participant.photoURL === 'string' ? participant.photoURL.trim() : '';
-			const missingPhoto =
-				!photo ||
-				photo === '?' ||
-				photo === DEFAULT_AVATAR_URL ||
-				photo.toLowerCase().endsWith('default-avatar.svg');
+			const missingPhoto = !photo || photo === '?' || isDefaultAvatarUrl(photo);
 			// Fetch if we don't have a cache yet or if the participant looks incomplete.
 			if (cached && cached.photoURL && !missingDisplay && !missingPhoto) continue;
 			if (pendingVoiceProfiles.has(participant.uid)) continue;
@@ -807,6 +887,162 @@
 		await saveReorder();
 	}
 
+	// ==================== Context Menu Functions for Mark as Read ====================
+
+	function getChannelIdsForCategory(categoryId: string): string[] {
+		return visibleChannels
+			.filter((c) => c.categoryId === categoryId && c.type === 'text')
+			.map((c) => c.id);
+	}
+
+	function getAllTextChannelIds(): string[] {
+		return visibleChannels
+			.filter((c) => c.type === 'text')
+			.map((c) => c.id);
+	}
+
+	function getUnreadChannelIds(channelIds: string[]): string[] {
+		return channelIds.filter((id) => hasUnread(id));
+	}
+
+	async function markAllAsRead(target: 'all' | 'category', categoryId?: string) {
+		if (!$user?.uid || !computedServerId || markingAsRead) return;
+		
+		markingAsRead = true;
+		try {
+			let channelIds: string[];
+			if (target === 'all') {
+				channelIds = getAllTextChannelIds();
+			} else if (categoryId) {
+				channelIds = getChannelIdsForCategory(categoryId);
+			} else {
+				// Uncategorized channels
+				channelIds = visibleChannels
+					.filter((c) => !c.categoryId && c.type === 'text')
+					.map((c) => c.id);
+			}
+
+			const unreadIds = getUnreadChannelIds(channelIds);
+			if (!unreadIds.length) return;
+
+			// Mark channels as read in Firestore
+			await markMultipleChannelsRead($user.uid, computedServerId, unreadIds);
+
+			// Also mark activity feed entries as read
+			await markMultipleChannelsActivityRead(computedServerId, unreadIds);
+
+			// Clear local unread state immediately for responsive UI
+			const newLocalUnread = { ...localUnread };
+			for (const id of unreadIds) {
+				newLocalUnread[id] = false;
+			}
+			localUnread = newLocalUnread;
+
+			// Haptic feedback on mobile
+			if (browser && 'vibrate' in navigator) {
+				navigator.vibrate(30);
+			}
+		} catch (err) {
+			console.error('[ServerSidebar] Failed to mark channels as read:', err);
+		} finally {
+			markingAsRead = false;
+		}
+	}
+
+	function openContextMenu(
+		event: MouseEvent | PointerEvent,
+		target: 'all' | 'category',
+		categoryId?: string
+	) {
+		event.preventDefault();
+		event.stopPropagation();
+		contextMenuTarget = { type: target, categoryId };
+		contextMenuRef?.show(event.clientX, event.clientY);
+	}
+
+	function startContextMenuLongPress(
+		event: PointerEvent | TouchEvent,
+		target: 'all' | 'category',
+		categoryId?: string
+	) {
+		if (contextMenuLongPressTimer !== null) {
+			clearTimeout(contextMenuLongPressTimer);
+		}
+		
+		const touch = 'touches' in event ? event.touches[0] : event;
+		contextMenuLongPressStart = { x: touch.clientX, y: touch.clientY };
+		
+		contextMenuLongPressTimer = window.setTimeout(() => {
+			contextMenuLongPressTimer = null;
+			if (contextMenuLongPressStart) {
+				// Trigger haptic feedback
+				if (browser && 'vibrate' in navigator) {
+					navigator.vibrate(50);
+				}
+				contextMenuTarget = { type: target, categoryId };
+				contextMenuRef?.show(contextMenuLongPressStart.x, contextMenuLongPressStart.y);
+			}
+		}, CONTEXT_MENU_LONG_PRESS_MS);
+	}
+
+	function handleContextMenuPointerMove(event: PointerEvent | TouchEvent) {
+		if (!contextMenuLongPressStart) return;
+		
+		const touch = 'touches' in event ? event.touches[0] : event;
+		const dx = Math.abs(touch.clientX - contextMenuLongPressStart.x);
+		const dy = Math.abs(touch.clientY - contextMenuLongPressStart.y);
+		
+		if (dx > CONTEXT_MENU_LONG_PRESS_THRESHOLD || dy > CONTEXT_MENU_LONG_PRESS_THRESHOLD) {
+			cancelContextMenuLongPress();
+		}
+	}
+
+	function cancelContextMenuLongPress() {
+		if (contextMenuLongPressTimer !== null) {
+			clearTimeout(contextMenuLongPressTimer);
+			contextMenuLongPressTimer = null;
+		}
+		contextMenuLongPressStart = null;
+	}
+
+	function getContextMenuItems() {
+		if (!contextMenuTarget) return [];
+
+		const target = contextMenuTarget.type;
+		const categoryId = contextMenuTarget.categoryId;
+		
+		let channelIds: string[];
+		let label: string;
+		
+		if (target === 'all') {
+			channelIds = getAllTextChannelIds();
+			label = 'Mark All Channels as Read';
+		} else if (categoryId) {
+			const cat = categories.find((c) => c.id === categoryId);
+			channelIds = getChannelIdsForCategory(categoryId);
+			label = `Mark "${cat?.name ?? 'Folder'}" as Read`;
+		} else {
+			channelIds = visibleChannels
+				.filter((c) => !c.categoryId && c.type === 'text')
+				.map((c) => c.id);
+			label = 'Mark Uncategorized as Read';
+		}
+
+		const unreadCount = getUnreadChannelIds(channelIds).length;
+		const hasUnreadChannels = unreadCount > 0;
+
+		return [
+			{
+				label: hasUnreadChannels ? `${label} (${unreadCount})` : label,
+				icon: 'bx-check-double',
+				disabled: !hasUnreadChannels || markingAsRead,
+				action: () => markAllAsRead(target, categoryId)
+			}
+		];
+	}
+
+	// ==================== End Context Menu Functions ====================
+
 	function watchServerMeta(server: string) {
 		unsubServerMeta?.();
 		const db = getDb();
@@ -924,6 +1160,7 @@
 	function watchChannelOrder(server: string) {
 		unsubPersonalOrder?.();
 		myChannelOrder = [];
+		collapsedCategories = new Set();
 		if (!$user?.uid) return;
 
 		const db = getDb();
@@ -937,9 +1174,17 @@
 				} else {
 					myChannelOrder = [];
 				}
+				if (Array.isArray(data?.collapsedCategoryIds)) {
+					collapsedCategories = new Set(
+						data.collapsedCategoryIds.filter((id: unknown) => typeof id === 'string')
+					);
+				} else {
+					collapsedCategories = new Set();
+				}
 			},
 			() => {
 				myChannelOrder = [];
+				collapsedCategories = new Set();
 			}
 		);
 	}
@@ -955,13 +1200,32 @@
 		});
 	}
 
-	function toggleCategoryCollapse(categoryId: string) {
-		if (collapsedCategories.has(categoryId)) {
-			collapsedCategories.delete(categoryId);
-		} else {
-			collapsedCategories.add(categoryId);
+	async function saveCollapsedCategories(next: Set<string>) {
+		const targetServerId = computedServerId;
+		const uid = $user?.uid;
+		if (!targetServerId || !uid) return;
+		const db = getDb();
+		const ids = Array.from(next).filter((id) => typeof id === 'string' && id.trim().length > 0);
+		try {
+			await setDoc(
+				doc(db, 'profiles', uid, 'servers', targetServerId),
+				{ collapsedCategoryIds: ids },
+				{ merge: true }
+			);
+		} catch (error) {
+			console.error('Failed to save folder collapse state', error);
 		}
-		collapsedCategories = new Set(collapsedCategories); // trigger reactivity
+	}
+
+	function toggleCategoryCollapse(categoryId: string) {
+		const next = new Set(collapsedCategories);
+		if (next.has(categoryId)) {
+			next.delete(categoryId);
+		} else {
+			next.add(categoryId);
+		}
+		collapsedCategories = next; // trigger reactivity
+		void saveCollapsedCategories(next);
 	}
 
 	// Category drag-and-drop handlers
@@ -1088,12 +1352,13 @@
 		const map = new Map<string, Chan>();
 		channels.forEach((c) => map.set(c.id, c));
 		list.forEach((c) => map.set(c.id, c));
-		channels = Array.from(map.values()).sort((a, b) => {
-			const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
-			const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
-			return ap - bp || a.id.localeCompare(b.id);
-		});
-		syncVoicePresenceWatchers(channels);
+		const merged = Array.from(map.values());
+		if (currentChannelServer) {
+			applyChannelList(currentChannelServer, merged);
+		} else {
+			channels = sortChannelsByPosition(merged);
+			syncVoicePresenceWatchers(channels);
+		}
 	}
 
 	function watchChannels(server: string) {
@@ -1102,6 +1367,7 @@
 		const blockedKey = blockedChannelServers.get(server);
 		// Admins and members can read the full collection (rules allow member channel metadata); guests use filtered queries.
 		const allowFullChannelQuery = isAdminLike || isMember;
+		const switchingServer = currentChannelServer !== server;
 
 		const stopChannelUnsubs = () => {
 			unsubChannels?.();
@@ -1116,17 +1382,26 @@
 			channelFetchDenied = true;
 			channelVisibilityHint =
 				'You do not have permission to view channels. Ask an admin to allow @everyone/default role to view channels or add you to the server.';
+			channels = [];
 			syncVoicePresenceWatchers(channels);
 			return;
 		}
 
 		stopChannelUnsubs();
-		channels = [];
 		channelFetchDenied = false;
 		let channelWatchBlocked = false;
 		channelVisibilityHint = null;
 		currentChannelServer = server;
-
+		if (switchingServer || channels.length === 0) {
+			const cached = readCachedChannels(server, allowFullChannelQuery);
+			if (cached.length) {
+				channels = cached;
+				syncVoicePresenceWatchers(channels);
+			} else if (switchingServer) {
+				channels = [];
+				syncVoicePresenceWatchers(channels);
+			}
+		}
 
 		const db = getDb();
 		const baseCol = collection(db, 'servers', server, 'channels');
@@ -1134,15 +1409,10 @@
 		const mergeAndSortChannels = (lists: Chan[][]) => {
 			const map = new Map<string, Chan>();
 			lists.forEach((list) => list.forEach((c) => map.set(c.id, c)));
-			channels = Array.from(map.values()).sort((a, b) => {
-				const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
-				const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
-				return ap - bp || a.id.localeCompare(b.id);
-			});
+			applyChannelList(server, Array.from(map.values()));
 			channelFetchDenied = false;
 			channelVisibilityHint = null;
 			lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
-			syncVoicePresenceWatchers(channels);
 		};
 
 		const handleChannelError = (error: unknown, blockOnDeny = true) => {
@@ -1163,7 +1433,6 @@
 				channelWatchBlocked = true;
 				stopChannelUnsubs();
 				channels = [];
-				channelsLoadedForServer = server; // Mark as loaded (permission denied = no channels)
 				syncVoicePresenceWatchers(channels);
 			}
 		};
@@ -1199,11 +1468,13 @@
 			qRef,
 			(snap) => {
 				if (channelWatchBlocked) return;
-				channels = snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
+				applyChannelList(
+					server,
+					snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[]
+				);
 				channelFetchDenied = false;
 				channelVisibilityHint = null;
 				lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
-				syncVoicePresenceWatchers(channels);
 			},
 			(err) => {
 				const denied = (err as any)?.code === 'permission-denied';
@@ -1343,6 +1614,7 @@
 		resetVoiceWatchers();
 		unsubscribeVoiceSession();
 		stopNotif?.();
+		cancelContextMenuLongPress();
 		removeVoiceDebugSection('serverSidebar.channels');
 		removeVoiceDebugSection('serverSidebar.voicePresence');
 		removeVoiceDebugSection('serverSidebar.voiceSession');
@@ -1455,19 +1727,144 @@
 		return serverKey ? (indicators[serverKey] ?? {}) : {};
 	});
 
+	// Simple local unread tracking - watches latest message per channel
+	let localUnread: Record<string, boolean> = $state({});
+	let channelWatchers = new Map<string, Unsubscribe>();
+	let channelReadWatchers = new Map<string, Unsubscribe>();
+	let lastReadTimestamps: Record<string, number | null> = {};
+	let initialLoadComplete: Set<string> = new Set();
 	let lastViewedChannel: string | null = null;
 
- main
+	// Track when user views a channel - mark it as read
+run(() => {
+	if (activeChannelId && activeChannelId !== lastViewedChannel) {
+		lastViewedChannel = activeChannelId;
+		// Mark channel as read when user views it
+		const currentUnread = untrack(() => localUnread);
+		if (currentUnread[activeChannelId] !== false) {
+			localUnread = { ...currentUnread, [activeChannelId]: false };
+		}
+		// Update local timestamp to "now" so we don't show as unread after refresh
+		lastReadTimestamps[activeChannelId] = Date.now();
+			// Also mark activity entries as read
 			if (computedServerId) {
 				void markChannelActivityRead(computedServerId, activeChannelId);
 			}
 		}
 	});
 
-	// Combined unread check - use global store
+	// Helper to convert Firestore timestamp to millis
+	function toMillis(value: any): number | null {
+		if (!value) return null;
+		if (typeof value === 'number') return value;
+		if (value instanceof Date) return value.getTime();
+		if (typeof value?.toMillis === 'function') return value.toMillis();
+		if (typeof value?.seconds === 'number') return value.seconds * 1000;
+		return null;
+	}
+
+	// Set up watchers for each text channel to detect new messages
+	function setupChannelWatchers(chans: Chan[], sId: string | null, uid: string | null) {
+		if (!browser || !sId || !uid) return;
+
+		const db = getDb();
+		const textChannels = chans.filter((c) => c.type === 'text');
+
+		// Clean up old watchers for channels no longer in list
+		for (const [channelId, unsub] of channelWatchers) {
+			if (!textChannels.find((c) => c.id === channelId)) {
+				unsub();
+				channelWatchers.delete(channelId);
+				channelReadWatchers.get(channelId)?.();
+				channelReadWatchers.delete(channelId);
+				initialLoadComplete.delete(channelId);
+			}
+		}
+
+		// Set up new watchers
+		for (const chan of textChannels) {
+			if (channelWatchers.has(chan.id)) continue;
+
+			// First, watch the user's read state for this channel
+			const readDocRef = doc(db, 'profiles', uid, 'reads', `${sId}__${chan.id}`);
+			const readUnsub = onSnapshot(
+				readDocRef,
+				(snap) => {
+					const data = snap.data();
+					lastReadTimestamps[chan.id] = toMillis(data?.lastReadAt) ?? null;
+				},
+				() => {
+					// If no read doc exists, that's fine - they haven't read it yet
+					lastReadTimestamps[chan.id] = null;
+				}
+			);
+			channelReadWatchers.set(chan.id, readUnsub);
+
+			// Then watch for latest messages
+			const messagesRef = collection(db, 'servers', sId, 'channels', chan.id, 'messages');
+			const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
+
+			const unsub = onSnapshot(
+				q,
+				(snap) => {
+					if (snap.empty) return;
+					const latestMsg = snap.docs[0].data();
+					const msgTimestamp = toMillis(latestMsg?.createdAt);
+					const lastRead = lastReadTimestamps[chan.id];
+					const currentUid = $user?.uid;
+					const isFirstLoad = !initialLoadComplete.has(chan.id);
+
+					// Mark initial load complete
+					initialLoadComplete.add(chan.id);
+
+					// Skip if this is the active channel
+					if (chan.id === activeChannelId) return;
+
+					// Skip if message is from current user
+					if (latestMsg?.authorId === currentUid) return;
+
+					// Check if this message is newer than when user last read
+					if (msgTimestamp && lastRead && msgTimestamp > lastRead) {
+						localUnread = { ...localUnread, [chan.id]: true };
+					} else if (!isFirstLoad && msgTimestamp) {
+						// New message came in after initial load - mark as unread
+						localUnread = { ...localUnread, [chan.id]: true };
+					}
+				},
+				(err) => {
+					// Silently ignore permission errors
+				}
+			);
+
+			channelWatchers.set(chan.id, unsub);
+		}
+	}
+
+	// Watch for channel list changes
+	run(() => {
+		if (browser && computedServerId && channels.length > 0) {
+			setupChannelWatchers(channels, computedServerId, $user?.uid ?? null);
+		}
+	});
+
+	// Cleanup on destroy
+	onDestroy(() => {
+		for (const unsub of channelWatchers.values()) {
+			unsub();
+		}
+		channelWatchers.clear();
+		for (const unsub of channelReadWatchers.values()) {
+			unsub();
+		}
+		channelReadWatchers.clear();
+		initialLoadComplete.clear();
+	});
+
+	// Combined unread check - use local tracking OR global store
 	function hasUnread(channelId: string): boolean {
 		const global = unreadByChannel[channelId];
-		return (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
+		const globalUnread = (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
+		return globalUnread || localUnread[channelId] === true;
 	}
 
 	function hasHighPriority(channelId: string): number {
@@ -1606,36 +2003,17 @@
 		// Re-filter channels when any role-related state changes
 		visibleChannels = orderedChannels.filter(canSeeChannel);
 	});
-	
-	// Track last dispatched server to detect server changes
-	let lastDispatchedServer: string | null = null;
 	run(() => {
-		const currentServer = computedServerId ?? null;
-		const serverChanged = currentServer !== lastDispatchedServer;
-		const hasLoadedFromFirestore = channelsLoadedForServer === currentServer;
-		
-		// Only dispatch if:
-		// 1. We have channels to show, OR
-		// 2. We've confirmed from Firestore there are no channels (empty list after load)
-		// Don't dispatch empty channels if we're just waiting for Firestore to load
-		if (visibleChannels.length > 0 || (serverChanged && hasLoadedFromFirestore)) {
-			dispatch('channels', {
-				serverId: currentServer,
-				channels: visibleChannels
-			});
-			untrack(() => {
-				lastDispatchedServer = currentServer;
-			});
-		}
+		dispatch('channels', {
+			serverId: computedServerId ?? null,
+			channels: visibleChannels
+		});
 	});
 	run(() => {
 		const prevServer = untrack(() => lastServerId);
 		const nextServer = computedServerId ?? null;
-		const currentUid = $user?.uid;
-		if (nextServer && currentUid && nextServer !== prevServer) {
-			untrack(() => {
-				lastServerId = nextServer;
-			});
+		if (nextServer && $user?.uid && nextServer !== prevServer) {
+			lastServerId = nextServer;
 			subscribeAll(nextServer);
 		}
 	});
@@ -1686,9 +2064,7 @@
 				}
 			} catch {}
 		}
-		untrack(() => {
-			prevUnread = totals;
-		});
+		prevUnread = totals;
 	});
 </script>
 
@@ -1699,6 +2075,7 @@
 		draggable={false}
 		use:channelRowRefAction={c.id}
 		onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
+		onpointerenter={() => { if (serverId && c.type === 'text') onChannelHover(serverId, c.id); }}
 	>
 		<button
 			type="button"
@@ -1869,16 +2246,29 @@
 	<div
 		class="channel-scroll-area flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3 -webkit-overflow-scrolling-touch"
 	>
-		<!-- Channels heading - clickable on mobile for admins to access server settings -->
+		<!-- Channels heading - right-click/long-press for mark all as read -->
 		{#if isAdminLike}
 			<button
 				type="button"
 				class="channel-heading channel-heading--clickable md:cursor-default"
 				onclick={openServerSettingsOverlay}
+				oncontextmenu={(e) => openContextMenu(e, 'all')}
+				onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'all'); }}
+				onpointermove={handleContextMenuPointerMove}
+				onpointerup={cancelContextMenuLongPress}
+				onpointercancel={cancelContextMenuLongPress}
 				aria-label="Open server settings">Channels</button
 			>
 		{:else}
-			<div class="channel-heading">Channels</div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div 
+				class="channel-heading"
+				oncontextmenu={(e) => openContextMenu(e, 'all')}
+				onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'all'); }}
+				onpointermove={handleContextMenuPointerMove}
+				onpointerup={cancelContextMenuLongPress}
+				onpointercancel={cancelContextMenuLongPress}
+			>Channels</div>
 		{/if}
 		<div class="channel-list space-y-0.5">
 			{#each unifiedDisplayList as item, itemIndex (item.type === 'category' ? `cat-${item.category.id}` : `ch-${item.channel.id}`)}
@@ -1898,7 +2288,7 @@
 				{#if item.type === 'category'}
 					{@const cat = item.category}
 					{@const categoryChannels = item.channels}
-					<!-- Category Header - Draggable for admins -->
+					<!-- Category Header - Draggable for admins, right-click/long-press for mark as read -->
 					<div
 						role="listitem"
 						class="category-header-wrapper {draggingCategoryId === cat.id ? 'category-header--dragging' : ''}"
@@ -1910,6 +2300,11 @@
 							type="button"
 							class="category-header"
 							onclick={() => toggleCategoryCollapse(cat.id)}
+							oncontextmenu={(e) => openContextMenu(e, 'category', cat.id)}
+							onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'category', cat.id); }}
+							onpointermove={handleContextMenuPointerMove}
+							onpointerup={cancelContextMenuLongPress}
+							onpointercancel={cancelContextMenuLongPress}
 							draggable="false"
 						>
 							<i
@@ -1962,6 +2357,13 @@
 	</div>
 </aside>
 
+<!-- Context menu for Mark All as Read -->
+<ContextMenu
+	bind:this={contextMenuRef}
+	items={getContextMenuItems()}
+	onClose={() => { contextMenuTarget = null; }}
+/>
+
 <svelte:window
 	onpointermove={handleChannelPointerMove}
 	onpointerup={handleChannelPointerUp}
@@ -1992,6 +2394,13 @@
 		padding-bottom: calc(
 			3.5rem + var(--mobile-dock-height, 3rem) + env(safe-area-inset-bottom, 0px)
 		);
+	}
+
+	/* Desktop: add extra padding for the DesktopUserBar */
+	@media (min-width: 768px) {
+		.channel-scroll-area {
+			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 3rem);
+		}
 	}
 
 	@media (max-width: 767px) {

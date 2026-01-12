@@ -1926,7 +1926,4 @@
 		color: var(--red, #ff5c5c);
 	}
 
-	.form-hint.warning {
-		color: var(--yellow, #f5a623);
-	}
 </style>

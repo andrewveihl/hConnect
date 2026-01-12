@@ -5,6 +5,7 @@
 		channelsVisible?: boolean;
 		membersVisible?: boolean;
 		showMessageShortcut?: boolean;
+		hideMembersToggle?: boolean;
 		onToggleChannels?: (() => void) | null;
 		onToggleMembers?: (() => void) | null;
 		onOpenMessages?: (() => void) | null;
@@ -18,6 +19,7 @@
 		channelsVisible = false,
 		membersVisible = false,
 		showMessageShortcut = false,
+		hideMembersToggle = false,
 		onToggleChannels = null,
 		onToggleMembers = null,
 		onOpenMessages = null,
@@ -97,8 +99,8 @@
 				<i class="bx bx-message-dots text-xl"></i>
 			</button>
 		{/if}
-		<!-- Members toggle button (desktop only, when not in thread) -->
-		{#if onToggleMembers && !thread}
+		<!-- Members toggle button (desktop only, when not in thread and screen is wide enough) -->
+		{#if onToggleMembers && !thread && !hideMembersToggle}
 			<button
 				class="channel-header__members-toggle hidden md:flex"
 				type="button"

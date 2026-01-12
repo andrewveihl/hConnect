@@ -94,6 +94,13 @@
 	let skipNextClick = false;
 	let isSnapped = $state(false);
 	let nearSnapZone: SnapZone | null = $state(null);
+	
+	// Tray awareness - hide when snapped to tray and tray is closed
+	let trayOpen = $state(false);
+	let userClosedTray = $state(true); // Start true so FABs snapped to tray are hidden until tray opens
+	let trayUnmounted = $state(false); // Track if tray component unmounted (vs user closing)
+	let snappedZoneIdForHiding = $state<string | null>(null);
+	const hiddenInTray = $derived(isSnapped && (snappedZoneIdForHiding ?? '').startsWith('fab-tray-slot-') && !trayOpen && userClosedTray && !trayUnmounted);
 
 	const DONE_EMOJI = '✅';
 	const PANEL_WIDTH = 340;
@@ -115,6 +122,28 @@
 
 	// Check if user has staff access to any server
 	let hasAnyStaffAccess = $derived(staffServers.length > 0);
+	
+	// Track whether we've registered the FAB
+	let isRegistered = $state(false);
+
+	// Effect to register/unregister based on hasAnyStaffAccess
+	$effect(() => {
+		if (!browser) return;
+		
+		if (hasAnyStaffAccess && !isRegistered) {
+			// Register this FAB with the snap store
+			fabSnapStore.registerFab({
+				id: FAB_ID,
+				label: 'Support',
+				icon: 'bx-support'
+			});
+			isRegistered = true;
+		} else if (!hasAnyStaffAccess && isRegistered) {
+			// Unregister when no longer a staff member
+			fabSnapStore.unregisterFab(FAB_ID);
+			isRegistered = false;
+		}
+	});
 
 	let filteredIssues = $derived.by(() => {
 		if (filter === 'unassigned') return unassignedIssues;
@@ -235,6 +264,11 @@
 	}
 
 	let snappedZoneId: string | null = $state(null);
+	
+	// Keep snappedZoneIdForHiding in sync with snappedZoneId
+	$effect(() => {
+		snappedZoneIdForHiding = snappedZoneId;
+	});
 
 	async function initPosition() {
 		if (!browser) return;
@@ -244,10 +278,23 @@
 		const wasSnapped = !$isFabSnappingDisabled && fabSnapStore.isSnappedToRail(FAB_ID);
 		const savedZoneId = fabSnapStore.getSnappedZoneId(FAB_ID);
 		if (wasSnapped && savedZoneId) {
+			// If snapped to a tray slot, stay snapped even if tray isn't in DOM
+			// This keeps the FAB hidden when navigating to pages without the tray
+			if (savedZoneId.startsWith('fab-tray-slot-')) {
+				isSnapped = true;
+				snappedZoneId = savedZoneId;
+				// Don't set position - FAB will be hidden anyway
+				ready = true;
+				return;
+			}
+			
 			// Wait a bit for zones to be registered
 			await new Promise((resolve) => setTimeout(resolve, 100));
+			fabSnapStore.ensureZone(savedZoneId);
 			const zones = fabSnapStore.getZones();
-			const zone = zones.find((z) => z.id === savedZoneId) || zones[0];
+			const zone =
+				zones.find((z) => z.id === savedZoneId) ||
+				(!savedZoneId.includes('-stack-') ? zones[0] : null);
 			if (zone) {
 				const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
 				position = clampToViewport(snapPos);
@@ -274,19 +321,87 @@
 	}
 
 	// Check if current FAB center is near a snap zone
+	const SNAP_THRESHOLD_PX = 150; // Distance in pixels to trigger snap (increased for easier snapping)
+
 	function checkNearSnapZone(): SnapZone | null {
-		if (!browser || $isFabSnappingDisabled) return null;
+		if (!browser) return null;
+		
 		const fabCenterX = position.x + FAB_SIZE / 2;
 		const fabCenterY = position.y + FAB_SIZE / 2;
-		return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+		
+		// Directly query tray slots in DOM - more reliable than store-based zones
+		const traySlots = document.querySelectorAll('.fab-tray__slot');
+		
+		if (traySlots.length > 0) {
+			let bestSlot: { index: number; rect: DOMRect; distance: number } | null = null;
+			
+			for (let i = 0; i < traySlots.length; i++) {
+				const slot = traySlots[i] as HTMLElement;
+				const rect = slot.getBoundingClientRect();
+				
+				// Skip if slot is not visible (hidden tray)
+				if (rect.width === 0 || rect.height === 0) continue;
+				
+				const slotCenterX = rect.left + rect.width / 2;
+				const slotCenterY = rect.top + rect.height / 2;
+				const distance = Math.sqrt((fabCenterX - slotCenterX) ** 2 + (fabCenterY - slotCenterY) ** 2);
+				
+				if (distance < SNAP_THRESHOLD_PX && (!bestSlot || distance < bestSlot.distance)) {
+					bestSlot = { index: i, rect, distance };
+				}
+			}
+			
+			if (bestSlot) {
+				// Check if slot is already occupied by another FAB
+				const zoneId = `fab-tray-slot-${bestSlot.index}`;
+				const snappedFabs = fabSnapStore.getSnappedFabs();
+				const slotOccupied = snappedFabs.some(f => 
+					f.zoneId === zoneId && f.fabId !== FAB_ID
+				);
+				
+				// Don't snap to occupied slots
+				if (slotOccupied) {
+					return null;
+				}
+				
+				return {
+					id: zoneId,
+					x: bestSlot.rect.left,
+					y: bestSlot.rect.top,
+					width: bestSlot.rect.width,
+					height: bestSlot.rect.height
+				} as SnapZone;
+			}
+		}
+		
+		// Fallback to store-based zones if DOM query found nothing
+		if (!$isFabSnappingDisabled) {
+			return fabSnapStore.findSnapZone(fabCenterX, fabCenterY, FAB_ID);
+		}
+		
+		return null;
 	}
 
 	// Snap to a zone
 	function snapToZone(zone: SnapZone) {
-		const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
-		position = clampToViewport(snapPos);
+		// Calculate snap position: center the FAB on the zone
+		const snapX = zone.x + (zone.width - FAB_SIZE) / 2;
+		const snapY = zone.y + (zone.height - FAB_SIZE) / 2;
+		
+		position = clampToViewport({ x: snapX, y: snapY });
 		isSnapped = true;
 		snappedZoneId = zone.id;
+		
+		// Register zone with store for persistence
+		if (zone.id.startsWith('fab-tray-slot-')) {
+			fabSnapStore.registerZone({
+				id: zone.id,
+				x: zone.x,
+				y: zone.y,
+				width: zone.width,
+				height: zone.height
+			});
+		}
 		fabSnapStore.occupyZone(zone.id, FAB_ID);
 		persistPosition(position, true, zone.id);
 	}
@@ -332,6 +447,12 @@
 			if (pointerId === null) return;
 			dragging = true;
 			wasDragging = true;
+			
+			// Dispatch fab drag start event for tray auto-open
+			if (browser) {
+				window.dispatchEvent(new CustomEvent('fabDragStart', { detail: { fabId: FAB_ID } }));
+			}
+			
 			// Release zone when starting to drag
 			if (isSnapped) {
 				fabSnapStore.releaseZone(FAB_ID);
@@ -377,11 +498,12 @@
 				persistPosition(position, false);
 			}
 			
-			// Clear snap zone highlight
+			// Clear snap zone highlight and dispatch drag end
 			if (browser) {
 				window.dispatchEvent(new CustomEvent('fabNearSnapZone', {
 					detail: { zoneId: null }
 				}));
+				window.dispatchEvent(new CustomEvent('fabDragEnd', { detail: { fabId: FAB_ID } }));
 			}
 			nearSnapZone = null;
 			
@@ -720,22 +842,93 @@
 
 		// Listen for snap zone updates
 		window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+		window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+		// Listen for tray state changes
+		window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 
 		return () => {
 			userUnsub();
 			serversUnsub?.();
 			cleanup();
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		};
 	});
 
 	function handleSnapZoneUpdated() {
-		if (!isSnapped || !snappedZoneId) return;
-		const zones = fabSnapStore.getZones();
-		const zone = zones.find((z) => z.id === snappedZoneId);
-		if (zone) {
-			const snapPos = fabSnapStore.getSnapPosition(zone, FAB_SIZE);
-			position = clampToViewport(snapPos);
+		if (!isSnapped || !snappedZoneId?.startsWith('fab-tray-slot-')) return;
+		const slotIndex = parseInt(snappedZoneId.replace('fab-tray-slot-', ''), 10);
+		const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+		if (slot) {
+			const rect = slot.getBoundingClientRect();
+			const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+			const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+			position = clampToViewport({ x: snapX, y: snapY });
+			// Re-occupy the zone to ensure it's marked as occupied
+			fabSnapStore.occupyZone(snappedZoneId, FAB_ID);
+		}
+	}
+
+	function handleFabSnapSynced(event: CustomEvent<{ fabIds: string[] }>) {
+		if (!event?.detail?.fabIds?.includes(FAB_ID)) return;
+		if (dragging) return;
+		void initPosition();
+	}
+
+	function handleTrayStateChange(e: CustomEvent<{ open: boolean; unmounting?: boolean; mounting?: boolean }>) {
+		const wasOpen = trayOpen;
+		trayOpen = e.detail.open;
+		
+		// Track if tray is unmounting (vs user closing)
+		if (e.detail.unmounting) {
+			trayUnmounted = true;
+			// Don't change userClosedTray - FAB should show in default position when tray is gone
+			return;
+		}
+		
+		// Tray is mounting (back in DOM) - reset unmounted flag
+		if (e.detail.mounting) {
+			trayUnmounted = false;
+			// Don't change other state - let FAB stay hidden until user opens tray
+			return;
+		}
+		
+		// Tray is back (mounting) - reset unmounted flag (legacy check)
+		if (trayOpen && trayUnmounted) {
+			trayUnmounted = false;
+		}
+		
+		if (wasOpen && !trayOpen) {
+			// Tray just closed by user
+			userClosedTray = true;
+		} else if (!wasOpen && trayOpen) {
+			// Tray opening
+			userClosedTray = false;
+		}
+		
+		// Update position when tray opens and we're snapped to a tray slot
+		if (trayOpen && isSnapped && snappedZoneId?.startsWith('fab-tray-slot-')) {
+			setTimeout(() => {
+				const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+				const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+				if (slot) {
+					const rect = slot.getBoundingClientRect();
+					const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+					const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+					position = { x: snapX, y: snapY };
+					
+					// Re-register the zone occupation now that the zone exists
+					fabSnapStore.registerZone({
+						id: snappedZoneId!,
+						x: rect.left,
+						y: rect.top,
+						width: rect.width,
+						height: rect.height
+					});
+					fabSnapStore.occupyZone(snappedZoneId!, FAB_ID);
+				}
+			}, 250);
 		}
 	}
 
@@ -792,6 +985,11 @@
 		serversUnsub?.();
 		if (browser) {
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
+			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
+			// Unregister FAB from snap store if it was registered
+			if (isRegistered) {
+				fabSnapStore.unregisterFab(FAB_ID);
+			}
 		}
 	});
 
@@ -803,9 +1001,43 @@
 	// Resize handler
 	$effect(() => {
 		if (!browser || !ready) return;
+		
+		let lastWasMobile = window.matchMedia('(max-width: 767px)').matches;
+		
 		const handleResize = () => {
-			position = clampToViewport(position);
+			const isMobile = window.matchMedia('(max-width: 767px)').matches;
+			const viewportChanged = isMobile !== lastWasMobile;
+			lastWasMobile = isMobile;
+			
+			// If viewport changed and we're snapped to a tray slot, handle re-positioning
+			if (viewportChanged && isSnapped && snappedZoneId?.startsWith('fab-tray-slot-')) {
+				// Viewport changed - need to wait for layout to stabilize
+				setTimeout(() => {
+					const slotIndex = parseInt(snappedZoneId?.replace('fab-tray-slot-', '') ?? '0', 10);
+					const slot = document.querySelector(`.fab-tray__slot[data-slot="${slotIndex}"]`) as HTMLElement;
+					if (slot) {
+						const rect = slot.getBoundingClientRect();
+						const snapX = rect.left + (rect.width - FAB_SIZE) / 2;
+						const snapY = rect.top + (rect.height - FAB_SIZE) / 2;
+						position = { x: snapX, y: snapY };
+						
+						// Re-register the zone with updated position
+						fabSnapStore.registerZone({
+							id: snappedZoneId!,
+							x: rect.left,
+							y: rect.top,
+							width: rect.width,
+							height: rect.height
+						});
+						fabSnapStore.occupyZone(snappedZoneId!, FAB_ID);
+					}
+				}, 300);
+			} else {
+				// Just clamp to viewport
+				position = clampToViewport(position);
+			}
 		};
+		
 		window.addEventListener('resize', handleResize);
 		return () => window.removeEventListener('resize', handleResize);
 	});
@@ -824,6 +1056,7 @@
 		class:ticket-container--ready={ready}
 		class:ticket-container--snapped={isSnapped}
 		class:ticket-container--near-snap={nearSnapZone !== null}
+		class:ticket-container--hidden={hiddenInTray}
 		style="transform: translate({position.x}px, {position.y}px)"
 	>
 		<!-- FAB Button -->
@@ -1074,6 +1307,12 @@
 		opacity: 1;
 		pointer-events: auto;
 	}
+	
+	.ticket-container--hidden {
+		opacity: 0 !important;
+		pointer-events: none !important;
+		visibility: hidden;
+	}
 
 	.ticket-fab {
 		width: 3.1rem;
@@ -1102,6 +1341,13 @@
 		width: 3rem;
 		height: 3rem;
 		box-shadow: 0 8px 18px rgba(249, 115, 22, 0.25);
+	}
+
+	@media (max-width: 767px) {
+		.ticket-fab {
+			width: 3rem;
+			height: 3rem;
+		}
 	}
 
 	.ticket-fab--dragging {

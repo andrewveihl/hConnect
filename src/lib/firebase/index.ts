@@ -210,7 +210,7 @@ export default getDb;
 /* Optional: wait for the first auth resolution so auth.currentUser is reliable */
 export async function waitForAuthInit(): Promise<void> {
 	await ensureFirebaseReady();
-	if ((auth as any)._initializedOnce || auth!.currentUser !== undefined) return;
+	if ((auth as any)._initializedOnce) return;
 	await new Promise<void>((resolve) => {
 		const unsub = onAuthStateChanged(auth!, () => {
 			(auth as any)._initializedOnce = true;
@@ -483,9 +483,15 @@ export async function ensureUserDoc(
 	const name = data?.name ?? null;
 	const email = data?.email ?? null;
 	const trim = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+	const isFirebaseStorageUrl = (value: string) =>
+		value.includes('storage.googleapis.com') ||
+		value.includes('firebasestorage.googleapis.com') ||
+		value.includes('firebasestorage.app');
 
-	const incomingAuth = trim(data?.photoURL ?? null);
-	const existingAuth = trim(existing?.authPhotoURL ?? null);
+	const incomingAuthRaw = trim(data?.photoURL ?? null);
+	const existingAuthRaw = trim(existing?.authPhotoURL ?? null);
+	const incomingAuth = incomingAuthRaw && !isFirebaseStorageUrl(incomingAuthRaw) ? incomingAuthRaw : '';
+	const existingAuth = existingAuthRaw && !isFirebaseStorageUrl(existingAuthRaw) ? existingAuthRaw : '';
 	const authPhotoURL = incomingAuth || existingAuth || '';
 
 	let customPhoto = trim(existing?.customPhotoURL ?? null);

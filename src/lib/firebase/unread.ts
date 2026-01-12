@@ -12,6 +12,7 @@ import {
 	setDoc,
 	where,
 	limit,
+	writeBatch,
 	type Unsubscribe
 } from 'firebase/firestore';
 import type { DocumentData, DocumentSnapshot, Timestamp } from 'firebase/firestore';
@@ -285,31 +286,12 @@ export function subscribeUnreadForServer(
 		return allowed.some((id) => roles.includes(id as string));
 	};
 
-	// Debounce recompute calls to reduce Firestore query load
-	const recomputeTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	const RECOMPUTE_DEBOUNCE_MS = 500; // Wait 500ms before recomputing
-
 	const scheduleRecompute = (channelId: string) => {
 		if (!hasServerAccess()) return;
 		// If we have already observed a permission issue for this channel, do not retry until roles change.
 		if (deniedChannels.has(channelId)) return;
 		const state = channelStates.get(channelId);
 		if (!state) return;
-		
-		// Clear existing timer for this channel
-		const existingTimer = recomputeTimers.get(channelId);
-		if (existingTimer) {
-			clearTimeout(existingTimer);
-		}
-		
-		// Debounce the recompute
-		recomputeTimers.set(channelId, setTimeout(() => {
-			recomputeTimers.delete(channelId);
-			executeRecompute(channelId, state);
-		}, RECOMPUTE_DEBOUNCE_MS));
-	};
-	
-	const executeRecompute = (channelId: string, state: ChannelState) => {
 		if (state.recomputeRunning) {
 			state.recomputeQueued = true;
 			return;
@@ -345,12 +327,6 @@ export function subscribeUnreadForServer(
 		if (!state) return;
 		state.stopLatest?.();
 		state.stopRead?.();
-		// Clear any pending recompute timer
-		const timer = recomputeTimers.get(channelId);
-		if (timer) {
-			clearTimeout(timer);
-			recomputeTimers.delete(channelId);
-		}
 		channelStates.delete(channelId);
 		delete counts[channelId];
 		emit();
@@ -582,4 +558,39 @@ export function subscribeUnreadForServer(
 		deniedChannels.clear();
 		channelDocs.clear();
 	};
+}
+
+/**
+ * Mark multiple channels as read at once.
+ * @param uid - The user's uid
+ * @param serverId - The server id
+ * @param channelIds - Array of channel ids to mark as read
+ */
+export async function markMultipleChannelsRead(
+	uid: string,
+	serverId: string,
+	channelIds: string[]
+): Promise<void> {
+	if (!channelIds.length) return;
+	const db = getDb();
+	const batch = writeBatch(db);
+	const now = serverTimestamp();
+
+	for (const channelId of channelIds) {
+		const id = keyFor(serverId, channelId);
+		const ref = doc(db, 'profiles', uid, 'reads', id);
+		batch.set(
+			ref,
+			{
+				serverId,
+				channelId,
+				lastReadAt: now,
+				lastReadMessageId: null,
+				updatedAt: now
+			},
+			{ merge: true }
+		);
+	}
+
+	await batch.commit();
 }

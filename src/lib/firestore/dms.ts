@@ -53,6 +53,12 @@ export type DMThread = {
 	name?: string | null;
 	iconURL?: string | null;
 	createdBy?: string | null;
+	// Extended group features
+	description?: string | null;
+	pinnedMessageId?: string | null;
+	allowMemberInvites?: boolean; // Can non-creator members add new participants
+	mutedBy?: Record<string, number | null>; // uid -> muteUntil timestamp (null = permanent)
+	adminUids?: string[]; // Additional admins besides creator
 };
 
 export type DMMessage = {
@@ -409,10 +415,17 @@ export async function createGroupDM(
 	};
 }
 
-/** Update group DM settings (name, icon). */
+/** Update group DM settings (name, icon, description, etc.). */
 export async function updateGroupDM(
 	threadId: string,
-	updates: { name?: string | null; iconURL?: string | null }
+	updates: {
+		name?: string | null;
+		iconURL?: string | null;
+		description?: string | null;
+		allowMemberInvites?: boolean;
+		pinnedMessageId?: string | null;
+		adminUids?: string[];
+	}
 ): Promise<void> {
 	const cleanThreadId = trimValue(threadId);
 	if (!cleanThreadId) throw new Error('Missing thread ID');
@@ -430,8 +443,98 @@ export async function updateGroupDM(
 	if ('iconURL' in updates) {
 		updateData.iconURL = updates.iconURL || null;
 	}
+	if ('description' in updates) {
+		updateData.description = updates.description?.trim() || null;
+	}
+	if ('allowMemberInvites' in updates) {
+		updateData.allowMemberInvites = updates.allowMemberInvites ?? true;
+	}
+	if ('pinnedMessageId' in updates) {
+		updateData.pinnedMessageId = updates.pinnedMessageId || null;
+	}
+	if ('adminUids' in updates) {
+		updateData.adminUids = updates.adminUids ?? [];
+	}
 
 	await updateDoc(tRef, updateData);
+
+	// Update rail for all participants if name or icon changed
+	if ('name' in updates || 'iconURL' in updates) {
+		try {
+			const tSnap = await getDoc(tRef);
+			if (tSnap.exists()) {
+				const data = tSnap.data() as DMThread;
+				const participants = data.participants ?? [];
+				if (participants.length > 0) {
+					await upsertDMRailForParticipants(
+						cleanThreadId,
+						participants,
+						data.lastMessage ?? null,
+						{
+							isGroup: true,
+							name: data.name ?? null,
+							iconURL: data.iconURL ?? null
+						}
+					);
+				}
+			}
+		} catch (err) {
+			console.warn('[dms] updateGroupDM: failed to update rail', err);
+		}
+	}
+}
+
+/** Check if a user is a group admin (creator or in adminUids). */
+export function isGroupAdmin(thread: DMThread, uid: string): boolean {
+	if (!thread.isGroup || !uid) return false;
+	if (thread.createdBy === uid) return true;
+	return thread.adminUids?.includes(uid) ?? false;
+}
+
+/** Mute a group DM for a user. */
+export async function muteGroupDM(
+	threadId: string,
+	uid: string,
+	muteUntil: number | null // timestamp or null for permanent mute
+): Promise<void> {
+	const cleanThreadId = trimValue(threadId);
+	const cleanUid = trimValue(uid);
+	if (!cleanThreadId || !cleanUid) throw new Error('Missing identifiers');
+
+	const db = getDb();
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	
+	await updateDoc(tRef, {
+		[`mutedBy.${cleanUid}`]: muteUntil,
+		updatedAt: serverTimestamp()
+	});
+}
+
+/** Unmute a group DM for a user. */
+export async function unmuteGroupDM(
+	threadId: string,
+	uid: string
+): Promise<void> {
+	const cleanThreadId = trimValue(threadId);
+	const cleanUid = trimValue(uid);
+	if (!cleanThreadId || !cleanUid) throw new Error('Missing identifiers');
+
+	const db = getDb();
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	
+	await updateDoc(tRef, {
+		[`mutedBy.${cleanUid}`]: deleteField(),
+		updatedAt: serverTimestamp()
+	});
+}
+
+/** Check if a group is muted for a user. */
+export function isGroupMuted(thread: DMThread, uid: string): boolean {
+	if (!thread.mutedBy || !uid) return false;
+	const muteUntil = thread.mutedBy[uid];
+	if (muteUntil === undefined) return false;
+	if (muteUntil === null) return true; // permanent mute
+	return Date.now() < muteUntil;
 }
 
 /** Add a participant to a group DM. */
@@ -573,15 +676,13 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		dmId: cleanThreadId
 	};
 
-	// Run message write and thread data fetch in parallel for speed
-	const summary = summarizeMessageForThread(payload);
-	const tRef = doc(db, COL_DMS, cleanThreadId);
-	
-	const [, tSnap] = await Promise.all([
-		addDoc(messagesCol, docData),
-		getDoc(tRef)
-	]);
+	await addDoc(messagesCol, docData);
 
+	const summary = summarizeMessageForThread(payload);
+
+	// bump thread meta
+	const tRef = doc(db, COL_DMS, cleanThreadId);
+	const tSnap = await getDoc(tRef);
 	const threadData: any = tSnap.exists() ? tSnap.data() : null;
 	const participants: string[] = threadData?.participants ?? [];
 	const resets: Record<string, any> = {};
@@ -589,9 +690,6 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		resets[`deletedFor.${participant}`] = deleteField();
 	}
 
-	// Run thread meta update and rail updates in parallel (don't await rails since it's non-critical)
-	const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
-	
 	await updateDoc(tRef, {
 		updatedAt: serverTimestamp(),
 		lastMessage: summary,
@@ -600,10 +698,13 @@ export async function sendDMMessage(threadId: string, payload: MessageInput) {
 		...resets
 	});
 
-	// Fire and forget rail updates - these are non-critical for the sender's experience
-	upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta, {
-		forceVisible: true
-	}).catch(() => {});
+	// Update rail mapping for all participants so new DMs appear (and refresh metadata)
+	try {
+		const threadMeta = threadData ? { isGroup: threadData.isGroup ?? false, name: threadData.name ?? null } : undefined;
+		await upsertDMRailForParticipants(cleanThreadId, participants, summary, threadMeta, {
+			forceVisible: true
+		});
+	} catch {}
 }
 
 /** Live messages for a thread (ascending). */
@@ -726,13 +827,11 @@ const DM_PAGE_SIZE = 50;
  * Subscribe to the latest DM messages (paginated).
  * Returns the newest PAGE_SIZE messages in real-time.
  * Callback receives messages and optionally the first doc snapshot for pagination.
- * Uses includeMetadataChanges to get cached data immediately when available.
  */
 export function streamDMMessages(
 	threadId: string,
 	cb: (msgs: any[], firstDoc?: DocumentSnapshot) => void,
-	pageSize = DM_PAGE_SIZE,
-	onError?: (error: Error) => void
+	pageSize = DM_PAGE_SIZE
 ): Unsubscribe {
 	const db = getDb();
 	const q1 = query(
@@ -740,25 +839,11 @@ export function streamDMMessages(
 		orderBy('createdAt', 'asc'),
 		limitToLast(pageSize)
 	);
-	// Use includeMetadataChanges to get cached data first for faster initial load
-	return onSnapshot(
-		q1,
-		{ includeMetadataChanges: true },
-		(snap) => {
-			const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-			const firstDoc = snap.docs[0] ?? undefined;
-			cb(msgs, firstDoc);
-		},
-		(error) => {
-			console.error('[streamDMMessages] Error:', error);
-			if (onError) {
-				onError(error);
-			} else {
-				// Default behavior: call callback with empty array to clear loading state
-				cb([]);
-			}
-		}
-	);
+	return onSnapshot(q1, (snap) => {
+		const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+		const firstDoc = snap.docs[0] ?? undefined;
+		cb(msgs, firstDoc);
+	});
 }
 
 /**
@@ -911,7 +996,7 @@ async function upsertDMRailForParticipants(
 	threadId: string,
 	participants: string[],
 	lastMessage: string | null,
-	threadMeta?: { isGroup?: boolean; name?: string | null },
+	threadMeta?: { isGroup?: boolean; name?: string | null; iconURL?: string | null },
 	options?: RailUpsertOptions
 ) {
 	await Promise.all(
@@ -927,7 +1012,7 @@ async function upsertDMRailForUid(
 	uid: string,
 	participants: string[],
 	lastMessage: string | null,
-	threadMeta?: { isGroup?: boolean; name?: string | null },
+	threadMeta?: { isGroup?: boolean; name?: string | null; iconURL?: string | null },
 	options?: RailUpsertOptions
 ) {
 	const db = getDb();
@@ -942,7 +1027,8 @@ async function upsertDMRailForUid(
 		lastMessage: lastMessage ?? null,
 		updatedAt: now,
 		isGroup,
-		groupName: isGroup ? (threadMeta?.name ?? null) : null
+		groupName: isGroup ? (threadMeta?.name ?? null) : null,
+		iconURL: isGroup ? (threadMeta?.iconURL ?? null) : null
 	};
 	if (options?.forceVisible) {
 		payload.hidden = false;
@@ -979,14 +1065,19 @@ export function streamMyDMs(
 			hidden?: boolean;
 			isGroup?: boolean;
 			groupName?: string | null;
-		}>
+			iconURL?: string | null;
+		}>,
+		meta?: { fromCache: boolean; hasPendingWrites: boolean }
 	) => void
 ): Unsubscribe {
 	const db = getDb();
 	const q1 = query(collection(db, COL_PROFILES, uid, SUB_DM_RAIL), orderBy('updatedAt', 'desc'));
-	return onSnapshot(q1, (snap) => {
+	return onSnapshot(q1, { includeMetadataChanges: true }, (snap) => {
 		const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-		cb(rows.filter((r) => !r.hidden));
+		cb(rows.filter((r) => !r.hidden), {
+			fromCache: snap.metadata.fromCache,
+			hasPendingWrites: snap.metadata.hasPendingWrites
+		});
 	});
 }
 
