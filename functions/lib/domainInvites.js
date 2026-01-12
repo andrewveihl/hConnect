@@ -8,7 +8,13 @@ const firebase_functions_1 = require("firebase-functions");
 const callableConfig = {
     region: 'us-central1',
     invoker: 'public',
-    cors: ['https://hconnect-6212b.web.app', 'https://hconnect-6212b.firebaseapp.com', 'http://localhost:5173', 'http://127.0.0.1:5173']
+    cors: [
+        'https://hconnect-6212b.web.app',
+        'https://hconnect-6212b.firebaseapp.com',
+        'https://hconnect.healthspaces.io',
+        'http://localhost:5173',
+        'http://127.0.0.1:5173'
+    ]
 };
 exports.requestDomainAutoInvite = (0, https_1.onCall)(callableConfig, async (request) => {
     const uid = request.auth?.uid;
