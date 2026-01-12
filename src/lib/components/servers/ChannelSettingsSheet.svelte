@@ -30,39 +30,27 @@ let linkDescription = $state('');
 		linkDescription = '';
 	}
 
-const keyHandler = (event: KeyboardEvent) => {
-	if (event.key === 'Escape') dispatch('close');
-	if (event.key === 'Enter' || event.key === ' ') {
-		event.preventDefault();
-		dispatch('close');
-	}
-};
+	const keyHandler = (event: KeyboardEvent) => {
+		if (event.key === 'Escape') dispatch('close');
+	};
 </script>
 
 {#if visible}
-	<div
-		class="channel-settings__backdrop"
-		role="button"
-		aria-label="Close channel settings"
-		onclick={() => dispatch('close')}
-		onkeydown={keyHandler}
-		tabindex="0"
-	>
+	<div class="channel-settings__backdrop" role="presentation" on:click={() => dispatch('close')} on:keydown={keyHandler} tabindex="-1">
 		<div
 			class="channel-settings__panel"
 			role="dialog"
 			aria-modal="true"
 			aria-label={`${channelName} settings`}
 			tabindex="-1"
-			onclick={(event) => event.stopPropagation()}
-			onkeydown={(event) => event.stopPropagation()}
+			on:click|stopPropagation
 		>
 			<header class="channel-settings__header">
 				<div>
 					<div class="channel-settings__eyebrow">Channel</div>
 					<h2>#{channelName}</h2>
 				</div>
-				<button class="channel-settings__close" type="button" onclick={() => dispatch('close')} aria-label="Close channel settings">
+				<button class="channel-settings__close" type="button" on:click={() => dispatch('close')} aria-label="Close channel settings">
 					<i class="bx bx-x"></i>
 				</button>
 			</header>
@@ -75,13 +63,7 @@ const keyHandler = (event: KeyboardEvent) => {
 					</div>
 				</div>
 				{#if canManagePins}
-					<form
-						class="pin-form"
-						onsubmit={(event) => {
-							event.preventDefault();
-							submitLink();
-						}}
-					>
+					<form class="pin-form" on:submit|preventDefault={submitLink}>
 						<label>
 							<span>Title</span>
 							<input type="text" placeholder="Team standup" bind:value={linkTitle} />
@@ -95,7 +77,7 @@ const keyHandler = (event: KeyboardEvent) => {
 							<textarea rows="2" placeholder="Who uses this link or when" bind:value={linkDescription}></textarea>
 						</label>
 						<div class="pin-form__actions">
-							<button type="button" class="ghost" onclick={() => dispatch('close')}>Cancel</button>
+							<button type="button" class="ghost" on:click={() => dispatch('close')}>Cancel</button>
 							<button type="submit" class="primary" disabled={!linkUrl.trim()}>Save link</button>
 						</div>
 					</form>
@@ -115,11 +97,11 @@ const keyHandler = (event: KeyboardEvent) => {
 									{/if}
 								</div>
 								<div class="pin-row__actions">
-									<button type="button" class="ghost" onclick={() => dispatch('openPinned', { messageId: pin.messageId, linkUrl: pin.linkUrl })}>
+									<button type="button" class="ghost" on:click={() => dispatch('openPinned', { messageId: pin.messageId, linkUrl: pin.linkUrl })}>
 										Open
 									</button>
 									{#if canManagePins}
-										<button type="button" class="ghost danger" onclick={() => dispatch('unpin', { messageId: pin.messageId })}>
+										<button type="button" class="ghost danger" on:click={() => dispatch('unpin', { messageId: pin.messageId })}>
 											Unpin
 										</button>
 									{/if}
@@ -285,6 +267,17 @@ const keyHandler = (event: KeyboardEvent) => {
 
 	.pin-row__title {
 		font-weight: 700;
+	}
+
+	.pin-row__link {
+		color: var(--color-accent);
+		text-decoration: none;
+		font-size: 0.95rem;
+	}
+
+	.pin-row__link:hover,
+	.pin-row__link:focus-visible {
+		text-decoration: underline;
 	}
 
 	.pin-row__desc {

@@ -9,7 +9,7 @@
 
 	let { items = [], canManagePins = false }: Props = $props();
 	let open = $state(false);
-	let root = $state<HTMLDivElement | null>(null);
+	let root: HTMLDivElement | null = null;
 
 	const dispatch = createEventDispatcher<{
 		open: { messageId: string; linkUrl?: string | null };
@@ -81,7 +81,7 @@
 
 {#if items.length}
 	<div class="pinned-bar" bind:this={root}>
-		<button class="pinned-pill" type="button" onclick={toggle} aria-expanded={open} aria-label="Pinned messages">
+		<button class="pinned-pill" type="button" on:click={toggle} aria-expanded={open} aria-label="Pinned messages">
 			<i class="bx bx-pin"></i>
 			<span class="pinned-pill__count">{items.length}</span>
 		</button>
@@ -90,17 +90,11 @@
 				{#each items as pin (pin.id)}
 					{@const icon = iconFor(pin)}
 					{@const meet = isMeet(pin)}
-					<div
+					<button
+						type="button"
 						class="pinned-card"
 						role="menuitem"
-						tabindex="0"
-						onclick={() => dispatch('open', { messageId: pin.messageId, linkUrl: pin.linkUrl })}
-						onkeydown={(event) => {
-							if (event.key === 'Enter' || event.key === ' ') {
-								event.preventDefault();
-								dispatch('open', { messageId: pin.messageId, linkUrl: pin.linkUrl });
-							}
-						}}
+						on:click={() => dispatch('open', { messageId: pin.messageId, linkUrl: pin.linkUrl })}
 					>
 						<div class="pinned-card__icon" style={`color:${icon.color}; background:${icon.bg};`}>
 							{#if icon.customSvg === 'meet'}
@@ -149,7 +143,7 @@
 								class="pinned-card__unpin"
 								title="Unpin"
 								aria-label="Unpin message"
-								onclick={(event) => {
+								on:click={(event) => {
 									event.stopPropagation();
 									dispatch('unpin', { messageId: pin.messageId });
 								}}
@@ -157,7 +151,7 @@
 								<i class="bx bx-x" aria-hidden="true"></i>
 							</button>
 						{/if}
-					</div>
+					</button>
 				{/each}
 			</div>
 		{/if}

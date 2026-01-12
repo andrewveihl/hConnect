@@ -14,9 +14,6 @@
   /* Mobile dock height - Discord-style compact nav (includes safe area) */
   --mobile-dock-height: calc(6rem + env(safe-area-inset-bottom, 0px));
   
-  /* Desktop user panel height (Discord-style bottom-left panel) */
-  --desktop-user-bar-height: 52px;
-  
   /* Mobile header height - extends into safe area on iPhone 15+ */
   --mobile-header-height: 3rem;
   --mobile-header-total: calc(var(--mobile-header-height) + var(--safe-area-top));
@@ -32,13 +29,6 @@
   
   /* Enable hardware acceleration for smooth scrolling */
   --scroll-behavior: smooth;
-}
-
-/* Desktop: disable mobile dock */
-@media (min-width: 768px) {
-  :root {
-    --mobile-dock-height: 0px;
-  }
 }
 
 /* iOS Safari: force use of the largest available height */
@@ -1620,18 +1610,6 @@ body {
   );
 }
 
-/* Desktop: add extra padding for the DesktopUserBar (72px height + 20px bottom offset) */
-@media (min-width: 768px) {
-  .message-scroll-region .chat-scroll {
-    --chat-scroll-padding: calc(
-      var(--chat-safe-area-bottom, env(safe-area-inset-bottom, 0px)) +
-      var(--chat-keyboard-offset, 0px) +
-      1.25rem +
-      var(--desktop-user-bar-height, 52px) + 2rem
-    );
-  }
-}
-
 @media (min-width: 768px) {
   .chat-input-region {
     position: sticky;
@@ -2418,8 +2396,6 @@ body {
   background: color-mix(in srgb, var(--color-panel) 70%, transparent);
   color: var(--color-text-primary);
   transition: background 150ms ease, border 150ms ease, color 150ms ease, transform 150ms ease;
-  position: relative;
-  overflow: visible;
 }
 
 .rail-button:hover {
@@ -2524,7 +2500,6 @@ body {
   height: 100%;
   border-radius: 9999px;
   overflow: hidden;
-  position: relative;
 }
 
 .rail-button__fallback {
@@ -2535,22 +2510,20 @@ body {
 
 .rail-badge {
   position: absolute;
-  top: -0.6rem;
-  right: -0.6rem;
-  min-width: 1.65rem;
-  height: 1.65rem;
+  top: -0.2rem;
+  right: -0.2rem;
+  min-width: 1.35rem;
+  height: 1.35rem;
   display: grid;
   place-items: center;
-  padding: 0 0.55rem;
+  padding: 0 0.4rem;
   border-radius: 999px;
   background: var(--color-alert, #f87171);
   color: #fff;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 700;
   line-height: 1;
   box-shadow: 0 8px 22px rgba(248, 114, 117, 0.4);
-  border: 2px solid var(--color-panel, #1e1e2e);
-  z-index: 50;
 }
 
 .appearance-option {

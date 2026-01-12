@@ -100,52 +100,6 @@ interface SlackUserCache {
 // In-memory cache for Slack users (refresh every hour)
 const slackUserCache: SlackUserCache = {};
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
-const THREAD_DEFAULT_TTL_HOURS = 24;
-const THREAD_MAX_MEMBER_LIMIT = 20;
-const THREAD_ARCHIVE_MAX_HOURS = 7 * 24;
-const THREAD_VISIBILITY = 'inherit_parent_with_exceptions';
-
-const clampNumber = (value: number, min: number, max: number) =>
-	Math.max(min, Math.min(max, value));
-
-const nextAutoArchiveAt = (ttlHours: number) => {
-	const ttl = clampNumber(ttlHours, 1, THREAD_ARCHIVE_MAX_HOURS);
-	return Date.now() + ttl * 60 * 60 * 1000;
-};
-
-const normalizeText = (value: string | null | undefined) =>
-	typeof value === 'string' ? value.trim() : '';
-
-const compactWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
-
-const previewFromText = (value: string | null | undefined, max = 120) => {
-	const cleaned = compactWhitespace(normalizeText(value));
-	if (!cleaned) return '';
-	return cleaned.length > max ? cleaned.slice(0, max) : cleaned;
-};
-
-const threadNameFromText = (value: string | null | undefined) => {
-	const cleaned = previewFromText(value, 48);
-	return cleaned || 'Thread';
-};
-
-const isSlackUid = (value: string | null | undefined) =>
-	typeof value === 'string' && value.startsWith('slack:');
-
-const pickMessageText = (data?: Record<string, any> | null) => {
-	if (!data) return '';
-	return normalizeText(
-		data.plainTextContent ?? data.text ?? data.content ?? data.preview ?? ''
-	);
-};
-
-const pickMessageAuthorId = (data?: Record<string, any> | null): string | null => {
-	if (!data) return null;
-	const uid = typeof data.uid === 'string' ? data.uid : null;
-	const authorId = typeof data.authorId === 'string' ? data.authorId : null;
-	const picked = normalizeText(uid ?? authorId ?? '');
-	return picked || null;
-};
 
 // ============ Credentials Helpers ============
 
@@ -397,73 +351,32 @@ async function syncSlackMessageToHConnect(
 	// Convert message content
 	const content = convertSlackToHConnect(event.text);
 
-	const hconnectServerId = bridge.hconnectServerId || serverId;
-	const hconnectChannelId = bridge.hconnectChannelId;
-	const slackUid = `slack:${event.user}`;
-
 	// Create the message document
-	let messageRef = db
-		.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`)
+	const messageRef = db
+		.collection(`servers/${bridge.hconnectServerId}/channels/${bridge.hconnectChannelId}/messages`)
 		.doc();
 
 	// Check if this is a thread reply and find the parent message
 	let replyToId: string | null = null;
 	let isThreadReply = false;
-	let threadTarget: { id: string; data: Record<string, any> } | null = null;
 	
 	if (event.thread_ts && event.thread_ts !== event.ts) {
 		isThreadReply = true;
 		// Find the parent message in hConnect
 		const parentMessage = await findHConnectMessageBySlackTs(
-			hconnectServerId,
-			hconnectChannelId,
+			serverId,
+			bridge.hconnectChannelId,
 			event.thread_ts
 		);
 		if (parentMessage) {
 			replyToId = parentMessage.id;
-			if (bridge.syncThreads !== false) {
-				try {
-					threadTarget = await ensureThreadForParentMessage({
-						serverId: hconnectServerId,
-						channelId: hconnectChannelId,
-						parentMessageId: parentMessage.id,
-						parentMessageData: parentMessage.data,
-						fallbackCreatorId: slackUid
-					});
-				} catch (err) {
-					logger.warn('[slack] Failed to ensure thread for Slack reply', {
-						serverId: hconnectServerId,
-						channelId: hconnectChannelId,
-						parentMessageId: parentMessage.id,
-						error: err
-					});
-				}
-			} else {
-				logger.info('[slack] Thread sync disabled for bridge, storing reply as channel message', {
-					bridgeId: bridge.id,
-					parentMessageId: parentMessage.id
-				});
-			}
-		} else {
-			logger.warn('[slack] Thread reply missing parent message, storing as channel message', {
-				bridgeId: bridge.id,
-				threadTs: event.thread_ts
-			});
 		}
 	}
 
-	if (threadTarget) {
-		messageRef = db
-			.collection(
-				`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`
-			)
-			.doc();
-	}
-
-	const baseMessageData = {
+	const messageData = {
 		// Core fields
-		uid: slackUid, // Special UID format for Slack users
-		authorId: slackUid,
+		uid: `slack:${event.user}`, // Special UID format for Slack users
+		authorId: `slack:${event.user}`,
 		text: content,
 		content: content,
 		plainTextContent: event.text,
@@ -475,6 +388,10 @@ async function syncSlackMessageToHConnect(
 			isSlackUser: true
 		},
 		displayName: authorName,
+
+		// Thread/reply info
+		...(replyToId && { replyTo: replyToId }),
+		...(isThreadReply && { isThreadReply: true }),
 
 		// Slack metadata
 		slackMeta: {
@@ -496,43 +413,10 @@ async function syncSlackMessageToHConnect(
 		type: 'text'
 	};
 
-	const messageData = threadTarget
-		? {
-				...baseMessageData,
-				serverId: hconnectServerId,
-				channelId: hconnectChannelId,
-				threadId: threadTarget.id,
-				...(isThreadReply && { isThreadReply: true })
-			}
-		: {
-				...baseMessageData,
-				...(replyToId && { replyTo: replyToId }),
-				...(isThreadReply && { isThreadReply: true })
-			};
-
 	await messageRef.set(messageData);
 
-	if (threadTarget) {
-		const preview = previewFromText(content, 120) || 'New message';
-		const ttlHours =
-			typeof threadTarget.data?.ttlHours === 'number'
-				? threadTarget.data.ttlHours
-				: THREAD_DEFAULT_TTL_HOURS;
-
-		await db
-			.doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
-			.update({
-				lastMessageAt: Timestamp.now(),
-				lastMessagePreview: preview,
-				autoArchiveAt: nextAutoArchiveAt(ttlHours),
-				status: 'active',
-				archivedAt: null,
-				messageCount: FieldValue.increment(1)
-			});
-	}
-
 	// Update bridge stats (using per-server path)
-	await db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
+	await db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
 		lastSyncAt: Timestamp.now(),
 		messageCount: FieldValue.increment(1)
 	});
@@ -551,7 +435,7 @@ async function findHConnectMessageBySlackTs(
 	serverId: string,
 	channelId: string,
 	slackTs: string
-): Promise<{ id: string; data: Record<string, any>; reactions?: Record<string, string[]> } | null> {
+): Promise<{ id: string; reactions?: Record<string, string[]> } | null> {
 	const messagesSnapshot = await db
 		.collection(`servers/${serverId}/channels/${channelId}/messages`)
 		.where('slackMeta.messageTs', '==', slackTs)
@@ -563,91 +447,11 @@ async function findHConnectMessageBySlackTs(
 	}
 
 	const doc = messagesSnapshot.docs[0];
-	const data = doc.data() as Record<string, any>;
+	const data = doc.data();
 	return {
 		id: doc.id,
-		data,
 		reactions: data.reactions || {}
 	};
-}
-
-async function findThreadByParentMessageId(
-	serverId: string,
-	channelId: string,
-	parentMessageId: string
-): Promise<{ id: string; data: Record<string, any> } | null> {
-	const threadsSnapshot = await db
-		.collection(`servers/${serverId}/channels/${channelId}/threads`)
-		.where('createdFromMessageId', '==', parentMessageId)
-		.limit(1)
-		.get();
-
-	if (threadsSnapshot.empty) {
-		return null;
-	}
-
-	const doc = threadsSnapshot.docs[0];
-	return { id: doc.id, data: doc.data() as Record<string, any> };
-}
-
-async function createThreadForParentMessage(options: {
-	serverId: string;
-	channelId: string;
-	parentMessageId: string;
-	parentMessageData?: Record<string, any> | null;
-	fallbackCreatorId: string;
-}): Promise<{ id: string; data: Record<string, any> }> {
-	const { serverId, channelId, parentMessageId, parentMessageData, fallbackCreatorId } = options;
-	const threadRef = db.collection(`servers/${serverId}/channels/${channelId}/threads`).doc();
-	const now = Timestamp.now();
-	const parentText = pickMessageText(parentMessageData);
-	const preview = previewFromText(parentText, 120) || 'Thread';
-	const name = threadNameFromText(parentText);
-	const creatorId = pickMessageAuthorId(parentMessageData) || fallbackCreatorId;
-	const memberUids = creatorId && !isSlackUid(creatorId) ? [creatorId] : [];
-
-	const payload: Record<string, any> = {
-		id: threadRef.id,
-		serverId,
-		channelId,
-		parentChannelId: channelId,
-		createdBy: creatorId || null,
-		createdFromMessageId: parentMessageId,
-		createdAt: now,
-		name,
-		preview,
-		rootPreview: preview,
-		lastMessageAt: now,
-		lastMessagePreview: preview,
-		autoArchiveAt: nextAutoArchiveAt(THREAD_DEFAULT_TTL_HOURS),
-		status: 'active',
-		ttlHours: THREAD_DEFAULT_TTL_HOURS,
-		maxMembers: THREAD_MAX_MEMBER_LIMIT,
-		memberUids,
-		memberCount: memberUids.length,
-		visibility: THREAD_VISIBILITY,
-		archivedAt: null,
-		messageCount: 0
-	};
-
-	await threadRef.set(payload);
-	return { id: threadRef.id, data: payload };
-}
-
-async function ensureThreadForParentMessage(options: {
-	serverId: string;
-	channelId: string;
-	parentMessageId: string;
-	parentMessageData?: Record<string, any> | null;
-	fallbackCreatorId: string;
-}): Promise<{ id: string; data: Record<string, any> }> {
-	const existing = await findThreadByParentMessageId(
-		options.serverId,
-		options.channelId,
-		options.parentMessageId
-	);
-	if (existing) return existing;
-	return createThreadForParentMessage(options);
 }
 
 /**
@@ -1343,12 +1147,12 @@ export async function syncHConnectMessageToSlack(
  * Sync an hConnect thread message to Slack
  * Called from Firestore trigger for thread messages
  * Thread messages are stored at: servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}
- * The threadId is the thread document ID in hConnect
+ * The threadId is the parent message ID in hConnect
  */
 export async function syncHConnectThreadMessageToSlack(
 	serverId: string,
 	channelId: string,
-	threadId: string, // This is the thread document ID in hConnect
+	threadId: string, // This is the parent message ID in hConnect
 	messageId: string,
 	messageData: {
 		uid: string;
@@ -1419,91 +1223,32 @@ export async function syncHConnectThreadMessageToSlack(
 		logger.warn('[slack-outbound-thread] Could not read server Slack config for avatar', { serverId });
 	}
 
-	// Resolve the parent channel message from the thread document
+	// Find parent message's Slack timestamp
+	// The threadId is the parent message ID in hConnect
 	let parentSlackTs: string | undefined;
-	let parentMessageId: string | null = null;
-	let parentMessageData: Record<string, any> | null = null;
 	try {
-		const threadDoc = await db
-			.doc(`servers/${serverId}/channels/${channelId}/threads/${threadId}`)
-			.get();
-		if (!threadDoc.exists) {
-			logger.warn('[slack-outbound-thread] Thread not found', { threadId });
-			return;
-		}
-		const threadData = threadDoc.data() as Record<string, any>;
-		parentMessageId =
-			typeof threadData?.createdFromMessageId === 'string'
-				? threadData.createdFromMessageId
-				: null;
-
-		if (!parentMessageId) {
-			logger.warn('[slack-outbound-thread] Thread missing parent message id', { threadId });
-			return;
-		}
-
 		const parentDoc = await db
-			.doc(`servers/${serverId}/channels/${channelId}/messages/${parentMessageId}`)
+			.doc(`servers/${serverId}/channels/${channelId}/messages/${threadId}`)
 			.get();
 		if (parentDoc.exists) {
-			parentMessageData = parentDoc.data() as Record<string, any>;
-			if (parentMessageData?.slackMeta?.messageTs) {
-				parentSlackTs = parentMessageData.slackMeta.messageTs;
-			} else if (parentMessageData?.slackTs) {
-				parentSlackTs = parentMessageData.slackTs;
+			const parentData = parentDoc.data();
+			if (parentData?.slackMeta?.messageTs) {
+				parentSlackTs = parentData.slackMeta.messageTs;
+			} else if (parentData?.slackTs) {
+				parentSlackTs = parentData.slackTs;
 			}
 			logger.info('[slack-outbound-thread] Found parent message', {
 				threadId,
-				parentMessageId,
 				parentSlackTs: parentSlackTs || 'not found'
 			});
 		} else {
-			logger.warn('[slack-outbound-thread] Parent message not found', {
-				threadId,
-				parentMessageId
-			});
+			logger.warn('[slack-outbound-thread] Parent message not found', { threadId });
 		}
 	} catch (err) {
 		logger.warn('[slack-outbound-thread] Could not find parent message', { 
 			threadId,
 			error: err
 		});
-	}
-
-	if (!parentSlackTs && parentMessageId && parentMessageData) {
-		const hasSlackMeta = Boolean(
-			parentMessageData?.slackMeta?.messageTs || parentMessageData?.slackTs
-		);
-		if (!hasSlackMeta && !parentMessageData.isSlackMessage) {
-			logger.info('[slack-outbound-thread] Syncing parent message to Slack for thread', {
-				threadId,
-				parentMessageId
-			});
-			try {
-				await syncHConnectMessageToSlack(
-					serverId,
-					channelId,
-					parentMessageId,
-					parentMessageData as any
-				);
-				const refreshed = await db
-					.doc(`servers/${serverId}/channels/${channelId}/messages/${parentMessageId}`)
-					.get();
-				if (refreshed.exists) {
-					const refreshedData = refreshed.data() as Record<string, any>;
-					parentSlackTs =
-						refreshedData?.slackMeta?.messageTs ??
-						refreshedData?.slackTs ??
-						parentSlackTs;
-				}
-			} catch (err) {
-				logger.warn('[slack-outbound-thread] Failed to sync parent message', {
-					threadId,
-					parentMessageId,
-					error: err
-				});
-			}
-		}
 	}
 
 	if (!parentSlackTs) {

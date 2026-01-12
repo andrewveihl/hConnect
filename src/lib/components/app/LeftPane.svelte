@@ -108,9 +108,6 @@
 	let fabSnapZoneEl: HTMLDivElement | null = $state(null);
 	const FAB_SNAP_ZONE_ID = 'left-rail-fab-snap';
 	let snapZones = $state<import('$lib/stores/fabSnap').SnapZone[]>([]);
-	let fabTrayOpen = $state(false);
-	let registeredFabCount = $state(0);
-	const hasFabTray = $derived(registeredFabCount > 0);
 	const currentStatusSelection = $derived(
 		myOverrideActive && myOverrideState ? myOverrideState : 'auto'
 	);
@@ -204,21 +201,6 @@
 		activeSnapZoneId = event.detail.zoneId;
 	}
 
-	function handleFabTrayStateChange(event: CustomEvent<{ open: boolean }>) {
-		fabTrayOpen = event.detail.open;
-	}
-
-	function handleFabRegistryChanged(event: CustomEvent<{ count: number }>) {
-		registeredFabCount = event.detail.count;
-	}
-
-	function toggleFabTrayFromRail(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (!browser) return;
-		window.dispatchEvent(new CustomEvent('fabTrayToggleRequest'));
-	}
-
 	// Subscribe to snap zones updates
 	let snapZonesUnsub: (() => void) | null = null;
 	let snapZoneRegistered = false;
@@ -254,8 +236,6 @@
 		if (browser) {
 			window.addEventListener('resize', updateFabSnapZone);
 			window.addEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
-			window.addEventListener('fabTrayStateChange', handleFabTrayStateChange as EventListener);
-			window.addEventListener('fabRegistryChanged', handleFabRegistryChanged as EventListener);
 			
 			// Subscribe to snap zones
 			snapZonesUnsub = fabSnapStore.subscribe((state) => {
@@ -263,8 +243,6 @@
 					(z) => z.id === FAB_SNAP_ZONE_ID || z.id.startsWith(`${FAB_SNAP_ZONE_ID}-stack-`)
 				);
 			});
-
-			registeredFabCount = fabSnapStore.getRegisteredFabs().length;
 		}
 	});
 
@@ -277,8 +255,6 @@
 			fabSnapStore.unregisterZone(FAB_SNAP_ZONE_ID);
 			window.removeEventListener('resize', updateFabSnapZone);
 			window.removeEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
-			window.removeEventListener('fabTrayStateChange', handleFabTrayStateChange as EventListener);
-			window.removeEventListener('fabRegistryChanged', handleFabRegistryChanged as EventListener);
 			snapZonesUnsub?.();
 		}
 	});
@@ -288,6 +264,7 @@
 		else localCreateOpen = true;
 	};
 	const handleLogoClick = (event: MouseEvent) => {
+		if (!currentPath.startsWith('/admin')) return;
 		event.preventDefault();
 		if (browser) {
 			try {
@@ -296,10 +273,7 @@
 				// ignore storage errors
 			}
 		}
-		// On desktop (non-admin), go to DMs; on mobile or admin, go to activity
-		const isDesktop = browser && window.matchMedia('(min-width: 768px)').matches;
-		const destination = isDesktop && !currentPath.startsWith('/admin') ? '/dms' : '/';
-		goto(destination, { keepFocus: true, noScroll: true, replaceState: true });
+		goto('/', { keepFocus: true, noScroll: true, replaceState: true });
 	};
 	function openUserSettings(event: MouseEvent) {
 		event.preventDefault();
@@ -778,42 +752,11 @@
 >
 	<div class="h-4 shrink-0"></div>
 
-	<a href="/dms" class="rail-logo" aria-label="Home" onclick={handleLogoClick}>
+	<a href="/" class="rail-logo" aria-label="Activity" onclick={handleLogoClick}>
 		<img src={logoMarkUrl} alt="hConnect" class="rail-logo__image" />
 	</a>
 
 	<div class="rail-divider"></div>
-
-	<!-- DM alerts - shown above servers like Discord (desktop only) -->
-	{#if dmAlerts.length}
-		<div class="rail-dm-alerts flex flex-col items-center gap-2 w-full px-2 py-1" aria-label="Unread direct messages">
-			{#each dmAlerts as dm (dm.id)}
-				<a
-					href={dm.href}
-					class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
-					class:rail-button--alert={activeDmThreadId !== dm.threadId}
-					aria-label={dm.title}
-					title={dm.title}
-					aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
-				>
-					{#if dm.isGroup}
-						<div class="rail-button__avatar-wrap w-8 h-8 rounded-full bg-muted flex items-center justify-center">
-							<i class="bx bx-group text-lg text-muted-foreground"></i>
-						</div>
-					{:else}
-						{@const avatarUser = {
-							uid: dm.otherUid,
-							photoURL: dm.photoURL,
-							displayName: dm.title
-						}}
-						<Avatar user={avatarUser} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
-					{/if}
-					<span class="rail-badge">{formatBadge(dm.unread)}</span>
-				</a>
-			{/each}
-		</div>
-		<div class="rail-dm-alerts-divider rail-divider"></div>
-	{/if}
 
 	<div
 		class="flex-1 w-full overflow-y-auto touch-pan-y"
@@ -899,29 +842,43 @@
 	</div>
 	{/if}
 
-	{#if hasFabTray}
-		<div class="rail-fab-tray-toggle">
-			<button
-				type="button"
-				class={`rail-button rail-button--fab-tray-toggle fab-tray__toggle ${fabTrayOpen ? 'rail-button--fab-tray-toggle-open' : ''}`}
-				onclick={toggleFabTrayFromRail}
-				aria-label={fabTrayOpen ? 'Hide widget dock' : 'Show widget dock'}
-				title={fabTrayOpen ? 'Hide widget dock' : 'Show widget dock'}
-			>
-				<i class={fabTrayOpen ? 'bx bx-chevron-down text-2xl leading-none' : 'bx bx-chevron-up text-2xl leading-none'}></i>
-			</button>
-		</div>
-	{/if}
-
 	{#if showBottomActions}
 		<div
 			class="rail-bottom w-full flex flex-col items-center gap-3 p-3 mt-auto"
 			style:padding-bottom={padForDock
-				? 'calc(1rem + var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px))'
+				? '1rem'
 				: 'calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px) + 0.25rem)'}
 		>
-			<!-- DMs button - hidden on desktop since logo goes to DMs -->
-			<div class="w-full flex flex-col items-center gap-2 pt-1 rail-dms-button">
+			{#if dmAlerts.length}
+				<div class="flex flex-col items-center gap-2 w-full" aria-label="Unread direct messages">
+					{#each dmAlerts as dm (dm.id)}
+						<a
+							href={dm.href}
+							class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
+							class:rail-button--alert={activeDmThreadId !== dm.threadId}
+							aria-label={dm.title}
+							title={dm.title}
+							aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
+						>
+							{#if dm.isGroup}
+								<div class="rail-button__avatar-wrap w-8 h-8 rounded-full bg-muted flex items-center justify-center">
+									<i class="bx bx-group text-lg text-muted-foreground"></i>
+								</div>
+							{:else}
+								{@const avatarUser = {
+									uid: dm.otherUid,
+									photoURL: dm.photoURL,
+									displayName: dm.title
+								}}
+								<Avatar user={avatarUser} name={dm.title} size="sm" class="rail-button__avatar-wrap" />
+							{/if}
+							<span class="rail-badge">{formatBadge(dm.unread)}</span>
+						</a>
+					{/each}
+				</div>
+			{/if}
+
+			<div class="w-full flex flex-col items-center gap-2 pt-1">
 				{#if enableDMs}
 					<a
 						href="/dms"
@@ -953,7 +910,6 @@
 				{/if}
 			</div>
 
-			<!-- Profile - hidden on desktop, shown in DesktopUserBar instead -->
 			<div class="rail-profile-wrapper">
 				<div class="rail-profile-anchor">
 					<a
@@ -1122,83 +1078,9 @@
 		}
 	}
 
-	.rail-fab-tray-toggle {
-		display: none;
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + 8px);
-		justify-content: center;
-		z-index: 2;
-	}
-
-	.rail-button--fab-tray-toggle-open {
-		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-		border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
-		color: var(--color-accent);
-	}
-
-	.rail-button--fab-tray-toggle-open:hover {
-		background: color-mix(in srgb, var(--color-accent) 26%, transparent);
-	}
-
-	@media (max-width: 767px) {
-		.rail-fab-tray-toggle {
-			display: flex;
-		}
-
-		.rail-server-stack {
-			padding-bottom: calc(1rem + var(--mobile-dock-height, 0px) + 56px);
-		}
-	}
-
-	/* Desktop: add extra padding for the DesktopUserBar */
-	@media (min-width: 768px) {
-		.rail-server-stack {
-			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 3rem);
-		}
-	}
-
-	/* Hide DM alerts on mobile - mobile uses taskbar instead */
-	.rail-dm-alerts,
-	.rail-dm-alerts-divider {
-		display: none;
-	}
-
-	@media (min-width: 768px) {
-		/* Show DM alerts on desktop */
-		.rail-dm-alerts,
-		.rail-dm-alerts-divider {
-			display: flex;
-		}
-		.rail-dm-alerts-divider {
-			display: block;
-		}
-	}
-
-	/* Hide DMs button and profile on desktop - moved to DesktopUserBar */
-	@media (min-width: 768px) {
-		.rail-dms-button {
-			display: none !important;
-		}
-		.rail-profile-wrapper {
-			display: none !important;
-		}
-	}
-
 	.rail-bottom {
 		position: relative;
 	}
-
-	.rail-dms-button {
-		width: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.5rem;
-		padding-top: 0.25rem;
-	}
-
 
 	.rail-profile-wrapper {
 		width: 100%;

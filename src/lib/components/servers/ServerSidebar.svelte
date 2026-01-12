@@ -16,12 +16,11 @@
 		removeVoiceDebugSection,
 		setVoiceDebugSection
 	} from '$lib/utils/voiceDebugContext';
-	import { resolveProfilePhotoURL, isDefaultAvatarUrl } from '$lib/utils/profile';
+	import { resolveProfilePhotoURL, DEFAULT_AVATAR_URL } from '$lib/utils/profile';
 	import { voiceSession } from '$lib/stores/voice';
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
 	import { markChannelActivityRead } from '$lib/stores/activityFeed';
-	import { getCachedServerChannels, updateServerChannelCache } from '$lib/stores/messageCache';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import {
 		collection,
@@ -86,76 +85,6 @@
 		allowedRoleIds?: string[];
 		categoryId?: string | null;
 	};
-
-	const CHANNEL_CACHE_STORAGE_PREFIX = 'server-channels:';
-	const CHANNEL_CACHE_STORAGE_LIMIT = 200;
-
-	function sortChannelsByPosition(list: Chan[]) {
-		return list.slice().sort((a, b) => {
-			const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
-			const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
-			return ap - bp || a.id.localeCompare(b.id);
-		});
-	}
-
-	function normalizeChannelForStorage(chan: Chan): Chan {
-		return {
-			id: chan.id,
-			name: chan.name,
-			type: chan.type,
-			position: typeof chan.position === 'number' ? chan.position : undefined,
-			isPrivate: chan.isPrivate === true,
-			allowedRoleIds: Array.isArray(chan.allowedRoleIds) ? chan.allowedRoleIds : undefined,
-			categoryId: chan.categoryId ?? null
-		};
-	}
-
-	function loadStoredChannels(server: string): Chan[] {
-		if (typeof window === 'undefined') return [];
-		try {
-			const raw = sessionStorage.getItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`);
-			if (!raw) return [];
-			const parsed = JSON.parse(raw);
-			return Array.isArray(parsed)
-				? parsed.filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
-				: [];
-		} catch {
-			return [];
-		}
-	}
-
-	function persistStoredChannels(server: string, list: Chan[]) {
-		if (typeof window === 'undefined') return;
-		try {
-			const trimmed = list.slice(0, CHANNEL_CACHE_STORAGE_LIMIT).map(normalizeChannelForStorage);
-			sessionStorage.setItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`, JSON.stringify(trimmed));
-		} catch {
-			// ignore storage errors
-		}
-	}
-
-	function readCachedChannels(server: string, allowPrivate: boolean): Chan[] {
-		let cached = (getCachedServerChannels(server) as Chan[]) ?? [];
-		if (!cached.length) {
-			const stored = loadStoredChannels(server);
-			if (stored.length) {
-				cached = stored;
-				updateServerChannelCache(server, stored);
-			}
-		}
-		if (!allowPrivate) {
-			cached = cached.filter((chan) => chan?.isPrivate !== true);
-		}
-		return sortChannelsByPosition(cached);
-	}
-
-	function applyChannelList(server: string, list: Chan[]) {
-		const sorted = sortChannelsByPosition(list);
-		channels = sorted;
-		updateServerChannelCache(server, sorted);
-		persistStoredChannels(server, sorted);
-		syncVoicePresenceWatchers(channels);
-	}
 
 	type Category = {
 		id: string;
@@ -380,7 +309,11 @@
 				participant.displayName === 'Member' ||
 				participant.displayName === '?';
 			const photo = typeof participant.photoURL === 'string' ? participant.photoURL.trim() : '';
-			const missingPhoto = !photo || photo === '?' || isDefaultAvatarUrl(photo);
+			const missingPhoto =
+				!photo ||
+				photo === '?' ||
+				photo === DEFAULT_AVATAR_URL ||
+				photo.toLowerCase().endsWith('default-avatar.svg');
 			// Fetch if we don't have a cache yet or if the participant looks incomplete.
 			if (cached && cached.photoURL && !missingDisplay && !missingPhoto) continue;
 			if (pendingVoiceProfiles.has(participant.uid)) continue;
@@ -990,7 +923,6 @@
 	function watchChannelOrder(server: string) {
 		unsubPersonalOrder?.();
 		myChannelOrder = [];
-		collapsedCategories = new Set();
 		if (!$user?.uid) return;
 
 		const db = getDb();
@@ -1004,17 +936,9 @@
 				} else {
 					myChannelOrder = [];
 				}
-				if (Array.isArray(data?.collapsedCategoryIds)) {
-					collapsedCategories = new Set(
-						data.collapsedCategoryIds.filter((id: unknown) => typeof id === 'string')
-					);
-				} else {
-					collapsedCategories = new Set();
-				}
 			},
 			() => {
 				myChannelOrder = [];
-				collapsedCategories = new Set();
 			}
 		);
 	}
@@ -1030,32 +954,13 @@
 		});
 	}
 
-	async function saveCollapsedCategories(next: Set<string>) {
-		const targetServerId = computedServerId;
-		const uid = $user?.uid;
-		if (!targetServerId || !uid) return;
-		const db = getDb();
-		const ids = Array.from(next).filter((id) => typeof id === 'string' && id.trim().length > 0);
-		try {
-			await setDoc(
-				doc(db, 'profiles', uid, 'servers', targetServerId),
-				{ collapsedCategoryIds: ids },
-				{ merge: true }
-			);
-		} catch (error) {
-			console.error('Failed to save folder collapse state', error);
-		}
-	}
-
 	function toggleCategoryCollapse(categoryId: string) {
-		const next = new Set(collapsedCategories);
-		if (next.has(categoryId)) {
-			next.delete(categoryId);
+		if (collapsedCategories.has(categoryId)) {
+			collapsedCategories.delete(categoryId);
 		} else {
-			next.add(categoryId);
+			collapsedCategories.add(categoryId);
 		}
-		collapsedCategories = next; // trigger reactivity
-		void saveCollapsedCategories(next);
+		collapsedCategories = new Set(collapsedCategories); // trigger reactivity
 	}
 
 	// Category drag-and-drop handlers
@@ -1182,13 +1087,12 @@
 		const map = new Map<string, Chan>();
 		channels.forEach((c) => map.set(c.id, c));
 		list.forEach((c) => map.set(c.id, c));
-		const merged = Array.from(map.values());
-		if (currentChannelServer) {
-			applyChannelList(currentChannelServer, merged);
-		} else {
-			channels = sortChannelsByPosition(merged);
-			syncVoicePresenceWatchers(channels);
-		}
+		channels = Array.from(map.values()).sort((a, b) => {
+			const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+			const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+			return ap - bp || a.id.localeCompare(b.id);
+		});
+		syncVoicePresenceWatchers(channels);
 	}
 
 	function watchChannels(server: string) {
@@ -1197,7 +1101,6 @@
 		const blockedKey = blockedChannelServers.get(server);
 		// Admins and members can read the full collection (rules allow member channel metadata); guests use filtered queries.
 		const allowFullChannelQuery = isAdminLike || isMember;
-		const switchingServer = currentChannelServer !== server;
 
 		const stopChannelUnsubs = () => {
 			unsubChannels?.();
@@ -1212,26 +1115,20 @@
 			channelFetchDenied = true;
 			channelVisibilityHint =
 				'You do not have permission to view channels. Ask an admin to allow @everyone/default role to view channels or add you to the server.';
-			channels = [];
+			// Only clear if actually blocked - don't clear cached data from other servers
+			if (currentChannelServer === server) {
+				channels = [];
+			}
 			syncVoicePresenceWatchers(channels);
 			return;
 		}
 
 		stopChannelUnsubs();
+		channels = [];
 		channelFetchDenied = false;
 		let channelWatchBlocked = false;
 		channelVisibilityHint = null;
 		currentChannelServer = server;
-		if (switchingServer || channels.length === 0) {
-			const cached = readCachedChannels(server, allowFullChannelQuery);
-			if (cached.length) {
-				channels = cached;
-				syncVoicePresenceWatchers(channels);
-			} else if (switchingServer) {
-				channels = [];
-				syncVoicePresenceWatchers(channels);
-			}
-		}
 
 		const db = getDb();
 		const baseCol = collection(db, 'servers', server, 'channels');
@@ -1239,10 +1136,15 @@
 		const mergeAndSortChannels = (lists: Chan[][]) => {
 			const map = new Map<string, Chan>();
 			lists.forEach((list) => list.forEach((c) => map.set(c.id, c)));
-			applyChannelList(server, Array.from(map.values()));
+			channels = Array.from(map.values()).sort((a, b) => {
+				const ap = typeof a.position === 'number' ? a.position : Number.MAX_SAFE_INTEGER;
+				const bp = typeof b.position === 'number' ? b.position : Number.MAX_SAFE_INTEGER;
+				return ap - bp || a.id.localeCompare(b.id);
+			});
 			channelFetchDenied = false;
 			channelVisibilityHint = null;
 			lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
+			syncVoicePresenceWatchers(channels);
 		};
 
 		const handleChannelError = (error: unknown, blockOnDeny = true) => {
@@ -1298,13 +1200,11 @@
 			qRef,
 			(snap) => {
 				if (channelWatchBlocked) return;
-				applyChannelList(
-					server,
-					snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[]
-				);
+				channels = snap.docs.map((d: any) => ({ id: d.id, ...(d.data() as any) })) as Chan[];
 				channelFetchDenied = false;
 				channelVisibilityHint = null;
 				lastChannelRoleKey = roleKeyFromSet(channelRoleSet());
+				syncVoicePresenceWatchers(channels);
 			},
 			(err) => {
 				const denied = (err as any)?.code === 'permission-denied';
@@ -1565,16 +1465,13 @@
 	let lastViewedChannel: string | null = null;
 
 	// Track when user views a channel - mark it as read
-run(() => {
-	if (activeChannelId && activeChannelId !== lastViewedChannel) {
-		lastViewedChannel = activeChannelId;
-		// Mark channel as read when user views it
-		const currentUnread = untrack(() => localUnread);
-		if (currentUnread[activeChannelId] !== false) {
-			localUnread = { ...currentUnread, [activeChannelId]: false };
-		}
-		// Update local timestamp to "now" so we don't show as unread after refresh
-		lastReadTimestamps[activeChannelId] = Date.now();
+	run(() => {
+		if (activeChannelId && activeChannelId !== lastViewedChannel) {
+			lastViewedChannel = activeChannelId;
+			// Mark channel as read when user views it
+			localUnread = { ...localUnread, [activeChannelId]: false };
+			// Update local timestamp to "now" so we don't show as unread after refresh
+			lastReadTimestamps[activeChannelId] = Date.now();
 			// Also mark activity entries as read
 			if (computedServerId) {
 				void markChannelActivityRead(computedServerId, activeChannelId);
@@ -2197,13 +2094,6 @@ run(() => {
 		padding-bottom: calc(
 			3.5rem + var(--mobile-dock-height, 3rem) + env(safe-area-inset-bottom, 0px)
 		);
-	}
-
-	/* Desktop: add extra padding for the DesktopUserBar */
-	@media (min-width: 768px) {
-		.channel-scroll-area {
-			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 3rem);
-		}
 	}
 
 	@media (max-width: 767px) {

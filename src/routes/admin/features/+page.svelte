@@ -60,12 +60,8 @@
 	let voiceDebugSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	let previewInvite: ServerInvite | null = $state(null);
 	let testPushLoading = $state(false);
-	let testEmailAddress = $state('');
+	let testEmailAddress = $state(data?.user?.email ?? '');
 	let testEmailLoading = $state(false);
-
-	$effect(() => {
-		testEmailAddress = data?.user?.email ?? '';
-	});
 
 	// Email logs modal state
 	let emailLogsOpen = $state(false);
@@ -792,7 +788,7 @@
 							>
 								{#if testPushLoading}
 									<i class="bx bx-loader-alt bx-spin"></i>
-									Sending...
+									Sending…
 								{:else}
 									<i class="bx bx-send"></i>
 									Send test push
@@ -929,23 +925,20 @@
 							{#if voiceDebugResults.length}
 								<ul class="voice-debug-results">
 									{#each voiceDebugResults as user (user.uid)}
-										<li>
-											<button
-												type="button"
-												class:selected={voiceDebugSelected?.uid === user.uid}
-												onclick={() => selectVoiceDebugUser(user)}
-											>
-												<div class="pill-avatar">
-													<i class="bx bx-user"></i>
-												</div>
-												<div class="result-meta">
-													<p>{user.displayName ?? user.email ?? 'User'}</p>
-													<small>{user.email ?? 'No email'} - {user.uid}</small>
-												</div>
-												{#if voiceDebugSelected?.uid === user.uid}
-													<i class="bx bx-check"></i>
-												{/if}
-											</button>
+										<li
+											class:selected={voiceDebugSelected?.uid === user.uid}
+											onclick={() => selectVoiceDebugUser(user)}
+										>
+											<div class="pill-avatar">
+												<i class="bx bx-user"></i>
+											</div>
+											<div class="result-meta">
+												<p>{user.displayName ?? user.email ?? 'User'}</p>
+												<small>{user.email ?? 'No email'} · {user.uid}</small>
+											</div>
+											{#if voiceDebugSelected?.uid === user.uid}
+												<i class="bx bx-check"></i>
+											{/if}
 										</li>
 									{/each}
 								</ul>
@@ -1783,11 +1776,6 @@
 	}
 
 	.voice-debug-results li {
-		margin: 0;
-		padding: 0;
-	}
-
-	.voice-debug-results button {
 		display: flex;
 		align-items: center;
 		gap: 0.65rem;
@@ -1797,18 +1785,14 @@
 		background: color-mix(in srgb, var(--surface-panel) 85%, transparent);
 		cursor: pointer;
 		transition: border-color 120ms ease, background 120ms ease;
-		width: 100%;
-		text-align: left;
-		color: inherit;
-		font: inherit;
 	}
 
-	.voice-debug-results button.selected {
+	.voice-debug-results li.selected {
 		border-color: color-mix(in srgb, var(--accent-primary) 35%, transparent);
 		background: color-mix(in srgb, var(--accent-primary) 10%, var(--surface-panel));
 	}
 
-	.voice-debug-results button:hover {
+	.voice-debug-results li:hover {
 		border-color: color-mix(in srgb, var(--accent-primary) 25%, transparent);
 	}
 

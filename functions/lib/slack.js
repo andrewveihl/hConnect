@@ -49,41 +49,6 @@ const crypto = __importStar(require("crypto"));
 // In-memory cache for Slack users (refresh every hour)
 const slackUserCache = {};
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
-const THREAD_DEFAULT_TTL_HOURS = 24;
-const THREAD_MAX_MEMBER_LIMIT = 20;
-const THREAD_ARCHIVE_MAX_HOURS = 7 * 24;
-const THREAD_VISIBILITY = 'inherit_parent_with_exceptions';
-const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
-const nextAutoArchiveAt = (ttlHours) => {
-    const ttl = clampNumber(ttlHours, 1, THREAD_ARCHIVE_MAX_HOURS);
-    return Date.now() + ttl * 60 * 60 * 1000;
-};
-const normalizeText = (value) => typeof value === 'string' ? value.trim() : '';
-const compactWhitespace = (value) => value.replace(/\s+/g, ' ').trim();
-const previewFromText = (value, max = 120) => {
-    const cleaned = compactWhitespace(normalizeText(value));
-    if (!cleaned)
-        return '';
-    return cleaned.length > max ? cleaned.slice(0, max) : cleaned;
-};
-const threadNameFromText = (value) => {
-    const cleaned = previewFromText(value, 48);
-    return cleaned || 'Thread';
-};
-const isSlackUid = (value) => typeof value === 'string' && value.startsWith('slack:');
-const pickMessageText = (data) => {
-    if (!data)
-        return '';
-    return normalizeText(data.plainTextContent ?? data.text ?? data.content ?? data.preview ?? '');
-};
-const pickMessageAuthorId = (data) => {
-    if (!data)
-        return null;
-    const uid = typeof data.uid === 'string' ? data.uid : null;
-    const authorId = typeof data.authorId === 'string' ? data.authorId : null;
-    const picked = normalizeText(uid ?? authorId ?? '');
-    return picked || null;
-};
 // ============ Credentials Helpers ============
 /**
  * Get server config with credentials for a server
@@ -266,65 +231,25 @@ async function syncSlackMessageToHConnect(event, bridge, workspace, serverId) {
     }
     // Convert message content
     const content = convertSlackToHConnect(event.text);
-    const hconnectServerId = bridge.hconnectServerId || serverId;
-    const hconnectChannelId = bridge.hconnectChannelId;
-    const slackUid = `slack:${event.user}`;
     // Create the message document
-    let messageRef = firebase_1.db
-        .collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`)
+    const messageRef = firebase_1.db
+        .collection(`servers/${bridge.hconnectServerId}/channels/${bridge.hconnectChannelId}/messages`)
         .doc();
     // Check if this is a thread reply and find the parent message
     let replyToId = null;
     let isThreadReply = false;
-    let threadTarget = null;
     if (event.thread_ts && event.thread_ts !== event.ts) {
         isThreadReply = true;
         // Find the parent message in hConnect
-        const parentMessage = await findHConnectMessageBySlackTs(hconnectServerId, hconnectChannelId, event.thread_ts);
+        const parentMessage = await findHConnectMessageBySlackTs(serverId, bridge.hconnectChannelId, event.thread_ts);
         if (parentMessage) {
             replyToId = parentMessage.id;
-            if (bridge.syncThreads !== false) {
-                try {
-                    threadTarget = await ensureThreadForParentMessage({
-                        serverId: hconnectServerId,
-                        channelId: hconnectChannelId,
-                        parentMessageId: parentMessage.id,
-                        parentMessageData: parentMessage.data,
-                        fallbackCreatorId: slackUid
-                    });
-                }
-                catch (err) {
-                    firebase_functions_1.logger.warn('[slack] Failed to ensure thread for Slack reply', {
-                        serverId: hconnectServerId,
-                        channelId: hconnectChannelId,
-                        parentMessageId: parentMessage.id,
-                        error: err
-                    });
-                }
-            }
-            else {
-                firebase_functions_1.logger.info('[slack] Thread sync disabled for bridge, storing reply as channel message', {
-                    bridgeId: bridge.id,
-                    parentMessageId: parentMessage.id
-                });
-            }
-        }
-        else {
-            firebase_functions_1.logger.warn('[slack] Thread reply missing parent message, storing as channel message', {
-                bridgeId: bridge.id,
-                threadTs: event.thread_ts
-            });
         }
     }
-    if (threadTarget) {
-        messageRef = firebase_1.db
-            .collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`)
-            .doc();
-    }
-    const baseMessageData = {
+    const messageData = {
         // Core fields
-        uid: slackUid, // Special UID format for Slack users
-        authorId: slackUid,
+        uid: `slack:${event.user}`, // Special UID format for Slack users
+        authorId: `slack:${event.user}`,
         text: content,
         content: content,
         plainTextContent: event.text,
@@ -335,6 +260,9 @@ async function syncSlackMessageToHConnect(event, bridge, workspace, serverId) {
             isSlackUser: true
         },
         displayName: authorName,
+        // Thread/reply info
+        ...(replyToId && { replyTo: replyToId }),
+        ...(isThreadReply && { isThreadReply: true }),
         // Slack metadata
         slackMeta: {
             teamId: event.team || bridge.slackTeamId,
@@ -352,38 +280,9 @@ async function syncSlackMessageToHConnect(event, bridge, workspace, serverId) {
         isSlackMessage: true,
         type: 'text'
     };
-    const messageData = threadTarget
-        ? {
-            ...baseMessageData,
-            serverId: hconnectServerId,
-            channelId: hconnectChannelId,
-            threadId: threadTarget.id,
-            ...(isThreadReply && { isThreadReply: true })
-        }
-        : {
-            ...baseMessageData,
-            ...(replyToId && { replyTo: replyToId }),
-            ...(isThreadReply && { isThreadReply: true })
-        };
     await messageRef.set(messageData);
-    if (threadTarget) {
-        const preview = previewFromText(content, 120) || 'New message';
-        const ttlHours = typeof threadTarget.data?.ttlHours === 'number'
-            ? threadTarget.data.ttlHours
-            : THREAD_DEFAULT_TTL_HOURS;
-        await firebase_1.db
-            .doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
-            .update({
-            lastMessageAt: firestore_1.Timestamp.now(),
-            lastMessagePreview: preview,
-            autoArchiveAt: nextAutoArchiveAt(ttlHours),
-            status: 'active',
-            archivedAt: null,
-            messageCount: firestore_1.FieldValue.increment(1)
-        });
-    }
     // Update bridge stats (using per-server path)
-    await firebase_1.db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
+    await firebase_1.db.doc(`servers/${serverId}/integrations/slack/bridges/${bridge.id}`).update({
         lastSyncAt: firestore_1.Timestamp.now(),
         messageCount: firestore_1.FieldValue.increment(1)
     });
@@ -409,62 +308,8 @@ async function findHConnectMessageBySlackTs(serverId, channelId, slackTs) {
     const data = doc.data();
     return {
         id: doc.id,
-        data,
         reactions: data.reactions || {}
     };
-}
-async function findThreadByParentMessageId(serverId, channelId, parentMessageId) {
-    const threadsSnapshot = await firebase_1.db
-        .collection(`servers/${serverId}/channels/${channelId}/threads`)
-        .where('createdFromMessageId', '==', parentMessageId)
-        .limit(1)
-        .get();
-    if (threadsSnapshot.empty) {
-        return null;
-    }
-    const doc = threadsSnapshot.docs[0];
-    return { id: doc.id, data: doc.data() };
-}
-async function createThreadForParentMessage(options) {
-    const { serverId, channelId, parentMessageId, parentMessageData, fallbackCreatorId } = options;
-    const threadRef = firebase_1.db.collection(`servers/${serverId}/channels/${channelId}/threads`).doc();
-    const now = firestore_1.Timestamp.now();
-    const parentText = pickMessageText(parentMessageData);
-    const preview = previewFromText(parentText, 120) || 'Thread';
-    const name = threadNameFromText(parentText);
-    const creatorId = pickMessageAuthorId(parentMessageData) || fallbackCreatorId;
-    const memberUids = creatorId && !isSlackUid(creatorId) ? [creatorId] : [];
-    const payload = {
-        id: threadRef.id,
-        serverId,
-        channelId,
-        parentChannelId: channelId,
-        createdBy: creatorId || null,
-        createdFromMessageId: parentMessageId,
-        createdAt: now,
-        name,
-        preview,
-        rootPreview: preview,
-        lastMessageAt: now,
-        lastMessagePreview: preview,
-        autoArchiveAt: nextAutoArchiveAt(THREAD_DEFAULT_TTL_HOURS),
-        status: 'active',
-        ttlHours: THREAD_DEFAULT_TTL_HOURS,
-        maxMembers: THREAD_MAX_MEMBER_LIMIT,
-        memberUids,
-        memberCount: memberUids.length,
-        visibility: THREAD_VISIBILITY,
-        archivedAt: null,
-        messageCount: 0
-    };
-    await threadRef.set(payload);
-    return { id: threadRef.id, data: payload };
-}
-async function ensureThreadForParentMessage(options) {
-    const existing = await findThreadByParentMessageId(options.serverId, options.channelId, options.parentMessageId);
-    if (existing)
-        return existing;
-    return createThreadForParentMessage(options);
 }
 /**
  * Sync a Slack reaction to hConnect
@@ -997,9 +842,9 @@ async function syncHConnectMessageToSlack(serverId, channelId, messageId, messag
  * Sync an hConnect thread message to Slack
  * Called from Firestore trigger for thread messages
  * Thread messages are stored at: servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}
- * The threadId is the thread document ID in hConnect
+ * The threadId is the parent message ID in hConnect
  */
-async function syncHConnectThreadMessageToSlack(serverId, channelId, threadId, // This is the thread document ID in hConnect
+async function syncHConnectThreadMessageToSlack(serverId, channelId, threadId, // This is the parent message ID in hConnect
 messageId, messageData) {
     firebase_functions_1.logger.info('[slack-outbound-thread] syncHConnectThreadMessageToSlack called', {
         serverId,
@@ -1051,49 +896,28 @@ messageId, messageData) {
     catch (err) {
         firebase_functions_1.logger.warn('[slack-outbound-thread] Could not read server Slack config for avatar', { serverId });
     }
-    // Resolve the parent channel message from the thread document
+    // Find parent message's Slack timestamp
+    // The threadId is the parent message ID in hConnect
     let parentSlackTs;
-    let parentMessageId = null;
-    let parentMessageData = null;
     try {
-        const threadDoc = await firebase_1.db
-            .doc(`servers/${serverId}/channels/${channelId}/threads/${threadId}`)
-            .get();
-        if (!threadDoc.exists) {
-            firebase_functions_1.logger.warn('[slack-outbound-thread] Thread not found', { threadId });
-            return;
-        }
-        const threadData = threadDoc.data();
-        parentMessageId =
-            typeof threadData?.createdFromMessageId === 'string'
-                ? threadData.createdFromMessageId
-                : null;
-        if (!parentMessageId) {
-            firebase_functions_1.logger.warn('[slack-outbound-thread] Thread missing parent message id', { threadId });
-            return;
-        }
         const parentDoc = await firebase_1.db
-            .doc(`servers/${serverId}/channels/${channelId}/messages/${parentMessageId}`)
+            .doc(`servers/${serverId}/channels/${channelId}/messages/${threadId}`)
             .get();
         if (parentDoc.exists) {
-            parentMessageData = parentDoc.data();
-            if (parentMessageData?.slackMeta?.messageTs) {
-                parentSlackTs = parentMessageData.slackMeta.messageTs;
+            const parentData = parentDoc.data();
+            if (parentData?.slackMeta?.messageTs) {
+                parentSlackTs = parentData.slackMeta.messageTs;
             }
-            else if (parentMessageData?.slackTs) {
-                parentSlackTs = parentMessageData.slackTs;
+            else if (parentData?.slackTs) {
+                parentSlackTs = parentData.slackTs;
             }
             firebase_functions_1.logger.info('[slack-outbound-thread] Found parent message', {
                 threadId,
-                parentMessageId,
                 parentSlackTs: parentSlackTs || 'not found'
             });
         }
         else {
-            firebase_functions_1.logger.warn('[slack-outbound-thread] Parent message not found', {
-                threadId,
-                parentMessageId
-            });
+            firebase_functions_1.logger.warn('[slack-outbound-thread] Parent message not found', { threadId });
         }
     }
     catch (err) {
@@ -1101,35 +925,6 @@ messageId, messageData) {
             threadId,
             error: err
         });
-    }
-    if (!parentSlackTs && parentMessageId && parentMessageData) {
-        const hasSlackMeta = Boolean(parentMessageData?.slackMeta?.messageTs || parentMessageData?.slackTs);
-        if (!hasSlackMeta && !parentMessageData.isSlackMessage) {
-            firebase_functions_1.logger.info('[slack-outbound-thread] Syncing parent message to Slack for thread', {
-                threadId,
-                parentMessageId
-            });
-            try {
-                await syncHConnectMessageToSlack(serverId, channelId, parentMessageId, parentMessageData);
-                const refreshed = await firebase_1.db
-                    .doc(`servers/${serverId}/channels/${channelId}/messages/${parentMessageId}`)
-                    .get();
-                if (refreshed.exists) {
-                    const refreshedData = refreshed.data();
-                    parentSlackTs =
-                        refreshedData?.slackMeta?.messageTs ??
-                            refreshedData?.slackTs ??
-                            parentSlackTs;
-                }
-            }
-            catch (err) {
-                firebase_functions_1.logger.warn('[slack-outbound-thread] Failed to sync parent message', {
-                    threadId,
-                    parentMessageId,
-                    error: err
-                });
-            }
-        }
     }
     if (!parentSlackTs) {
         firebase_functions_1.logger.warn('[slack-outbound-thread] Cannot sync thread - parent has no Slack timestamp', {

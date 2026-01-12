@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { run } from 'svelte/legacy';
 
-import { onDestroy, untrack } from 'svelte';
+	import { onDestroy } from 'svelte';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
 	import { createChannel } from '$lib/firestore/channels';
@@ -85,13 +85,12 @@ import { onDestroy, untrack } from 'svelte';
 		}
 	}
 
-run(() => {
-	const nextId = browser ? (serverIdFinal ?? null) : null;
-	const prevId = untrack(() => roleWatcherServerId);
-	if (prevId === nextId) {
-		// no change
-	} else {
-		roleWatcherServerId = nextId;
+	run(() => {
+		const nextId = browser ? (serverIdFinal ?? null) : null;
+		if (roleWatcherServerId === nextId) {
+			// no change
+		} else {
+			roleWatcherServerId = nextId;
 			roleStop?.();
 			roleStop = null;
 			roleOptions = [];
@@ -119,23 +118,18 @@ run(() => {
 		}
 	});
 
-run(() => {
-	const available = new Set(roleOptions.map((role) => role.id));
-	const currentSelected = untrack(() => selectedRoleIds);
-	if (currentSelected.some((id) => !available.has(id))) {
-		const nextSelected = currentSelected.filter((id) => available.has(id));
-		if (nextSelected.length !== currentSelected.length) {
-			selectedRoleIds = nextSelected;
+	run(() => {
+		const available = new Set(roleOptions.map((role) => role.id));
+		if (selectedRoleIds.some((id) => !available.has(id))) {
+			selectedRoleIds = selectedRoleIds.filter((id) => available.has(id));
 		}
-	}
-});
+	});
 
-run(() => {
-	const currentSelected = untrack(() => selectedRoleIds);
-	if ((!browser || !chPrivate) && currentSelected.length) {
-		selectedRoleIds = [];
-	}
-});
+	run(() => {
+		if ((!browser || !chPrivate) && selectedRoleIds.length) {
+			selectedRoleIds = [];
+		}
+	});
 
 	function toggleRole(roleId: string, enabled: boolean) {
 		selectedRoleIds = enabled

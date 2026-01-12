@@ -11,17 +11,8 @@
 	}
 
 	let { data }: Props = $props();
-	let settings = $state({
-		logRetentionDays: 0,
-		archiveRetentionDays: 0,
-		requireDoubleConfirm: false,
-		extraLogging: false
-	});
+	let settings = $state({ ...data.settings });
 	let saving = $state(false);
-
-	$effect(() => {
-		settings = { ...data.settings };
-	});
 
 	const save = async () => {
 		saving = true;
@@ -114,7 +105,7 @@
 					onclick={save}
 					disabled={saving}
 				>
-					{saving ? 'Saving...' : 'Save settings'}
+					{saving ? 'Saving…' : 'Save settings'}
 				</button>
 			</div>
 		</AdminCard>

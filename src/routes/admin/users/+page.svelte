@@ -2,13 +2,11 @@
 	import type { PageData } from './$types';
 	import AdminCard from '$lib/admin/components/AdminCard.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
-	import { getDefaultAvatarUrl, isDefaultAvatarUrl, resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { 
 		addSuperAdminEmail, 
 		removeSuperAdminEmail, 
 		refreshAllGooglePhotos, 
 		refreshUserGooglePhoto, 
-		repairUserAvatarTokens,
 		forceAddUserToServer, 
 		fetchAllServers,
 		fetchUserGroups,
@@ -33,35 +31,15 @@
 		data: PageData;
 	}
 
-	const PHOTO_SOURCE_KEYS = [
-		'avatar',
-		'customPhotoURL',
-		'authPhotoURL',
-		'photoURL',
-		'cachedPhotoURL'
-	] as const;
-	type PhotoSourceKey = (typeof PHOTO_SOURCE_KEYS)[number];
-
-	type PhotoResolutionStep = {
-		key: string;
-		label: string;
-		value: string | null;
-	};
-
 	let { data }: Props = $props();
-	let users = $state<typeof data.users>([]);
-	let superAdminSet = $state(new Set<string>());
+	let users = $state([...data.users]);
+	let superAdminSet = $state(new Set((data.superAdmins ?? []).map((email) => email.toLowerCase())));
 	let search = $state('');
 	let onlyBanned = $state(false);
 	let selectedUser: (typeof data.users)[number] | null = $state(null);
 	let actionLoading = $state(false);
 	let refreshingPhotos = $state(false);
 	let refreshingUserPhoto = $state<string | null>(null);
-	let deletingUserPhoto = $state<string | null>(null);
-	let updatingPhotoOrder = $state(false);
-	let updatingActivePhoto = $state(false);
-	let showAvatarManager = $state(false);
-	let repairingUserPhoto = $state<string | null>(null);
 
 	// Force add to server state
 	let showServerPicker = $state(false);
@@ -83,185 +61,7 @@
 	let groupServerSearch = $state('');
 	let savingGroup = $state(false);
 
-	$effect(() => {
-		users = [...data.users];
-		superAdminSet = new Set((data.superAdmins ?? []).map((email) => email.toLowerCase()));
-	});
-
 	const mobileViewport = $derived($isMobileViewport);
-	const normalizePhotoOrder = (value: unknown): PhotoSourceKey[] => {
-		const incoming = Array.isArray(value)
-			? value.filter((key): key is PhotoSourceKey => PHOTO_SOURCE_KEYS.includes(key as PhotoSourceKey))
-			: [];
-		const deduped: PhotoSourceKey[] = [];
-		for (const key of incoming) {
-			if (!deduped.includes(key)) deduped.push(key);
-		}
-		for (const key of PHOTO_SOURCE_KEYS) {
-			if (!deduped.includes(key)) deduped.push(key);
-		}
-		return deduped;
-	};
-
-	let photoOrder = $state<PhotoSourceKey[]>(normalizePhotoOrder(null));
-	$effect(() => {
-		photoOrder = normalizePhotoOrder(selectedUser?.photoSourceOrder ?? null);
-	});
-	const selectedUserPhotoRecord = $derived.by(() =>
-		selectedUser
-			? {
-					avatar: selectedUser.avatar ?? null,
-					avatarUrl: selectedUser.avatarUrl ?? null,
-					avatarURL: selectedUser.avatarURL ?? null,
-					customPhotoURL: selectedUser.customPhotoURL ?? null,
-					authPhotoURL: selectedUser.authPhotoURL ?? null,
-					photoURL: selectedUser.storedPhotoURL ?? null,
-					cachedPhotoURL: selectedUser.cachedPhotoURL ?? null,
-					activePhotoSource: selectedUser.activePhotoSource ?? null,
-					photoSourceOrder: selectedUser.photoSourceOrder ?? null
-				}
-			: null
-	);
-
-	const resolvedPhotoURL = $derived.by(() =>
-		selectedUserPhotoRecord
-			? resolveProfilePhotoURL(selectedUserPhotoRecord, null, { preferGooglePhoto: true })
-			: null
-	);
-	const defaultAvatarUrl = $derived(getDefaultAvatarUrl());
-
-	const photoResolutionSteps = $derived.by((): PhotoResolutionStep[] => {
-		if (!selectedUser) return [];
-		const avatar =
-			selectedUser.avatar ?? selectedUser.avatarUrl ?? selectedUser.avatarURL ?? null;
-		const sources: Record<PhotoSourceKey, { label: string; value: string | null }> = {
-			avatar: {
-				label: 'Custom avatar (avatar/avatarUrl/avatarURL)',
-				value: avatar
-			},
-			customPhotoURL: {
-				label: 'Custom photo (customPhotoURL)',
-				value: selectedUser.customPhotoURL ?? null
-			},
-			authPhotoURL: {
-				label: 'Auth provider (authPhotoURL)',
-				value: selectedUser.authPhotoURL ?? null
-			},
-			photoURL: {
-				label: 'Stored photo (photoURL, overrides auth if different)',
-				value: selectedUser.storedPhotoURL ?? null
-			},
-			cachedPhotoURL: {
-				label: 'Cached photo (cachedPhotoURL)',
-				value: selectedUser.cachedPhotoURL ?? null
-			}
-		};
-
-		const orderedSteps = photoOrder.map((key) => ({
-			key,
-			label: sources[key].label,
-			value: sources[key].value
-		}));
-
-		return [
-			...orderedSteps,
-			{
-				key: 'default',
-				label: 'Default avatar',
-				value: defaultAvatarUrl
-			}
-		];
-	});
-
-	const activePhotoKey = $derived.by(() => {
-		if (!selectedUser) return null;
-		const overrideKey = selectedUser.activePhotoSource ?? null;
-		if (overrideKey) {
-			const match = photoResolutionSteps.find(
-				(step) => step.key === overrideKey && step.value
-			);
-			if (match) return overrideKey;
-		}
-		if (!resolvedPhotoURL) return null;
-		for (const step of photoResolutionSteps) {
-			if (step.value && step.value === resolvedPhotoURL) {
-				return step.key;
-			}
-		}
-		return null;
-	});
-
-	const resolvedPhotoDisplay = $derived.by(() =>
-		resolvedPhotoURL ??
-		(activePhotoKey
-			? photoResolutionSteps.find((step) => step.key === activePhotoKey)?.value ?? null
-			: null) ??
-		defaultAvatarUrl
-	);
-
-	let previewErrors = $state<Record<string, boolean>>({});
-
-	$effect(() => {
-		if (selectedUser) {
-			previewErrors = {};
-		}
-	});
-
-	const markPreviewError = (key: string) => {
-		previewErrors = { ...previewErrors, [key]: true };
-	};
-
-	const hasPreviewError = (key: string) => previewErrors[key] === true;
-
-	const isStorageUrlMissingToken = (value: string | null) => {
-		if (!value) return false;
-		const lowered = value.toLowerCase();
-		return (
-			(lowered.includes('storage.googleapis.com/') ||
-				lowered.includes('firebasestorage.googleapis.com/') ||
-				lowered.includes('firebasestorage.app/')) &&
-			!lowered.includes('token=')
-		);
-	};
-
-	const buildTokenMissingDebug = (params: {
-		key: string;
-		label: string;
-		value: string | null;
-		context: 'resolved' | 'source';
-	}) => {
-		const url = (params.value ?? '').trim();
-		let host = '';
-		let path = '';
-		try {
-			const parsed = new URL(url);
-			host = parsed.host;
-			path = parsed.pathname;
-		} catch {
-			// ignore invalid URLs
-		}
-		return [
-			'hconnect avatar token-missing',
-			`context: ${params.context}`,
-			`uid: ${selectedUser?.uid ?? 'unknown'}`,
-			`email: ${selectedUser?.email ?? 'unknown'}`,
-			`sourceKey: ${params.key}`,
-			`sourceLabel: ${params.label}`,
-			`activePhotoSource: ${selectedUser?.activePhotoSource ?? 'none'}`,
-			`resolvedSourceKey: ${activePhotoKey ?? 'unknown'}`,
-			`photoSourceOrder: ${photoOrder.join(', ')}`,
-			`url: ${url || 'n/a'}`,
-			host ? `host: ${host}` : null,
-			path ? `path: ${path}` : null
-		]
-			.filter(Boolean)
-			.join('\n');
-	};
-
-	const previewInitial = (value: string | null) => {
-		const source = value?.trim() || selectedUser?.displayName || selectedUser?.email || '?';
-		return source.charAt(0).toUpperCase() || '?';
-	};
 
 	const filteredUsers = $derived(
 		users.filter((user) => {
@@ -887,18 +687,9 @@
 				
 				// Update local state with new photo URL
 				const newPhotoURL = result.photoURL;
-				const applyUpdate = (user: (typeof data.users)[number]) =>
-					user.uid === uid
-						? {
-								...user,
-								photoURL: newPhotoURL,
-								storedPhotoURL: newPhotoURL,
-								cachedPhotoURL: newPhotoURL
-							}
-						: user;
-				users = users.map(applyUpdate);
+				users = users.map(u => u.uid === uid ? { ...u, photoURL: newPhotoURL } : u);
 				if (selectedUser?.uid === uid) {
-					selectedUser = applyUpdate(selectedUser);
+					selectedUser = { ...selectedUser, photoURL: newPhotoURL };
 				}
 				console.log('[handleRefreshUserPhoto] Updated local state with:', newPhotoURL);
 			} else if (result.ok) {
@@ -931,65 +722,6 @@
 			refreshingUserPhoto = null;
 		}
 	};
-
-	const handleRepairUserPhoto = async (uid: string) => {
-		if (repairingUserPhoto) return;
-		repairingUserPhoto = uid;
-
-		try {
-			const result = await repairUserAvatarTokens(uid);
-			if (result.ok && result.updated) {
-				const updates = result.updated;
-				const applyUpdate = (user: (typeof data.users)[number]) => {
-					if (user.uid !== uid) return user;
-					const next = { ...user };
-					if (updates.photoURL) next.storedPhotoURL = updates.photoURL;
-					if (updates.cachedPhotoURL) next.cachedPhotoURL = updates.cachedPhotoURL;
-					if (updates.authPhotoURL) next.authPhotoURL = updates.authPhotoURL;
-					if (updates.customPhotoURL) next.customPhotoURL = updates.customPhotoURL;
-					if (updates.avatar) next.avatar = updates.avatar;
-					if (updates.avatarUrl) next.avatarUrl = updates.avatarUrl;
-					if (updates.avatarURL) next.avatarURL = updates.avatarURL;
-
-					const resolved = resolveProfilePhotoURL({
-						avatar: next.avatar,
-						avatarUrl: next.avatarUrl,
-						avatarURL: next.avatarURL,
-						customPhotoURL: next.customPhotoURL,
-						authPhotoURL: next.authPhotoURL,
-						photoURL: next.storedPhotoURL,
-						cachedPhotoURL: next.cachedPhotoURL
-					});
-					next.photoURL = isDefaultAvatarUrl(resolved) ? null : resolved;
-					next.hasCustomPhoto = !!next.customPhotoURL;
-					return next;
-				};
-
-				users = users.map(applyUpdate);
-				if (selectedUser?.uid === uid) {
-					selectedUser = applyUpdate(selectedUser);
-				}
-
-				showAdminToast({
-					type: 'success',
-					message: result.message || 'Repaired token-missing Storage URLs.'
-				});
-			} else {
-				showAdminToast({
-					type: result.reason === 'no_missing_tokens' ? 'info' : 'warning',
-					message: result.message || 'No token-missing Storage URLs found.'
-				});
-			}
-		} catch (err) {
-			console.error('Repair user photo failed:', err);
-			showAdminToast({
-				type: 'error',
-				message: (err as Error)?.message ?? 'Failed to repair Storage URLs.'
-			});
-		} finally {
-			repairingUserPhoto = null;
-		}
-	};
 	
 	const handleReauthWithGoogle = async () => {
 		refreshingUserPhoto = data.user.uid;
@@ -1002,13 +734,9 @@
 				showAdminToast({ type: 'success', message: 'Photo refreshed from Google!' });
 				
 				// Update local state
-				const applyUpdate = (user: (typeof data.users)[number]) =>
-					user.uid === data.user.uid
-						? { ...user, photoURL: result.photoURL!, storedPhotoURL: result.photoURL! }
-						: user;
-				users = users.map(applyUpdate);
+				users = users.map(u => u.uid === data.user.uid ? { ...u, photoURL: result.photoURL! } : u);
 				if (selectedUser?.uid === data.user.uid) {
-					selectedUser = applyUpdate(selectedUser);
+					selectedUser = { ...selectedUser, photoURL: result.photoURL! };
 				}
 				
 				prompt('New Photo URL:', result.photoURL);
@@ -1022,211 +750,6 @@
 			showAdminToast({ type: 'error', message: (err as Error)?.message ?? 'Failed to re-authenticate.' });
 		} finally {
 			refreshingUserPhoto = null;
-		}
-	};
-
-	const handleDeleteUserPhoto = async (uid: string) => {
-		if (!selectedUser || deletingUserPhoto) return;
-
-		const displayName = selectedUser.displayName || selectedUser.email || uid;
-		const hasPhotoData = Boolean(
-			selectedUser.customPhotoURL ||
-				selectedUser.cachedPhotoURL ||
-				selectedUser.storedPhotoURL ||
-				selectedUser.avatar ||
-				selectedUser.avatarUrl ||
-				selectedUser.avatarURL ||
-				selectedUser.authPhotoURL
-		);
-
-		if (!hasPhotoData) {
-			showAdminToast({ type: 'info', message: 'No profile photo data to clear.' });
-			return;
-		}
-
-		const confirmMessage = `Clear profile photo data for ${displayName}? This removes custom, cached, and auth photos and reverts to the default avatar. Provider photos may re-sync on next sign-in.`;
-
-		if (!confirm(confirmMessage)) return;
-
-		deletingUserPhoto = uid;
-
-		try {
-			await ensureFirebaseReady();
-			const db = getDb();
-
-			await updateDoc(doc(db, 'profiles', uid), {
-				avatar: null,
-				avatarUrl: null,
-				avatarURL: null,
-				customPhotoURL: null,
-				authPhotoURL: null,
-				cachedPhotoURL: null,
-				cachedPhotoAt: null,
-				photoURL: null,
-				activePhotoSource: null,
-				updatedAt: serverTimestamp()
-			});
-
-			const applyUpdate = (user: (typeof data.users)[number]) =>
-				user.uid === uid
-					? {
-							...user,
-							avatar: null,
-							avatarUrl: null,
-							avatarURL: null,
-							customPhotoURL: null,
-							authPhotoURL: null,
-							cachedPhotoURL: null,
-							storedPhotoURL: null,
-							photoURL: null,
-							activePhotoSource: null,
-							hasCustomPhoto: false
-						}
-					: user;
-
-			users = users.map(applyUpdate);
-			if (selectedUser?.uid === uid) {
-				selectedUser = applyUpdate(selectedUser);
-			}
-
-			await logAdminAction({
-				type: 'adminAction',
-				level: 'warning',
-				message: `Cleared profile photo data for user ${uid}`,
-				data: {
-					action: 'profile:clearPhoto',
-					targetUid: uid,
-					fallbackToAuth: false,
-					actor: {
-						uid: data.user.uid,
-						email: data.user.email ?? null
-					}
-				},
-				userId: data.user.uid
-			});
-
-			showAdminToast({ type: 'success', message: 'Profile photo cleared.' });
-		} catch (err) {
-			console.error('Failed to clear profile photo:', err);
-			showAdminToast({
-				type: 'error',
-				message: (err as Error)?.message ?? 'Failed to clear profile photo.'
-			});
-		} finally {
-			deletingUserPhoto = null;
-		}
-	};
-
-	const openAvatarManager = () => {
-		if (!selectedUser) return;
-		showAvatarManager = true;
-	};
-
-	const closeAvatarManager = () => {
-		showAvatarManager = false;
-	};
-
-	$effect(() => {
-		if (!selectedUser && showAvatarManager) {
-			showAvatarManager = false;
-		}
-	});
-
-	const copyToClipboard = async (value: string | null, label: string) => {
-		if (!value) return;
-		try {
-			await navigator.clipboard.writeText(value);
-			showAdminToast({ type: 'success', message: `${label} copied.` });
-		} catch {
-			showAdminToast({ type: 'error', message: `Failed to copy ${label.toLowerCase()}.` });
-		}
-	};
-
-	const handleMovePhotoSource = async (direction: 'up' | 'down', key: PhotoSourceKey) => {
-		if (!selectedUser || updatingPhotoOrder) return;
-		const current = [...photoOrder];
-		const index = current.indexOf(key);
-		const targetIndex = direction === 'up' ? index - 1 : index + 1;
-		if (index === -1 || targetIndex < 0 || targetIndex >= current.length) return;
-
-		const next = [...current];
-		[next[index], next[targetIndex]] = [next[targetIndex], next[index]];
-
-		updatingPhotoOrder = true;
-		photoOrder = next;
-		try {
-			await ensureFirebaseReady();
-			const db = getDb();
-			await updateDoc(doc(db, 'profiles', selectedUser.uid), {
-				photoSourceOrder: next,
-				updatedAt: serverTimestamp()
-			});
-			users = users.map((user) =>
-				user.uid === selectedUser!.uid ? { ...user, photoSourceOrder: next } : user
-			);
-			selectedUser = { ...selectedUser, photoSourceOrder: next };
-			showAdminToast({ type: 'success', message: 'Photo order updated.' });
-		} catch (err) {
-			console.error('Failed to update photo order:', err);
-			photoOrder = current;
-			showAdminToast({
-				type: 'error',
-				message: (err as Error)?.message ?? 'Failed to update photo order.'
-			});
-		} finally {
-			updatingPhotoOrder = false;
-		}
-	};
-
-	const handleSetActivePhotoSource = async (key: PhotoSourceKey) => {
-		if (!selectedUser || updatingActivePhoto) return;
-		updatingActivePhoto = true;
-		try {
-			await ensureFirebaseReady();
-			const db = getDb();
-			await updateDoc(doc(db, 'profiles', selectedUser.uid), {
-				activePhotoSource: key,
-				updatedAt: serverTimestamp()
-			});
-			users = users.map((user) =>
-				user.uid === selectedUser!.uid ? { ...user, activePhotoSource: key } : user
-			);
-			selectedUser = { ...selectedUser, activePhotoSource: key };
-			showAdminToast({ type: 'success', message: 'Active photo source updated.' });
-		} catch (err) {
-			console.error('Failed to update active photo source:', err);
-			showAdminToast({
-				type: 'error',
-				message: (err as Error)?.message ?? 'Failed to update active photo source.'
-			});
-		} finally {
-			updatingActivePhoto = false;
-		}
-	};
-
-	const handleClearActivePhotoSource = async () => {
-		if (!selectedUser || updatingActivePhoto) return;
-		updatingActivePhoto = true;
-		try {
-			await ensureFirebaseReady();
-			const db = getDb();
-			await updateDoc(doc(db, 'profiles', selectedUser.uid), {
-				activePhotoSource: null,
-				updatedAt: serverTimestamp()
-			});
-			users = users.map((user) =>
-				user.uid === selectedUser!.uid ? { ...user, activePhotoSource: null } : user
-			);
-			selectedUser = { ...selectedUser, activePhotoSource: null };
-			showAdminToast({ type: 'success', message: 'Active photo source cleared.' });
-		} catch (err) {
-			console.error('Failed to clear active photo source:', err);
-			showAdminToast({
-				type: 'error',
-				message: (err as Error)?.message ?? 'Failed to clear active photo source.'
-			});
-		} finally {
-			updatingActivePhoto = false;
 		}
 	};
 </script>
@@ -1377,11 +900,7 @@
 		<div class="flex-1">
 			{#if selectedUser}
 				<AdminCard title="User Details" description="View and manage user information.">
-					<div
-						class="max-h-[70vh] overflow-y-auto pr-2"
-						style="-webkit-overflow-scrolling: touch;"
-					>
-						<div class="space-y-6">
+					<div class="space-y-6">
 						<!-- User Header -->
 						<div class="flex items-center gap-4">
 							<Avatar
@@ -1559,29 +1078,71 @@
 								</button>
 							{/if}
 
-							<!-- Manage Avatar -->
+							<!-- Refresh Google Photo -->
 							<button
 								type="button"
-								class="flex w-full items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)35%,transparent)] p-4 transition hover:bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)10%,transparent)]"
-								onclick={openAvatarManager}
+								class="flex w-full items-center justify-between rounded-xl border border-blue-500/30 p-4 transition hover:bg-blue-500/5"
+								onclick={() => handleRefreshUserPhoto(selectedUser!.uid, selectedUser!.hasCustomPhoto)}
+								disabled={refreshingUserPhoto === selectedUser.uid}
 							>
 								<div class="flex items-center gap-3">
 									<div
-										class="flex h-10 w-10 items-center justify-center rounded-lg bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)]"
+										class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/20"
 									>
-										<i class="bx bx-image-alt text-lg text-[color:var(--accent-primary,#14b8a6)]"></i>
+										<i class="bx bx-refresh text-lg text-blue-500"></i>
 									</div>
 									<div>
 										<p class="font-medium text-[color:var(--color-text-primary)]">
-											Manage Profile Avatar
+											Refresh Google Photo
 										</p>
 										<p class="text-xs text-[color:var(--text-60,#6b7280)]">
-											View sources, change order, set active, and troubleshoot
+											{selectedUser.hasCustomPhoto 
+												? 'Has custom photo - will force refresh' 
+												: 'Pull latest photo from Google account'}
 										</p>
 									</div>
 								</div>
-								<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+								{#if refreshingUserPhoto === selectedUser.uid}
+									<i
+										class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
+									></i>
+								{:else}
+									<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+								{/if}
 							</button>
+							
+							<!-- Re-authenticate with Google (only for current user) -->
+							{#if selectedUser.uid === data.user.uid}
+								<button
+									type="button"
+									class="flex w-full items-center justify-between rounded-xl border border-green-500/30 p-4 transition hover:bg-green-500/5"
+									onclick={() => handleReauthWithGoogle()}
+									disabled={!!refreshingUserPhoto}
+								>
+									<div class="flex items-center gap-3">
+										<div
+											class="flex h-10 w-10 items-center justify-center rounded-lg bg-green-500/20"
+										>
+											<i class="bx bxl-google text-lg text-green-500"></i>
+										</div>
+										<div>
+											<p class="font-medium text-[color:var(--color-text-primary)]">
+												Re-sign in with Google
+											</p>
+											<p class="text-xs text-[color:var(--text-60,#6b7280)]">
+												Fetch fresh profile data directly from Google
+											</p>
+										</div>
+									</div>
+									{#if refreshingUserPhoto === data.user.uid}
+										<i
+											class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
+										></i>
+									{:else}
+										<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+									{/if}
+								</button>
+							{/if}
 
 							<!-- Force Add to Server -->
 							<button
@@ -1645,7 +1206,6 @@
 								{/if}
 							</button>
 						</div>
-						</div>
 					</div>
 				</AdminCard>
 			{:else}
@@ -1666,423 +1226,6 @@
 		</div>
 	</div>
 </div>
-
-<!-- Avatar Manager Modal -->
-{#if showAvatarManager && selectedUser}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-		onclick={closeAvatarManager}
-	>
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<div
-			class="relative mx-4 flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:var(--surface-panel,#1e293b)] shadow-2xl"
-			onclick={(e) => e.stopPropagation()}
-		>
-			<!-- Header -->
-			<div class="flex items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] p-4">
-				<div>
-					<h3 class="text-lg font-bold text-[color:var(--color-text-primary)]">
-						Profile Avatar Manager
-					</h3>
-					<p class="text-xs text-[color:var(--text-60,#6b7280)]">
-						{selectedUser.displayName || selectedUser.email || 'User'} - {selectedUser.uid}
-					</p>
-				</div>
-				<button
-					type="button"
-					class="flex h-8 w-8 items-center justify-center rounded-lg text-[color:var(--text-60,#6b7280)] transition hover:bg-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] hover:text-[color:var(--color-text-primary)]"
-					onclick={closeAvatarManager}
-					aria-label="Close avatar manager"
-				>
-					<i class="bx bx-x text-xl"></i>
-				</button>
-			</div>
-
-			<div class="flex-1 overflow-y-auto p-4 space-y-6" style="-webkit-overflow-scrolling: touch;">
-				<!-- Resolved Avatar -->
-				<div class="rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] p-4">
-					<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
-						<div
-							class="flex h-20 w-20 items-center justify-center overflow-hidden rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color:var(--color-panel-muted,#23272a)]"
-						>
-							{#if resolvedPhotoDisplay && !hasPreviewError('resolved')}
-								<img
-									src={resolvedPhotoDisplay}
-									alt="Resolved avatar"
-									class="h-full w-full object-cover"
-									referrerpolicy="no-referrer"
-									onerror={() => markPreviewError('resolved')}
-								/>
-							{:else}
-								<span class="text-lg font-semibold text-[color:var(--text-60,#6b7280)]">
-									{previewInitial(selectedUser.displayName)}
-								</span>
-							{/if}
-						</div>
-						<div class="min-w-0 flex-1">
-							<div class="flex flex-wrap items-center gap-2">
-								<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
-									Resolved Avatar
-								</p>
-								{#if selectedUser.activePhotoSource}
-									<span class="rounded-full bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--accent-primary,#14b8a6)]">
-										Active override
-									</span>
-								{/if}
-							</div>
-							<p class="mt-1 text-xs text-[color:var(--text-60,#6b7280)]">
-								Active source: {activePhotoKey ?? 'default'}
-							</p>
-							{#if isStorageUrlMissingToken(resolvedPhotoDisplay)}
-								<div class="mt-1 flex flex-wrap items-center gap-2">
-									<p class="text-[10px] text-amber-400">
-										Token missing - app may block this URL
-									</p>
-									<button
-										type="button"
-										class="rounded-full border border-amber-400/30 px-2 py-0.5 text-[10px] text-amber-300 transition hover:text-amber-100"
-										onclick={() =>
-											copyToClipboard(
-												buildTokenMissingDebug({
-													key: activePhotoKey ?? 'default',
-													label: 'Resolved avatar',
-													value: resolvedPhotoDisplay,
-													context: 'resolved'
-												}),
-												'Token debug'
-											)}
-									>
-										Copy debug
-									</button>
-								</div>
-							{:else if hasPreviewError('resolved') && !isDefaultAvatarUrl(resolvedPhotoDisplay)}
-								<p class="mt-1 text-[10px] text-amber-400">
-									Preview failed - check storage permissions or URL
-								</p>
-							{/if}
-							<div class="mt-3 flex flex-wrap gap-2">
-								<button
-									type="button"
-									class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-3 py-1 text-xs text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)]"
-									onclick={() => copyToClipboard(resolvedPhotoDisplay, 'Resolved URL')}
-								>
-									Copy URL
-								</button>
-								<a
-									class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-3 py-1 text-xs text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)]"
-									href={resolvedPhotoDisplay}
-									target="_blank"
-									rel="noreferrer"
-								>
-									Open image
-								</a>
-							</div>
-						</div>
-					</div>
-				</div>
-
-				<!-- Sources & Order -->
-				<div class="rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] p-4 space-y-3">
-					<div class="flex flex-wrap items-center justify-between gap-2">
-						<div>
-							<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
-								Sources & Order
-							</p>
-							<p class="text-xs text-[color:var(--text-60,#6b7280)]">
-								Move items to change priority. Set active to force a source.
-							</p>
-						</div>
-						{#if selectedUser.activePhotoSource}
-							<button
-								type="button"
-								class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-3 py-1 text-xs text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)]"
-								onclick={handleClearActivePhotoSource}
-								disabled={updatingActivePhoto}
-							>
-								Clear active override
-							</button>
-						{/if}
-					</div>
-					<div class="space-y-2">
-						{#each photoResolutionSteps as step, index (step.key)}
-							{@const isDefault = step.key === 'default'}
-							{@const previewKey = `source-${step.key}`}
-							{@const missingToken = isStorageUrlMissingToken(step.value)}
-							<div class="flex flex-col gap-3 rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-3 sm:flex-row sm:items-center">
-								<div class="flex items-center gap-3 min-w-0 flex-1">
-									<div
-										class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)12%,transparent)] bg-[color:var(--color-panel-muted,#23272a)]"
-									>
-										{#if (step.value || isDefault) && !hasPreviewError(previewKey)}
-											<img
-												src={step.value ?? defaultAvatarUrl}
-												alt={step.label}
-												class="h-full w-full object-cover"
-												referrerpolicy="no-referrer"
-												loading="lazy"
-												onerror={() => markPreviewError(previewKey)}
-											/>
-										{:else}
-											<span class="text-xs font-semibold text-[color:var(--text-60,#6b7280)]">
-												{previewInitial(step.value)}
-											</span>
-										{/if}
-									</div>
-									<div class="min-w-0">
-										<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-											{index + 1}. {step.label}
-										</p>
-										<p class="mt-0.5 truncate font-mono text-[11px] text-[color:var(--text-60,#6b7280)]" title={step.value ?? ''}>
-											{step.value ?? 'Not set'}
-										</p>
-										{#if missingToken}
-											<div class="mt-1 flex flex-wrap items-center gap-2">
-												<p class="text-[10px] text-amber-400">
-													Token missing - app may block this URL
-												</p>
-												<button
-													type="button"
-													class="rounded-full border border-amber-400/30 px-2 py-0.5 text-[10px] text-amber-300 transition hover:text-amber-100"
-													onclick={() =>
-														copyToClipboard(
-															buildTokenMissingDebug({
-																key: step.key,
-																label: step.label,
-																value: step.value,
-																context: 'source'
-															}),
-															'Token debug'
-														)}
-												>
-													Copy debug
-												</button>
-											</div>
-										{/if}
-									</div>
-								</div>
-								<div class="flex flex-wrap items-center justify-end gap-2">
-									{#if activePhotoKey === step.key}
-										<span class="rounded-full bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--accent-primary,#14b8a6)]">
-											Active
-										</span>
-									{:else if selectedUser.activePhotoSource === step.key && !step.value}
-										<span class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-500">
-											Pinned (missing)
-										</span>
-									{/if}
-									{#if step.value}
-										<button
-											type="button"
-											class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-2 py-0.5 text-[10px] text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)]"
-											onclick={() => copyToClipboard(step.value, `${step.label} URL`)}
-										>
-											Copy
-										</button>
-										<a
-											class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-2 py-0.5 text-[10px] text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)]"
-											href={step.value}
-											target="_blank"
-											rel="noreferrer"
-										>
-											Open
-										</a>
-									{/if}
-									{#if !isDefault}
-										<button
-											type="button"
-											class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] p-1.5 text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)] disabled:opacity-50"
-											onclick={() => handleMovePhotoSource('up', step.key as PhotoSourceKey)}
-											disabled={updatingPhotoOrder || index === 0}
-											aria-label="Move up"
-											title="Move up"
-										>
-											<i class="bx bx-chevron-up text-sm"></i>
-										</button>
-										<button
-											type="button"
-											class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] p-1.5 text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)] disabled:opacity-50"
-											onclick={() => handleMovePhotoSource('down', step.key as PhotoSourceKey)}
-											disabled={updatingPhotoOrder || index >= photoOrder.length - 1}
-											aria-label="Move down"
-											title="Move down"
-										>
-											<i class="bx bx-chevron-down text-sm"></i>
-										</button>
-										<button
-											type="button"
-											class="rounded-full border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] px-2 py-0.5 text-[10px] text-[color:var(--text-60,#6b7280)] transition hover:text-[color:var(--color-text-primary)] disabled:opacity-50"
-											onclick={() => handleSetActivePhotoSource(step.key as PhotoSourceKey)}
-											disabled={updatingActivePhoto || !step.value}
-										>
-											Set active
-										</button>
-									{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
-				</div>
-
-				<!-- Tools & Diagnostics -->
-				<div class="rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] p-4 space-y-4">
-					<div class="flex items-center justify-between">
-						<p class="text-sm font-semibold text-[color:var(--color-text-primary)]">
-							Tools & Diagnostics
-						</p>
-						<span class="text-[10px] text-[color:var(--text-60,#6b7280)]">
-							Troubleshoot avatar data
-						</span>
-					</div>
-					<div class="grid gap-3 sm:grid-cols-2">
-						<button
-							type="button"
-							class="flex items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)35%,transparent)] p-3 text-left transition hover:bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)10%,transparent)]"
-							onclick={() => handleRefreshUserPhoto(selectedUser!.uid, selectedUser!.hasCustomPhoto)}
-							disabled={refreshingUserPhoto === selectedUser.uid}
-						>
-							<div class="flex items-center gap-3">
-								<div class="flex h-9 w-9 items-center justify-center rounded-lg bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)]">
-									<i class="bx bx-refresh text-base text-[color:var(--accent-primary,#14b8a6)]"></i>
-								</div>
-								<div>
-									<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-										Refresh Google Photo
-									</p>
-									<p class="text-[11px] text-[color:var(--text-60,#6b7280)]">
-										{selectedUser.hasCustomPhoto ? 'Force refresh' : 'Pull latest from Google'}
-									</p>
-								</div>
-							</div>
-							{#if refreshingUserPhoto === selectedUser.uid}
-								<i class="bx bx-loader-alt animate-spin text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{:else}
-								<i class="bx bx-chevron-right text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{/if}
-						</button>
-
-						<button
-							type="button"
-							class="flex items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)35%,transparent)] p-3 text-left transition hover:bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)10%,transparent)]"
-							onclick={() => handleRepairUserPhoto(selectedUser!.uid)}
-							disabled={repairingUserPhoto === selectedUser.uid}
-						>
-							<div class="flex items-center gap-3">
-								<div class="flex h-9 w-9 items-center justify-center rounded-lg bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)]">
-									<i class="bx bx-wrench text-base text-[color:var(--accent-primary,#14b8a6)]"></i>
-								</div>
-								<div>
-									<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-										Repair Storage URLs
-									</p>
-									<p class="text-[11px] text-[color:var(--text-60,#6b7280)]">
-										Add download tokens to cached avatar URLs
-									</p>
-								</div>
-							</div>
-							{#if repairingUserPhoto === selectedUser.uid}
-								<i class="bx bx-loader-alt animate-spin text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{:else}
-								<i class="bx bx-chevron-right text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{/if}
-						</button>
-
-						<button
-							type="button"
-							class="flex items-center justify-between rounded-xl border border-rose-500/30 p-3 text-left transition hover:bg-rose-500/5"
-							onclick={() => handleDeleteUserPhoto(selectedUser!.uid)}
-							disabled={deletingUserPhoto === selectedUser.uid}
-						>
-							<div class="flex items-center gap-3">
-								<div class="flex h-9 w-9 items-center justify-center rounded-lg bg-rose-500/20">
-									<i class="bx bx-trash text-base text-rose-500"></i>
-								</div>
-								<div>
-									<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-										Clear Profile Photo
-									</p>
-									<p class="text-[11px] text-[color:var(--text-60,#6b7280)]">
-										Remove custom/cached/auth photos
-									</p>
-								</div>
-							</div>
-							{#if deletingUserPhoto === selectedUser.uid}
-								<i class="bx bx-loader-alt animate-spin text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{:else}
-								<i class="bx bx-chevron-right text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-							{/if}
-						</button>
-
-						{#if selectedUser.uid === data.user.uid}
-							<button
-								type="button"
-								class="flex items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)35%,transparent)] p-3 text-left transition hover:bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)10%,transparent)]"
-								onclick={() => handleReauthWithGoogle()}
-								disabled={!!refreshingUserPhoto}
-							>
-								<div class="flex items-center gap-3">
-									<div class="flex h-9 w-9 items-center justify-center rounded-lg bg-[color:color-mix(in_srgb,var(--accent-primary,#14b8a6)20%,transparent)]">
-										<i class="bx bxl-google text-base text-[color:var(--accent-primary,#14b8a6)]"></i>
-									</div>
-									<div>
-										<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-											Re-sign in with Google
-										</p>
-										<p class="text-[11px] text-[color:var(--text-60,#6b7280)]">
-											Fetch fresh profile data
-										</p>
-									</div>
-								</div>
-								{#if refreshingUserPhoto === data.user.uid}
-									<i class="bx bx-loader-alt animate-spin text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-								{:else}
-									<i class="bx bx-chevron-right text-lg text-[color:var(--text-50,#94a3b8)]"></i>
-								{/if}
-							</button>
-						{/if}
-					</div>
-
-					<div class="grid gap-3 sm:grid-cols-2">
-						<div class="rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-3">
-							<p class="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--text-50,#94a3b8)]">
-								Active override
-							</p>
-							<p class="mt-1 text-xs text-[color:var(--color-text-primary)]">
-								{selectedUser.activePhotoSource ?? 'none'}
-							</p>
-						</div>
-						<div class="rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-3">
-							<p class="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--text-50,#94a3b8)]">
-								Source order
-							</p>
-							<p class="mt-1 text-[11px] font-mono text-[color:var(--color-text-primary)]">
-								{photoOrder.join(' > ')}
-							</p>
-						</div>
-						<div class="rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-3">
-							<p class="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--text-50,#94a3b8)]">
-								Resolved URL
-							</p>
-							<p class="mt-1 truncate text-[11px] font-mono text-[color:var(--color-text-primary)]" title={resolvedPhotoDisplay}>
-								{resolvedPhotoDisplay}
-							</p>
-						</div>
-						<div class="rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] p-3">
-							<p class="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--text-50,#94a3b8)]">
-								Has custom photo
-							</p>
-							<p class="mt-1 text-xs text-[color:var(--color-text-primary)]">
-								{selectedUser.hasCustomPhoto ? 'Yes' : 'No'}
-							</p>
-						</div>
-					</div>
-				</div>
-			</div>
-		</div>
-	</div>
-{/if}
 
 <!-- Server Picker Modal -->
 {#if showServerPicker && selectedUser}
@@ -2344,14 +1487,10 @@
 				<div class="space-y-4">
 					<!-- Group Name -->
 					<div>
-						<label
-							class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5"
-							for="group-editor-name"
-						>
+						<label class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5">
 							Group Name
 						</label>
 						<input
-							id="group-editor-name"
 							type="text"
 							placeholder="e.g., New Employee Servers"
 							class="w-full rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-transparent px-4 py-2.5 text-sm text-[color:var(--color-text-primary)] placeholder:text-[color:var(--text-50,#94a3b8)] focus:border-[color:var(--accent-primary,#14b8a6)] focus:outline-none"
@@ -2361,14 +1500,10 @@
 
 					<!-- Description -->
 					<div>
-						<label
-							class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5"
-							for="group-editor-description"
-						>
+						<label class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5">
 							Description (optional)
 						</label>
 						<input
-							id="group-editor-description"
 							type="text"
 							placeholder="Brief description of this group"
 							class="w-full rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-transparent px-4 py-2.5 text-sm text-[color:var(--color-text-primary)] placeholder:text-[color:var(--text-50,#94a3b8)] focus:border-[color:var(--accent-primary,#14b8a6)] focus:outline-none"
@@ -2378,10 +1513,7 @@
 
 					<!-- Server Selection -->
 					<div>
-						<label
-							class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5"
-							for="group-editor-server-search"
-						>
+						<label class="block text-sm font-medium text-[color:var(--color-text-primary)] mb-1.5">
 							Servers ({groupEditorServerIds.length} selected)
 						</label>
 						
@@ -2391,7 +1523,6 @@
 								class="bx bx-search absolute left-3 top-1/2 -translate-y-1/2 text-lg text-[color:var(--text-50,#94a3b8)]"
 							></i>
 							<input
-								id="group-editor-server-search"
 								type="search"
 								placeholder="Search servers..."
 								class="w-full rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-transparent py-2.5 pl-10 pr-4 text-sm text-[color:var(--color-text-primary)] placeholder:text-[color:var(--text-50,#94a3b8)] focus:border-[color:var(--accent-primary,#14b8a6)] focus:outline-none"
