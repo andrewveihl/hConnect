@@ -79,6 +79,19 @@
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import {
+		timeServerSwitch,
+		timeChannelSwitch,
+		timeMessageSend,
+		sendChannelMessageOptimized,
+		getPendingMessages,
+		mergeWithPending,
+		cleanupChannelListeners,
+		initializeOutbox,
+		getThreadViewMemory,
+		threadKey,
+		setThreadViewMemory
+	} from '$lib/perf';
+	import {
 		getCachedChannelMessages,
 		updateChannelCache,
 		hasChannelCache,
@@ -146,6 +159,15 @@
 	let channelListServerId: string | null = null;
 	let routerReady = false;
 	let messages: any[] = $state([]);
+	let messagesLoading = $state(false);
+	
+	// Merge pending (local echo) messages with confirmed messages
+	const mergedMessages = $derived.by(() => {
+		if (!serverId || !activeChannel?.id) return messages;
+		const channelKey = `${serverId}:${activeChannel.id}`;
+		return mergeWithPending(messages, channelKey);
+	});
+	
 	let lastReadMessageIds: Record<string, string | null> = {};
 	let messagesLoadError: string | null = $state(null);
 	let lastSidebarChannels: ChannelEventDetail | null = $state(null);
@@ -1333,21 +1355,20 @@
 		// Increment subscription version to track this subscription
 		const subscriptionVersion = ++messagesSubscriptionVersion;
 		
+		// Note: Cache-first rendering is handled in pickChannel() for instant paint
+		// This function focuses on setting up the live Firestore subscription
+		
+		// Don't block on membership - let it run in parallel
+		// Firestore will surface permission errors if unauthorized
 		if (memberEnsurePromise) {
-			try {
-				await memberEnsurePromise;
-			} catch {
-				// Ignore membership bootstrap failures; Firestore will surface permissions if still unauthorized.
-			}
+			memberEnsurePromise.catch(() => {});
 		}
-		// Guard: if context changed while awaiting membership, abort
-		if (serverId !== currServerId || activeChannel?.id !== channelId) {
-			return;
+		
+		// Set loading state if no cached messages shown yet
+		if (messages.length === 0) {
+			messagesLoading = true;
 		}
-		// Guard: if a newer subscription was started, abort this one
-		if (subscriptionVersion !== messagesSubscriptionVersion) {
-			return;
-		}
+		
 		const database = db();
 		const q = query(
 			collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
@@ -1372,6 +1393,7 @@
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
 				}
+				messagesLoading = false;
 				const nextMessages: any[] = [];
 				const seen = new Set<string>();
 
@@ -1393,11 +1415,31 @@
 				const nextLen = nextMessages.length;
 				messages = nextMessages;
 				
-				// Update message cache for this channel
+				// Update both caches with new messages
 				if (nextLen > 0) {
+					// Update Svelte store cache
 					updateChannelCache(currServerId, channelId, nextMessages as CachedMessage[], {
 						earliestLoaded: nextMessages[0]?.createdAt ?? null,
 						hasOlderMessages: nextLen >= PAGE_SIZE
+					});
+					
+					// Also update IndexedDB-backed perf cache for persistence across refreshes
+					const channelCacheKey = threadKey(currServerId, channelId);
+					setThreadViewMemory({
+						threadKey: channelCacheKey,
+						messages: nextMessages.map((m: any) => ({
+							id: m.id,
+							uid: m.uid,
+							text: m.text ?? m.content ?? '',
+							type: m.type,
+							createdAt: typeof m.createdAt?.toMillis === 'function' ? m.createdAt.toMillis() : m.createdAt,
+							displayName: m.displayName,
+							photoURL: m.photoURL,
+							reactions: m.reactions,
+							replyTo: m.replyTo
+						})),
+						hasOlderMessages: nextLen >= PAGE_SIZE,
+						updatedAt: Date.now()
 					});
 				}
 				
@@ -1420,6 +1462,7 @@
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
 				}
+				messagesLoading = false;
 				console.error('Failed to load channel messages', error);
 				messagesLoadError =
 					(error as any)?.code === 'permission-denied'
@@ -1765,12 +1808,17 @@
 
 	function pickChannel(id: string) {
 		if (!serverId) return;
+		
+		// Start performance timing
+		const endChannelTimer = timeChannelSwitch(id);
+		
 		if (blockedChannels.has(id)) {
 			messagesLoadError = 'You do not have permission to view messages in this channel.';
 			activeChannel = null;
 			showChannels = true;
 			showMembers = false;
 			clearRequestedChannel(id);
+			endChannelTimer(); // End timing even on error
 			return;
 		}
 		// First check current channels array
@@ -1789,19 +1837,43 @@
 			showChannels = true;
 			showMembers = false;
 			clearRequestedChannel(id);
+			endChannelTimer();
 			return;
 		}
 		const next = selectChannelObject(id);
 		activeChannel = next;
 		
-		// Immediately show cached messages for instant feedback
+		// Clean up old channel listeners before subscribing to new ones
+		cleanupChannelListeners();
+		
+		// CACHE-FIRST: Check both in-memory cache AND IndexedDB cache
+		let hasCachedMessages = false;
+		
+		// First check in-memory Svelte store cache
 		if (next.type !== 'voice' && hasChannelCache(serverId, id)) {
 			const cached = getCachedChannelMessages(serverId, id);
 			if (cached.length > 0) {
-				messages = cached;
-				earliestLoaded = cached[0]?.createdAt ?? null;
+				messages = cached.map((row: any) => toChatMessage(row.id, row));
+				earliestLoaded = messages[0]?.createdAt ?? null;
+				hasCachedMessages = true;
+				endChannelTimer();
 			}
-		} else {
+		}
+		
+		// If no Svelte store cache, check IndexedDB-backed perf cache
+		if (!hasCachedMessages && next.type !== 'voice') {
+			const channelCacheKey = threadKey(serverId, id);
+			const idbCached = getThreadViewMemory(channelCacheKey);
+			if (idbCached && idbCached.messages?.length > 0) {
+				messages = idbCached.messages.map((row: any) => toChatMessage(row.id, row));
+				earliestLoaded = messages[0]?.createdAt ?? null;
+				hasCachedMessages = true;
+				endChannelTimer();
+			}
+		}
+		
+		// Only clear messages if no cache at all
+		if (!hasCachedMessages) {
 			messages = [];
 		}
 		
@@ -3115,8 +3187,11 @@
 		const mentionList = normalizeMentionSendList(
 			typeof payload === 'object' ? (payload?.mentions ?? []) : []
 		);
+		
+		// Use optimistic send with local echo - renders immediately as pending
+		const endTimer = timeMessageSend();
 		try {
-			await sendChannelMessage(serverId, activeChannel.id, {
+			sendChannelMessageOptimized(serverId, activeChannel.id, {
 				type: 'text',
 				text: trimmed,
 				uid: $user.uid,
@@ -3125,7 +3200,10 @@
 				mentions: mentionList,
 				replyTo: replyRef ?? undefined
 			});
+			// Timer ends after pending message is added (nearly instant)
+			endTimer();
 		} catch (err) {
+			endTimer();
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to send message: ${err}`);
@@ -3150,8 +3228,11 @@
 			return;
 		}
 		const replyRef = consumeReply(typeof detail === 'object' ? (detail?.replyTo ?? null) : null);
+		
+		// Use optimized send with local echo - no await needed
+		const endTimer = timeMessageSend();
 		try {
-			await sendChannelMessage(serverId, activeChannel.id, {
+			sendChannelMessageOptimized(serverId, activeChannel.id, {
 				type: 'gif',
 				url: trimmed,
 				uid: $user.uid,
@@ -3159,7 +3240,9 @@
 				photoURL: deriveCurrentPhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
+			endTimer();
 		} catch (err) {
+			endTimer();
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to share GIF: ${err}`);
@@ -5384,7 +5467,17 @@ run(() => {
 								</div>
 
 								<div class={`mobile-chat-card ${mobileVoicePane === 'chat' ? '' : 'hidden'}`}>
-									{#if messagesLoadError}
+									{#if messagesLoading && !mergedMessages.length}
+										<div class="flex-1 grid place-items-center text-soft">
+											<div class="flex flex-col items-center gap-3">
+												<div
+													class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
+													aria-hidden="true"
+												></div>
+												<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+											</div>
+										</div>
+									{:else if messagesLoadError}
 										<div class="flex-1 grid place-items-center text-soft text-center px-4">
 											<div>
 												<div class="font-semibold mb-1">Messages unavailable</div>
@@ -5395,7 +5488,7 @@ run(() => {
 										<ChannelMessagePane
 											hasChannel={Boolean(serverId && activeChannel)}
 											channelName={activeChannel?.name ?? ''}
-											{messages}
+											messages={mergedMessages}
 											{profiles}
 											currentUserId={$user?.uid ?? null}
 											{mentionOptions}
@@ -5631,7 +5724,17 @@ run(() => {
 							{/if}
 
 							{#if !voiceDesktopLayout && !showVoiceLobby}
-								{#if messagesLoadError}
+								{#if messagesLoading && !mergedMessages.length}
+									<div class="flex-1 grid place-items-center text-soft">
+										<div class="flex flex-col items-center gap-3">
+											<div
+												class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
+												aria-hidden="true"
+											></div>
+											<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+										</div>
+									</div>
+								{:else if messagesLoadError}
 									<div class="flex-1 grid place-items-center text-soft text-center px-4">
 										<div>
 											<div class="font-semibold mb-1">Messages unavailable</div>
@@ -5642,7 +5745,7 @@ run(() => {
 									<ChannelMessagePane
 										hasChannel={Boolean(serverId && activeChannel)}
 										channelName={activeChannel?.name ?? ''}
-										{messages}
+										messages={mergedMessages}
 										{profiles}
 										currentUserId={$user?.uid ?? null}
 										{mentionOptions}

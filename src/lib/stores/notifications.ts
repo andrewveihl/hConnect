@@ -142,6 +142,7 @@ type ServerUnreadState = {
 const notificationsInternal = writable<NotificationItem[]>([]);
 const notificationCountInternal = writable(0);
 const dmUnreadCountInternal = writable(0);
+const dmUnreadByIdInternal = writable<Record<string, number>>({});
 const channelUnreadCountInternal = writable(0);
 const readyInternal = writable(false);
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>(
@@ -178,6 +179,7 @@ export const channelIndicators = derived(channelIndicatorsInternal, (value) => v
 export const serverUnreadIndicators = derived(serverUnreadInternal, (value) => value);
 export const threadUnreadCount = derived(threadUnreadCountInternal, (value) => value);
 export const threadUnreadById = derived(threadUnreadByIdInternal, (value) => value);
+export const dmUnreadById = derived(dmUnreadByIdInternal, (value) => value);
 
 const servers = new Map<string, ServerInfo>();
 const serverChannelMeta = new Map<string, Map<string, ChannelMeta>>();
@@ -995,10 +997,19 @@ function recomputeNow() {
 		}
 	}
 
+	// Calculate DM unread by thread ID
+	const dmById: Record<string, number> = {};
+	for (const [threadId, count] of dmCounts) {
+		if (count > 0) {
+			dmById[threadId] = count;
+		}
+	}
+
 	maybePlayNotificationSound(total);
 	notificationsInternal.set(list);
 	notificationCountInternal.set(total);
 	dmUnreadCountInternal.set(dmTotal);
+	dmUnreadByIdInternal.set(dmById);
 	channelUnreadCountInternal.set(channelTotal);
 	threadUnreadCountInternal.set(threadTotal);
 	threadUnreadByIdInternal.set(threadById);

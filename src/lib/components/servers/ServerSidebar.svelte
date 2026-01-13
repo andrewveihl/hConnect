@@ -90,6 +90,33 @@
 
 	const CHANNEL_CACHE_STORAGE_PREFIX = 'server-channels:';
 	const CHANNEL_CACHE_STORAGE_LIMIT = 200;
+	const MEMBER_CACHE_PREFIX = 'server-member:';
+
+	// Cache member state per server to avoid flash of empty channels
+	function loadCachedMemberState(server: string): { isMember: boolean; roleIds: string[]; profileMember: boolean } | null {
+		if (typeof window === 'undefined') return null;
+		try {
+			const raw = sessionStorage.getItem(`${MEMBER_CACHE_PREFIX}${server}`);
+			if (!raw) return null;
+			const parsed = JSON.parse(raw);
+			return {
+				isMember: parsed?.isMember === true,
+				roleIds: Array.isArray(parsed?.roleIds) ? parsed.roleIds : [],
+				profileMember: parsed?.profileMember === true
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	function persistMemberState(server: string, isMember: boolean, roleIds: string[], profileMember: boolean) {
+		if (typeof window === 'undefined') return;
+		try {
+			sessionStorage.setItem(`${MEMBER_CACHE_PREFIX}${server}`, JSON.stringify({ isMember, roleIds, profileMember }));
+		} catch {
+			// ignore
+		}
+	}
 
 	function sortChannelsByPosition(list: Chan[]) {
 		return list.slice().sort((a, b) => {
@@ -1080,10 +1107,19 @@
 		unsubMyMember?.();
 		myRole = computeIsOwner() ? 'owner' : null;
 		myPerms = null;
-		isMemberDoc = false;
-		myRoleIds = [];
 		channelFetchDenied = false;
 		channelVisibilityHint = null;
+
+		// Read cached member state to avoid flash of empty channels while subscription loads
+		const cached = loadCachedMemberState(server);
+		if (cached) {
+			isMemberDoc = cached.isMember;
+			myRoleIds = cached.roleIds;
+			profileMembership = cached.profileMember;
+		} else {
+			isMemberDoc = false;
+			myRoleIds = [];
+		}
 
 		if (!$user?.uid) return;
 
@@ -1098,6 +1134,8 @@
 				myRole = computeIsOwner() ? 'owner' : (maybeRole as any);
 				myPerms = data?.perms ?? null;
 				myRoleIds = Array.isArray(data?.roleIds) ? data.roleIds : [];
+				// Persist member state for next time
+				persistMemberState(server, isMemberDoc, myRoleIds, profileMembership);
 				blockedChannelServers.delete(server);
 				maybeRefreshChannels(server);
 			},
@@ -1111,8 +1149,11 @@
 	}
 
 	function watchProfileMembership(server: string) {
-		profileMembership = false;
-		if (!$user?.uid) return;
+		// Don't reset profileMembership here - it may have been set from cache in watchMyMember
+		if (!$user?.uid) {
+			profileMembership = false;
+			return;
+		}
 		const db = getDb();
 		const ref = doc(db, 'profiles', $user.uid, 'servers', server);
 		// Firestore rules also treat this profile doc as membership for isMember; we only use its existence.
@@ -1120,6 +1161,8 @@
 			ref,
 			(snap) => {
 				profileMembership = snap.exists();
+				// Persist updated member state
+				persistMemberState(server, isMemberDoc, myRoleIds, profileMembership);
 				maybeRefreshChannels(server);
 			},
 			() => {
@@ -1627,10 +1670,8 @@
 		onPickChannel(id);
 		dispatch('pick', id);
 		// Optimistically clear unread badge for picked channel
-		const entry = unreadByChannel[id];
-		if (entry && (entry.high > 0 || entry.low > 0)) {
-			unreadByChannel = { ...unreadByChannel, [id]: { high: 0, low: 0 } };
-		}
+		// Add to optimisticClears set so the derived unreadByChannel shows 0
+		optimisticClears = new Set([...optimisticClears, id]);
 	}
 
 	function beginReorder() {
@@ -1706,16 +1747,49 @@
 	// Unread state map
 	type ChannelIndicator = { high: number; low: number };
 	let prevUnread: Record<string, number> = {};
+	
+	// Track channels we've optimistically cleared - to prevent flash of old unread state
+	let optimisticClears = $state<Set<string>>(new Set());
 
 	let computedServerId = $derived(
 		serverId ?? $page.params.serverID ?? ($page.params as any).serverId ?? null
 	);
 
-	// Use $derived for reactive unread tracking from global store
+	// Use $derived for reactive unread tracking from global store, with optimistic override
 	let unreadByChannel: Record<string, ChannelIndicator> = $derived.by(() => {
 		const indicators = $channelIndicators ?? {};
 		const serverKey = computedServerId ?? null;
-		return serverKey ? (indicators[serverKey] ?? {}) : {};
+		const base = serverKey ? (indicators[serverKey] ?? {}) : {};
+		
+		// Apply optimistic clears - if a channel is in optimisticClears, show 0 unread
+		const result: Record<string, ChannelIndicator> = {};
+		for (const [channelId, indicator] of Object.entries(base)) {
+			if (optimisticClears.has(channelId)) {
+				result[channelId] = { high: 0, low: 0 };
+			} else {
+				result[channelId] = indicator;
+			}
+		}
+		return result;
+	});
+	
+	// When the global store confirms the unread is cleared, remove from optimistic set
+	$effect(() => {
+		const indicators = $channelIndicators ?? {};
+		const serverKey = computedServerId ?? null;
+		const storeData = serverKey ? (indicators[serverKey] ?? {}) : {};
+		
+		// Check if any optimistically cleared channels now show 0 in the store
+		const toRemove: string[] = [];
+		for (const channelId of optimisticClears) {
+			const storeValue = storeData[channelId];
+			if (!storeValue || (storeValue.high === 0 && storeValue.low === 0)) {
+				toRemove.push(channelId);
+			}
+		}
+		if (toRemove.length > 0) {
+			optimisticClears = new Set([...optimisticClears].filter(id => !toRemove.includes(id)));
+		}
 	});
 
 	let lastViewedChannel: string | null = null;
@@ -1883,6 +1957,8 @@ run(() => {
 		const nextServer = computedServerId ?? null;
 		if (nextServer && $user?.uid && nextServer !== prevServer) {
 			lastServerId = nextServer;
+			// Clear optimistic clears when switching servers
+			optimisticClears = new Set();
 			subscribeAll(nextServer);
 		}
 	});
