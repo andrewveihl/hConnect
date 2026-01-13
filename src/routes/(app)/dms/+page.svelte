@@ -224,30 +224,30 @@
 	</div>
 </div>
 
-{#if showThreads || swipeActive}
-	<div
-		class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
-		class:mobile-panel--dragging={swipeActive}
-		style:transform={panelTransform}
-		style:transition-duration={`${PANEL_DURATION}ms`}
-		style:transitionTimingFunction={PANEL_EASING}
-		style:pointer-events={showThreads ? 'auto' : 'none'}
-		aria-label="Conversations"
-	>
-		<div class="mobile-panel__body">
-			<div class="mobile-panel__list">
-				<div class="flex-1 overflow-y-auto touch-pan-y">
-					<DMsSidebar
-						activeThreadId={null}
-						showPersonalSection={false}
-						on:select={handleThreadSelect}
-						on:delete={() => syncThreadsVisibility(false)}
-					/>
-				</div>
+<!-- Always mount the mobile panel to keep DMsSidebar subscriptions alive -->
+<div
+	class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
+	class:mobile-panel--dragging={swipeActive}
+	class:invisible={!showThreads && !swipeActive}
+	style:transform={panelTransform}
+	style:transition-duration={`${PANEL_DURATION}ms`}
+	style:transitionTimingFunction={PANEL_EASING}
+	style:pointer-events={showThreads ? 'auto' : 'none'}
+	aria-label="Conversations"
+>
+	<div class="mobile-panel__body">
+		<div class="mobile-panel__list">
+			<div class="flex-1 overflow-y-auto touch-pan-y">
+				<DMsSidebar
+					activeThreadId={null}
+					showPersonalSection={false}
+					on:select={handleThreadSelect}
+					on:delete={() => syncThreadsVisibility(false)}
+				/>
 			</div>
 		</div>
 	</div>
-{/if}
+</div>
 
 <style>
 	.channel-header {

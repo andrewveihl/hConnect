@@ -5789,15 +5789,14 @@ run(() => {
 	aria-label="Servers and channels"
 >
 	<div class="mobile-panel__body md:hidden">
-		{#if showChannels}
-			<div class="mobile-panel__servers">
-				<LeftPane
-					activeServerId={serverId}
-					padForDock={false}
-					showBottomActions={false}
-				/>
-			</div>
-		{/if}
+		<!-- Always mount LeftPane to keep subscriptions alive, use CSS visibility -->
+		<div class="mobile-panel__servers" class:invisible={!showChannels} class:hidden={!showChannels && !channelSwipeActive}>
+			<LeftPane
+				activeServerId={serverId}
+				padForDock={false}
+				showBottomActions={false}
+			/>
+		</div>
 		<div class="mobile-panel__channels">
 			{#if serverId}
 				<ServerSidebar
