@@ -28,6 +28,7 @@
 	import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
 	import { defaultSettingsSection } from '$lib/settings/sections';
 	import { serverRailCache, type ServerRailEntry } from '$lib/stores/serverRailCache';
+	import { subscribeServerRailOptimized, timeServerSwitch } from '$lib/perf';
 	import {
 		presenceFromSources,
 		presenceLabels,
@@ -171,7 +172,21 @@
 			pendingOrderIds = null;
 			return;
 		}
-		unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? [], uid));
+		// Use optimized subscription with cache-first pattern
+		subscribeServerRailOptimized(uid, (rows) => handleServerRows(rows ?? [], uid))
+			.then((unsubFn) => {
+				// Only set unsub if we're still subscribed to the same uid
+				if (subscribedServerUid === uid) {
+					unsub = unsubFn;
+				} else {
+					unsubFn();
+				}
+			})
+			.catch((err) => {
+				console.error('[LeftPane] Server rail subscription error:', err);
+				// Fallback to original subscription
+				unsub = subscribeUserServers(uid, (rows) => handleServerRows(rows ?? [], uid));
+			});
 	}
 
 	function updateFabSnapZone() {

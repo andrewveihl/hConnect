@@ -23,6 +23,7 @@
 	import { theme } from '$lib/stores/theme';
 	import { setSoundOverrides } from '$lib/utils/sounds';
 	import { initFabSnappingSettings, initFabSnapSync } from '$lib/stores/fabSnap';
+	import { preloadCacheFromDb } from '$lib/perf';
 
 	interface Props {
 		children?: import('svelte').Snippet;
@@ -131,6 +132,9 @@
 	};
 
 	onMount(() => {
+		// Preload IndexedDB cache into memory ASAP for instant paint on navigation
+		preloadCacheFromDb();
+		
 		detachViewportListeners = attachViewportListeners();
 		const teardownNavigation = initMobileNavigation();
 		initClientErrorReporting();

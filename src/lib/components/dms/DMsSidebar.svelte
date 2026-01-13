@@ -16,16 +16,15 @@
 		streamProfiles,
 		getProfile,
 		deleteThreadForUser,
-		streamThreadMeta,
 		triggerDMRailBackfill
 	} from '$lib/firestore/dms';
-	import { notifications } from '$lib/stores/notifications';
 	import { dmRailCache } from '$lib/stores/dmRailCache';
+	import { dmUnreadById } from '$lib/stores/notifications';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
-	
+
 	const dispatch = createEventDispatcher();
-	let me: any = $state(null);
+	let me: any = $derived($user);
 	let isRefreshing = $state(false);
 
 	interface Props {
@@ -52,7 +51,6 @@
 		idle: 'presence-dot--idle',
 		offline: 'presence-dot--offline'
 	};
-	const MAX_PRESENCE_SUBSCRIPTIONS = 30;
 
 	const THREAD_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 	const THREAD_DATE_WITH_YEAR_FORMAT = new Intl.DateTimeFormat(undefined, {
@@ -109,6 +107,10 @@
 	let visibleSearchResults: any[] = $state([]);
 	let visiblePeopleList: any[] = $state([]);
 	let filteredThreads: any[] = $state([]);
+	let dmUnreadByIdValue: Record<string, number> = $state({});
+	
+	// Track threads we've optimistically cleared to prevent flash of old unread state
+	let optimisticDmClears = $state<Set<string>>(new Set());
 
 	// Group DM creation state
 	let isGroupMode = $state(false);
@@ -465,31 +467,8 @@
 		return summary;
 	}
 
-	function manageThreadMetaSubscriptions(currentThreads: any[], activeId: string | null) {
-		if (!Array.isArray(currentThreads)) return;
-		const ids = new Set<string>();
-		if (activeId) {
-			ids.add(activeId);
-		}
-		ids.forEach((id) => {
-			if (!metaUnsubs[id]) {
-				metaUnsubs[id] = streamThreadMeta(id, (meta) => {
-					threadMeta = { ...threadMeta, [id]: meta };
-				});
-			}
-		});
-		for (const id of Object.keys(metaUnsubs)) {
-			if (!ids.has(id)) {
-				metaUnsubs[id]?.();
-				delete metaUnsubs[id];
-				if (threadMeta[id]) {
-					const next = { ...threadMeta };
-					delete next[id];
-					threadMeta = next;
-				}
-			}
-		}
-	}
+	// REMOVED: manageThreadMetaSubscriptions - rail doc already has lastMessage/lastSender/updatedAt
+	// Per-thread meta watchers were causing O(n) listeners. Use rail data instead.
 
 	/* ---------------- Presence tracking ---------------- */
 	let presenceDocs: Record<string, PresenceDoc> = $state({});
@@ -549,21 +528,11 @@
 		presenceDb = null;
 	}
 
-	function syncPresenceSubscriptions(sourceThreads: any[] = threads) {
-		if (typeof window === 'undefined') return;
-		const partnerUids = new Set<string>();
-		const list = Array.isArray(sourceThreads) ? sourceThreads : [];
-		for (const thread of list) {
-			if (partnerUids.size >= MAX_PRESENCE_SUBSCRIPTIONS) break;
-			const uid = resolveOtherUid(thread);
-			if (uid) partnerUids.add(uid);
-		}
-		partnerUids.forEach((uid) => subscribePresence(uid));
-		Object.keys(presenceUnsubs).forEach((uid) => {
-			if (!partnerUids.has(uid)) {
-				unsubscribePresence(uid);
-			}
-		});
+	function syncPresenceSubscriptions() {
+		// OPTIMIZED: No longer creating per-partner presence listeners
+		// Presence is derived from peopleMap which is already subscribed via streamProfiles
+		// This reduces listener count from O(n) to O(1)
+		// Legacy cleanup is now handled by cleanupPresence() on destroy
 	}
 
 	function presenceStateFor(uid: string | null, thread?: any): PresenceState {
@@ -581,7 +550,7 @@
 		presenceClassMap[state] ?? presenceClassMap.offline;
 
 	/* ---------------- Unread badges ---------------- */
-	let unreadMap: Record<string, number> = $state({});
+	// unreadMap is now derived from dmUnreadByIdValue (see below)
 
 	/* ---------------- Everyone (profiles) ---------------- */
 	let people: any[] = $state([]);
@@ -769,6 +738,9 @@
 	function openExisting(threadId: string) {
 		activeThreadId = threadId;
 		dispatch('select', threadId);
+		// Optimistically clear unread badge to prevent flash
+		optimisticDmClears = new Set([...optimisticDmClears, threadId]);
+		// Unread will be cleared when thread marks itself as read
 		if (navigateOnSelect) {
 			void goto(`/dms/${threadId}`);
 		}
@@ -798,6 +770,9 @@
 
 			activeThreadId = t.id;
 			dispatch('select', t.id);
+			// Optimistically clear unread badge to prevent flash
+			optimisticDmClears = new Set([...optimisticDmClears, t.id]);
+			// Unread will be cleared when thread marks itself as read
 			closePeoplePicker();
 			await goto(`/dms/${t.id}`);
 		} catch (err: any) {
@@ -821,6 +796,7 @@
 				dmRailCache.set(me.uid, nextThreads);
 				persistStoredRail(me.uid, nextThreads);
 			}
+			// Unread count will be cleaned up by the store
 			if (activeThreadId === threadId) {
 				activeThreadId = null;
 			}
@@ -895,6 +871,9 @@
 
 	run(() => {
 		me = $user;
+	});
+	run(() => {
+		dmUnreadByIdValue = $dmUnreadById;
 	});
 	run(() => {
 		const uid = me?.uid ?? null;
@@ -992,25 +971,17 @@
 			}
 		})();
 	});
+	// REMOVED: per-thread meta subscriptions - using rail doc data instead
+	// run(() => { manageThreadMetaSubscriptions(threads); });
+	// REMOVED: per-partner presence subscriptions - using peopleMap instead
 	run(() => {
-		manageThreadMetaSubscriptions(threads, activeThreadId ?? null);
-	});
-	run(() => {
-		syncPresenceSubscriptions(filteredThreads);
-	});
-	run(() => {
-		decoratedThreads = threads.map((thread) => {
-			const meta = threadMeta[thread.id] ?? null;
-			const lastMessage = meta?.lastMessage ?? thread.lastMessage ?? null;
-			const lastSender = meta?.lastSender ?? thread.lastSender ?? null;
-			const updatedAt = meta?.updatedAt ?? thread.updatedAt ?? null;
-			return {
-				...thread,
-				lastMessage,
-				lastSender,
-				updatedAt
-			};
-		});
+		// Use rail doc data directly - no per-thread meta subscriptions needed
+		decoratedThreads = threads.map((thread) => ({
+			...thread,
+			lastMessage: thread.lastMessage ?? null,
+			lastSender: thread.lastSender ?? null,
+			updatedAt: thread.updatedAt ?? null
+		}));
 	});
 	run(() => {
 		// Sort threads by updatedAt descending (most recent first)
@@ -1020,32 +991,32 @@
 			return bTime - aTime; // descending order
 		});
 	});
-	run(() => {
-		const list = $notifications ?? [];
-		const next: Record<string, number> = {};
-		for (const item of list) {
-			if (item?.kind !== 'dm') continue;
-			const threadId =
-				typeof item?.threadId === 'string'
-					? item.threadId
-					: typeof item?.id === 'string' && item.id.startsWith('dm:')
-						? item.id.slice(3)
-						: null;
-			if (threadId) {
-				next[threadId] = Number(item.unread ?? 0) || 0;
+	// Use dmUnreadByIdValue from store - derived to avoid reactive copies, with optimistic override
+	const unreadMap = $derived.by(() => {
+		const base = dmUnreadByIdValue;
+		const result: Record<string, number> = {};
+		for (const [threadId, count] of Object.entries(base)) {
+			// Apply optimistic clears - if a thread is in optimisticDmClears, show 0 unread
+			result[threadId] = optimisticDmClears.has(threadId) ? 0 : count;
+		}
+		return result;
+	});
+	
+	// When the store confirms 0 unread, remove from optimistic set
+	$effect(() => {
+		const toRemove: string[] = [];
+		for (const threadId of optimisticDmClears) {
+			if (!dmUnreadByIdValue[threadId] || dmUnreadByIdValue[threadId] === 0) {
+				toRemove.push(threadId);
 			}
 		}
-		unreadMap = next;
+		if (toRemove.length > 0) {
+			optimisticDmClears = new Set([...optimisticDmClears].filter(id => !toRemove.includes(id)));
+		}
 	});
 	run(() => {
-		const prevUnsub = untrack(() => unsubPeople);
-		if (!showPeoplePicker) {
-			prevUnsub?.();
-			unsubPeople = null;
-			peopleLoading = false;
-			return;
-		}
 		peopleLoading = true;
+		const prevUnsub = untrack(() => unsubPeople);
 		prevUnsub?.();
 		unsubPeople = streamProfiles(
 			(list) => {
@@ -1209,7 +1180,7 @@
 								ontouchmove={handleSwipeMove}
 								ontouchend={handleSwipeEnd}
 								ontouchcancel={handleSwipeEnd}
-								>
+							>
 								<button
 									class="dm-thread__button"
 									onclick={(event) => handleThreadClick(event, t.id)}

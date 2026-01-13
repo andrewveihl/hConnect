@@ -186,34 +186,32 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 				</div>
 			{/if}
 			<div class={listClass} style={scrollRegionStyle}>
-				{#key scrollContextKey ?? 'channel-pane'}
-					<MessageList
-						{messages}
-						users={profiles}
-						{currentUserId}
-						replyTargetId={replyTarget?.messageId ?? null}
-						{threadStats}
-						{pendingUploads}
-						scrollToBottomSignal={combinedScrollSignal}
-						{scrollToMessageId}
-						{isTicketAiStaff}
-						{serverId}
-						{channelId}
-						{threadId}
-						{ticketedMessageIds}
-						on:vote={onVote}
-						on:submitForm={onSubmitForm}
-						on:react={onReact}
-						on:loadMore={onLoadMore}
-						on:atBottom={(event) => dispatch('atBottom', event.detail)}
-						on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
-						on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
-						on:ticketCreated={onTicketCreated}
-						on:ticketError={onTicketError}
-						{pinnedMessageIds}
-						canPinMessages={canPinMessages}
-					/>
-				{/key}
+				<MessageList
+					{messages}
+					users={profiles}
+					{currentUserId}
+					replyTargetId={replyTarget?.messageId ?? null}
+					{threadStats}
+					{pendingUploads}
+					scrollToBottomSignal={combinedScrollSignal}
+					{scrollToMessageId}
+					{isTicketAiStaff}
+					{serverId}
+					{channelId}
+					{threadId}
+					{ticketedMessageIds}
+					on:vote={onVote}
+					on:submitForm={onSubmitForm}
+					on:react={onReact}
+					on:loadMore={onLoadMore}
+					on:atBottom={(event) => dispatch('atBottom', event.detail)}
+					on:reply={(event: CustomEvent<any>) => dispatch('reply', event.detail)}
+					on:thread={(event: CustomEvent<any>) => dispatch('thread', event.detail)}
+					on:ticketCreated={onTicketCreated}
+					on:ticketError={onTicketError}
+					{pinnedMessageIds}
+					canPinMessages={canPinMessages}
+				/>
 			</div>
 		</div>
 		{#if !hideInput}

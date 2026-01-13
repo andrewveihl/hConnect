@@ -46,7 +46,20 @@
 		hasDMCache,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
-	
+	import { dmRailCache } from '$lib/stores/dmRailCache';
+	import {
+		timeDmSwitch,
+		timeMessageSend,
+		sendDMMessageOptimized,
+		cleanupDmListeners,
+		initializeOutbox,
+		getPendingMessages,
+		mergeWithPending,
+		getThreadViewMemory,
+		dmThreadKey,
+		setThreadViewMemory
+	} from '$lib/perf';
+
 	interface Props {
 		data: { threadID: string };
 	}
@@ -62,6 +75,13 @@
 
 	let messages: any[] = $state([]);
 	let messagesLoading = $state(true);
+	
+	// Merge pending (local echo) messages with confirmed messages
+	const mergedMessages = $derived.by(() => {
+		if (!threadID) return messages;
+		return mergeWithPending(messages, threadID);
+	});
+	
 	let messageUsers: Record<string, any> = $state({});
 	let pendingUploads: PendingUploadPreview[] = $state([]);
 	const profileUnsubs: Record<string, Unsubscribe> = {};
@@ -119,8 +139,32 @@
 		messageUsers = { ...messageUsers, [uid]: next };
 	}
 
+	// OPTIMIZED: Limit profile subscriptions to reduce listener count
+	// Only subscribe to profiles for the current user and thread participants
+	// Other message authors use cached profile data from messageUsers
+	const MAX_PROFILE_SUBSCRIPTIONS = 4;
+	const profileSubPriority: string[] = []; // Track subscription order for LRU eviction
+
 	function ensureProfileSubscription(database: ReturnType<typeof getDb>, uid: string) {
 		if (!uid || profileUnsubs[uid]) return;
+		
+		// Check if we're at the limit
+		if (Object.keys(profileUnsubs).length >= MAX_PROFILE_SUBSCRIPTIONS) {
+			// Check if we already have this user's data in messageUsers cache
+			const cached = messageUsers[uid];
+			if (cached?.displayName || cached?.name) {
+				// Already have data, don't need a subscription
+				return;
+			}
+			// Evict oldest subscription if needed to make room
+			const oldest = profileSubPriority.shift();
+			if (oldest && profileUnsubs[oldest]) {
+				profileUnsubs[oldest]();
+				delete profileUnsubs[oldest];
+			}
+		}
+
+		profileSubPriority.push(uid);
 		profileUnsubs[uid] = onSnapshot(
 			doc(database, 'profiles', uid),
 			(snap) => {
@@ -136,10 +180,13 @@
 					authPhotoURL: data?.authPhotoURL ?? null,
 					settings: data?.settings ?? undefined
 				});
+				// Profile cache update removed - using messageUsers as local cache
 			},
 			() => {
 				profileUnsubs[uid]?.();
 				delete profileUnsubs[uid];
+				const idx = profileSubPriority.indexOf(uid);
+				if (idx >= 0) profileSubPriority.splice(idx, 1);
 			}
 		);
 	}
@@ -739,9 +786,52 @@
 		};
 	}
 
+	// Cache for profile data to avoid refetching
+	const profileCache = new Map<string, any>();
+	
+	function getCachedThreadMeta(): { participants: string[]; isGroup: boolean; name: string | null; iconURL: string | null } | null {
+		if (!me?.uid || !threadID) return null;
+		const cachedRail = dmRailCache.get(me.uid);
+		if (!cachedRail) return null;
+		const entry = cachedRail.find(t => t.id === threadID);
+		if (!entry) return null;
+		return {
+			participants: entry.participants ?? [],
+			isGroup: entry.isGroup ?? false,
+			name: entry.groupName ?? null,
+			iconURL: (entry as any).iconURL ?? null
+		};
+	}
+
 	async function loadThreadMeta() {
 		if (!threadID || typeof window === 'undefined') return;
-		metaLoading = true;
+		
+		// CACHE-FIRST: Try to use cached thread metadata for instant render
+		const cached = getCachedThreadMeta();
+		if (cached && cached.participants.length > 0) {
+			const parts = cached.participants;
+			isGroupChat = cached.isGroup || parts.length > 2;
+			groupName = cached.name;
+			groupIconURL = cached.iconURL;
+			groupParticipants = parts;
+			
+			// For 1:1 DMs, set otherUid immediately
+			if (!isGroupChat) {
+				otherUid = parts.find(p => p !== me?.uid) ?? null;
+				// Check if we have a cached profile
+				if (otherUid && profileCache.has(otherUid)) {
+					otherProfile = profileCache.get(otherUid);
+					metaLoading = false;
+				}
+			}
+			// Don't set metaLoading = false yet for group chats - need profiles
+		}
+		
+		// Always set metaLoading true only if we don't have cached data
+		if (!cached) {
+			metaLoading = true;
+		}
+		
 		try {
 			const database = getDb();
 			const snap = await getDoc(doc(database, 'dms', threadID));
@@ -776,17 +866,23 @@
 			};
 
 			if (isGroupChat) {
-				// Load profiles for all other participants
+				// Load profiles for all other participants IN PARALLEL
 				const otherUids = parts.filter(p => p !== me?.uid);
 				const profilePromises = otherUids.map(async (uid) => {
+					// Check cache first
+					if (profileCache.has(uid)) {
+						return { uid, profile: profileCache.get(uid) };
+					}
 					try {
 						const profileDoc = await getDoc(doc(database, 'profiles', uid));
-						if (profileDoc.exists()) {
-							return { uid, profile: normalizeUserRecord(profileDoc.id, profileDoc.data()) };
-						}
-						return { uid, profile: normalizeUserRecord(uid, {}) };
+						const profile = profileDoc.exists() 
+							? normalizeUserRecord(profileDoc.id, profileDoc.data())
+							: normalizeUserRecord(uid, {});
+						profileCache.set(uid, profile);
+						return { uid, profile };
 					} catch {
-						return { uid, profile: normalizeUserRecord(uid, {}) };
+						const profile = normalizeUserRecord(uid, {});
+						return { uid, profile };
 					}
 				});
 				
@@ -804,11 +900,17 @@
 				groupParticipantProfiles = {};
 
 				if (otherUid) {
-					const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
-					if (profileDoc.exists()) {
-						otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
+					// Check cache first
+					if (profileCache.has(otherUid)) {
+						otherProfile = profileCache.get(otherUid);
 					} else {
-						otherProfile = normalizeUserRecord(otherUid, {});
+						const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
+						if (profileDoc.exists()) {
+							otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
+						} else {
+							otherProfile = normalizeUserRecord(otherUid, {});
+						}
+						profileCache.set(otherUid, otherProfile);
 					}
 				} else {
 					otherProfile = null;
@@ -899,8 +1001,12 @@
 			lastThreadID = threadID;
 			syncInfoVisibility(false);
 			pendingReply = null;
-			messages = [];
-			messagesLoading = true;
+			// Don't clear messages here - let the cache-first block handle it
+			// Only set loading state if no cache exists
+			if (!hasDMCache(threadID)) {
+				messages = [];
+				messagesLoading = true;
+			}
 			scrollResumeSignal = Date.now();
 		}
 	});
@@ -1166,27 +1272,51 @@
 		};
 	});
 
-	// After computing messageUsers map, ensure we subscribe to each author's profile
-	run(() => {
-		if (Object.keys(messageUsers).length > 0) {
-			try {
-				const database = getDb();
-				for (const uid in messageUsers) ensureProfileSubscription(database, uid);
-			} catch {}
-		}
-	});
+	// Profile subscriptions are handled inside the message stream callback to avoid reactive loops
+	// The ensureProfileSubscription guards prevent duplicate subscriptions
 
+	let dmSwitchTimer: (() => void) | null = null;
+	
 	run(() => {
 		if (mounted && threadID) {
-			// Show cached messages instantly for better UX
+			// Start timing DM switch
+			dmSwitchTimer = timeDmSwitch(threadID);
+			
+			// CACHE-FIRST: Check both in-memory cache AND IndexedDB cache
+			// IndexedDB cache is preloaded on app start via preloadCacheFromDb()
+			let hasCachedMessages = false;
+			
+			// First check in-memory Svelte store cache
 			if (hasDMCache(threadID)) {
 				const cached = getCachedDMMessages(threadID);
 				if (cached.length > 0) {
 					messages = cached.map((row: any) => toChatMessage(row.id, row));
 					messagesLoading = false;
 					scrollResumeSignal = Date.now();
+					hasCachedMessages = true;
+					// End timing - cache hit is fast paint
+					dmSwitchTimer?.();
+					dmSwitchTimer = null;
 				}
-			} else {
+			}
+			
+			// If no Svelte store cache, check IndexedDB-backed perf cache
+			if (!hasCachedMessages) {
+				const threadCacheKey = dmThreadKey(threadID);
+				const idbCached = getThreadViewMemory(threadCacheKey);
+				if (idbCached && idbCached.messages?.length > 0) {
+					messages = idbCached.messages.map((row: any) => toChatMessage(row.id, row));
+					messagesLoading = false;
+					scrollResumeSignal = Date.now();
+					hasCachedMessages = true;
+					// End timing - cache hit is fast paint
+					dmSwitchTimer?.();
+					dmSwitchTimer = null;
+				}
+			}
+			
+			// Only show loading if no cache at all
+			if (!hasCachedMessages) {
 				messagesLoading = true;
 			}
 			
@@ -1195,10 +1325,43 @@
 			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
 				messages = msgs.map((row: any) => toChatMessage(row.id, row));
 				
-				// Update DM cache with new messages
+				// End timing on first data callback if we didn't already end on cache
+				dmSwitchTimer?.();
+				dmSwitchTimer = null;
+				
+				// Subscribe to profiles for message authors (inside callback to avoid reactive loops)
+				try {
+					const database = getDb();
+					const authorUids = new Set(msgs.map((m: any) => m.uid).filter(Boolean));
+					for (const uid of authorUids) {
+						ensureProfileSubscription(database, uid as string);
+					}
+				} catch {}
+				
+				// Update both caches with new messages
 				if (msgs.length > 0) {
+					// Update Svelte store cache
 					updateDMCache(threadID, msgs as CachedMessage[], {
 						hasOlderMessages: msgs.length >= 50
+					});
+					
+					// Also update IndexedDB-backed perf cache for persistence across refreshes
+					const threadCacheKey = dmThreadKey(threadID);
+					setThreadViewMemory({
+						threadKey: threadCacheKey,
+						messages: msgs.map((m: any) => ({
+							id: m.id,
+							uid: m.uid,
+							text: m.text ?? m.content ?? '',
+							type: m.type,
+							createdAt: typeof m.createdAt?.toMillis === 'function' ? m.createdAt.toMillis() : m.createdAt,
+							displayName: m.displayName,
+							photoURL: m.photoURL,
+							reactions: m.reactions,
+							replyTo: m.replyTo
+						})),
+						hasOlderMessages: msgs.length >= 50,
+						updatedAt: Date.now()
 					});
 				}
 				
@@ -1275,8 +1438,11 @@
 			const allowed = new Set(mentionOptions.map((entry) => entry.uid));
 			mentionList = mentionList.filter((item) => allowed.has(item.uid));
 		}
+		
+		// Use optimistic send with local echo - renders immediately as pending
+		const endTimer = timeMessageSend();
 		try {
-			await sendDMMessage(threadID, {
+			sendDMMessageOptimized(threadID, {
 				type: 'text',
 				text: trimmed,
 				uid: me.uid,
@@ -1285,9 +1451,11 @@
 				mentions: mentionList.length ? mentionList : undefined,
 				replyTo: replyRef ?? undefined
 			});
+			endTimer(); // Timer ends after pending message is added (nearly instant)
 			// Sound is played by ChatInput component
 			markThreadAsSeen();
 		} catch (err) {
+			endTimer();
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to send message: ${err}`);
@@ -1300,8 +1468,11 @@
 		const trimmed = pickString(typeof detail === 'string' ? detail : detail?.url);
 		if (!trimmed || !me?.uid) return;
 		const replyRef = consumeReply(typeof detail === 'object' ? (detail?.replyTo ?? null) : null);
+		
+		// Use optimized send with local echo - no await needed
+		const endTimer = timeMessageSend();
 		try {
-			await sendDMMessage(threadID, {
+			sendDMMessageOptimized(threadID, {
 				type: 'gif',
 				url: trimmed,
 				uid: me.uid,
@@ -1309,9 +1480,10 @@
 				photoURL: deriveMePhotoURL(),
 				replyTo: replyRef ?? undefined
 			});
-			// Sound is played by ChatInput component
+			endTimer();
 			markThreadAsSeen();
 		} catch (err) {
+			endTimer();
 			restoreReply(replyRef);
 			console.error(err);
 			alert(`Failed to share GIF: ${err}`);
@@ -1635,22 +1807,20 @@
 							<span class="sr-only" aria-live="polite">Loading messages...</span>
 						</div>
 					{/if}
-					{#key messageScrollKey}
-						<MessageList
-							{messages}
-							users={messageUsers}
-							currentUserId={me?.uid ?? null}
-							replyTargetId={pendingReply?.messageId ?? null}
-							{pendingUploads}
-							scrollToBottomSignal={combinedScrollSignal}
-							dmThreadId={threadID}
-							on:vote={handleVote}
-							on:submitForm={handleFormSubmit}
-							on:react={handleReaction}
-							on:reply={handleReplyRequest}
-							on:loadMore={handleLoadOlderMessages}
-						/>
-					{/key}
+					<MessageList
+						messages={mergedMessages}
+						users={messageUsers}
+						currentUserId={me?.uid ?? null}
+						replyTargetId={pendingReply?.messageId ?? null}
+						{pendingUploads}
+						scrollToBottomSignal={combinedScrollSignal}
+						dmThreadId={threadID}
+						on:vote={handleVote}
+						on:submitForm={handleFormSubmit}
+						on:react={handleReaction}
+						on:reply={handleReplyRequest}
+						on:loadMore={handleLoadOlderMessages}
+					/>
 				</div>
 			</div>
 		</main>
@@ -1745,39 +1915,38 @@
 	{/if}
 </div>
 
-<!-- Mobile overlays -->
-{#if showThreads || leftSwipeActive}
-	<div
-		class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
-		class:mobile-panel--dragging={leftSwipeActive}
-		style:transform={threadsTransform}
-		style:transition-duration={`${PANEL_DURATION}ms`}
-		style:transitionTimingFunction={PANEL_EASING}
-		style:pointer-events={showThreads ? 'auto' : 'none'}
-		aria-label="Conversations"
-	>
-		<div class="mobile-panel__body">
-			<div class="mobile-panel__list">
-				<div class="mobile-panel__header md:hidden">
-					<div class="mobile-panel__title">Conversations</div>
-				</div>
-				<div class="flex-1 overflow-y-auto touch-pan-y">
-					<DMsSidebar
-						bind:this={sidebarRefMobile}
-						activeThreadId={threadID}
-						showPersonalSection={false}
-						on:select={handleSidebarSelect}
-						on:delete={(e) => {
-							syncThreadsVisibility(false);
-							syncInfoVisibility(false);
-							if (e.detail === threadID) void goto('/dms');
-						}}
-					/>
-				</div>
+<!-- Mobile overlays - Always mounted to keep subscriptions alive -->
+<div
+	class="mobile-panel md:hidden fixed inset-0 z-40 flex flex-col transition-transform will-change-transform touch-pan-y"
+	class:mobile-panel--dragging={leftSwipeActive}
+	class:invisible={!showThreads && !leftSwipeActive}
+	style:transform={threadsTransform}
+	style:transition-duration={`${PANEL_DURATION}ms`}
+	style:transitionTimingFunction={PANEL_EASING}
+	style:pointer-events={showThreads ? 'auto' : 'none'}
+	aria-label="Conversations"
+>
+	<div class="mobile-panel__body">
+		<div class="mobile-panel__list">
+			<div class="mobile-panel__header md:hidden">
+				<div class="mobile-panel__title">Conversations</div>
+			</div>
+			<div class="flex-1 overflow-y-auto touch-pan-y">
+				<DMsSidebar
+					bind:this={sidebarRefMobile}
+					activeThreadId={threadID}
+					showPersonalSection={false}
+					on:select={handleSidebarSelect}
+					on:delete={(e) => {
+						syncThreadsVisibility(false);
+						syncInfoVisibility(false);
+						if (e.detail === threadID) void goto('/dms');
+					}}
+				/>
 			</div>
 		</div>
 	</div>
-{/if}
+</div>
 
 {#if showInfo || rightSwipeActive}
 	<div
