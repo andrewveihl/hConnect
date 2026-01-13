@@ -33,7 +33,6 @@
 		orderBy,
 		query,
 		where,
-		limit,
 		type Unsubscribe,
 		setDoc,
 		writeBatch
@@ -930,13 +929,6 @@
 			// Also mark activity feed entries as read
 			await markMultipleChannelsActivityRead(computedServerId, unreadIds);
 
-			// Clear local unread state immediately for responsive UI
-			const newLocalUnread = { ...localUnread };
-			for (const id of unreadIds) {
-				newLocalUnread[id] = false;
-			}
-			localUnread = newLocalUnread;
-
 			// Haptic feedback on mobile
 			if (browser && 'vibrate' in navigator) {
 				navigator.vibrate(30);
@@ -1726,144 +1718,22 @@
 		return serverKey ? (indicators[serverKey] ?? {}) : {};
 	});
 
-	// Simple local unread tracking - watches latest message per channel
-	let localUnread: Record<string, boolean> = $state({});
-	let channelWatchers = new Map<string, Unsubscribe>();
-	let channelReadWatchers = new Map<string, Unsubscribe>();
-	let lastReadTimestamps: Record<string, number | null> = {};
-	let initialLoadComplete: Set<string> = new Set();
 	let lastViewedChannel: string | null = null;
 
 	// Track when user views a channel - mark it as read
 run(() => {
 	if (activeChannelId && activeChannelId !== lastViewedChannel) {
 		lastViewedChannel = activeChannelId;
-		// Mark channel as read when user views it
-		const currentUnread = untrack(() => localUnread);
-		if (currentUnread[activeChannelId] !== false) {
-			localUnread = { ...currentUnread, [activeChannelId]: false };
-		}
-		// Update local timestamp to "now" so we don't show as unread after refresh
-		lastReadTimestamps[activeChannelId] = Date.now();
-			// Also mark activity entries as read
-			if (computedServerId) {
-				void markChannelActivityRead(computedServerId, activeChannelId);
-			}
-		}
-	});
-
-	// Helper to convert Firestore timestamp to millis
-	function toMillis(value: any): number | null {
-		if (!value) return null;
-		if (typeof value === 'number') return value;
-		if (value instanceof Date) return value.getTime();
-		if (typeof value?.toMillis === 'function') return value.toMillis();
-		if (typeof value?.seconds === 'number') return value.seconds * 1000;
-		return null;
-	}
-
-	// Set up watchers for each text channel to detect new messages
-	function setupChannelWatchers(chans: Chan[], sId: string | null, uid: string | null) {
-		if (!browser || !sId || !uid) return;
-
-		const db = getDb();
-		const textChannels = chans.filter((c) => c.type === 'text');
-
-		// Clean up old watchers for channels no longer in list
-		for (const [channelId, unsub] of channelWatchers) {
-			if (!textChannels.find((c) => c.id === channelId)) {
-				unsub();
-				channelWatchers.delete(channelId);
-				channelReadWatchers.get(channelId)?.();
-				channelReadWatchers.delete(channelId);
-				initialLoadComplete.delete(channelId);
-			}
-		}
-
-		// Set up new watchers
-		for (const chan of textChannels) {
-			if (channelWatchers.has(chan.id)) continue;
-
-			// First, watch the user's read state for this channel
-			const readDocRef = doc(db, 'profiles', uid, 'reads', `${sId}__${chan.id}`);
-			const readUnsub = onSnapshot(
-				readDocRef,
-				(snap) => {
-					const data = snap.data();
-					lastReadTimestamps[chan.id] = toMillis(data?.lastReadAt) ?? null;
-				},
-				() => {
-					// If no read doc exists, that's fine - they haven't read it yet
-					lastReadTimestamps[chan.id] = null;
-				}
-			);
-			channelReadWatchers.set(chan.id, readUnsub);
-
-			// Then watch for latest messages
-			const messagesRef = collection(db, 'servers', sId, 'channels', chan.id, 'messages');
-			const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
-
-			const unsub = onSnapshot(
-				q,
-				(snap) => {
-					if (snap.empty) return;
-					const latestMsg = snap.docs[0].data();
-					const msgTimestamp = toMillis(latestMsg?.createdAt);
-					const lastRead = lastReadTimestamps[chan.id];
-					const currentUid = $user?.uid;
-					const isFirstLoad = !initialLoadComplete.has(chan.id);
-
-					// Mark initial load complete
-					initialLoadComplete.add(chan.id);
-
-					// Skip if this is the active channel
-					if (chan.id === activeChannelId) return;
-
-					// Skip if message is from current user
-					if (latestMsg?.authorId === currentUid) return;
-
-					// Check if this message is newer than when user last read
-					if (msgTimestamp && lastRead && msgTimestamp > lastRead) {
-						localUnread = { ...localUnread, [chan.id]: true };
-					} else if (!isFirstLoad && msgTimestamp) {
-						// New message came in after initial load - mark as unread
-						localUnread = { ...localUnread, [chan.id]: true };
-					}
-				},
-				(err) => {
-					// Silently ignore permission errors
-				}
-			);
-
-			channelWatchers.set(chan.id, unsub);
+		if (computedServerId) {
+			void markChannelActivityRead(computedServerId, activeChannelId);
 		}
 	}
+});
 
-	// Watch for channel list changes
-	run(() => {
-		if (browser && computedServerId && channels.length > 0) {
-			setupChannelWatchers(channels, computedServerId, $user?.uid ?? null);
-		}
-	});
-
-	// Cleanup on destroy
-	onDestroy(() => {
-		for (const unsub of channelWatchers.values()) {
-			unsub();
-		}
-		channelWatchers.clear();
-		for (const unsub of channelReadWatchers.values()) {
-			unsub();
-		}
-		channelReadWatchers.clear();
-		initialLoadComplete.clear();
-	});
-
-	// Combined unread check - use local tracking OR global store
+	// Combined unread check - use global store
 	function hasUnread(channelId: string): boolean {
 		const global = unreadByChannel[channelId];
-		const globalUnread = (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
-		return globalUnread || localUnread[channelId] === true;
+		return (global?.high ?? 0) > 0 || (global?.low ?? 0) > 0;
 	}
 
 	function hasHighPriority(channelId: string): number {

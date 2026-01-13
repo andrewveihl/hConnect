@@ -13,13 +13,13 @@
 		createGroupDM,
 		streamMyDMs,
 		streamMyThreadsLoose,
-		streamUnreadCount,
 		streamProfiles,
 		getProfile,
 		deleteThreadForUser,
 		streamThreadMeta,
 		triggerDMRailBackfill
 	} from '$lib/firestore/dms';
+	import { notifications } from '$lib/stores/notifications';
 	import { dmRailCache } from '$lib/stores/dmRailCache';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
 	import Avatar from '$lib/components/app/Avatar.svelte';
@@ -52,6 +52,7 @@
 		idle: 'presence-dot--idle',
 		offline: 'presence-dot--offline'
 	};
+	const MAX_PRESENCE_SUBSCRIPTIONS = 30;
 
 	const THREAD_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 	const THREAD_DATE_WITH_YEAR_FORMAT = new Intl.DateTimeFormat(undefined, {
@@ -464,13 +465,12 @@
 		return summary;
 	}
 
-	function manageThreadMetaSubscriptions(currentThreads: any[]) {
+	function manageThreadMetaSubscriptions(currentThreads: any[], activeId: string | null) {
 		if (!Array.isArray(currentThreads)) return;
-		const ids = new Set(
-			currentThreads
-				.map((t) => t?.id)
-				.filter((id): id is string => typeof id === 'string' && id.length > 0)
-		);
+		const ids = new Set<string>();
+		if (activeId) {
+			ids.add(activeId);
+		}
 		ids.forEach((id) => {
 			if (!metaUnsubs[id]) {
 				metaUnsubs[id] = streamThreadMeta(id, (meta) => {
@@ -549,13 +549,15 @@
 		presenceDb = null;
 	}
 
-	function syncPresenceSubscriptions() {
+	function syncPresenceSubscriptions(sourceThreads: any[] = threads) {
 		if (typeof window === 'undefined') return;
-		const partnerUids = new Set(
-			threads
-				.map((t) => resolveOtherUid(t))
-				.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
-		);
+		const partnerUids = new Set<string>();
+		const list = Array.isArray(sourceThreads) ? sourceThreads : [];
+		for (const thread of list) {
+			if (partnerUids.size >= MAX_PRESENCE_SUBSCRIPTIONS) break;
+			const uid = resolveOtherUid(thread);
+			if (uid) partnerUids.add(uid);
+		}
 		partnerUids.forEach((uid) => subscribePresence(uid));
 		Object.keys(presenceUnsubs).forEach((uid) => {
 			if (!partnerUids.has(uid)) {
@@ -580,9 +582,6 @@
 
 	/* ---------------- Unread badges ---------------- */
 	let unreadMap: Record<string, number> = $state({});
-	let unsubsUnread: Array<() => void> = [];
-
-	onDestroy(() => unsubsUnread.forEach((u) => u()));
 
 	/* ---------------- Everyone (profiles) ---------------- */
 	let people: any[] = $state([]);
@@ -770,10 +769,6 @@
 	function openExisting(threadId: string) {
 		activeThreadId = threadId;
 		dispatch('select', threadId);
-		// Optimistically clear unread
-		if (unreadMap[threadId] && unreadMap[threadId] > 0) {
-			unreadMap = { ...unreadMap, [threadId]: 0 };
-		}
 		if (navigateOnSelect) {
 			void goto(`/dms/${threadId}`);
 		}
@@ -803,10 +798,6 @@
 
 			activeThreadId = t.id;
 			dispatch('select', t.id);
-			// Optimistically clear unread
-			if (unreadMap[t.id] && unreadMap[t.id] > 0) {
-				unreadMap = { ...unreadMap, [t.id]: 0 };
-			}
 			closePeoplePicker();
 			await goto(`/dms/${t.id}`);
 		} catch (err: any) {
@@ -830,9 +821,6 @@
 				dmRailCache.set(me.uid, nextThreads);
 				persistStoredRail(me.uid, nextThreads);
 			}
-			const nextMap = { ...unreadMap };
-			delete nextMap[threadId];
-			unreadMap = nextMap;
 			if (activeThreadId === threadId) {
 				activeThreadId = null;
 			}
@@ -1005,10 +993,10 @@
 		})();
 	});
 	run(() => {
-		manageThreadMetaSubscriptions(threads);
+		manageThreadMetaSubscriptions(threads, activeThreadId ?? null);
 	});
 	run(() => {
-		syncPresenceSubscriptions();
+		syncPresenceSubscriptions(filteredThreads);
 	});
 	run(() => {
 		decoratedThreads = threads.map((thread) => {
@@ -1033,22 +1021,31 @@
 		});
 	});
 	run(() => {
-		const prevStops = untrack(() => unsubsUnread);
-		prevStops.forEach((u) => u());
-		unsubsUnread = [];
-		if (me?.uid) {
-			for (const t of threads) {
-				const stop = streamUnreadCount(t.id, me.uid, (n) => {
-					const prev = untrack(() => unreadMap);
-					unreadMap = { ...prev, [t.id]: n };
-				});
-				unsubsUnread.push(stop);
+		const list = $notifications ?? [];
+		const next: Record<string, number> = {};
+		for (const item of list) {
+			if (item?.kind !== 'dm') continue;
+			const threadId =
+				typeof item?.threadId === 'string'
+					? item.threadId
+					: typeof item?.id === 'string' && item.id.startsWith('dm:')
+						? item.id.slice(3)
+						: null;
+			if (threadId) {
+				next[threadId] = Number(item.unread ?? 0) || 0;
 			}
 		}
+		unreadMap = next;
 	});
 	run(() => {
-		peopleLoading = true;
 		const prevUnsub = untrack(() => unsubPeople);
+		if (!showPeoplePicker) {
+			prevUnsub?.();
+			unsubPeople = null;
+			peopleLoading = false;
+			return;
+		}
+		peopleLoading = true;
 		prevUnsub?.();
 		unsubPeople = streamProfiles(
 			(list) => {
