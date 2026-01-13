@@ -197,7 +197,7 @@ export function streamProfiles(
 	const lim = opts?.limitTo ?? 500;
 
 	// No orderBy — avoids index/field issues if some docs lack "name"
-	const ref = collection(db, 'profiles');
+	const ref = query(collection(db, 'profiles'), limit(lim));
 
 	return onSnapshot(
 		ref,
