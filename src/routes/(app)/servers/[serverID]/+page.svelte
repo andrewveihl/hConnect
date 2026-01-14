@@ -1103,7 +1103,8 @@
 	let isViewingActiveVoiceChannel = $state(false);
 	let showVoiceLobby = $state(false);
 	let voiceInviteUrl: string | null = $state(null);
-	let isMobile = $state(false);
+	// Initialize isMobile immediately on browser to ensure nav bar visibility before onMount
+	let isMobile = $state(browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches);
 	let currentUserDisplayName = $state('');
 	let currentUserPhotoURL: string | null = $state(null);
 	const unsubscribeVoice = voiceSession.subscribe((value) => {
@@ -1293,8 +1294,12 @@
 		scrollToBottomSignal = Date.now();
 	};
 
-	const PAGE_SIZE = 50;
+	// Progressive loading: quick initial render, then backfill
+	const INITIAL_PAGE_SIZE = 5;   // First quick load for instant feel
+	const BACKFILL_PAGE_SIZE = 20; // Second load after initial render
+	const PAGE_SIZE = 50;          // Pagination on scroll
 	let earliestLoaded: any = null; // Firestore Timestamp or Date
+	let backfillPending = $state(false); // Track if backfill is in progress
 
 	async function loadOlderMessages(currServerId: string, channelId: string) {
 		try {
@@ -1346,6 +1351,39 @@
 		}
 	}
 
+	// Backfill older messages after initial quick load
+	async function backfillMessages(currServerId: string, channelId: string, beforeTimestamp: any) {
+		if (!beforeTimestamp || backfillPending) return;
+		backfillPending = true;
+		try {
+			const database = db();
+			const q = query(
+				collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
+				orderBy('createdAt', 'asc'),
+				endBefore(beforeTimestamp),
+				limitToLast(BACKFILL_PAGE_SIZE)
+			);
+			const snap = await getDocs(q);
+			const older: any[] = [];
+			snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
+			if (older.length > 0) {
+				// Prepend older messages without scroll jump
+				messages = [...older, ...messages];
+				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
+				// Update cache with backfilled messages
+				updateChannelCache(currServerId, channelId, older as CachedMessage[], {
+					earliestLoaded,
+					hasOlderMessages: older.length >= BACKFILL_PAGE_SIZE,
+					prepend: true
+				});
+			}
+		} catch (err) {
+			console.error('Failed to backfill messages', err);
+		} finally {
+			backfillPending = false;
+		}
+	}
+
 	async function subscribeMessages(currServerId: string, channelId: string) {
 		if (blockedChannels.has(channelId)) {
 			messagesLoadError = 'You do not have permission to view messages in this channel.';
@@ -1370,11 +1408,17 @@
 		}
 		
 		const database = db();
+		
+		// Progressive loading: start with small initial query for fast first paint
+		// Then backfill more messages after render
+		const initialLoad = messages.length === 0;
+		const queryLimit = initialLoad ? INITIAL_PAGE_SIZE : PAGE_SIZE;
+		
 		const q = query(
 			collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
 			orderBy('createdAt', 'asc'),
 			// Show last page live; older are fetched on-demand
-			limitToLast(PAGE_SIZE)
+			limitToLast(queryLimit)
 		);
 		clearMessagesUnsub();
 		messagesLoadError = null;
@@ -1417,10 +1461,13 @@
 				
 				// Update both caches with new messages
 				if (nextLen > 0) {
+					// For initial load, we know there are likely more messages
+					const hasMoreMessages = initialLoad ? true : nextLen >= PAGE_SIZE;
+					
 					// Update Svelte store cache
 					updateChannelCache(currServerId, channelId, nextMessages as CachedMessage[], {
 						earliestLoaded: nextMessages[0]?.createdAt ?? null,
-						hasOlderMessages: nextLen >= PAGE_SIZE
+						hasOlderMessages: hasMoreMessages
 					});
 					
 					// Also update IndexedDB-backed perf cache for persistence across refreshes
@@ -1438,12 +1485,13 @@
 							reactions: m.reactions,
 							replyTo: m.replyTo
 						})),
-						hasOlderMessages: nextLen >= PAGE_SIZE,
+						hasOlderMessages: hasMoreMessages,
 						updatedAt: Date.now()
 					});
 				}
 				
 				triggerScrollToBottom();
+				const prevEarliest = earliestLoaded;
 				if (nextLen) {
 					earliestLoaded = nextMessages[0]?.createdAt ?? null;
 				}
@@ -1456,6 +1504,16 @@
 						markChannelReadFromMessages(currServerId, channelId, nextMessages);
 					}
 				} catch {}
+				
+				// Progressive loading: if this was initial load, backfill more messages
+				if (initialLoad && nextLen > 0 && nextLen <= INITIAL_PAGE_SIZE) {
+					// Schedule backfill after a short delay to let UI render first
+					setTimeout(() => {
+						if (subscriptionVersion === messagesSubscriptionVersion) {
+							backfillMessages(currServerId, channelId, earliestLoaded);
+						}
+					}, 50);
+				}
 			},
 			(error) => {
 				// Guard: ignore errors from stale subscriptions
@@ -1806,7 +1864,8 @@
 		}, 650);
 	}
 
-	function pickChannel(id: string) {
+	function pickChannel(id: string, options?: { closeMobileChannels?: boolean }) {
+		const closeMobileChannels = options?.closeMobileChannels ?? true;
 		if (!serverId) return;
 		
 		// Start performance timing
@@ -1899,8 +1958,10 @@
 			markChannelReadFromMessages(serverId, id, messages);
 		}
 
-		// close channels panel on mobile
-		showChannels = false;
+		// close channels panel on mobile (unless explicitly kept open)
+		if (closeMobileChannels) {
+			showChannels = false;
+		}
 
 		// Remember this channel for this server
 		if (serverId) {
@@ -1964,7 +2025,8 @@
 			if (requestedId) {
 				const target = nextChannels.find((c) => c.id === requestedId);
 				if (target) {
-					pickChannel(target.id);
+					// On mobile, keep channel list visible during server switch
+					pickChannel(target.id, { closeMobileChannels: isDesktop });
 					return;
 				}
 			}
@@ -1973,7 +2035,8 @@
 			if (rememberedId) {
 				const remembered = nextChannels.find((c) => c.id === rememberedId);
 				if (remembered) {
-					pickChannel(remembered.id);
+					// On mobile, keep channel list visible during server switch
+					pickChannel(remembered.id, { closeMobileChannels: isDesktop });
 					return;
 				}
 			}
@@ -1996,7 +2059,8 @@
 		if (requestedId) {
 			const target = nextChannels.find((c) => c.id === requestedId);
 			if (target) {
-				pickChannel(target.id);
+				// On mobile, keep channel list visible during server switch
+				pickChannel(target.id, { closeMobileChannels: isDesktop });
 				return;
 			}
 		}
@@ -2076,7 +2140,9 @@
 	/* ===========================
      Mobile panels + gestures
      =========================== */
-	let showChannels = $state(false);
+	// Initialize showChannels to true on mobile to ensure nav bar is visible immediately
+	const initialIsMobile = browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches;
+	let showChannels = $state(initialIsMobile);
 	let showMembers = $state(false);
 	let desktopMembersVisible = $state(true);
 	let desktopMembersPreferred = $state(true);
@@ -5135,17 +5201,17 @@ run(() => {
 		}
 	});
 	// mobile: when switching servers, open channels panel
+	// This MUST run immediately to ensure the nav bar is visible
 	run(() => {
 		if (serverId) {
 			const isDesktop =
 				typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches;
-			if (!isDesktop && !activeChannel) {
+			if (!isDesktop) {
 				showMembers = false;
-				if (requestedChannelId) {
-					showChannels = false;
-				} else {
-					showChannels = true;
-				}
+				// Always show channel list on mobile when entering a server
+				// This ensures the nav bar remains visible and users can navigate
+				// Works regardless of whether there's an active channel
+				showChannels = true;
 			}
 		}
 	});

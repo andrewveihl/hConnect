@@ -1561,9 +1561,12 @@
 		// Group channels by category
 		const uncategorized: Chan[] = [];
 		const byCategory = new Map<string, Chan[]>();
+		const knownCategoryIds = new Set(categories.map(c => c.id));
 
 		for (const ch of visibleChannels) {
-			if (ch.categoryId) {
+			// Only group by category if the category is known/loaded
+			// Otherwise treat as uncategorized (prevents channels from disappearing while categories load)
+			if (ch.categoryId && knownCategoryIds.has(ch.categoryId)) {
 				const arr = byCategory.get(ch.categoryId) || [];
 				arr.push(ch);
 				byCategory.set(ch.categoryId, arr);
@@ -1594,9 +1597,11 @@
 	let groupedChannels: { category: Category | null; channels: Chan[] }[] = $derived.by(() => {
 		const uncategorized: Chan[] = [];
 		const byCategory = new Map<string, Chan[]>();
+		const knownCategoryIds = new Set(categories.map(c => c.id));
 
 		for (const ch of visibleChannels) {
-			if (ch.categoryId) {
+			// Only group by category if the category is known/loaded
+			if (ch.categoryId && knownCategoryIds.has(ch.categoryId)) {
 				const arr = byCategory.get(ch.categoryId) || [];
 				arr.push(ch);
 				byCategory.set(ch.categoryId, arr);
@@ -1959,6 +1964,23 @@ run(() => {
 			lastServerId = nextServer;
 			// Clear optimistic clears when switching servers
 			optimisticClears = new Set();
+			
+			// INSTANT PAINT: Load member state from cache FIRST so canSeeChannel works correctly
+			const cachedMember = loadCachedMemberState(nextServer);
+			if (cachedMember) {
+				isMemberDoc = cachedMember.isMember;
+				myRoleIds = cachedMember.roleIds;
+				profileMembership = cachedMember.profileMember;
+			}
+			
+			// INSTANT PAINT: Load channels from cache immediately before subscriptions
+			// This ensures the UI shows channels instantly even before Firestore responds
+			const cachedChannels = readCachedChannels(nextServer, true);
+			if (cachedChannels.length > 0 && channels.length === 0) {
+				channels = cachedChannels;
+				syncVoicePresenceWatchers(channels);
+			}
+			
 			subscribeAll(nextServer);
 		}
 	});

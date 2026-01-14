@@ -1013,5 +1013,101 @@ function evictOldMemberCaches(state: MemberCacheState): void {
 	}
 }
 
+/* ===========================
+   Preload Functions for Mobile Navigation
+=========================== */
+
+// Track which servers we've already preloaded to avoid duplicate fetches
+const preloadedServers = new Set<string>();
+let preloadInProgress = false;
+
+/**
+ * Preload server channels into cache for instant navigation
+ * Called from MobileNavBar when user is on DMs to warm up server data
+ */
+export async function preloadServerChannels(serverId: string): Promise<void> {
+	if (!serverId || preloadedServers.has(serverId) || preloadInProgress) return;
+	
+	// Check if already in cache
+	if (hasServerCache(serverId)) {
+		preloadedServers.add(serverId);
+		return;
+	}
+	
+	// Check sessionStorage first (faster than Firestore)
+	if (typeof window !== 'undefined') {
+		try {
+			const stored = sessionStorage.getItem(`server-channels:${serverId}`);
+			if (stored) {
+				const channels = JSON.parse(stored);
+				if (Array.isArray(channels) && channels.length > 0) {
+					updateServerChannelCache(serverId, channels);
+					preloadedServers.add(serverId);
+					return;
+				}
+			}
+		} catch {
+			// ignore
+		}
+	}
+	
+	// Fetch from Firestore in background
+	preloadInProgress = true;
+	try {
+		const { getDb } = await import('$lib/firebase');
+		const { collection, query, orderBy, getDocs } = await import('firebase/firestore');
+		
+		const db = getDb();
+		const q = query(
+			collection(db, 'servers', serverId, 'channels'),
+			orderBy('position')
+		);
+		
+		const snap = await getDocs(q);
+		const channels: CachedChannel[] = snap.docs.map((d) => ({
+			id: d.id,
+			...(d.data() as any)
+		}));
+		
+		if (channels.length > 0) {
+			updateServerChannelCache(serverId, channels);
+			
+			// Also persist to sessionStorage
+			if (typeof window !== 'undefined') {
+				try {
+					sessionStorage.setItem(
+						`server-channels:${serverId}`,
+						JSON.stringify(channels.slice(0, 200))
+					);
+				} catch {
+					// ignore
+				}
+			}
+		}
+		
+		preloadedServers.add(serverId);
+	} catch (err) {
+		console.warn('[preload] Failed to preload server channels', serverId, err);
+	} finally {
+		preloadInProgress = false;
+	}
+}
+
+/**
+ * Preload multiple servers in sequence (call when user is idle on DMs)
+ */
+export async function preloadUserServers(serverIds: string[]): Promise<void> {
+	for (const id of serverIds.slice(0, 3)) { // Limit to top 3 servers
+		await preloadServerChannels(id);
+	}
+}
+
+/**
+ * Clear preload tracking (call on logout)
+ */
+export function clearPreloadTracking(): void {
+	preloadedServers.clear();
+}
+
 // Export stores for reactive subscriptions if needed
 export { channelCache, dmCache, serverCache, memberCache };

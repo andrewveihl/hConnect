@@ -20,6 +20,7 @@
 	import { splashVisible } from '$lib/stores/splash';
 	import { mobileOverlayStack, mobileSwipeProgress } from '$lib/stores/mobileNav';
 	import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
+	import { preloadServerChannels, preloadUserServers } from '$lib/stores/messageCache';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
 	type LinkKey = 'activity' | 'dms';
@@ -265,6 +266,21 @@
 			rememberServerChannel(match[1], channelId);
 		}
 	});
+	
+	// Preload server data when user is on DMs for instant server switching
+	$effect(() => {
+		if (!browser) return;
+		const path = currentPath ?? '';
+		// When on DMs or Activity page, preload the last server's channels
+		if ((path === '/dms' || path.startsWith('/dms/') || path === '/') && serverRows.length > 0) {
+			// Delay preload slightly so it doesn't compete with current page load
+			const timer = setTimeout(() => {
+				// Preload channels for servers (top 3)
+				void preloadUserServers(serverRows.map(s => s.id));
+			}, 500);
+			return () => clearTimeout(timer);
+		}
+	});
 
 	const formatBadge = (value: number): string => {
 		if (!Number.isFinite(value)) return '';
@@ -386,6 +402,13 @@
 	onDestroy(() => {
 		detachSwipeGestures?.();
 	});
+	
+	// Preload server data on touch start for instant navigation
+	function handleServerTouchStart() {
+		if (shortcut?.id) {
+			void preloadServerChannels(shortcut.id);
+		}
+	}
 </script>
 
 <nav 
@@ -399,6 +422,8 @@
 	<div class="mobile-dock__inner">
 		<a
 			href={serverHref}
+			ontouchstart={handleServerTouchStart}
+			onmouseenter={handleServerTouchStart}
 			onclick={(event) => {
 				event.preventDefault();
 				closeSettings();

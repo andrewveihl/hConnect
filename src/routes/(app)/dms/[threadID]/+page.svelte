@@ -44,6 +44,7 @@
 		getCachedDMMessages,
 		updateDMCache,
 		hasDMCache,
+		preloadServerChannels,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
 	import { dmRailCache } from '$lib/stores/dmRailCache';
@@ -59,6 +60,7 @@
 		dmThreadKey,
 		setThreadViewMemory
 	} from '$lib/perf';
+	import { LAST_SERVER_KEY } from '$lib/constants/navigation';
 
 	interface Props {
 		data: { threadID: string };
@@ -111,6 +113,11 @@
 	let composerFocusSignal = $state(0);
 	const combinedScrollSignal = $derived(scrollResumeSignal + composerFocusSignal);
 	let lastPendingThreadId: string | null = null;
+	
+	// Progressive loading: quick initial render, then backfill
+	const DM_INITIAL_PAGE_SIZE = 5;   // First quick load for instant feel
+	const DM_BACKFILL_PAGE_SIZE = 20; // Second load after initial render
+	let dmBackfillPending = $state(false);
 
 	onMount(() => {
 		if (!browser) return;
@@ -122,6 +129,20 @@
 			}
 		} catch {
 			resumeDmScroll = false;
+		}
+		
+		// Preload last server's channels in background for instant server switching
+		try {
+			const lastServerRaw = localStorage.getItem(LAST_SERVER_KEY);
+			if (lastServerRaw) {
+				const parsed = JSON.parse(lastServerRaw);
+				if (parsed?.id) {
+					// Delay preload to not compete with current page load
+					setTimeout(() => void preloadServerChannels(parsed.id), 300);
+				}
+			}
+		} catch {
+			// ignore
 		}
 	});
 
@@ -1277,6 +1298,37 @@
 
 	let dmSwitchTimer: (() => void) | null = null;
 	
+	// Backfill older DM messages after initial quick load
+	async function backfillDMMessages(threadId: string, oldestDoc: any) {
+		if (!oldestDoc || dmBackfillPending) return;
+		dmBackfillPending = true;
+		try {
+			const olderMsgs = await loadOlderDMMessages(threadId, oldestDoc, DM_BACKFILL_PAGE_SIZE);
+			if (olderMsgs.length > 0) {
+				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
+				messages = [...olderConverted, ...messages];
+				// Update cache with backfilled messages
+				updateDMCache(threadId, olderConverted as CachedMessage[], {
+					hasOlderMessages: olderMsgs.length >= DM_BACKFILL_PAGE_SIZE,
+					prepend: true
+				});
+				// Update earliestLoadedDoc for scroll pagination
+				const db = getDb();
+				const firstOld = olderMsgs[0];
+				if (firstOld?.id) {
+					const docSnap = await getDoc(doc(db, 'dms', threadId, 'messages', firstOld.id));
+					if (docSnap.exists()) {
+						earliestLoadedDoc = docSnap;
+					}
+				}
+			}
+		} catch (err) {
+			console.error('Failed to backfill DM messages', err);
+		} finally {
+			dmBackfillPending = false;
+		}
+	}
+	
 	run(() => {
 		if (mounted && threadID) {
 			// Start timing DM switch
@@ -1322,7 +1374,13 @@
 			
 			earliestLoadedDoc = null;
 			unsub?.();
+			
+			// Progressive loading: start with small initial query for fast first paint
+			const initialLoad = !hasCachedMessages;
+			const queryLimit = initialLoad ? DM_INITIAL_PAGE_SIZE : 50;
+			
 			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
+				const isFirstCallback = messages.length === 0 || initialLoad;
 				messages = msgs.map((row: any) => toChatMessage(row.id, row));
 				
 				// End timing on first data callback if we didn't already end on cache
@@ -1340,9 +1398,12 @@
 				
 				// Update both caches with new messages
 				if (msgs.length > 0) {
+					// For initial load, we know there are likely more messages
+					const hasMoreMessages = initialLoad ? true : msgs.length >= 50;
+					
 					// Update Svelte store cache
 					updateDMCache(threadID, msgs as CachedMessage[], {
-						hasOlderMessages: msgs.length >= 50
+						hasOlderMessages: hasMoreMessages
 					});
 					
 					// Also update IndexedDB-backed perf cache for persistence across refreshes
@@ -1360,7 +1421,7 @@
 							reactions: m.reactions,
 							replyTo: m.replyTo
 						})),
-						hasOlderMessages: msgs.length >= 50,
+						hasOlderMessages: hasMoreMessages,
 						updatedAt: Date.now()
 					});
 				}
@@ -1379,7 +1440,15 @@
 					const lastId = last?.id ?? null;
 					markThreadAsSeen({ at, lastMessageId: lastId });
 				}
-			});
+				
+				// Progressive loading: if this was initial load, backfill more messages
+				if (isFirstCallback && msgs.length > 0 && msgs.length <= DM_INITIAL_PAGE_SIZE && earliestLoadedDoc) {
+					// Schedule backfill after a short delay to let UI render first
+					setTimeout(() => {
+						backfillDMMessages(threadID, earliestLoadedDoc);
+					}, 50);
+				}
+			}, queryLimit);
 		} else if (!threadID) {
 			unsub?.();
 			unsub = null;
