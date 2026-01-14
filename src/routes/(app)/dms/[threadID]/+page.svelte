@@ -10,8 +10,7 @@
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 
 	import DMsSidebar from '$lib/components/dms/DMsSidebar.svelte';
-	import MessageList from '$lib/components/chat/MessageList.svelte';
-	import ChatInput from '$lib/components/chat/ChatInput.svelte';
+	import ChannelMessagePane from '$lib/components/servers/ChannelMessagePane.svelte';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import GroupChatInfoPanel from '$lib/components/dms/GroupChatInfoPanel.svelte';
 	import {
@@ -55,6 +54,7 @@
 		cleanupDmListeners,
 		initializeOutbox,
 		getPendingMessages,
+		subscribePendingMessages,
 		mergeWithPending,
 		getThreadViewMemory,
 		dmThreadKey,
@@ -68,7 +68,6 @@
 
 	let { data }: Props = $props();
 	let threadID = $derived(data.threadID);
-	const messageScrollKey = $derived(`${threadID ?? 'dm'}`);
 
 	let me: any = $state(null);
 	run(() => {
@@ -77,11 +76,32 @@
 
 	let messages: any[] = $state([]);
 	let messagesLoading = $state(true);
+	let pendingMessages: any[] = $state([]); // Track pending messages separately
+	
+	// Subscribe to pending messages for this thread
+	let unsubscribePending: (() => void) | null = null;
+	$effect(() => {
+		// Cleanup previous subscription
+		unsubscribePending?.();
+		
+		// Subscribe to pending messages for this thread
+		if (threadID) {
+			unsubscribePending = subscribePendingMessages(threadID, (msgs) => {
+				pendingMessages = msgs;
+			});
+		} else {
+			pendingMessages = [];
+		}
+		
+		return () => {
+			unsubscribePending?.();
+		};
+	});
 	
 	// Merge pending (local echo) messages with confirmed messages
 	const mergedMessages = $derived.by(() => {
 		if (!threadID) return messages;
-		return mergeWithPending(messages, threadID);
+		return [...messages, ...pendingMessages];
 	});
 	
 	let messageUsers: Record<string, any> = $state({});
@@ -110,8 +130,7 @@
 	let resumeDmScroll = false;
 	let scrollResumeSignal = $state(0);
 	let earliestLoadedDoc: any = $state(null); // Track oldest message doc for pagination
-	let composerFocusSignal = $state(0);
-	const combinedScrollSignal = $derived(scrollResumeSignal + composerFocusSignal);
+	const combinedScrollSignal = $derived(scrollResumeSignal);
 	let lastPendingThreadId: string | null = null;
 	
 	// Progressive loading: quick initial render, then backfill
@@ -241,39 +260,12 @@
 	let latestInboundMessage: any = $state(null);
 	let aiConversationContext: any[] = $state([]);
 	let aiAssistEnabled = $state(true);
-	let composerEl: HTMLDivElement | null = $state(null);
-	let composerHeight = $state(0);
-	let composerObserver: ResizeObserver | null = null;
-	let lastComposerEl: HTMLDivElement | null = null;
 	let dockClaimed = false;
 
 	const useMobileShell = () => typeof window !== 'undefined' && window.innerWidth < 768;
 
-	function observeComposer(target: HTMLDivElement | null) {
-		if (!browser || typeof ResizeObserver === 'undefined') {
-			composerHeight = target ? composerHeight : 0;
-			return;
-		}
-		composerObserver?.disconnect();
-		if (target) {
-			composerObserver = new ResizeObserver((entries) => {
-				const entry = entries[0];
-				composerHeight = entry?.contentRect?.height ?? 0;
-			});
-			composerObserver.observe(target);
-		} else {
-			composerObserver = null;
-			composerHeight = 0;
-		}
-	}
-
 	onMount(() => {
 		clearAllOverlays();
-		observeComposer(composerEl);
-		return () => {
-			composerObserver?.disconnect();
-			composerObserver = null;
-		};
 	});
 
 	$effect(() => {
@@ -295,14 +287,6 @@
 			dockClaimed = false;
 		}
 	});
-
-	$effect(() => {
-		if (!browser || composerEl === lastComposerEl) return;
-		lastComposerEl = composerEl;
-		observeComposer(composerEl);
-	});
-
-	const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 
 	// Keep overlays and browser history synchronized so native edge swipes pop the same stack as our buttons.
 	let routeSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1718,14 +1702,6 @@
 		if (ref) pendingReply = ref;
 	}
 
-	function onSend(e: CustomEvent<any>) {
-		handleSend(e.detail ?? '');
-	}
-
-	function handleComposerFocus() {
-		composerFocusSignal += 1;
-	}
-
 	run(() => {
 		otherMessageUser = otherUid ? (messageUsers[otherUid] ?? null) : null;
 	});
@@ -1802,7 +1778,7 @@
 	});
 </script>
 
-<div class="flex flex-1 h-full overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
+<div class="flex flex-1 h-full min-h-0 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
 	<div class="hidden md:flex md:w-80 h-full flex-col border-r border-subtle panel-muted">
 		<DMsSidebar
 			bind:this={sidebarRef}
@@ -1817,9 +1793,9 @@
 		/>
 	</div>
 
-	<div class="flex flex-1 flex-col panel overflow-hidden">
+	<div class="flex flex-1 flex-col panel min-h-0">
 		<header
-			class="dm-header px-3 sm:px-4 flex items-center justify-between border-b border-subtle/50 panel"
+			class="dm-header px-3 sm:px-4 flex items-center justify-between border-b border-subtle/50 panel shrink-0"
 		>
 			<div class="flex items-center gap-2.5 min-w-0">
 				<button
@@ -1869,62 +1845,55 @@
 			</div>
 		</header>
 
-		<main class="flex-1 overflow-hidden panel-muted">
-			<div class="h-full flex flex-col">
-				<div
-					class="message-scroll-region relative flex-1 overflow-hidden p-3 sm:p-4 touch-pan-y"
-					style={scrollRegionStyle}
+		<main class="flex-1 panel-muted min-h-0 flex flex-col">
+			<div class="dm-message-pane">
+				<ChannelMessagePane
+					hasChannel={Boolean(threadID)}
+					channelName={displayName}
+					messages={mergedMessages}
+					profiles={messageUsers}
+					currentUserId={me?.uid ?? null}
+					{mentionOptions}
+					replyTarget={pendingReply}
+					replySource={replySourceMessage}
+					defaultSuggestionSource={latestInboundMessage}
+					conversationContext={aiConversationContext}
+					{aiAssistEnabled}
+					threadLabel={displayName}
+					{pendingUploads}
+					scrollToBottomSignal={combinedScrollSignal}
+					dmThreadId={threadID}
+					listClass="message-scroll-region relative flex-1 min-h-0 overflow-hidden p-3 sm:p-4 touch-pan-y"
+					inputPlaceholder="Message"
+					onVote={handleVote}
+					onSubmitForm={handleFormSubmit}
+					onReact={handleReaction}
+					onLoadMore={handleLoadOlderMessages}
+					onSend={handleSend}
+					onSendGif={handleSendGif}
+					onCreatePoll={handleCreatePoll}
+					onCreateForm={handleCreateForm}
+					onUploadFiles={handleUploadFiles}
+					on:reply={handleReplyRequest}
+					on:cancelReply={() => (pendingReply = null)}
 				>
-					{#if messagesLoading}
-						<div
-							class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/40 backdrop-blur-sm text-soft"
-						>
+					{#snippet listOverlay()}
+						{#if messagesLoading}
 							<div
-								class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
-								aria-hidden="true"
-							></div>
-							<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
-							<span class="sr-only" aria-live="polite">Loading messages...</span>
-						</div>
-					{/if}
-					<MessageList
-						messages={mergedMessages}
-						users={messageUsers}
-						currentUserId={me?.uid ?? null}
-						replyTargetId={pendingReply?.messageId ?? null}
-						{pendingUploads}
-						scrollToBottomSignal={combinedScrollSignal}
-						dmThreadId={threadID}
-						on:vote={handleVote}
-						on:submitForm={handleFormSubmit}
-						on:react={handleReaction}
-						on:reply={handleReplyRequest}
-						on:loadMore={handleLoadOlderMessages}
-					/>
-				</div>
+								class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/40 backdrop-blur-sm text-soft"
+							>
+								<div
+									class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
+									aria-hidden="true"
+								></div>
+								<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+								<span class="sr-only" aria-live="polite">Loading messages...</span>
+							</div>
+						{/if}
+					{/snippet}
+				</ChannelMessagePane>
 			</div>
 		</main>
-
-		<div class="chat-input-region shrink-0 border-t border-subtle panel" bind:this={composerEl}>
-			<ChatInput
-				placeholder={`Message`}
-				{mentionOptions}
-				replyTarget={pendingReply}
-				replySource={replySourceMessage}
-				defaultSuggestionSource={latestInboundMessage}
-				conversationContext={aiConversationContext}
-				{aiAssistEnabled}
-				threadLabel={displayName}
-				on:send={onSend}
-				on:submit={onSend}
-				on:sendGif={(e: CustomEvent<any>) => handleSendGif(e.detail)}
-				on:upload={(e: CustomEvent<any>) => handleUploadFiles(e.detail)}
-				on:createPoll={(e: CustomEvent<any>) => handleCreatePoll(e.detail)}
-				on:createForm={(e: CustomEvent<any>) => handleCreateForm(e.detail)}
-				on:cancelReply={() => (pendingReply = null)}
-				on:focusInput={handleComposerFocus}
-			/>
-		</div>
 	</div>
 
 	{#if showInfo}
@@ -2109,6 +2078,14 @@
 		background: var(--color-panel);
 	}
 
+	.dm-message-pane {
+		display: flex;
+		flex-direction: column;
+		flex: 1 1 auto;
+		min-height: 0;
+		width: 100%;
+	}
+
 	.dm-header__menu-btn {
 		width: 2rem;
 		height: 2rem;
@@ -2245,34 +2222,4 @@
 		flex-direction: column;
 	}
 
-	/* Desktop: ensure chat input is below image preview overlay (z-index 9999) */
-	@media (min-width: 768px) {
-		.dm-page .chat-input-region {
-			position: relative;
-			z-index: 10;
-		}
-
-		/* Add extra bottom padding for DesktopUserBar on DM pages */
-		.dm-page .message-scroll-region {
-			padding-bottom: calc(var(--desktop-user-bar-height, 52px) + 2.5rem);
-		}
-	}
-
-	@media (max-width: 767px) {
-		.dm-page .chat-input-region {
-			position: fixed;
-			left: 0;
-			right: 0;
-			bottom: 0;
-			z-index: 10;
-			padding: 0.375rem 0.5rem env(safe-area-inset-bottom, 0px) 0.5rem;
-		}
-
-		.dm-page .message-scroll-region {
-			padding-bottom: calc(
-				var(--chat-input-height, 4.5rem) + env(safe-area-inset-bottom, 0px) +
-					var(--chat-keyboard-offset, 0px) + 0.5rem
-			);
-		}
-	}
 </style>

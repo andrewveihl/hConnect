@@ -59,8 +59,11 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		scrollToBottomSignal?: number;
 		scrollToMessageId?: string | null;
 		replyTarget?: ReplyReferenceInput | null;
+		replySource?: any | null;
+		inputPlaceholder?: string;
 		scrollContextKey?: string | number;
 		empty?: import('svelte').Snippet;
+		listOverlay?: import('svelte').Snippet;
 		/** Whether the current user is a Ticket AI staff member */
 		isTicketAiStaff?: boolean;
 		/** Server ID for ticket creation */
@@ -69,6 +72,8 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		channelId?: string | null;
 		/** Thread ID for ticket creation */
 		threadId?: string | null;
+		/** DM thread ID (when rendering DMs) */
+		dmThreadId?: string | null;
 		/** Set of message IDs that already have tickets */
 		ticketedMessageIds?: Set<string>;
 		/** Callback when a ticket is created */
@@ -110,12 +115,16 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		scrollToBottomSignal = 0,
 		scrollToMessageId = null,
 		replyTarget = null,
+		replySource = null,
+		inputPlaceholder = undefined,
 		scrollContextKey = 'channel-pane',
 		empty,
+		listOverlay,
 		isTicketAiStaff = false,
 		serverId = null,
 		channelId = null,
 		threadId = null,
+		dmThreadId = null,
 		ticketedMessageIds = new Set<string>(),
 		onTicketCreated = () => {},
 		onTicketError = () => {},
@@ -199,6 +208,7 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 					{serverId}
 					{channelId}
 					{threadId}
+					{dmThreadId}
 					{ticketedMessageIds}
 					on:vote={onVote}
 					on:submitForm={onSubmitForm}
@@ -212,6 +222,7 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 					{pinnedMessageIds}
 					canPinMessages={canPinMessages}
 				/>
+				{#if listOverlay}{@render listOverlay()}{/if}
 			</div>
 		</div>
 		{#if !hideInput}
@@ -221,9 +232,10 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 				style:padding-bottom={inputPaddingBottom ?? undefined}
 			>
 				<ChatInput
-					placeholder={`Message #${channelName}`}
+					placeholder={inputPlaceholder ?? `Message #${channelName}`}
 					{mentionOptions}
 					{replyTarget}
+					{replySource}
 					{defaultSuggestionSource}
 					{conversationContext}
 					{aiAssistEnabled}

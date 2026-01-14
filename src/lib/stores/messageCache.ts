@@ -14,6 +14,34 @@ const MAX_CACHED_DMS = 20; // Max DM threads to keep in memory
 const MAX_CACHED_SERVERS = 15; // Max servers to keep channel lists cached
 
 /* ===========================
+   Priority Channel Protection
+   These channels (preloaded during splash) should never be evicted
+=========================== */
+const priorityChannelKeys = new Set<string>();
+
+/**
+ * Mark a channel as priority (should not be evicted from cache)
+ * Called by splashPreload during initial load
+ */
+export function markChannelAsPriority(serverId: string, channelId: string): void {
+	priorityChannelKeys.add(`${serverId}:${channelId}`);
+}
+
+/**
+ * Check if a channel is marked as priority
+ */
+export function isChannelPriority(serverId: string, channelId: string): boolean {
+	return priorityChannelKeys.has(`${serverId}:${channelId}`);
+}
+
+/**
+ * Clear all priority channel markers (call on logout)
+ */
+export function clearPriorityChannels(): void {
+	priorityChannelKeys.clear();
+}
+
+/* ===========================
    Utilities
 =========================== */
 /**
@@ -278,14 +306,17 @@ export function clearServerCache(serverId: string): void {
 
 /**
  * Evict oldest channels when over limit
+ * Protects priority channels (preloaded during splash) from eviction
  */
 function evictOldChannels(state: ChannelCacheState): void {
 	if (state.channels.size <= MAX_CACHED_CHANNELS) return;
 	
 	const entries = Array.from(state.channels.entries())
+		// Filter out priority channels - they should never be evicted
+		.filter(([key]) => !priorityChannelKeys.has(key))
 		.sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
 	
-	const toRemove = entries.slice(0, state.channels.size - MAX_CACHED_CHANNELS);
+	const toRemove = entries.slice(0, Math.max(0, state.channels.size - MAX_CACHED_CHANNELS));
 	for (const [key] of toRemove) {
 		state.channels.delete(key);
 	}
