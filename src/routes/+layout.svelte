@@ -22,8 +22,7 @@
 	} from '$lib/admin/customization';
 	import { theme } from '$lib/stores/theme';
 	import { setSoundOverrides } from '$lib/utils/sounds';
-	import { initFabSnappingSettings, initFabSnapSync } from '$lib/stores/fabSnap';
-	import { preloadCacheFromDb } from '$lib/perf';
+	import { initFabSnappingSettings } from '$lib/stores/fabSnap';
 
 	interface Props {
 		children?: import('svelte').Snippet;
@@ -64,30 +63,20 @@
 	});
 
 	// Prefer the largest available viewport metric so iOS URL bars don't shrink the app.
-	// On desktop, just use innerHeight directly for accurate resizing.
 	const setAppHeight = () => {
 		if (typeof window === 'undefined') return;
 		const vv = window.visualViewport;
-		const isMobile = window.matchMedia('(max-width: 767px)').matches;
-		
-		let height: number;
-		if (isMobile) {
-			// On mobile, prefer the largest value to avoid shrinking when keyboard opens
-			const candidates = [
-				window.innerHeight,
-				document.documentElement.clientHeight,
-				window.outerHeight,
-				vv?.height ?? 0,
-				window.screen?.height ?? 0,
-				window.screen?.availHeight ?? 0
-			].filter((n) => typeof n === 'number' && n > 0);
-			height = candidates.length ? Math.max(...candidates) : window.innerHeight;
-		} else {
-			// On desktop, use actual window height for accurate resize behavior
-			height = window.innerHeight;
-		}
+		const candidates = [
+			window.innerHeight,
+			document.documentElement.clientHeight,
+			window.outerHeight,
+			vv?.height ?? 0,
+			window.screen?.height ?? 0,
+			window.screen?.availHeight ?? 0
+		].filter((n) => typeof n === 'number' && n > 0);
 
-		const next = `${height}px`;
+		const maxHeight = candidates.length ? Math.max(...candidates) : window.innerHeight;
+		const next = `${maxHeight}px`;
 		document.documentElement.style.setProperty('--app-height', next);
 		document.documentElement.style.height = next;
 		document.documentElement.style.minHeight = next;
@@ -132,14 +121,10 @@
 	};
 
 	onMount(() => {
-		// Preload IndexedDB cache into memory ASAP for instant paint on navigation
-		preloadCacheFromDb();
-		
 		detachViewportListeners = attachViewportListeners();
 		const teardownNavigation = initMobileNavigation();
 		initClientErrorReporting();
 		initFabSnappingSettings();
-		initFabSnapSync();
 		const isMobile = shouldUseMobileSplash();
 
 		if (!isMobile) {
