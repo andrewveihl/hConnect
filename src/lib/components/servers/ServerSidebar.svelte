@@ -91,6 +91,41 @@
 	const CHANNEL_CACHE_STORAGE_PREFIX = 'server-channels:';
 	const CHANNEL_CACHE_STORAGE_LIMIT = 200;
 	const MEMBER_CACHE_PREFIX = 'server-member:';
+	const CATEGORY_CACHE_PREFIX = 'server-categories:';
+
+	// In-memory category cache for instant switching
+	const categoryCacheMap = new Map<string, Category[]>();
+
+	function loadCachedCategories(server: string): Category[] {
+		// First check in-memory cache
+		const memCached = categoryCacheMap.get(server);
+		if (memCached && memCached.length > 0) return memCached;
+		
+		// Fall back to sessionStorage
+		if (typeof window === 'undefined') return [];
+		try {
+			const raw = sessionStorage.getItem(`${CATEGORY_CACHE_PREFIX}${server}`);
+			if (!raw) return [];
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				categoryCacheMap.set(server, parsed);
+				return parsed;
+			}
+			return [];
+		} catch {
+			return [];
+		}
+	}
+
+	function persistCategoriesCache(server: string, cats: Category[]) {
+		categoryCacheMap.set(server, cats);
+		if (typeof window === 'undefined') return;
+		try {
+			sessionStorage.setItem(`${CATEGORY_CACHE_PREFIX}${server}`, JSON.stringify(cats));
+		} catch {
+			// ignore
+		}
+	}
 
 	// Cache member state per server to avoid flash of empty channels
 	function loadCachedMemberState(server: string): { isMember: boolean; roleIds: string[]; profileMember: boolean } | null {
@@ -1225,12 +1260,22 @@
 
 	function watchCategories(server: string) {
 		unsubCategories?.();
-		categories = [];
+		
+		// INSTANT PAINT: Load categories from cache first
+		const cachedCats = loadCachedCategories(server);
+		if (cachedCats.length > 0) {
+			categories = cachedCats;
+		} else {
+			categories = [];
+		}
+		
 		const db = getDb();
 		const catCol = collection(db, 'servers', server, 'categories');
 		const qRef = query(catCol, orderBy('position'));
 		unsubCategories = onSnapshot(qRef, (snap) => {
-			categories = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as Category[];
+			const newCats = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as Category[];
+			categories = newCats;
+			persistCategoriesCache(server, newCats);
 		});
 	}
 

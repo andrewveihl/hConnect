@@ -23,6 +23,7 @@ import { getDb } from '$lib/firebase/index';
 import { getAuth } from 'firebase/auth';
 import type { User, Server, Channel, Message, Membership, UserRole } from '$lib/types';
 import { clearAllMessageCaches } from '$lib/stores/messageCache';
+import { resetPreloadState } from '$lib/stores/splashPreload';
 
 // ============ AUTH ============
 
@@ -63,6 +64,8 @@ export async function signOut(): Promise<void> {
 	const auth = getAuth();
 	// Clear message caches on logout for privacy and fresh state
 	clearAllMessageCaches();
+	// Reset splash preload state
+	resetPreloadState();
 	await firebaseSignOut(auth);
 }
 

@@ -17,6 +17,7 @@
 	import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 	import ChannelSettingsSheet from '$lib/components/servers/ChannelSettingsSheet.svelte';
 	import ThreadPane from '$lib/components/chat/ThreadPane.svelte';
+	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import VideoChat from '$lib/components/voice/VideoChat.svelte';
 	import CallPreview from '$lib/components/voice/CallPreview.svelte';
 	import VoiceParticipantsPanel from '$lib/components/voice/VoiceParticipantsPanel.svelte';
@@ -84,6 +85,7 @@
 		timeMessageSend,
 		sendChannelMessageOptimized,
 		getPendingMessages,
+		subscribePendingMessages,
 		mergeWithPending,
 		cleanupChannelListeners,
 		initializeOutbox,
@@ -95,6 +97,7 @@
 		getCachedChannelMessages,
 		updateChannelCache,
 		hasChannelCache,
+		getCachedServerChannels,
 		type CachedMessage
 	} from '$lib/stores/messageCache';
 
@@ -159,13 +162,35 @@
 	let channelListServerId: string | null = null;
 	let routerReady = false;
 	let messages: any[] = $state([]);
-	let messagesLoading = $state(false);
+	let messagesLoading = $state(false); // Disabled - we show empty state immediately instead of spinner
+	let showSkeletonMessages = $state(false); // Show skeleton placeholders while loading
+	let pendingMessages: any[] = $state([]); // Track pending messages separately
+	
+	// Subscribe to pending messages for this channel
+	let unsubscribePending: (() => void) | null = null;
+	$effect(() => {
+		// Cleanup previous subscription
+		unsubscribePending?.();
+		
+		// Subscribe to pending messages for this channel
+		if (serverId && activeChannel?.id) {
+			const channelKey = `${serverId}:${activeChannel.id}`;
+			unsubscribePending = subscribePendingMessages(channelKey, (msgs) => {
+				pendingMessages = msgs;
+			});
+		} else {
+			pendingMessages = [];
+		}
+		
+		return () => {
+			unsubscribePending?.();
+		};
+	});
 	
 	// Merge pending (local echo) messages with confirmed messages
 	const mergedMessages = $derived.by(() => {
 		if (!serverId || !activeChannel?.id) return messages;
-		const channelKey = `${serverId}:${activeChannel.id}`;
-		return mergeWithPending(messages, channelKey);
+		return [...messages, ...pendingMessages];
 	});
 	
 	let lastReadMessageIds: Record<string, string | null> = {};
@@ -1384,6 +1409,66 @@
 		}
 	}
 
+	// Background preload: fetch messages for other channels in this server
+	// This makes switching channels feel instant
+	let preloadedChannels = new Set<string>();
+	let preloadInProgress = false;
+	let preloadCurrentServerId: string | null = null;
+	
+	// Clear preload cache when server changes
+	run(() => {
+		if (serverId !== preloadCurrentServerId) {
+			preloadedChannels.clear();
+			preloadCurrentServerId = serverId;
+		}
+	});
+	
+	async function preloadOtherChannels(currServerId: string, currentChannelId: string) {
+		if (preloadInProgress) return;
+		preloadInProgress = true;
+		
+		try {
+			const database = db();
+			const otherChannels = channels.filter(c => 
+				c.id !== currentChannelId && 
+				c.type === 'text' && 
+				!preloadedChannels.has(c.id) &&
+				!hasChannelCache(currServerId, c.id)
+			);
+			
+			// Preload up to 5 other channels
+			for (const channel of otherChannels.slice(0, 5)) {
+				// Stop if server changed
+				if (serverId !== currServerId) break;
+				
+				try {
+					const q = query(
+						collection(database, 'servers', currServerId, 'channels', channel.id, 'messages'),
+						orderBy('createdAt', 'desc'),
+						limit(5)
+					);
+					const snap = await getDocs(q);
+					
+					if (snap.empty) {
+						preloadedChannels.add(channel.id);
+						continue;
+					}
+					
+					const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() } as CachedMessage)).reverse();
+					updateChannelCache(currServerId, channel.id, msgs, {
+						earliestLoaded: msgs[0]?.createdAt ?? null,
+						hasOlderMessages: true
+					});
+					preloadedChannels.add(channel.id);
+				} catch {
+					// Ignore errors for background preload
+				}
+			}
+		} finally {
+			preloadInProgress = false;
+		}
+	}
+
 	async function subscribeMessages(currServerId: string, channelId: string) {
 		if (blockedChannels.has(channelId)) {
 			messagesLoadError = 'You do not have permission to view messages in this channel.';
@@ -1402,26 +1487,65 @@
 			memberEnsurePromise.catch(() => {});
 		}
 		
-		// Set loading state if no cached messages shown yet
-		// Use a very short timeout so empty channels don't hang on the loading spinner
-		let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
-		if (messages.length === 0) {
-			messagesLoading = true;
-			// Auto-clear loading after 0.2s - empty channels will just show the empty state
-			// Real messages will clear this earlier when they arrive
-			loadingTimeout = setTimeout(() => {
-				if (subscriptionVersion === messagesSubscriptionVersion) {
-					messagesLoading = false;
-				}
-			}, 200);
+		const database = db();
+		const initialLoad = messages.length === 0;
+		
+		// Show skeleton messages immediately for visual feedback while loading
+		if (initialLoad) {
+			showSkeletonMessages = true;
 		}
 		
-		const database = db();
+		// FAST PATH: If no cached messages, fetch messages one at a time for progressive loading
+		// Each message is fetched and shown before the next, giving a smooth reveal
+		if (initialLoad) {
+			try {
+				const messagesRef = collection(database, 'servers', currServerId, 'channels', channelId, 'messages');
+				const loadedMessages: any[] = [];
+				
+				// Fetch up to 5 messages one at a time
+				for (let i = 0; i < 5; i++) {
+					// Guard: stop if subscription changed
+					if (subscriptionVersion !== messagesSubscriptionVersion) return;
+					
+					// Build query to get next message (after the ones we've loaded)
+					let msgQuery;
+					if (loadedMessages.length === 0) {
+						// First message - get the most recent
+						msgQuery = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
+					} else {
+						// Get the message before the oldest we have
+						const oldestTime = loadedMessages[0]?.createdAt;
+						if (!oldestTime) break;
+						msgQuery = query(
+							messagesRef, 
+							orderBy('createdAt', 'desc'), 
+							where('createdAt', '<', oldestTime),
+							limit(1)
+						);
+					}
+					
+					const snap = await getDocs(msgQuery);
+					if (snap.empty) break; // No more messages
+					
+					// Add message to the front (since we're loading newest first, then going back)
+					const msg = toChatMessage(snap.docs[0].id, snap.docs[0].data());
+					loadedMessages.unshift(msg);
+					
+					// Show the messages so far
+					showSkeletonMessages = false;
+					messages = [...loadedMessages];
+					triggerScrollToBottom();
+				}
+				
+				showSkeletonMessages = false;
+			} catch (err) {
+				// If quick fetch fails, just continue to listener
+				showSkeletonMessages = false;
+			}
+		}
 		
-		// Progressive loading: start with small initial query for fast first paint
-		// Then backfill more messages after render
-		const initialLoad = messages.length === 0;
-		const queryLimit = initialLoad ? INITIAL_PAGE_SIZE : PAGE_SIZE;
+		// Now set up the real-time listener for full message list
+		const queryLimit = PAGE_SIZE;
 		
 		const q = query(
 			collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
@@ -1446,12 +1570,8 @@
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
 				}
-				// Clear loading timeout if it was set
-				if (loadingTimeout) {
-					clearTimeout(loadingTimeout);
-					loadingTimeout = null;
-				}
 				messagesLoading = false;
+				showSkeletonMessages = false;
 				const nextMessages: any[] = [];
 				const seen = new Set<string>();
 
@@ -1528,16 +1648,18 @@
 						}
 					}, 50);
 				}
+				
+				// Background preload other channels after initial load completes
+				if (initialLoad) {
+					setTimeout(() => {
+						preloadOtherChannels(currServerId, channelId);
+					}, 500);
+				}
 			},
 			(error) => {
 				// Guard: ignore errors from stale subscriptions
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
-				}
-				// Clear loading timeout if it was set
-				if (loadingTimeout) {
-					clearTimeout(loadingTimeout);
-					loadingTimeout = null;
 				}
 				messagesLoading = false;
 				console.error('Failed to load channel messages', error);
@@ -2044,8 +2166,14 @@
 			if (requestedId) {
 				const target = nextChannels.find((c) => c.id === requestedId);
 				if (target) {
-					// On mobile, keep channel list visible during server switch
-					pickChannel(target.id, { closeMobileChannels: isDesktop });
+					// On mobile, just show channel list without auto-loading channel
+					if (isDesktop) {
+						pickChannel(target.id);
+					} else {
+						activeChannel = null;
+						showMembers = false;
+						showChannels = true;
+					}
 					return;
 				}
 			}
@@ -2054,8 +2182,14 @@
 			if (rememberedId) {
 				const remembered = nextChannels.find((c) => c.id === rememberedId);
 				if (remembered) {
-					// On mobile, keep channel list visible during server switch
-					pickChannel(remembered.id, { closeMobileChannels: isDesktop });
+					// On mobile, just show channel list without auto-loading channel
+					if (isDesktop) {
+						pickChannel(remembered.id);
+					} else {
+						activeChannel = null;
+						showMembers = false;
+						showChannels = true;
+					}
 					return;
 				}
 			}
@@ -2078,8 +2212,14 @@
 		if (requestedId) {
 			const target = nextChannels.find((c) => c.id === requestedId);
 			if (target) {
-				// On mobile, keep channel list visible during server switch
-				pickChannel(target.id, { closeMobileChannels: isDesktop });
+				// On mobile, just show channel list without auto-loading channel
+				if (isDesktop) {
+					pickChannel(target.id);
+				} else {
+					activeChannel = null;
+					showMembers = false;
+					showChannels = true;
+				}
 				return;
 			}
 		}
@@ -2176,6 +2316,8 @@
 	let lastShowThreadPanel = false;
 	let channelHeaderEl: { focusHeader?: () => void } | null = null;
 	const pendingChannelRedirect = $derived.by(() => {
+		// On mobile, never do the swipe-away effect - just show channels
+		if (isMobile) return false;
 		const requested = requestedChannelId;
 		if (!requested || activeChannel) return false;
 		return !blockedChannels.has(requested);
@@ -4979,7 +5121,49 @@
 		}
 		if (currentServer !== prevServerForChannels) {
 			channelListServerId = currentServer;
-			resetChannelState();
+			
+			// INSTANT CHANNEL LOADING: Load cached channels immediately on server switch
+			// This prevents the "Select a channel" screen from flashing while waiting for Firestore
+			const cachedChannels = getCachedServerChannels(currentServer);
+			if (cachedChannels.length > 0) {
+				// We have cached channels - use them immediately instead of clearing to empty
+				messagesSubscriptionVersion++;
+				clearMessagesUnsub();
+				clearPopoutMessagesUnsub();
+				cleanupPopoutProfileSubscriptions();
+				resetThreadState({ resetCache: true });
+				messagesLoadError = null;
+				// Use cached channels instead of empty array
+				channels = cachedChannels as Channel[];
+				activeChannel = null;
+				messages = [];
+				profiles = {};
+				channelMessagesPopout = false;
+				channelMessagesPopoutChannelId = null;
+				channelMessagesPopoutChannelName = '';
+				popoutMessages = [];
+				popoutProfiles = {};
+				popoutReplyTarget = null;
+				popoutPendingUploads = [];
+				popoutEarliestLoaded = null;
+				clearPinnedState();
+				clearPopoutPinnedState();
+				// Also update lastSidebarChannels so syncVisibleChannels works correctly
+				lastSidebarChannels = {
+					serverId: currentServer,
+					channels: cachedChannels as Channel[]
+				};
+			} else {
+				// No cache, use regular reset
+				resetChannelState();
+			}
+			
+			// On mobile, show the channel nav when switching to a different server
+			const isMobile = browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches;
+			if (isMobile && prevServerForChannels !== null) {
+				showChannels = true;
+				showMembers = false;
+			}
 		}
 	});
 	run(() => {
@@ -5476,6 +5660,7 @@ run(() => {
 		<div
 			class="server-columns__main flex flex-1 min-w-0 flex-col panel"
 			style="border-radius: var(--radius-sm);"
+			class:invisible={isMobile && showChannels && !activeChannel}
 		>
 			<div class="flex flex-1 min-h-0 relative">
 				<div class="flex flex-1 min-h-0 flex-col">
@@ -5552,14 +5737,34 @@ run(() => {
 								</div>
 
 								<div class={`mobile-chat-card ${mobileVoicePane === 'chat' ? '' : 'hidden'}`}>
-									{#if messagesLoading && !mergedMessages.length}
-										<div class="flex-1 grid place-items-center text-soft">
-											<div class="flex flex-col items-center gap-3">
-												<div
-													class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
-													aria-hidden="true"
-												></div>
-												<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+									{#if showSkeletonMessages && !mergedMessages.length}
+										<!-- Skeleton loading messages with chat input -->
+										<div class="flex flex-col flex-1 min-h-0">
+											<div class="flex-1 overflow-hidden p-3 flex flex-col justify-end">
+												<div class="space-y-4">
+													{#each [1, 2, 3] as i}
+														<div class="flex gap-3 animate-pulse">
+															<div class="w-10 h-10 rounded-full bg-white/10 shrink-0"></div>
+															<div class="flex-1 space-y-2">
+																<div class="h-4 bg-white/10 rounded w-24"></div>
+																<div class="h-4 bg-white/10 rounded" style="width: {60 + i * 15}%"></div>
+															</div>
+														</div>
+													{/each}
+												</div>
+											</div>
+											<div class="border-t border-subtle panel-muted shrink-0">
+												<ChatInput
+													placeholder={`Message #${activeChannel?.name ?? ''}`}
+													{mentionOptions}
+													{replyTarget}
+													onSend={handleSend}
+													onSendGif={handleSendGif}
+													onCreatePoll={handleCreatePoll}
+													onCreateForm={handleCreateForm}
+													onUpload={handleUploadFiles}
+													on:cancelReply={() => (replyTarget = null)}
+												/>
 											</div>
 										</div>
 									{:else if messagesLoadError}
@@ -5809,15 +6014,37 @@ run(() => {
 							{/if}
 
 							{#if !voiceDesktopLayout && !showVoiceLobby}
-								{#if messagesLoading && !mergedMessages.length}
-									<div class="flex-1 grid place-items-center text-soft">
-										<div class="flex flex-col items-center gap-3">
-											<div
-												class="h-10 w-10 rounded-full border-2 border-white/30 border-t-white animate-spin"
-												aria-hidden="true"
-											></div>
-											<div class="text-sm font-medium tracking-wide uppercase">Loading messages</div>
+								{#if showSkeletonMessages && !mergedMessages.length}
+									<!-- Skeleton loading messages with chat input -->
+									<div class="flex flex-col flex-1 min-h-0">
+										<div class="flex-1 overflow-hidden p-3 flex flex-col justify-end">
+											<div class="space-y-4">
+												{#each [1, 2, 3] as i}
+													<div class="flex gap-3 animate-pulse">
+														<div class="w-10 h-10 rounded-full bg-white/10 shrink-0"></div>
+														<div class="flex-1 space-y-2">
+															<div class="h-4 bg-white/10 rounded w-24"></div>
+															<div class="h-4 bg-white/10 rounded" style="width: {60 + i * 15}%"></div>
+														</div>
+													</div>
+												{/each}
+											</div>
 										</div>
+										{#if !(isMobile && (showChannels || showMembers))}
+											<div class="border-t border-subtle panel-muted shrink-0">
+												<ChatInput
+													placeholder={`Message #${activeChannel?.name ?? ''}`}
+													{mentionOptions}
+													{replyTarget}
+													onSend={handleSend}
+													onSendGif={handleSendGif}
+													onCreatePoll={handleCreatePoll}
+													onCreateForm={handleCreateForm}
+													onUpload={handleUploadFiles}
+													on:cancelReply={() => (replyTarget = null)}
+												/>
+											</div>
+										{/if}
 									</div>
 								{:else if messagesLoadError}
 									<div class="flex-1 grid place-items-center text-soft text-center px-4">

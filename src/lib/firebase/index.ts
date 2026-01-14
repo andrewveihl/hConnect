@@ -39,8 +39,10 @@ import {
 import { getStorage, type FirebaseStorage } from 'firebase/storage';
 import { getFunctions, type Functions } from 'firebase/functions';
 import { clearAllMessageCaches } from '$lib/stores/messageCache';
+import { resetPreloadState } from '$lib/stores/splashPreload';
 
 import { user as userStore } from '$lib/stores/user';
+import { authUser, authLoading } from '$lib/stores/index';
 
 if (import.meta.env.DEV) {
 	setLogLevel('debug');
@@ -210,7 +212,7 @@ export default getDb;
 /* Optional: wait for the first auth resolution so auth.currentUser is reliable */
 export async function waitForAuthInit(): Promise<void> {
 	await ensureFirebaseReady();
-	if ((auth as any)._initializedOnce || auth!.currentUser !== undefined) return;
+	if ((auth as any)._initializedOnce) return;
 	await new Promise<void>((resolve) => {
 		const unsub = onAuthStateChanged(auth!, () => {
 			(auth as any)._initializedOnce = true;
@@ -243,6 +245,8 @@ export async function signOutUser() {
 	await ensureFirebaseReady();
 	// Clear message caches on logout for privacy and fresh state
 	clearAllMessageCaches();
+	// Reset splash preload state
+	resetPreloadState();
 	await signOut(auth!);
 }
 export const signOutNow = signOutUser;
@@ -385,10 +389,48 @@ function isCacheExpired(cachedAt: any): boolean {
 export function startAuthListener() {
 	let unsubscribe: (() => void) | null = null;
 
+	authLoading.set(true);
+
 	ensureFirebaseReady().then(() => {
 		unsubscribe = onAuthStateChanged(auth!, async (u) => {
 			userStore.set(u);
+			authLoading.set(false);
+			if (!u) {
+				authUser.set(null);
+				return;
+			}
 			if (u) {
+				try {
+					const legacyRef = doc(db!, 'users', u.uid);
+					const legacySnap = await getDoc(legacyRef);
+					if (legacySnap.exists()) {
+						const data = legacySnap.data() as Record<string, any>;
+						authUser.set({
+							id: u.uid,
+							email: data.email ?? u.email ?? '',
+							displayName: data.displayName ?? u.displayName ?? undefined,
+							photoURL: data.photoURL ?? u.photoURL ?? undefined,
+							createdAt: data.createdAt ?? Date.now()
+						});
+					} else {
+						authUser.set({
+							id: u.uid,
+							email: u.email ?? '',
+							displayName: u.displayName ?? undefined,
+							photoURL: u.photoURL ?? undefined,
+							createdAt: Date.now()
+						});
+					}
+				} catch {
+					authUser.set({
+						id: u.uid,
+						email: u.email ?? '',
+						displayName: u.displayName ?? undefined,
+						photoURL: u.photoURL ?? undefined,
+						createdAt: Date.now()
+					});
+				}
+
 				// Check existing profile to preserve cached/custom photos
 				const ref = profileRef(u.uid);
 				const snap = await getDoc(ref);

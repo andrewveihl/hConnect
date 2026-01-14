@@ -5,6 +5,8 @@
 	import SplashScreen from '$lib/components/app/SplashScreen.svelte';
 	import { initMobileNavigation } from '$lib/stores/mobileNav';
 	import { splashVisible } from '$lib/stores/splash';
+	import { startSplashPreload } from '$lib/stores/splashPreload';
+	import { user } from '$lib/stores/user';
 	import FloatingActionDock from '$lib/components/app/FloatingActionDock.svelte';
 	import TicketFab from '$lib/components/app/TicketFab.svelte';
 	import ThreadsFab from '$lib/components/app/ThreadsFab.svelte';
@@ -126,6 +128,16 @@
 		initClientErrorReporting();
 		initFabSnappingSettings();
 		const isMobile = shouldUseMobileSplash();
+		
+		// Start preloading in background (doesn't block splash)
+		let preloadUnsub: (() => void) | null = null;
+		preloadUnsub = user.subscribe((currentUser) => {
+			if (currentUser?.uid) {
+				void startSplashPreload(currentUser.uid);
+				preloadUnsub?.();
+				preloadUnsub = null;
+			}
+		});
 
 		if (!isMobile) {
 			isAppReady = true;
@@ -135,6 +147,7 @@
 				teardownNavigation?.();
 				teardownClientErrorReporting();
 				detachViewportListeners?.();
+				preloadUnsub?.();
 			};
 		}
 
@@ -142,21 +155,24 @@
 		isAppReady = false;
 		splashVisible.set(true);
 
+		// Simple splash timer - show for 2.5 seconds then dismiss
 		splashTimer = setTimeout(() => {
 			isAppReady = true;
-		}, 1200); // Length of time we intentionally show the splash on mobile.
+		}, 2500);
 
+		// Hard failsafe - never block UI for more than 7 seconds
 		hardFailSafeTimer = setTimeout(() => {
 			isAppReady = true;
 			shouldShowMobileSplash = false;
 			splashVisible.set(false);
-		}, 5000); // Absolute ceiling so the UI never remains blocked.
+		}, 7000);
 
 		return () => {
 			teardownNavigation?.();
 			teardownClientErrorReporting();
 			detachViewportListeners?.();
 			splashVisible.set(false);
+			preloadUnsub?.();
 			if (splashTimer) clearTimeout(splashTimer);
 			if (hardFailSafeTimer) clearTimeout(hardFailSafeTimer);
 		};
