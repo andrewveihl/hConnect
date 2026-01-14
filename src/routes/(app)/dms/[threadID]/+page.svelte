@@ -1863,7 +1863,8 @@
 					{pendingUploads}
 					scrollToBottomSignal={combinedScrollSignal}
 					dmThreadId={threadID}
-					listClass="message-scroll-region relative flex-1 min-h-0 overflow-hidden p-3 sm:p-4 touch-pan-y"
+					listClass="message-scroll-region relative flex-1 min-h-0 overflow-hidden p-3 sm:p-4 touch-pan-y dm-message-list"
+					inputWrapperClass="dm-chat-input-wrapper chat-input-region shrink-0 border-t border-subtle panel-muted"
 					inputPlaceholder="Message"
 					onVote={handleVote}
 					onSubmitForm={handleFormSubmit}
@@ -2222,4 +2223,30 @@
 		flex-direction: column;
 	}
 
+	/* Desktop: Fix chat input visibility with fixed positioning */
+	@media (min-width: 768px) {
+		/* Chat input fixed to bottom */
+		:global(.dm-chat-input-wrapper) {
+			position: fixed !important;
+			bottom: 0 !important;
+			left: 392px !important; /* LeftPane 72px + DM sidebar 320px */
+			right: 0 !important;
+			z-index: 100 !important;
+			background: var(--color-panel-muted) !important;
+			border-top: 1px solid var(--color-border-subtle) !important;
+			padding: 0.5rem 1rem !important;
+		}
+
+		/* Add bottom padding to message list so messages don't hide behind fixed input */
+		:global(.dm-message-list) {
+			padding-bottom: 100px !important;
+		}
+	}
+
+	/* Adjust for info panel on large screens */
+	@media (min-width: 1024px) {
+		.dm-page:has(aside) :global(.dm-chat-input-wrapper) {
+			right: 288px !important; /* lg:w-72 = 18rem = 288px */
+		}
+	}
 </style>
