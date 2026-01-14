@@ -1368,8 +1368,14 @@
 			}
 			
 			// Only show loading if no cache at all
+			// Use a short timeout so empty threads don't hang on the loading spinner
+			let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
 			if (!hasCachedMessages) {
 				messagesLoading = true;
+				// Auto-clear loading after 0.2s - empty threads will just show the empty state
+				loadingTimeout = setTimeout(() => {
+					messagesLoading = false;
+				}, 200);
 			}
 			
 			earliestLoadedDoc = null;
@@ -1380,6 +1386,11 @@
 			const queryLimit = initialLoad ? DM_INITIAL_PAGE_SIZE : 50;
 			
 			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
+				// Clear loading timeout when data arrives
+				if (loadingTimeout) {
+					clearTimeout(loadingTimeout);
+					loadingTimeout = null;
+				}
 				const isFirstCallback = messages.length === 0 || initialLoad;
 				messages = msgs.map((row: any) => toChatMessage(row.id, row));
 				

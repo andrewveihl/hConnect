@@ -1403,8 +1403,17 @@
 		}
 		
 		// Set loading state if no cached messages shown yet
+		// Use a very short timeout so empty channels don't hang on the loading spinner
+		let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
 		if (messages.length === 0) {
 			messagesLoading = true;
+			// Auto-clear loading after 0.2s - empty channels will just show the empty state
+			// Real messages will clear this earlier when they arrive
+			loadingTimeout = setTimeout(() => {
+				if (subscriptionVersion === messagesSubscriptionVersion) {
+					messagesLoading = false;
+				}
+			}, 200);
 		}
 		
 		const database = db();
@@ -1436,6 +1445,11 @@
 				// Guard: ignore updates from stale subscriptions
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
+				}
+				// Clear loading timeout if it was set
+				if (loadingTimeout) {
+					clearTimeout(loadingTimeout);
+					loadingTimeout = null;
 				}
 				messagesLoading = false;
 				const nextMessages: any[] = [];
@@ -1519,6 +1533,11 @@
 				// Guard: ignore errors from stale subscriptions
 				if (subscriptionVersion !== messagesSubscriptionVersion) {
 					return;
+				}
+				// Clear loading timeout if it was set
+				if (loadingTimeout) {
+					clearTimeout(loadingTimeout);
+					loadingTimeout = null;
 				}
 				messagesLoading = false;
 				console.error('Failed to load channel messages', error);
