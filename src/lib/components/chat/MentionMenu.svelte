@@ -50,6 +50,7 @@
 		style:bottom={position.bottom ?? 'auto'}
 		style:top={position.top ?? 'auto'}
 		style:max-height={position.maxHeight}
+		style:z-index="2147483647"
 	>
 		<div class="mention-menu__header">Tag someone or a role</div>
 		<div class="mention-menu__list">
@@ -109,6 +110,7 @@
 		position: fixed;
 		z-index: 999998;
 		width: min(22rem, calc(100vw - 1rem));
+		max-width: calc(100vw - 1rem);
 		max-height: calc(100vh - 5rem);
 		max-height: calc(100dvh - 5rem);
 		border-radius: var(--radius-lg);
@@ -119,6 +121,20 @@
 		backdrop-filter: blur(18px);
 		display: flex;
 		flex-direction: column;
+	}
+
+	/* Mobile: ensure menu stays on screen */
+	@media (max-width: 767px) {
+		.mention-menu {
+			left: 0.5rem !important;
+			right: 0.5rem !important;
+			width: auto !important;
+			max-width: calc(100vw - 1rem);
+			bottom: auto !important;
+			top: auto !important;
+			/* Position above keyboard - use bottom positioning */
+			bottom: calc(env(safe-area-inset-bottom, 0px) + 4rem) !important;
+		}
 	}
 
 	.mention-menu__header {

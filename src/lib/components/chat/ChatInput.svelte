@@ -2,6 +2,7 @@
 	import { run, preventDefault } from 'svelte/legacy';
 
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
+	import { browser } from '$app/environment';
 	import GifPicker from './GifPicker.svelte';
 	import EmojiPicker from './EmojiPicker.svelte';
 	import MentionMenu from './MentionMenu.svelte';
@@ -2463,15 +2464,7 @@
 					</div>
 				</div>
 
-				<MentionMenu
-					active={mentionActive}
-					options={mentionFiltered}
-					selectedIndex={mentionIndex}
-					position={mentionMenuPosition}
-					specialMentionIds={SPECIAL_MENTION_IDS}
-					onSelect={insertMention}
-					onHover={(idx) => (mentionIndex = idx)}
-				/>
+				<!-- MentionMenu moved to portal at end of component -->
 			</div>
 
 			<div class="chat-input__actions" class:chat-input__actions--anchored={textareaExpanded}>
@@ -3810,3 +3803,20 @@
 		}
 	}
 </style>
+
+<!-- Portal MentionMenu to body to escape any transform/contain ancestors -->
+{#if browser && mentionActive}
+	{#await import('$lib/components/util/Portal.svelte') then Portal}
+		<Portal.default>
+			<MentionMenu
+				active={mentionActive}
+				options={mentionFiltered}
+				selectedIndex={mentionIndex}
+				position={mentionMenuPosition}
+				specialMentionIds={SPECIAL_MENTION_IDS}
+				onSelect={insertMention}
+				onHover={(idx) => (mentionIndex = idx)}
+			/>
+		</Portal.default>
+	{/await}
+{/if}

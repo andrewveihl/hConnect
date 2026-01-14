@@ -1,5 +1,6 @@
 <script lang="ts">
 import { createEventDispatcher, onMount } from 'svelte';
+import { browser } from '$app/environment';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
 import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
@@ -178,7 +179,23 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		attachComposerObserver();
 	});
 
-const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
+	const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
+	
+	// Detect if we're on desktop for DM chat input fix
+	let isDesktop = $state(false);
+	$effect(() => {
+		if (browser) {
+			const checkDesktop = () => {
+				isDesktop = window.innerWidth >= 768;
+			};
+			checkDesktop();
+			window.addEventListener('resize', checkDesktop);
+			return () => window.removeEventListener('resize', checkDesktop);
+		}
+	});
+	
+	// Check if this is a DM context (has dmThreadId prop)
+	const isDmChat = $derived(Boolean(dmThreadId));
 </script>
 
 <div class="channel-message-pane">
@@ -226,29 +243,60 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 			</div>
 		</div>
 		{#if !hideInput}
-			<div
-				class={inputWrapperClass}
-				bind:this={composerEl}
-				style:padding-bottom={inputPaddingBottom ?? undefined}
-			>
-				<ChatInput
-					placeholder={inputPlaceholder ?? `Message #${channelName}`}
-					{mentionOptions}
-					{replyTarget}
-					{replySource}
-					{defaultSuggestionSource}
-					{conversationContext}
-					{aiAssistEnabled}
-					threadLabel={threadLabel || channelName}
-					{onSend}
-					{onSendGif}
-					{onCreatePoll}
-					{onCreateForm}
-					onUpload={onUploadFiles}
-					on:cancelReply={() => dispatch('cancelReply')}
-					on:focusInput={handleComposerFocus}
-				/>
-			</div>
+			{#if isDmChat && isDesktop}
+				<!-- Desktop DM: Render ChatInput as fixed element via portal to body -->
+				{#await import('$lib/components/util/Portal.svelte') then Portal}
+					<Portal.default>
+						<div
+							class="dm-desktop-chat-input"
+							bind:this={composerEl}
+						>
+							<ChatInput
+								placeholder={inputPlaceholder ?? `Message #${channelName}`}
+								{mentionOptions}
+								{replyTarget}
+								{replySource}
+								{defaultSuggestionSource}
+								{conversationContext}
+								{aiAssistEnabled}
+								threadLabel={threadLabel || channelName}
+								{onSend}
+								{onSendGif}
+								{onCreatePoll}
+								{onCreateForm}
+								onUpload={onUploadFiles}
+								on:cancelReply={() => dispatch('cancelReply')}
+								on:focusInput={handleComposerFocus}
+							/>
+						</div>
+					</Portal.default>
+				{/await}
+			{:else}
+				<!-- Normal rendering for mobile and server channels -->
+				<div
+					class={inputWrapperClass}
+					bind:this={composerEl}
+					style:padding-bottom={inputPaddingBottom ?? undefined}
+				>
+					<ChatInput
+						placeholder={inputPlaceholder ?? `Message #${channelName}`}
+						{mentionOptions}
+						{replyTarget}
+						{replySource}
+						{defaultSuggestionSource}
+						{conversationContext}
+						{aiAssistEnabled}
+						threadLabel={threadLabel || channelName}
+						{onSend}
+						{onSendGif}
+						{onCreatePoll}
+						{onCreateForm}
+						onUpload={onUploadFiles}
+						on:cancelReply={() => dispatch('cancelReply')}
+						on:focusInput={handleComposerFocus}
+					/>
+				</div>
+			{/if}
 		{/if}
 	{:else}
 		<div class="flex-1 grid place-items-center text-soft">
@@ -299,3 +347,32 @@ const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeig
 		right: auto;
 	}
 </style>
+
+<!-- Global styles for portaled DM chat input -->
+<svelte:head>
+	<style>
+		.dm-desktop-chat-input {
+			position: fixed !important;
+			bottom: 0 !important;
+			left: 392px !important;
+			right: 0 !important;
+			z-index: 9999 !important;
+			background: var(--color-panel-muted, #3a3f45) !important;
+			border-top: 1px solid var(--color-border-subtle, rgba(18, 22, 28, 0.45)) !important;
+			padding: 0.5rem 1rem !important;
+		}
+		
+		/* Add bottom padding to DM message list so content isn't hidden behind fixed input */
+		@media (min-width: 768px) {
+			.dm-message-list {
+				--chat-scroll-padding: 300px !important;
+				padding-bottom: 300px !important;
+			}
+			
+			/* Target the actual scrolling container inside */
+			.dm-message-list .chat-scroll {
+				padding-bottom: 300px !important;
+			}
+		}
+	</style>
+</svelte:head>
