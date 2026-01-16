@@ -112,17 +112,11 @@
 		fallback: string | null | undefined
 	) => params.serverID ?? params.serversID ?? params.serverId ?? fallback ?? null;
 
-	let serverId = $state<string | null>(null);
-	let activeKeybinds = $state(mergeKeybinds(null));
-	run(() => {
-		serverId = resolveServerId(
-			$page.params as Record<string, string | undefined>,
-			data?.serverId ?? null
-		);
-	});
-	run(() => {
-		activeKeybinds = mergeKeybinds($userProfile?.settings?.keybinds ?? null);
-	});
+	let serverId = $derived(resolveServerId(
+		$page.params as Record<string, string | undefined>,
+		data?.serverId ?? null
+	));
+	let activeKeybinds = $derived(mergeKeybinds($userProfile?.settings?.keybinds ?? null));
 
 	type Channel = {
 		id: string;
@@ -1143,7 +1137,7 @@
 		requestedChannelId = null;
 	}
 
-	run(() => {
+	$effect(() => {
 		const visible = !!voiceState?.visible;
 		const inLobby = showVoiceLobby;
 		const hasVoiceSession = !!voiceState;
@@ -1158,7 +1152,7 @@
 			// Keep open when minimized/hidden on desktop, just record last visibility.
 		}
 
-		lastVoiceVisible = visible;
+		untrack(() => { lastVoiceVisible = visible; });
 	});
 
 	// listeners
@@ -1416,10 +1410,12 @@
 	let preloadCurrentServerId: string | null = null;
 	
 	// Clear preload cache when server changes
-	run(() => {
-		if (serverId !== preloadCurrentServerId) {
+	$effect(() => {
+		const currentServerId = serverId;
+		const prevServerId = untrack(() => preloadCurrentServerId);
+		if (currentServerId !== prevServerId) {
 			preloadedChannels.clear();
-			preloadCurrentServerId = serverId;
+			preloadCurrentServerId = currentServerId;
 		}
 	});
 	
@@ -5250,14 +5246,16 @@
 	// to avoid recursion warnings
 	let lastSyncedServer: string | null = null;
 	let lastSyncedUser: string | null = null;
-run(() => {
+$effect(() => {
 	const currentServer = serverId ?? null;
 	const currentUser = $user?.uid ?? null;
 	const cachedChannels = untrack(() => lastSidebarChannels);
 	const hasChannels = untrack(() => channels.length > 0);
+	const prevSyncedServer = untrack(() => lastSyncedServer);
+	const prevSyncedUser = untrack(() => lastSyncedUser);
 	// Only sync when the combination of server/user actually changes, not on every reactive run
 	if (currentServer && currentUser && cachedChannels) {
-		const needsSync = currentServer !== lastSyncedServer || currentUser !== lastSyncedUser;
+		const needsSync = currentServer !== prevSyncedServer || currentUser !== prevSyncedUser;
 		if (
 			needsSync ||
 			(cachedChannels.serverId === currentServer &&
@@ -5322,22 +5320,22 @@ run(() => {
 			}
 		}
 	});
-	run(() => {
+	$effect(() => {
 		isVoiceChannelView = activeChannel?.type === 'voice';
 	});
-	run(() => {
+	$effect(() => {
 		isViewingActiveVoiceChannel = Boolean(
 			isVoiceChannelView &&
 			voiceState?.visible &&
 			serverId &&
-			voiceState.serverId === serverId &&
-			voiceState.channelId === activeChannel?.id
+			voiceState?.serverId === serverId &&
+			voiceState?.channelId === activeChannel?.id
 		);
 	});
-	run(() => {
+	$effect(() => {
 		showVoiceLobby = Boolean(isVoiceChannelView && !isViewingActiveVoiceChannel);
 	});
-	run(() => {
+	$effect(() => {
 		voiceInviteUrl = (() => {
 			if (!serverId || !activeChannel || activeChannel.type !== 'voice') return null;
 			try {
@@ -5349,15 +5347,15 @@ run(() => {
 			}
 		})();
 	});
-	run(() => {
+	$effect(() => {
 		if (isViewingActiveVoiceChannel && voiceState && !voiceState.visible) {
 			voiceSession.setVisible(true);
 		}
 	});
-	run(() => {
+	$effect(() => {
 		currentUserDisplayName = deriveCurrentDisplayName();
 	});
-	run(() => {
+	$effect(() => {
 		currentUserPhotoURL = deriveCurrentPhotoURL();
 	});
 	run(() => {

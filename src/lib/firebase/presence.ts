@@ -11,17 +11,26 @@ let heartbeat: ReturnType<typeof setInterval> | null = null;
 
 const windowUnsubs: Array<() => void> = [];
 
-const HEARTBEAT_INTERVAL = 60 * 1000;
+const HEARTBEAT_INTERVAL = 30 * 1000; // 30 seconds for more accurate presence
 
-type WindowEventKey = keyof WindowEventMap | 'visibilitychange';
+type WindowEventKey = keyof WindowEventMap;
 
 function addWindowListener<E extends WindowEventKey>(
 	event: E,
-	handler: (event: E extends keyof WindowEventMap ? WindowEventMap[E] : Event) => void
+	handler: (event: WindowEventMap[E]) => void
 ) {
 	if (!browser) return () => {};
-	window.addEventListener(event as keyof WindowEventMap, handler as EventListener);
-	return () => window.removeEventListener(event as keyof WindowEventMap, handler as EventListener);
+	window.addEventListener(event, handler as EventListener);
+	return () => window.removeEventListener(event, handler as EventListener);
+}
+
+function addDocumentListener<E extends keyof DocumentEventMap>(
+	event: E,
+	handler: (event: DocumentEventMap[E]) => void
+) {
+	if (!browser) return () => {};
+	document.addEventListener(event, handler as EventListener);
+	return () => document.removeEventListener(event, handler as EventListener);
 }
 
 function clearHeartbeat() {
@@ -114,10 +123,25 @@ function stopTracking() {
 function activateListeners() {
 	if (!browser || windowUnsubs.length) return;
 
+	// visibilitychange is a document event, not window
 	windowUnsubs.push(
-		addWindowListener('visibilitychange', () => {
+		addDocumentListener('visibilitychange', () => {
 			const state = stateFromEnvironment();
 			void writePresence(state, { force: true });
+		})
+	);
+
+	// Track focus/blur for more accurate presence
+	windowUnsubs.push(
+		addWindowListener('focus', () => {
+			void writePresence('online', { force: true });
+		})
+	);
+
+	windowUnsubs.push(
+		addWindowListener('blur', () => {
+			// When window loses focus, set to idle (not offline - they may come back)
+			void writePresence('idle', { force: true });
 		})
 	);
 
@@ -136,6 +160,15 @@ function activateListeners() {
 
 	windowUnsubs.push(
 		addWindowListener('beforeunload', () => {
+			if (currentUid) {
+				void writePresenceFor(currentUid, 'offline', { force: true });
+			}
+		})
+	);
+
+	// Also use pagehide for mobile browsers where beforeunload is unreliable
+	windowUnsubs.push(
+		addWindowListener('pagehide', () => {
 			if (currentUid) {
 				void writePresenceFor(currentUid, 'offline', { force: true });
 			}

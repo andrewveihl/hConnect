@@ -12,6 +12,7 @@ const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 3000, 10000]; // Exponential backoff
 const MAX_QUEUE_SIZE = 50;
 const PENDING_MESSAGE_TTL = 5 * 60 * 1000; // 5 minutes
+const STUCK_MESSAGE_TIMEOUT = 30 * 1000; // 30 seconds - if a message is "sending" for this long, retry it
 
 /* ===========================
    Types
@@ -42,6 +43,7 @@ export type OutboxMessage = {
 	retryCount: number;
 	createdAt: number;
 	sentAt?: number;
+	sendingStartedAt?: number; // Track when we started sending to detect stuck messages
 	firestoreId?: string;
 };
 
@@ -63,6 +65,7 @@ export type PendingMessage = {
 	file?: unknown;
 	poll?: unknown;
 	form?: unknown;
+	url?: string; // for GIF messages
 };
 
 /* ===========================
@@ -104,7 +107,8 @@ function createPendingMessage(msg: OutboxMessage): PendingMessage {
 		replyTo: msg.payload.replyTo,
 		file: msg.payload.file,
 		poll: msg.payload.poll,
-		form: msg.payload.form
+		form: msg.payload.form,
+		url: msg.payload.url // for GIF messages
 	};
 }
 
@@ -227,28 +231,90 @@ export function queueThreadMessage(
    Queue Processing
 =========================== */
 let processingQueue = false;
+let lastProcessTime = 0;
 
 async function processQueue(): Promise<void> {
-	if (processingQueue) return;
+	// Prevent concurrent processing, but allow re-entry if it's been too long (safety valve)
+	const now = Date.now();
+	if (processingQueue && now - lastProcessTime < STUCK_MESSAGE_TIMEOUT) return;
+	
 	processingQueue = true;
+	lastProcessTime = now;
 
 	try {
 		while (true) {
 			const queue = get(outboxQueue);
-			const nextMsg = queue.find((m) => m.status === 'pending');
+			
+			// First, check for stuck "sending" messages and reset them
+			const stuckMessages = queue.filter(
+				(m) => m.status === 'sending' && 
+				m.sendingStartedAt && 
+				now - m.sendingStartedAt > STUCK_MESSAGE_TIMEOUT
+			);
+			
+			for (const stuck of stuckMessages) {
+				console.warn('[outbox] Resetting stuck message:', stuck.clientId);
+				// Reset to pending with incremented retry count
+				outboxQueue.update((q) =>
+					q.map((m) =>
+						m.clientId === stuck.clientId
+							? { 
+								...m, 
+								status: 'pending' as const, 
+								retryCount: m.retryCount + 1,
+								sendingStartedAt: undefined,
+								error: m.retryCount + 1 >= MAX_RETRIES ? 'Message timed out' : undefined
+							}
+							: m
+					)
+				);
+			}
+			
+			// Mark any messages over max retries as failed
+			outboxQueue.update((q) =>
+				q.map((m) =>
+					m.status === 'pending' && m.retryCount >= MAX_RETRIES
+						? { ...m, status: 'failed' as const, error: m.error ?? 'Max retries exceeded' }
+						: m
+				)
+			);
+			
+			// Find next pending message
+			const refreshedQueue = get(outboxQueue);
+			const nextMsg = refreshedQueue.find((m) => m.status === 'pending' && m.retryCount < MAX_RETRIES);
 
 			if (!nextMsg) break;
 
 			await processMessage(nextMsg);
+			
+			// Update last process time
+			lastProcessTime = Date.now();
 		}
+	} catch (err) {
+		console.error('[outbox] Queue processing error:', err);
 	} finally {
 		processingQueue = false;
 	}
 }
 
 async function processMessage(msg: OutboxMessage): Promise<void> {
-	// Update status to sending
-	updateMessageStatus(msg.clientId, 'sending');
+	// Update status to sending with timestamp
+	outboxQueue.update((queue) =>
+		queue.map((m) =>
+			m.clientId === msg.clientId
+				? { ...m, status: 'sending' as const, sendingStartedAt: Date.now() }
+				: m
+		)
+	);
+	
+	// Update pending message status
+	updatePendingMessages(msg.targetId, (msgs) =>
+		msgs.map((m) =>
+			m.id === msg.clientId
+				? { ...m, status: 'sending' as const }
+				: m
+		)
+	);
 
 	const sendFn = msg.type === 'channel' ? channelSendFn
 		: msg.type === 'dm' ? dmSendFn
@@ -267,7 +333,7 @@ async function processMessage(msg: OutboxMessage): Promise<void> {
 		outboxQueue.update((queue) =>
 			queue.map((m) =>
 				m.clientId === msg.clientId
-					? { ...m, status: 'sent' as const, sentAt: Date.now(), firestoreId }
+					? { ...m, status: 'sent' as const, sentAt: Date.now(), firestoreId, sendingStartedAt: undefined }
 					: m
 			)
 		);
@@ -285,14 +351,27 @@ async function processMessage(msg: OutboxMessage): Promise<void> {
 		}, 2000);
 	} catch (error) {
 		const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+		console.error('[outbox] Send failed:', msg.clientId, errorMsg);
 		
-		msg.retryCount++;
+		// Update retry count in the queue
+		outboxQueue.update((queue) =>
+			queue.map((m) =>
+				m.clientId === msg.clientId
+					? { ...m, retryCount: m.retryCount + 1, sendingStartedAt: undefined }
+					: m
+			)
+		);
 		
-		if (msg.retryCount >= MAX_RETRIES) {
+		// Get updated message
+		const updatedQueue = get(outboxQueue);
+		const updatedMsg = updatedQueue.find((m) => m.clientId === msg.clientId);
+		
+		if (updatedMsg && updatedMsg.retryCount >= MAX_RETRIES) {
 			updateMessageStatus(msg.clientId, 'failed', errorMsg);
 		} else {
 			// Schedule retry
-			const delay = RETRY_DELAYS[msg.retryCount - 1] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1];
+			const retryCount = updatedMsg?.retryCount ?? 1;
+			const delay = RETRY_DELAYS[retryCount - 1] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1];
 			updateMessageStatus(msg.clientId, 'pending');
 			
 			setTimeout(() => {
@@ -427,13 +506,20 @@ export function mergeWithPending<T extends { id: string; createdAt?: unknown }>(
 	// Filter out any pending messages that now have Firestore IDs in live messages
 	const liveIds = new Set(liveMessages.map((m) => m.id));
 	const queue = get(outboxQueue);
-	const sentClientIds = new Set(
+	
+	// Get client IDs of messages that have been sent AND their Firestore IDs are in live messages
+	// Also filter messages that are "sending" but already confirmed (Firestore ID exists in live)
+	const confirmedClientIds = new Set(
 		queue
-			.filter((m) => m.status === 'sent' && m.firestoreId && liveIds.has(m.firestoreId))
+			.filter((m) => 
+				(m.status === 'sent' || m.status === 'sending') && 
+				m.firestoreId && 
+				liveIds.has(m.firestoreId)
+			)
 			.map((m) => m.clientId)
 	);
 
-	const filteredPending = pending.filter((m) => !sentClientIds.has(m.id));
+	const filteredPending = pending.filter((m) => !confirmedClientIds.has(m.id));
 
 	return [...liveMessages, ...filteredPending];
 }
@@ -461,11 +547,14 @@ export function clearFailedMessages(): void {
 	);
 }
 
-// Clean up old pending messages periodically
+// Clean up old pending messages and recover stuck messages periodically
 if (browser) {
+	// Main cleanup interval
 	setInterval(() => {
 		const now = Date.now();
 		const queue = get(outboxQueue);
+		
+		// Clean up expired failed messages
 		const expired = queue.filter(
 			(m) => m.status === 'failed' && now - m.createdAt > PENDING_MESSAGE_TTL
 		);
@@ -473,7 +562,40 @@ if (browser) {
 		for (const msg of expired) {
 			cancelMessage(msg.clientId);
 		}
-	}, 60 * 1000); // Check every minute
+		
+		// Check for stuck messages and trigger queue processing
+		const hasStuckOrPending = queue.some(
+			(m) => m.status === 'pending' || 
+			(m.status === 'sending' && m.sendingStartedAt && now - m.sendingStartedAt > STUCK_MESSAGE_TIMEOUT)
+		);
+		
+		if (hasStuckOrPending) {
+			console.log('[outbox] Periodic check found pending/stuck messages, processing queue');
+			processQueue();
+		}
+	}, 30 * 1000); // Check every 30 seconds
+	
+	// Also process queue when tab becomes visible (user returns)
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'visible') {
+			const queue = get(outboxQueue);
+			const hasPendingOrSending = queue.some((m) => m.status === 'pending' || m.status === 'sending');
+			if (hasPendingOrSending) {
+				console.log('[outbox] Tab visible, processing queue');
+				processQueue();
+			}
+		}
+	});
+	
+	// Process queue when coming back online
+	window.addEventListener('online', () => {
+		const queue = get(outboxQueue);
+		const hasPendingOrSending = queue.some((m) => m.status === 'pending' || m.status === 'sending');
+		if (hasPendingOrSending) {
+			console.log('[outbox] Back online, processing queue');
+			processQueue();
+		}
+	});
 }
 
 /* ===========================

@@ -106,10 +106,10 @@ export function recordMetric(type: MetricType, value: number, label?: string): v
 	// Log slow operations in dev mode
 	if (import.meta.env.DEV) {
 		const thresholds: Record<MetricType, number> = {
-			serverSwitch: 150,
-			channelSwitch: 100,
-			dmSwitch: 150,
-			messageSend: 50,
+			serverSwitch: 200,
+			channelSwitch: 150,
+			dmSwitch: 350, // DMs involve more data loading (thread meta, profiles, messages)
+			messageSend: 100,
 			listenerCreated: 0, // Always log
 			memoryUsage: 0 // Don't warn
 		};

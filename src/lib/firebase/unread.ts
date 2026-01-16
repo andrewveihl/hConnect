@@ -137,10 +137,20 @@ async function computeChannelSnapshot(options: {
 
 	const highEvents = new Map<string, HighEvent>();
 
+	// For mention queries with dynamic field names (mentionsMap.{uid}), we can't use
+	// composite indexes efficiently. Instead, query by the dynamic field only and
+	// filter by time client-side to avoid requiring a composite index for every user.
+	const lastReadMs = lastReadAt ? timestampToMillis(lastReadAt) : null;
+
 	try {
-		const mentionQuery = query(base, ...timeConstraint, where(`mentionsMap.${uid}`, '==', true));
+		// Query only by mentionsMap.{uid} - no time constraint in query
+		const mentionQuery = query(base, where(`mentionsMap.${uid}`, '==', true));
 		const mentionSnap = await getDocs(mentionQuery);
 		mentionSnap.forEach((docSnap) => {
+			const data = docSnap.data() ?? {};
+			const docTime = timestampToMillis(data?.createdAt);
+			// Filter by time client-side
+			if (lastReadMs && docTime && docTime <= lastReadMs) return;
 			const event = buildHighEvent(docSnap, 'mention');
 			highEvents.set(docSnap.id, event);
 		});
@@ -174,10 +184,15 @@ async function computeChannelSnapshot(options: {
 	]);
 
 	try {
-		const replyQuery = query(base, ...timeConstraint, where('replyTo.authorId', '==', uid));
+		// Query only by replyTo.authorId - filter by time client-side to avoid composite index
+		const replyQuery = query(base, where('replyTo.authorId', '==', uid));
 		const replySnap = await getDocs(replyQuery);
 		replySnap.forEach((docSnap) => {
 			if (highEvents.has(docSnap.id)) return;
+			const data = docSnap.data() ?? {};
+			const docTime = timestampToMillis(data?.createdAt);
+			// Filter by time client-side
+			if (lastReadMs && docTime && docTime <= lastReadMs) return;
 			const event = buildHighEvent(docSnap, 'reply');
 			highEvents.set(docSnap.id, event);
 		});

@@ -5,8 +5,8 @@ export type ManualPresence = {
 	expiresAt: number | null;
 };
 
-export const ONLINE_WINDOW_MS = 10 * 60 * 1000;
-export const IDLE_WINDOW_MS = 60 * 60 * 1000;
+export const ONLINE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes - for accurate presence detection
+export const IDLE_WINDOW_MS = 15 * 60 * 1000; // 15 minutes - then show as offline
 
 export const presenceLabels: Record<PresenceState, string> = {
 	online: 'Online',

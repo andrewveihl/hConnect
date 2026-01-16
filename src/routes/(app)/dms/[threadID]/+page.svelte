@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { run } from 'svelte/legacy';
+	import { untrack } from 'svelte';
 
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
@@ -69,10 +69,7 @@
 	let { data }: Props = $props();
 	let threadID = $derived(data.threadID);
 
-	let me: any = $state(null);
-	run(() => {
-		me = $user;
-	});
+	let me = $derived($user);
 
 	let messages: any[] = $state([]);
 	let messagesLoading = $state(true);
@@ -99,9 +96,19 @@
 	});
 	
 	// Merge pending (local echo) messages with confirmed messages
+	// Use pendingMessages in the derivation to ensure reactivity when pending changes
 	const mergedMessages = $derived.by(() => {
 		if (!threadID) return messages;
-		return [...messages, ...pendingMessages];
+		// Force reactivity by referencing pendingMessages, then use mergeWithPending for proper deduplication
+		void pendingMessages; // Ensure reactivity on pending changes
+		const merged = mergeWithPending(messages, threadID);
+		// Deduplicate by message ID to prevent {#each} key errors
+		const seen = new Set<string>();
+		return merged.filter((m) => {
+			if (!m?.id || seen.has(m.id)) return false;
+			seen.add(m.id);
+			return true;
+		});
 	});
 	
 	let messageUsers: Record<string, any> = $state({});
@@ -165,11 +172,14 @@
 		}
 	});
 
-	run(() => {
-		if (threadID !== lastPendingThreadId) {
-			lastPendingThreadId = threadID;
-			pendingUploads = [];
-		}
+	$effect(() => {
+		const currentThreadID = threadID;
+		untrack(() => {
+			if (currentThreadID !== lastPendingThreadId) {
+				lastPendingThreadId = currentThreadID;
+				pendingUploads = [];
+			}
+		});
 	});
 
 	function updateMessageUserCache(uid: string, patch: any) {
@@ -235,7 +245,6 @@
 
 	let otherUid: string | null = $state(null);
 	let otherProfile: any = $state(null);
-	let otherMessageUser: any = $state(null);
 	let metaLoading = $state(true);
 	
 	// Presence tracking for the other user
@@ -256,9 +265,6 @@
 	let swipeSurface: HTMLDivElement | null = null;
 	let lastThreadID: string | null = null;
 	let pendingReply: ReplyReferenceInput | null = $state(null);
-	let replySourceMessage: any = $state(null);
-	let latestInboundMessage: any = $state(null);
-	let aiConversationContext: any[] = $state([]);
 	let aiAssistEnabled = $state(true);
 	let dockClaimed = false;
 
@@ -808,8 +814,26 @@
 		};
 	}
 
+	// Track which thread load is in progress to avoid race conditions
+	let loadingThreadId: string | null = null;
+	
 	async function loadThreadMeta() {
-		if (!threadID || typeof window === 'undefined') return;
+		const currentThreadId = threadID; // Capture at start
+		if (!currentThreadId || typeof window === 'undefined') return;
+		
+		// Mark which thread we're loading
+		loadingThreadId = currentThreadId;
+		
+		// Reset state immediately for new thread to avoid stale display
+		otherUid = null;
+		otherProfile = null;
+		isGroupChat = false;
+		groupName = null;
+		groupIconURL = null;
+		groupDescription = null;
+		groupParticipants = [];
+		groupParticipantProfiles = {};
+		threadData = null;
 		
 		// CACHE-FIRST: Try to use cached thread metadata for instant render
 		const cached = getCachedThreadMeta();
@@ -839,7 +863,10 @@
 		
 		try {
 			const database = getDb();
-			const snap = await getDoc(doc(database, 'dms', threadID));
+			const snap = await getDoc(doc(database, 'dms', currentThreadId));
+			
+			// Bail out if thread changed during async operation
+			if (loadingThreadId !== currentThreadId) return;
 			const payload: any = snap.data() ?? {};
 			const parts: string[] = payload.participants ?? [];
 			
@@ -852,7 +879,7 @@
 			
 			// Store full thread data for group info panel
 			threadData = {
-				id: threadID,
+				id: currentThreadId,
 				key: payload.key ?? '',
 				participants: parts,
 				createdAt: payload.createdAt,
@@ -892,6 +919,10 @@
 				});
 				
 				const profiles = await Promise.all(profilePromises);
+				
+				// Bail out if thread changed during async operation
+				if (loadingThreadId !== currentThreadId) return;
+				
 				const profileMap: Record<string, any> = {};
 				for (const { uid, profile } of profiles) {
 					profileMap[uid] = profile;
@@ -910,6 +941,10 @@
 						otherProfile = profileCache.get(otherUid);
 					} else {
 						const profileDoc = await getDoc(doc(database, 'profiles', otherUid));
+						
+						// Bail out if thread changed during async operation
+						if (loadingThreadId !== currentThreadId) return;
+						
 						if (profileDoc.exists()) {
 							otherProfile = normalizeUserRecord(profileDoc.id, profileDoc.data());
 						} else {
@@ -922,13 +957,19 @@
 				}
 			}
 		} catch (err) {
-			console.error('[DM thread] failed to load meta', err);
-			otherProfile = null;
-			isGroupChat = false;
-			groupParticipantProfiles = {};
-			threadData = null;
+			// Only log error if this is still the current thread
+			if (loadingThreadId === currentThreadId) {
+				console.error('[DM thread] failed to load meta', err);
+				otherProfile = null;
+				isGroupChat = false;
+				groupParticipantProfiles = {};
+				threadData = null;
+			}
 		} finally {
-			metaLoading = false;
+			// Only update metaLoading if this is still the current thread
+			if (loadingThreadId === currentThreadId) {
+				metaLoading = false;
+			}
 		}
 	}
 
@@ -947,7 +988,7 @@
 		goto('/dms');
 	}
 
-	run(() => {
+	$effect(() => {
 		if (otherProfile?.uid) {
 			const meta = {
 				uid: otherProfile.uid,
@@ -956,29 +997,41 @@
 				name: pickString(otherProfile?.name) ?? null,
 				email: pickString(otherProfile?.email) ?? null
 			};
-			sidebarRef?.updatePartnerMeta(meta);
-			sidebarRefMobile?.updatePartnerMeta(meta);
+			untrack(() => {
+				sidebarRef?.updatePartnerMeta(meta);
+				sidebarRefMobile?.updatePartnerMeta(meta);
+			});
 		}
 	});
 
-	run(() => {
-		if (threadID) {
-			loadThreadMeta();
+	$effect(() => {
+		// Track threadID to trigger when it changes
+		const currentThreadID = threadID;
+		if (currentThreadID) {
+			// Wrap in untrack to prevent state writes inside loadThreadMeta from re-triggering this effect
+			untrack(() => {
+				loadThreadMeta();
+			});
 		}
 	});
 
 	// Subscribe to presence updates for the other user
 	$effect(() => {
-		// Cleanup previous subscription
-		presenceUnsub?.();
-		presenceUnsub = null;
-		otherPresence = 'offline';
+		// Capture the current otherUid to track
+		const currentOtherUid = otherUid;
 		
-		if (!otherUid || !browser) return;
+		// Cleanup and state writes should be in untrack
+		untrack(() => {
+			presenceUnsub?.();
+			presenceUnsub = null;
+			otherPresence = 'offline';
+		});
+		
+		if (!currentOtherUid || !browser) return;
 		
 		try {
 			const database = getDb();
-			const presenceRef = doc(database, 'profiles', otherUid, 'presence', 'status');
+			const presenceRef = doc(database, 'profiles', currentOtherUid, 'presence', 'status');
 			presenceUnsub = onSnapshot(
 				presenceRef,
 				(snap) => {
@@ -1001,92 +1054,110 @@
 		};
 	});
 
-	run(() => {
-		if (threadID && threadID !== lastThreadID) {
-			lastThreadID = threadID;
-			syncInfoVisibility(false);
-			pendingReply = null;
-			// Don't clear messages here - let the cache-first block handle it
-			// Only set loading state if no cache exists
-			if (!hasDMCache(threadID)) {
-				messages = [];
-				messagesLoading = true;
+	$effect(() => {
+		const currentThreadID = threadID;
+		untrack(() => {
+			if (currentThreadID && currentThreadID !== lastThreadID) {
+				lastThreadID = currentThreadID;
+				syncInfoVisibility(false);
+				pendingReply = null;
+				// Don't clear messages here - let the cache-first block handle it
+				// Only set loading state if no cache exists
+				if (!hasDMCache(currentThreadID)) {
+					messages = [];
+					messagesLoading = true;
+				}
+				scrollResumeSignal = Date.now();
 			}
-			scrollResumeSignal = Date.now();
-		}
+		});
 	});
 
-	run(() => {
-		if (resumeDmScroll && messages.length > 0) {
-			scrollResumeSignal = Date.now();
-			resumeDmScroll = false;
-		}
+	$effect(() => {
+		const shouldResume = resumeDmScroll && messages.length > 0;
+		untrack(() => {
+			if (shouldResume) {
+				scrollResumeSignal = Date.now();
+				resumeDmScroll = false;
+			}
+		});
 	});
 
-	run(() => {
-		const next: Record<string, any> = {};
-		if (me?.uid) {
-			next[me.uid] = normalizeUserRecord(me.uid, {
-				displayName: deriveMeDisplayName(),
-				name: deriveMeDisplayName(),
-				photoURL: deriveMePhotoURL(),
-				email: pickString(me?.email) ?? undefined
-			});
-		}
-		if (otherProfile?.uid) {
-			next[otherProfile.uid] = normalizeUserRecord(otherProfile.uid, otherProfile);
-		}
-		for (const m of messages) {
-			if (!m?.uid) continue;
-			const existing = next[m.uid] ?? { uid: m.uid };
-			const displayName = pickString(existing.displayName) ?? pickString(m.displayName);
-			const name = pickString(existing.name) ?? pickString(m.displayName);
-			const photoURL = pickString(existing.photoURL) ?? pickString(m.photoURL);
-			next[m.uid] = {
-				...existing,
-				displayName: displayName ?? existing.displayName ?? m.uid ?? 'Member',
-				name: name ?? existing.name ?? displayName ?? m.uid ?? 'Member',
-				photoURL: photoURL ?? existing.photoURL ?? null
+	$effect(() => {
+		const currentMe = me;
+		const currentOtherProfile = otherProfile;
+		const currentMessages = messages;
+		untrack(() => {
+			const next: Record<string, any> = {};
+			if (currentMe?.uid) {
+				next[currentMe.uid] = normalizeUserRecord(currentMe.uid, {
+					displayName: deriveMeDisplayName(),
+					name: deriveMeDisplayName(),
+					photoURL: deriveMePhotoURL(),
+					email: pickString(currentMe?.email) ?? undefined
+				});
+			}
+			if (currentOtherProfile?.uid) {
+				next[currentOtherProfile.uid] = normalizeUserRecord(currentOtherProfile.uid, currentOtherProfile);
+			}
+			for (const m of currentMessages) {
+				if (!m?.uid) continue;
+				const existing = next[m.uid] ?? { uid: m.uid };
+				const displayName = pickString(existing.displayName) ?? pickString(m.displayName);
+				const name = pickString(existing.name) ?? pickString(m.displayName);
+				const photoURL = pickString(existing.photoURL) ?? pickString(m.photoURL);
+				next[m.uid] = {
+					...existing,
+					displayName: displayName ?? existing.displayName ?? m.uid ?? 'Member',
+					name: name ?? existing.name ?? displayName ?? m.uid ?? 'Member',
+					photoURL: photoURL ?? existing.photoURL ?? null
+				};
+			}
+			messageUsers = next;
+		});
+	});
+
+	$effect(() => {
+		const currentMe = me;
+		const currentOtherProfile = otherProfile;
+		const currentIsGroupChat = isGroupChat;
+		const currentGroupProfiles = groupParticipantProfiles;
+		const currentMessageUsers = messageUsers;
+		untrack(() => {
+			const map = new Map<string, MentionOption>();
+			const addCandidate = (uid: unknown, data: any) => {
+				const clean = normalizeUid(uid);
+				if (!clean) return;
+				try {
+					map.set(clean, buildMentionOption(clean, data ?? {}));
+				} catch {
+					// ignore malformed entries
+				}
 			};
-		}
-		messageUsers = next;
-	});
 
-	run(() => {
-		const map = new Map<string, MentionOption>();
-		const addCandidate = (uid: unknown, data: any) => {
-			const clean = normalizeUid(uid);
-			if (!clean) return;
-			try {
-				map.set(clean, buildMentionOption(clean, data ?? {}));
-			} catch {
-				// ignore malformed entries
+			if (currentMe?.uid) {
+				addCandidate(currentMe.uid, {
+					displayName: deriveMeDisplayName(),
+					photoURL: deriveMePhotoURL(),
+					email: pickString(currentMe?.email) ?? null
+				});
 			}
-		};
+			
+			// For group chats, add all participants
+			if (currentIsGroupChat && Object.keys(currentGroupProfiles).length > 0) {
+				Object.entries(currentGroupProfiles).forEach(([uid, profile]) => {
+					addCandidate(uid, profile);
+				});
+			} else if (currentOtherProfile?.uid) {
+				// For 1:1 chats, add the other person
+				addCandidate(currentOtherProfile.uid, currentOtherProfile);
+			}
+			
+			Object.values(currentMessageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
 
-		if (me?.uid) {
-			addCandidate(me.uid, {
-				displayName: deriveMeDisplayName(),
-				photoURL: deriveMePhotoURL(),
-				email: pickString(me?.email) ?? null
-			});
-		}
-		
-		// For group chats, add all participants
-		if (isGroupChat && Object.keys(groupParticipantProfiles).length > 0) {
-			Object.entries(groupParticipantProfiles).forEach(([uid, profile]) => {
-				addCandidate(uid, profile);
-			});
-		} else if (otherProfile?.uid) {
-			// For 1:1 chats, add the other person
-			addCandidate(otherProfile.uid, otherProfile);
-		}
-		
-		Object.values(messageUsers).forEach((entry) => addCandidate(entry?.uid, entry));
-
-		mentionOptions = Array.from(map.values()).sort((a, b) =>
-			a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
-		);
+			mentionOptions = Array.from(map.values()).sort((a, b) =>
+				a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+			);
+		});
 	});
 
 	function setupGestures(target: HTMLDivElement | null) {
@@ -1290,7 +1361,12 @@
 			const olderMsgs = await loadOlderDMMessages(threadId, oldestDoc, DM_BACKFILL_PAGE_SIZE);
 			if (olderMsgs.length > 0) {
 				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
-				messages = [...olderConverted, ...messages];
+				// Deduplicate when prepending older messages
+				const existingIds = new Set(messages.map((m: any) => m.id));
+				const uniqueOlder = olderConverted.filter((m: any) => !existingIds.has(m.id));
+				if (uniqueOlder.length > 0) {
+					messages = [...uniqueOlder, ...messages];
+				}
 				// Update cache with backfilled messages
 				updateDMCache(threadId, olderConverted as CachedMessage[], {
 					hasOlderMessages: olderMsgs.length >= DM_BACKFILL_PAGE_SIZE,
@@ -1313,144 +1389,150 @@
 		}
 	}
 	
-	run(() => {
-		if (mounted && threadID) {
-			// Start timing DM switch
-			dmSwitchTimer = timeDmSwitch(threadID);
-			
-			// CACHE-FIRST: Check both in-memory cache AND IndexedDB cache
-			// IndexedDB cache is preloaded on app start via preloadCacheFromDb()
-			let hasCachedMessages = false;
-			
-			// First check in-memory Svelte store cache
-			if (hasDMCache(threadID)) {
-				const cached = getCachedDMMessages(threadID);
-				if (cached.length > 0) {
-					messages = cached.map((row: any) => toChatMessage(row.id, row));
-					messagesLoading = false;
-					scrollResumeSignal = Date.now();
-					hasCachedMessages = true;
-					// End timing - cache hit is fast paint
-					dmSwitchTimer?.();
-					dmSwitchTimer = null;
-				}
-			}
-			
-			// If no Svelte store cache, check IndexedDB-backed perf cache
-			if (!hasCachedMessages) {
-				const threadCacheKey = dmThreadKey(threadID);
-				const idbCached = getThreadViewMemory(threadCacheKey);
-				if (idbCached && idbCached.messages?.length > 0) {
-					messages = idbCached.messages.map((row: any) => toChatMessage(row.id, row));
-					messagesLoading = false;
-					scrollResumeSignal = Date.now();
-					hasCachedMessages = true;
-					// End timing - cache hit is fast paint
-					dmSwitchTimer?.();
-					dmSwitchTimer = null;
-				}
-			}
-			
-			// Only show loading if no cache at all
-			// Use a short timeout so empty threads don't hang on the loading spinner
-			let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
-			if (!hasCachedMessages) {
-				messagesLoading = true;
-				// Auto-clear loading after 0.2s - empty threads will just show the empty state
-				loadingTimeout = setTimeout(() => {
-					messagesLoading = false;
-				}, 200);
-			}
-			
-			earliestLoadedDoc = null;
-			unsub?.();
-			
-			// Progressive loading: start with small initial query for fast first paint
-			const initialLoad = !hasCachedMessages;
-			const queryLimit = initialLoad ? DM_INITIAL_PAGE_SIZE : 50;
-			
-			unsub = streamDMMessages(threadID, async (msgs, firstDoc) => {
-				// Clear loading timeout when data arrives
-				if (loadingTimeout) {
-					clearTimeout(loadingTimeout);
-					loadingTimeout = null;
-				}
-				const isFirstCallback = messages.length === 0 || initialLoad;
-				messages = msgs.map((row: any) => toChatMessage(row.id, row));
+	$effect(() => {
+		const currentThreadID = threadID;
+		const isMounted = mounted;
+		const currentMe = me;
+		
+		untrack(() => {
+			if (isMounted && currentThreadID) {
+				// Start timing DM switch
+				dmSwitchTimer = timeDmSwitch(currentThreadID);
 				
-				// End timing on first data callback if we didn't already end on cache
-				dmSwitchTimer?.();
-				dmSwitchTimer = null;
+				// CACHE-FIRST: Check both in-memory cache AND IndexedDB cache
+				// IndexedDB cache is preloaded on app start via preloadCacheFromDb()
+				let hasCachedMessages = false;
 				
-				// Subscribe to profiles for message authors (inside callback to avoid reactive loops)
-				try {
-					const database = getDb();
-					const authorUids = new Set(msgs.map((m: any) => m.uid).filter(Boolean));
-					for (const uid of authorUids) {
-						ensureProfileSubscription(database, uid as string);
+				// First check in-memory Svelte store cache
+				if (hasDMCache(currentThreadID)) {
+					const cached = getCachedDMMessages(currentThreadID);
+					if (cached.length > 0) {
+						messages = cached.map((row: any) => toChatMessage(row.id, row));
+						messagesLoading = false;
+						scrollResumeSignal = Date.now();
+						hasCachedMessages = true;
+						// End timing - cache hit is fast paint
+						dmSwitchTimer?.();
+						dmSwitchTimer = null;
 					}
-				} catch {}
-				
-				// Update both caches with new messages
-				if (msgs.length > 0) {
-					// For initial load, we know there are likely more messages
-					const hasMoreMessages = initialLoad ? true : msgs.length >= 50;
-					
-					// Update Svelte store cache
-					updateDMCache(threadID, msgs as CachedMessage[], {
-						hasOlderMessages: hasMoreMessages
-					});
-					
-					// Also update IndexedDB-backed perf cache for persistence across refreshes
-					const threadCacheKey = dmThreadKey(threadID);
-					setThreadViewMemory({
-						threadKey: threadCacheKey,
-						messages: msgs.map((m: any) => ({
-							id: m.id,
-							uid: m.uid,
-							text: m.text ?? m.content ?? '',
-							type: m.type,
-							createdAt: typeof m.createdAt?.toMillis === 'function' ? m.createdAt.toMillis() : m.createdAt,
-							displayName: m.displayName,
-							photoURL: m.photoURL,
-							reactions: m.reactions,
-							replyTo: m.replyTo
-						})),
-						hasOlderMessages: hasMoreMessages,
-						updatedAt: Date.now()
-					});
 				}
 				
-				// Only set earliestLoadedDoc on initial load (when it's null)
-				if (!earliestLoadedDoc && firstDoc) {
-					earliestLoadedDoc = firstDoc;
+				// If no Svelte store cache, check IndexedDB-backed perf cache
+				if (!hasCachedMessages) {
+					const threadCacheKey = dmThreadKey(currentThreadID);
+					const idbCached = getThreadViewMemory(threadCacheKey);
+					if (idbCached && idbCached.messages?.length > 0) {
+						messages = idbCached.messages.map((row: any) => toChatMessage(row.id, row));
+						messagesLoading = false;
+						scrollResumeSignal = Date.now();
+						hasCachedMessages = true;
+						// End timing - cache hit is fast paint
+						dmSwitchTimer?.();
+						dmSwitchTimer = null;
+					}
 				}
+				
+				// Only show loading if no cache at all
+				// Use a short timeout so empty threads don't hang on the loading spinner
+				let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
+				if (!hasCachedMessages) {
+					messagesLoading = true;
+					// Auto-clear loading after 0.2s - empty threads will just show the empty state
+					loadingTimeout = setTimeout(() => {
+						messagesLoading = false;
+					}, 200);
+				}
+				
+				earliestLoadedDoc = null;
+				unsub?.();
+				
+				// Progressive loading: start with small initial query for fast first paint
+				const initialLoad = !hasCachedMessages;
+				const queryLimit = initialLoad ? DM_INITIAL_PAGE_SIZE : 50;
+				
+				unsub = streamDMMessages(currentThreadID, async (msgs, firstDoc) => {
+					// Clear loading timeout when data arrives
+					if (loadingTimeout) {
+						clearTimeout(loadingTimeout);
+						loadingTimeout = null;
+					}
+					const isFirstCallback = messages.length === 0 || initialLoad;
+					messages = msgs.map((row: any) => toChatMessage(row.id, row));
+					
+					// End timing on first data callback if we didn't already end on cache
+					dmSwitchTimer?.();
+					dmSwitchTimer = null;
+					
+					// Subscribe to profiles for message authors (inside callback to avoid reactive loops)
+					try {
+						const database = getDb();
+						const authorUids = new Set(msgs.map((m: any) => m.uid).filter(Boolean));
+						for (const uid of authorUids) {
+							ensureProfileSubscription(database, uid as string);
+						}
+					} catch {}
+					
+					// Update both caches with new messages
+					if (msgs.length > 0) {
+						// For initial load, we know there are likely more messages
+						const hasMoreMessages = initialLoad ? true : msgs.length >= 50;
+						
+						// Update Svelte store cache
+						updateDMCache(currentThreadID, msgs as CachedMessage[], {
+							hasOlderMessages: hasMoreMessages
+						});
+						
+						// Also update IndexedDB-backed perf cache for persistence across refreshes
+						const threadCacheKey = dmThreadKey(currentThreadID);
+						setThreadViewMemory({
+							threadKey: threadCacheKey,
+							messages: msgs.map((m: any) => ({
+								id: m.id,
+								uid: m.uid,
+								text: m.text ?? m.content ?? '',
+								type: m.type,
+								createdAt: typeof m.createdAt?.toMillis === 'function' ? m.createdAt.toMillis() : m.createdAt,
+								displayName: m.displayName,
+								photoURL: m.photoURL,
+								reactions: m.reactions,
+								replyTo: m.replyTo
+							})),
+							hasOlderMessages: hasMoreMessages,
+							updatedAt: Date.now()
+						});
+					}
+					
+					// Only set earliestLoadedDoc on initial load (when it's null)
+					if (!earliestLoadedDoc && firstDoc) {
+						earliestLoadedDoc = firstDoc;
+					}
+					messagesLoading = false;
+					if (messages.length > 0) {
+						scrollResumeSignal = Date.now();
+					}
+					if (currentMe?.uid) {
+						const last = messages[messages.length - 1];
+						const at = last?.createdAt ?? null;
+						const lastId = last?.id ?? null;
+						markThreadAsSeen({ at, lastMessageId: lastId });
+					}
+					
+					// Progressive loading: if this was initial load, backfill more messages
+					if (isFirstCallback && msgs.length > 0 && msgs.length <= DM_INITIAL_PAGE_SIZE && earliestLoadedDoc) {
+						// Schedule backfill after a short delay to let UI render first
+						setTimeout(() => {
+							backfillDMMessages(currentThreadID, earliestLoadedDoc);
+						}, 50);
+					}
+				}, queryLimit);
+			} else if (!currentThreadID) {
+				unsub?.();
+				unsub = null;
+				messages = [];
+				earliestLoadedDoc = null;
 				messagesLoading = false;
-				if (messages.length > 0) {
-					scrollResumeSignal = Date.now();
-				}
-				if (me?.uid) {
-					const last = messages[messages.length - 1];
-					const at = last?.createdAt ?? null;
-					const lastId = last?.id ?? null;
-					markThreadAsSeen({ at, lastMessageId: lastId });
-				}
-				
-				// Progressive loading: if this was initial load, backfill more messages
-				if (isFirstCallback && msgs.length > 0 && msgs.length <= DM_INITIAL_PAGE_SIZE && earliestLoadedDoc) {
-					// Schedule backfill after a short delay to let UI render first
-					setTimeout(() => {
-						backfillDMMessages(threadID, earliestLoadedDoc);
-					}, 50);
-				}
-			}, queryLimit);
-		} else if (!threadID) {
-			unsub?.();
-			unsub = null;
-			messages = [];
-			earliestLoadedDoc = null;
-			messagesLoading = false;
-		}
+			}
+		});
 	});
 
 	async function handleLoadOlderMessages() {
@@ -1459,7 +1541,12 @@
 			const olderMsgs = await loadOlderDMMessages(threadID, earliestLoadedDoc);
 			if (olderMsgs.length > 0) {
 				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
-				messages = [...olderConverted, ...messages];
+				// Deduplicate when prepending older messages
+				const existingIds = new Set(messages.map((m: any) => m.id));
+				const uniqueOlder = olderConverted.filter((m: any) => !existingIds.has(m.id));
+				if (uniqueOlder.length > 0) {
+					messages = [...uniqueOlder, ...messages];
+				}
 				
 				// Update DM cache with older messages
 				updateDMCache(threadID, olderMsgs as CachedMessage[], {
@@ -1702,50 +1789,45 @@
 		if (ref) pendingReply = ref;
 	}
 
-	run(() => {
-		otherMessageUser = otherUid ? (messageUsers[otherUid] ?? null) : null;
+	let otherMessageUser = $derived(otherUid ? (messageUsers[otherUid] ?? null) : null);
+
+	$effect(() => {
+		const currentMe = me;
+		const currentMessageUsers = messageUsers;
+		untrack(() => {
+			if (!currentMe?.uid) {
+				aiAssistEnabled = true;
+				return;
+			}
+			const profile = currentMessageUsers[currentMe.uid] ?? null;
+			const prefs = (profile?.settings ?? {}) as any;
+			aiAssistEnabled = prefs.aiAssist?.enabled !== false;
+		});
 	});
 
-	run(() => {
-		if (!me?.uid) {
-			aiAssistEnabled = true;
-			return;
-		}
-		const profile = messageUsers[me.uid] ?? null;
-		const prefs = (profile?.settings ?? {}) as any;
-		aiAssistEnabled = prefs.aiAssist?.enabled !== false;
-	});
-
-	run(() => {
+	let replySourceMessage = $derived.by(() => {
 		const targetId = pendingReply?.messageId ?? null;
 		if (targetId) {
-			const source = messages.find((row) => row?.id === targetId);
-			replySourceMessage = source ?? null;
-		} else {
-			replySourceMessage = null;
+			return messages.find((row) => row?.id === targetId) ?? null;
 		}
+		return null;
 	});
 
-	run(() => {
+	let latestInboundMessage = $derived.by(() => {
 		if (!messages.length) {
-			latestInboundMessage = null;
-			return;
+			return null;
 		}
 		const latestAuthored = [...messages].reverse().find((msg) => msg?.uid);
 		if (!latestAuthored) {
-			latestInboundMessage = null;
-			return;
+			return null;
 		}
 		if (me?.uid && latestAuthored.uid === me.uid) {
-			latestInboundMessage = null;
-			return;
+			return null;
 		}
-		latestInboundMessage = latestAuthored;
+		return latestAuthored;
 	});
 
-	run(() => {
-		aiConversationContext = messages.slice(-10);
-	});
+	let aiConversationContext = $derived(messages.slice(-10));
 
 	// Compute group participant names
 	let groupParticipantNames = $derived.by(() => {
