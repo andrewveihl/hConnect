@@ -192,10 +192,10 @@
 </script>
 
 <div
-	class="flex flex-1 overflow-hidden panel-muted mobile-full-bleed gesture-pad-x"
+	class="flex flex-1 h-full min-h-0 overflow-hidden panel-muted mobile-full-bleed gesture-pad-x"
 	bind:this={gestureSurface}
 >
-	<div class="hidden md:flex md:w-80 flex-col border-r border-subtle">
+	<div class="hidden md:block md:w-80 h-full border-r border-subtle">
 		<DMsSidebar activeThreadId={null} on:select={handleThreadSelect} />
 	</div>
 

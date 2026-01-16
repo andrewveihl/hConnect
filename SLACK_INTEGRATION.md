@@ -57,6 +57,8 @@ Go to **OAuth & Permissions** and add these Bot Token Scopes:
 - `users:read` - Get user info
 - `team:read` - Get workspace info
 - `files:read` - Access shared files
+- `reactions:read` - Read reactions on messages
+- `reactions:write` - Add/remove reactions on messages
 
 ### Step 3: Configure Redirect URI
 
@@ -72,7 +74,11 @@ https://us-central1-hconnect-6212b.cloudfunctions.net/slackOAuth
 ```
 https://us-central1-hconnect-6212b.cloudfunctions.net/slackWebhook
 ```
-3. Subscribe to bot events: `message.channels`, `message.groups`
+3. Subscribe to bot events:
+   - `message.channels` - Messages in public channels
+   - `message.groups` - Messages in private channels
+   - `reaction_added` - Reactions added to messages
+   - `reaction_removed` - Reactions removed from messages
 
 ### Step 5: Get Credentials
 

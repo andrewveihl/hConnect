@@ -819,13 +819,13 @@
 	}
 
 	const QUICK_REACTIONS = [
-		'\u{1F44D}',
-		'\u{1F389}',
-		'\u2764\uFE0F',
-		'\u{1F602}',
-		'\u{1F525}',
-		'\u{1F44F}',
-		'\u{1F410}'
+		'\u2705',        // ✅ white_check_mark
+		'\u{1F44D}',     // 👍 thumbsup
+		'\u{1F389}',     // 🎉 tada
+		'\u2764\uFE0F',  // ❤️ heart
+		'\u{1F602}',     // 😂 joy
+		'\u{1F525}',     // 🔥 fire
+		'\u{1F44F}'      // 👏 clap
 	];
 	const LONG_PRESS_MS = 450;
 	const LONG_PRESS_MOVE_THRESHOLD = 10;
@@ -1002,10 +1002,88 @@
 		}
 	}
 
+	// Common Slack emoji names to Unicode mapping (for legacy data)
+	const SLACK_EMOJI_FALLBACK: Record<string, string> = {
+		'white_check_mark': '✅',
+		'heavy_check_mark': '✔️',
+		'ballot_box_with_check': '☑️',
+		'check': '✔️',
+		'x': '❌',
+		'+1': '👍',
+		'thumbsup': '👍',
+		'-1': '👎',
+		'thumbsdown': '👎',
+		'clap': '👏',
+		'wave': '👋',
+		'raised_hands': '🙌',
+		'pray': '🙏',
+		'ok_hand': '👌',
+		'muscle': '💪',
+		'smile': '😄',
+		'grinning': '😀',
+		'joy': '😂',
+		'heart_eyes': '😍',
+		'thinking_face': '🤔',
+		'thinking': '🤔',
+		'heart': '❤️',
+		'red_heart': '❤️',
+		'fire': '🔥',
+		'100': '💯',
+		'star': '⭐',
+		'sparkles': '✨',
+		'tada': '🎉',
+		'confetti_ball': '🎊',
+		'trophy': '🏆',
+		'rocket': '🚀',
+		'eyes': '👀',
+		'brain': '🧠',
+		'bulb': '💡',
+		'warning': '⚠️',
+		'no_entry': '⛔',
+		'question': '❓',
+		'exclamation': '❗',
+		'coffee': '☕',
+		'beer': '🍺',
+		'pizza': '🍕',
+		'cake': '🎂',
+		'sunglasses': '😎',
+		'crown': '👑',
+		'gem': '💎',
+		'zap': '⚡',
+		'sunny': '☀️',
+		'rainbow': '🌈',
+		'unicorn': '🦄',
+		'dog': '🐕',
+		'cat': '🐈',
+		'poop': '💩',
+		'ghost': '👻',
+		'skull': '💀',
+		'alien': '👽',
+		'robot_face': '🤖',
+		'see_no_evil': '🙈',
+		'hear_no_evil': '🙉',
+		'speak_no_evil': '🙊',
+		'partying_face': '🥳',
+		'exploding_head': '🤯',
+		'saluting_face': '🫡',
+		'face_holding_back_tears': '🥹'
+	};
+
 	function sanitizeEmoji(value: unknown): string | undefined {
 		if (typeof value !== 'string') return undefined;
-		const trimmed = value.trim();
-		return trimmed ? trimmed : undefined;
+		let trimmed = value.trim();
+		if (!trimmed) return undefined;
+		
+		// Check if it's a Slack-style emoji name (e.g., ":white_check_mark:" or "white_check_mark")
+		const slackMatch = trimmed.match(/^:?([a-z0-9_+-]+):?$/i);
+		if (slackMatch) {
+			const emojiName = slackMatch[1].toLowerCase();
+			if (SLACK_EMOJI_FALLBACK[emojiName]) {
+				return SLACK_EMOJI_FALLBACK[emojiName];
+			}
+		}
+		
+		return trimmed;
 	}
 
 	function extractReactionUsers(entry: any): string[] {

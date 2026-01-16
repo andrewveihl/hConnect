@@ -1861,7 +1861,7 @@
 </script>
 
 <div class="flex flex-1 h-full min-h-0 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
-	<div class="hidden md:flex md:w-80 h-full flex-col border-r border-subtle panel-muted">
+	<div class="hidden md:block md:w-80 h-full border-r border-subtle panel-muted">
 		<DMsSidebar
 			bind:this={sidebarRef}
 			activeThreadId={threadID}

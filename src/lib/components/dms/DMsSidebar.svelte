@@ -2,7 +2,7 @@
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { run, stopPropagation } from 'svelte/legacy';
 
-	import { createEventDispatcher, onDestroy, untrack } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 	import { db } from '$lib/firestore/client';
@@ -26,6 +26,9 @@
 	const dispatch = createEventDispatcher();
 	let me: any = $derived($user);
 	let isRefreshing = $state(false);
+	
+	// Element ref for height calculation
+	let sidebarEl: HTMLElement | null = $state(null);
 
 	interface Props {
 		activeThreadId?: string | null;
@@ -117,6 +120,10 @@
 	let selectedForGroup: any[] = $state([]);
 	let groupName = $state('');
 	let isCreatingGroup = $state(false);
+
+	// Filter state for All/Groups/Users
+	type DMFilterType = 'all' | 'groups' | 'users';
+	let dmFilter = $state<DMFilterType>('all');
 
 	function resetSearchState() {
 		clearTimeout(searchTimer);
@@ -855,6 +862,31 @@
 	// This ensures any DMs that exist in the main collection but not in the user's rail are synced
 	let hasAutoBackfilled = $state(false);
 	
+	// Fix sidebar height on mount
+	onMount(() => {
+		const fixHeight = () => {
+			if (!sidebarEl) return;
+			const parent = sidebarEl.parentElement;
+			if (parent) {
+				const parentHeight = parent.clientHeight;
+				if (parentHeight > 0) {
+					sidebarEl.style.height = `${parentHeight}px`;
+				}
+			}
+		};
+		
+		// Initial fix
+		fixHeight();
+		
+		// Fix on resize
+		const resizeObserver = new ResizeObserver(fixHeight);
+		if (sidebarEl?.parentElement) {
+			resizeObserver.observe(sidebarEl.parentElement);
+		}
+		
+		return () => resizeObserver.disconnect();
+	});
+	
 	async function autoBackfillOnMount() {
 		if (hasAutoBackfilled || isRefreshing || !me?.uid) return;
 		hasAutoBackfilled = true;
@@ -1086,20 +1118,31 @@
 	});
 	run(() => {
 		const query = threadSearch.trim().toLowerCase();
-		if (!query) {
-			filteredThreads = sortedThreads;
-			return;
+		let filtered = sortedThreads;
+		
+		// Apply type filter (All/Groups/Users)
+		if (dmFilter === 'groups') {
+			filtered = filtered.filter((t) => isGroupThread(t));
+		} else if (dmFilter === 'users') {
+			filtered = filtered.filter((t) => !isGroupThread(t));
 		}
-		filteredThreads = sortedThreads.filter((t) => {
-			const name = threadDisplayName(t)?.toLowerCase?.() ?? '';
-			const preview = previewTextFor(t)?.toLowerCase?.() ?? '';
-			return name.includes(query) || preview.includes(query);
-		});
+		
+		// Apply search query
+		if (query) {
+			filtered = filtered.filter((t) => {
+				const name = threadDisplayName(t)?.toLowerCase?.() ?? '';
+				const preview = previewTextFor(t)?.toLowerCase?.() ?? '';
+				return name.includes(query) || preview.includes(query);
+			});
+		}
+		
+		filteredThreads = filtered;
 	});
 </script>
 
 <aside
-	class="relative w-full md:w-80 shrink-0 sidebar-surface h-full flex flex-col text-primary"
+	bind:this={sidebarEl}
+	class="w-full md:w-80 shrink-0 sidebar-surface text-primary dms-sidebar-root"
 >
 	<!-- Minimalistic header -->
 	<div class="dms-sidebar-header px-4 py-3 flex items-center justify-between gap-2">
@@ -1117,7 +1160,8 @@
 		</div>
 	</div>
 
-	<div class="dms-sidebar-scroll flex-1 overflow-y-auto px-2 pb-4 space-y-4 touch-pan-y">
+	<div class="dms-sidebar-scroll-wrapper">
+		<div class="dms-sidebar-scroll px-2 pb-4 space-y-4 touch-pan-y">
 		<div class="dm-search">
 			<i class="bx bx-search dm-search__icon" aria-hidden="true"></i>
 			<input
@@ -1138,6 +1182,34 @@
 					<i class="bx bx-x"></i>
 				</button>
 			{/if}
+		</div>
+
+		<!-- Filter tabs -->
+		<div class="dm-filter-tabs">
+			<button
+				type="button"
+				class="dm-filter-tab"
+				class:dm-filter-tab--active={dmFilter === 'all'}
+				onclick={() => (dmFilter = 'all')}
+			>
+				All
+			</button>
+			<button
+				type="button"
+				class="dm-filter-tab"
+				class:dm-filter-tab--active={dmFilter === 'groups'}
+				onclick={() => (dmFilter = 'groups')}
+			>
+				Groups
+			</button>
+			<button
+				type="button"
+				class="dm-filter-tab"
+				class:dm-filter-tab--active={dmFilter === 'users'}
+				onclick={() => (dmFilter = 'users')}
+			>
+				Users
+			</button>
 		</div>
 
 		{#if showPersonalSection}
@@ -1285,6 +1357,7 @@
 				{/if}
 			</ul>
 		</section>
+	</div>
 	</div>
 
 	{#if showPeoplePicker}
@@ -1501,6 +1574,37 @@
 </aside>
 
 <style>
+	/* Root sidebar container using CSS Grid for reliable height distribution */
+	.dms-sidebar-root {
+		display: flex;
+		flex-direction: column;
+		height: calc(100vh - var(--desktop-user-bar-height, 52px));
+		height: calc(100dvh - var(--desktop-user-bar-height, 52px));
+		max-height: calc(100vh - var(--desktop-user-bar-height, 52px));
+		max-height: calc(100dvh - var(--desktop-user-bar-height, 52px));
+		overflow: hidden;
+	}
+
+	/* Scroll wrapper takes all remaining space */
+	.dms-sidebar-scroll-wrapper {
+		flex: 1;
+		min-height: 0;
+		position: relative;
+		overflow: hidden;
+	}
+
+	/* Actual scroll container - absolute to fill wrapper */
+	.dms-sidebar-scroll {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		-webkit-overflow-scrolling: touch;
+	}
+
 	/* DMs sidebar header - minimalistic */
 	.dms-sidebar-header {
 		background: var(--color-sidebar);
@@ -2087,6 +2191,43 @@
 		color: #f87171;
 	}
 
+	/* Filter tabs */
+	.dm-filter-tabs {
+		display: flex;
+		gap: 0.125rem;
+		margin-top: 0.375rem;
+		padding: 0.125rem;
+		background: color-mix(in srgb, var(--color-sidebar) 90%, rgba(255, 255, 255, 0.03));
+		border-radius: 0.375rem;
+	}
+
+	.dm-filter-tab {
+		flex: 1;
+		padding: 0.2rem 0.35rem;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--color-text-tertiary);
+		background: transparent;
+		border: none;
+		border-radius: 0.25rem;
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease;
+	}
+
+	.dm-filter-tab:hover {
+		color: var(--color-text-secondary);
+		background: rgba(255, 255, 255, 0.05);
+	}
+
+	.dm-filter-tab--active {
+		color: var(--color-text-primary);
+		background: rgba(255, 255, 255, 0.1);
+	}
+
+	.dm-filter-tab--active:hover {
+		background: rgba(255, 255, 255, 0.12);
+	}
+
 	@media (max-width: 767px) {
 		.dm-search {
 			padding: 0.45rem 0.85rem;
@@ -2095,6 +2236,15 @@
 
 		.dm-search__input {
 			font-size: 1rem;
+		}
+
+		.dm-filter-tabs {
+			margin-top: 0.5rem;
+		}
+
+		.dm-filter-tab {
+			padding: 0.3rem 0.4rem;
+			font-size: 0.75rem;
 		}
 	}
 </style>

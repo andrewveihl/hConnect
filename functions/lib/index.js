@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.repairUserAvatarTokens = exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
+exports.repairUserAvatarTokens = exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageReactionChanged = exports.onChannelMessageReactionChanged = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectReactionToSlack = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const crypto_1 = require("crypto");
 const firestore_1 = require("firebase-functions/v2/firestore");
@@ -53,6 +53,7 @@ Object.defineProperty(exports, "slackWebhook", { enumerable: true, get: function
 Object.defineProperty(exports, "slackOAuth", { enumerable: true, get: function () { return slack_2.slackOAuth; } });
 Object.defineProperty(exports, "syncHConnectMessageToSlack", { enumerable: true, get: function () { return slack_2.syncHConnectMessageToSlack; } });
 Object.defineProperty(exports, "syncHConnectThreadMessageToSlack", { enumerable: true, get: function () { return slack_2.syncHConnectThreadMessageToSlack; } });
+Object.defineProperty(exports, "syncHConnectReactionToSlack", { enumerable: true, get: function () { return slack_2.syncHConnectReactionToSlack; } });
 Object.defineProperty(exports, "getSlackChannels", { enumerable: true, get: function () { return slack_2.getSlackChannels; } });
 // Define secrets for functions that need them
 const openaiApiKey = (0, params_1.defineSecret)('OPENAI_API_KEY');
@@ -242,6 +243,61 @@ exports.onThreadMessageCreated = (0, firestore_1.onDocumentCreated)({
         (0, slack_1.syncHConnectThreadMessageToSlack)(serverId, channelId, threadId, messageId, messageData)
             .catch(err => firebase_functions_1.logger.error('[onThreadMessageCreated] Slack sync error', { error: err?.message || err }))
     ]);
+});
+// Sync reaction changes from hConnect to Slack (channel messages)
+exports.onChannelMessageReactionChanged = (0, firestore_1.onDocumentUpdated)({
+    document: 'servers/{serverId}/channels/{channelId}/messages/{messageId}'
+}, async (event) => {
+    const { serverId, channelId, messageId } = event.params;
+    const beforeData = event.data?.before.data();
+    const afterData = event.data?.after.data();
+    // Only process if reactions field changed
+    const beforeReactions = beforeData?.reactions;
+    const afterReactions = afterData?.reactions;
+    // Quick check if reactions are the same (stringify comparison)
+    if (JSON.stringify(beforeReactions) === JSON.stringify(afterReactions)) {
+        return; // No reaction changes
+    }
+    firebase_functions_1.logger.info('[onChannelMessageReactionChanged] Reaction change detected', {
+        serverId, channelId, messageId
+    });
+    try {
+        await (0, slack_1.syncHConnectReactionToSlack)(serverId, channelId, messageId, beforeReactions, afterReactions);
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[onChannelMessageReactionChanged] Error syncing reaction', {
+            messageId,
+            error: err
+        });
+    }
+});
+// Sync reaction changes from hConnect to Slack (thread messages)
+exports.onThreadMessageReactionChanged = (0, firestore_1.onDocumentUpdated)({
+    document: 'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}'
+}, async (event) => {
+    const { serverId, channelId, threadId, messageId } = event.params;
+    const beforeData = event.data?.before.data();
+    const afterData = event.data?.after.data();
+    // Only process if reactions field changed
+    const beforeReactions = beforeData?.reactions;
+    const afterReactions = afterData?.reactions;
+    // Quick check if reactions are the same (stringify comparison)
+    if (JSON.stringify(beforeReactions) === JSON.stringify(afterReactions)) {
+        return; // No reaction changes
+    }
+    firebase_functions_1.logger.info('[onThreadMessageReactionChanged] Reaction change detected', {
+        serverId, channelId, threadId, messageId
+    });
+    try {
+        await (0, slack_1.syncHConnectReactionToSlack)(serverId, channelId, messageId, beforeReactions, afterReactions, threadId);
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[onThreadMessageReactionChanged] Error syncing reaction', {
+            messageId,
+            threadId,
+            error: err
+        });
+    }
 });
 exports.onDmMessageCreated = (0, firestore_1.onDocumentCreated)({
     document: 'dms/{threadID}/messages/{messageId}',
