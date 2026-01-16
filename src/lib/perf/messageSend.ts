@@ -250,7 +250,8 @@ export function sendDMMessageOptimized(
 		photoURL: payload.photoURL,
 		mentions: payload.mentions,
 		replyTo: payload.replyTo,
-		file: payload.file
+		file: payload.file,
+		url: payload.url // for GIF messages
 	});
 
 	endTimer();

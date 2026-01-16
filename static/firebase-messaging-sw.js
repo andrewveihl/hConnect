@@ -151,13 +151,18 @@ async function ensureFirebaseInit() {
         swInfo('Firebase initialized from fetched config');
         initialized = true;
       } else {
-        swWarn('Fetched firebase config missing apiKey');
+        // Config will be provided via FIREBASE_CONFIG message from main app
+        swInfo('Firebase config not available at init.json, waiting for message from app');
       }
+    } else if (res.status === 404) {
+      // Expected when running locally - config will come via message from main app
+      swInfo('Firebase init.json not found (expected in local dev), waiting for config message');
     } else {
       swWarn('Failed to fetch firebase init config', { status: res.status });
     }
   } catch (err) {
-    swWarn('ensureFirebaseInit fetch failed', { error: err?.message ?? String(err) });
+    // Network errors are expected in some environments
+    swInfo('Firebase init.json fetch failed, waiting for config message');
   }
 }
 

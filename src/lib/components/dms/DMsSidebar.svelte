@@ -528,12 +528,41 @@
 		presenceDb = null;
 	}
 
+	// Track which UIDs we need presence for - limit to avoid too many listeners
+	const MAX_PRESENCE_SUBSCRIPTIONS = 20;
+	
 	function syncPresenceSubscriptions() {
-		// OPTIMIZED: No longer creating per-partner presence listeners
-		// Presence is derived from peopleMap which is already subscribed via streamProfiles
-		// This reduces listener count from O(n) to O(1)
-		// Legacy cleanup is now handled by cleanupPresence() on destroy
+		// Get unique other UIDs from visible threads (non-group only)
+		const neededUids = new Set<string>();
+		for (const t of filteredThreads.slice(0, MAX_PRESENCE_SUBSCRIPTIONS)) {
+			if (!isGroupThread(t)) {
+				const uid = resolveOtherUid(t);
+				if (uid && uid !== me?.uid) {
+					neededUids.add(uid);
+				}
+			}
+		}
+		
+		// Unsubscribe from UIDs no longer needed
+		for (const uid in presenceUnsubs) {
+			if (!neededUids.has(uid)) {
+				unsubscribePresence(uid);
+			}
+		}
+		
+		// Subscribe to new UIDs
+		for (const uid of neededUids) {
+			subscribePresence(uid);
+		}
 	}
+	
+	// Reactively sync presence subscriptions when threads change
+	$effect(() => {
+		// Reference filteredThreads to create dependency
+		if (filteredThreads.length >= 0) {
+			syncPresenceSubscriptions();
+		}
+	});
 
 	function presenceStateFor(uid: string | null, thread?: any): PresenceState {
 		if (!uid) return 'offline';

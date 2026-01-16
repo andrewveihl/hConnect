@@ -1,6 +1,4 @@
 ﻿<script lang="ts">
-	import { run } from 'svelte/legacy';
-
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
@@ -1845,8 +1843,9 @@
 	let lastViewedChannel: string | null = null;
 
 	// Track when user views a channel - mark it as read
-run(() => {
-	if (activeChannelId && activeChannelId !== lastViewedChannel) {
+$effect(() => {
+	const prevViewed = untrack(() => lastViewedChannel);
+	if (activeChannelId && activeChannelId !== prevViewed) {
 		lastViewedChannel = activeChannelId;
 		if (computedServerId) {
 			void markChannelActivityRead(computedServerId, activeChannelId);
@@ -1866,7 +1865,7 @@ run(() => {
 
 	let unreadReady = $derived(Object.keys($channelIndicators ?? {}).length > 0 || true);
 
-	run(() => {
+	$effect(() => {
 		if (browser) {
 			setVoiceDebugSection('serverSidebar.channels', {
 				serverId: computedServerId ?? null,
@@ -1884,7 +1883,7 @@ run(() => {
 			});
 		}
 	});
-	run(() => {
+	$effect(() => {
 		if (browser) {
 			setVoiceDebugSection('serverSidebar.voicePresence', {
 				serverId: computedServerId ?? null,
@@ -1893,7 +1892,7 @@ run(() => {
 			});
 		}
 	});
-	run(() => {
+	$effect(() => {
 		if (browser) {
 			setVoiceDebugSection('serverSidebar.voiceSession', {
 				activeVoice: activeVoice
@@ -1907,7 +1906,7 @@ run(() => {
 			});
 		}
 	});
-	run(() => {
+	$effect(() => {
 		mentionHighlights = new Set(
 			($notifications ?? [])
 				.filter(
@@ -1961,12 +1960,12 @@ run(() => {
 			'You do not have permission to view any channels. Ask an admin to adjust your role or default role permissions.'
 		);
 	});
-	run(() => {
+	$effect(() => {
 		// Track current working order separately to avoid reading and writing the same state inside this effect.
 		workingOrderSnapshot = workingOrder;
 	});
-	run(() => {
-		const currentOrder = workingOrderSnapshot;
+	$effect(() => {
+		const currentOrder = untrack(() => workingOrderSnapshot);
 		if (reorderMode === 'default') {
 			const target = defaultOrderIds();
 			const merged = mergeOrder(currentOrder.length ? currentOrder : target, target);
@@ -1979,13 +1978,13 @@ run(() => {
 			workingOrder = [];
 		}
 	});
-	run(() => {
+	$effect(() => {
 		displayOrderIds = getDisplayOrderIds();
 	});
-	run(() => {
+	$effect(() => {
 		orderedChannels = applyOrder(displayOrderIds, channels);
 	});
-	run(() => {
+	$effect(() => {
 		// Explicitly reference reactive dependencies to ensure re-computation when roles change
 		const _isMember = isMember;
 		const _isAdminLike = isAdminLike;
@@ -1996,13 +1995,13 @@ run(() => {
 		// Re-filter channels when any role-related state changes
 		visibleChannels = orderedChannels.filter(canSeeChannel);
 	});
-	run(() => {
+	$effect(() => {
 		dispatch('channels', {
 			serverId: computedServerId ?? null,
 			channels: visibleChannels
 		});
 	});
-	run(() => {
+	$effect(() => {
 		const prevServer = untrack(() => lastServerId);
 		const nextServer = computedServerId ?? null;
 		if (nextServer && $user?.uid && nextServer !== prevServer) {
@@ -2021,7 +2020,7 @@ run(() => {
 			// INSTANT PAINT: Load channels from cache immediately before subscriptions
 			// This ensures the UI shows channels instantly even before Firestore responds
 			const cachedChannels = readCachedChannels(nextServer, true);
-			if (cachedChannels.length > 0 && channels.length === 0) {
+			if (cachedChannels.length > 0 && untrack(() => channels.length === 0)) {
 				channels = cachedChannels;
 				syncVoicePresenceWatchers(channels);
 			}
@@ -2029,7 +2028,7 @@ run(() => {
 			subscribeAll(nextServer);
 		}
 	});
-	run(() => {
+	$effect(() => {
 		if (browser && window.matchMedia('(min-width: 768px)').matches && computedServerId) {
 			if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
 				const fallback = visibleChannels[0];
@@ -2039,7 +2038,7 @@ run(() => {
 			}
 		}
 	});
-	run(() => {
+	$effect(() => {
 		const totals: Record<string, number> = {};
 		for (const id in unreadByChannel) {
 			const entry = unreadByChannel[id];

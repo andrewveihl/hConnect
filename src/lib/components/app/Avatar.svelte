@@ -319,15 +319,11 @@
 		if (failedUrl) {
 			markAvatarUrlFailed(failedUrl);
 		}
-		if (shouldLogAvatarFailure(failedUrl)) {
-			console.warn('[Avatar] Image failed to load:', {
+		// Only log in development to reduce console noise in production
+		// Avatar failures are expected (expired tokens, deleted files, etc.)
+		if (import.meta.env.DEV && shouldLogAvatarFailure(failedUrl)) {
+			console.debug('[Avatar] Image failed to load:', {
 				src: img?.src,
-				fullUrl: img?.currentSrc,
-				naturalWidth: img?.naturalWidth,
-				naturalHeight: img?.naturalHeight,
-				complete: img?.complete,
-				fallbackIndex,
-				totalFallbacks: fallbackUrls.length,
 				name: displayName
 			});
 		}
