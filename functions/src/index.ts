@@ -1,6 +1,6 @@
 import { logger } from 'firebase-functions';
 import { randomUUID } from 'crypto';
-import { onDocumentCreated, onDocumentWritten } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentWritten, onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
 import type { Request, Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
@@ -16,9 +16,9 @@ import {
 } from './notifications';
 import { handleTicketAiThreadMessage, handleTicketAiChannelMessage, createManualTicket } from './ticketAi';
 import { sendEmail } from './email';
-import { syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack } from './slack';
+import { syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack, syncHConnectReactionToSlack } from './slack';
 export { requestDomainAutoInvite } from './domainInvites';
-export { slackWebhook, slackOAuth, syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack, getSlackChannels } from './slack';
+export { slackWebhook, slackOAuth, syncHConnectMessageToSlack, syncHConnectThreadMessageToSlack, syncHConnectReactionToSlack, getSlackChannels } from './slack';
 
 // Define secrets for functions that need them
 const openaiApiKey = defineSecret('OPENAI_API_KEY');
@@ -239,6 +239,88 @@ export const onThreadMessageCreated = onDocumentCreated(
       syncHConnectThreadMessageToSlack(serverId, channelId, threadId, messageId, messageData as any)
         .catch(err => logger.error('[onThreadMessageCreated] Slack sync error', { error: err?.message || err }))
     ]);
+  }
+);
+
+// Sync reaction changes from hConnect to Slack (channel messages)
+export const onChannelMessageReactionChanged = onDocumentUpdated(
+  {
+    document: 'servers/{serverId}/channels/{channelId}/messages/{messageId}'
+  },
+  async (event) => {
+    const { serverId, channelId, messageId } = event.params;
+    const beforeData = event.data?.before.data();
+    const afterData = event.data?.after.data();
+    
+    // Only process if reactions field changed
+    const beforeReactions = beforeData?.reactions;
+    const afterReactions = afterData?.reactions;
+    
+    // Quick check if reactions are the same (stringify comparison)
+    if (JSON.stringify(beforeReactions) === JSON.stringify(afterReactions)) {
+      return; // No reaction changes
+    }
+    
+    logger.info('[onChannelMessageReactionChanged] Reaction change detected', {
+      serverId, channelId, messageId
+    });
+    
+    try {
+      await syncHConnectReactionToSlack(
+        serverId,
+        channelId,
+        messageId,
+        beforeReactions,
+        afterReactions
+      );
+    } catch (err) {
+      logger.error('[onChannelMessageReactionChanged] Error syncing reaction', {
+        messageId,
+        error: err
+      });
+    }
+  }
+);
+
+// Sync reaction changes from hConnect to Slack (thread messages)
+export const onThreadMessageReactionChanged = onDocumentUpdated(
+  {
+    document: 'servers/{serverId}/channels/{channelId}/threads/{threadId}/messages/{messageId}'
+  },
+  async (event) => {
+    const { serverId, channelId, threadId, messageId } = event.params;
+    const beforeData = event.data?.before.data();
+    const afterData = event.data?.after.data();
+    
+    // Only process if reactions field changed
+    const beforeReactions = beforeData?.reactions;
+    const afterReactions = afterData?.reactions;
+    
+    // Quick check if reactions are the same (stringify comparison)
+    if (JSON.stringify(beforeReactions) === JSON.stringify(afterReactions)) {
+      return; // No reaction changes
+    }
+    
+    logger.info('[onThreadMessageReactionChanged] Reaction change detected', {
+      serverId, channelId, threadId, messageId
+    });
+    
+    try {
+      await syncHConnectReactionToSlack(
+        serverId,
+        channelId,
+        messageId,
+        beforeReactions,
+        afterReactions,
+        threadId
+      );
+    } catch (err) {
+      logger.error('[onThreadMessageReactionChanged] Error syncing reaction', {
+        messageId,
+        threadId,
+        error: err
+      });
+    }
   }
 );
 

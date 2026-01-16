@@ -86,6 +86,7 @@ interface SlackWorkspace {
 	teamId: string;
 	accessToken: string;
 	botAccessToken: string;
+	botUserId?: string; // The bot's Slack user ID
 }
 
 interface SlackUserCache {
@@ -104,6 +105,558 @@ const THREAD_DEFAULT_TTL_HOURS = 24;
 const THREAD_MAX_MEMBER_LIMIT = 20;
 const THREAD_ARCHIVE_MAX_HOURS = 7 * 24;
 const THREAD_VISIBILITY = 'inherit_parent_with_exceptions';
+
+// Slack emoji name to Unicode mapping (common emojis)
+const SLACK_EMOJI_MAP: Record<string, string> = {
+	// Checkmarks and symbols
+	'white_check_mark': '✅',
+	'heavy_check_mark': '✔️',
+	'ballot_box_with_check': '☑️',
+	'check': '✔️',
+	'x': '❌',
+	'negative_squared_cross_mark': '❎',
+	'heavy_multiplication_x': '✖️',
+	
+	// Thumbs and hands
+	'+1': '👍',
+	'thumbsup': '👍',
+	'-1': '👎',
+	'thumbsdown': '👎',
+	'clap': '👏',
+	'wave': '👋',
+	'raised_hands': '🙌',
+	'pray': '🙏',
+	'point_up': '☝️',
+	'point_down': '👇',
+	'point_left': '👈',
+	'point_right': '👉',
+	'ok_hand': '👌',
+	'v': '✌️',
+	'muscle': '💪',
+	
+	// Faces
+	'smile': '😄',
+	'grinning': '😀',
+	'smiley': '😃',
+	'joy': '😂',
+	'laughing': '😆',
+	'sweat_smile': '😅',
+	'rofl': '🤣',
+	'slightly_smiling_face': '🙂',
+	'wink': '😉',
+	'blush': '😊',
+	'heart_eyes': '😍',
+	'kissing_heart': '😘',
+	'thinking_face': '🤔',
+	'thinking': '🤔',
+	'neutral_face': '😐',
+	'expressionless': '😑',
+	'unamused': '😒',
+	'rolling_eyes': '🙄',
+	'grimacing': '😬',
+	'relieved': '😌',
+	'pensive': '😔',
+	'sleepy': '😪',
+	'sleeping': '😴',
+	'drooling_face': '🤤',
+	'disappointed': '😞',
+	'worried': '😟',
+	'confused': '😕',
+	'upside_down_face': '🙃',
+	'money_mouth_face': '🤑',
+	'astonished': '😲',
+	'flushed': '😳',
+	'scream': '😱',
+	'fearful': '😨',
+	'cold_sweat': '😰',
+	'cry': '😢',
+	'sob': '😭',
+	'angry': '😠',
+	'rage': '😡',
+	'triumph': '😤',
+	'skull': '💀',
+	'poop': '💩',
+	'ghost': '👻',
+	'alien': '👽',
+	'robot_face': '🤖',
+	'see_no_evil': '🙈',
+	'hear_no_evil': '🙉',
+	'speak_no_evil': '🙊',
+	'sunglasses': '😎',
+	'nerd_face': '🤓',
+	'face_with_monocle': '🧐',
+	'star_struck': '🤩',
+	'partying_face': '🥳',
+	'smirk': '😏',
+	'yum': '😋',
+	'stuck_out_tongue': '😛',
+	'stuck_out_tongue_winking_eye': '😜',
+	'zany_face': '🤪',
+	'stuck_out_tongue_closed_eyes': '😝',
+	'hugging_face': '🤗',
+	'shushing_face': '🤫',
+	'zipper_mouth_face': '🤐',
+	'raised_eyebrow': '🤨',
+	'face_with_rolling_eyes': '🙄',
+	'exploding_head': '🤯',
+	'cowboy_hat_face': '🤠',
+	'face_with_hand_over_mouth': '🤭',
+	'saluting_face': '🫡',
+	'melting_face': '🫠',
+	'face_holding_back_tears': '🥹',
+
+	// Hearts
+	'heart': '❤️',
+	'red_heart': '❤️',
+	'orange_heart': '🧡',
+	'yellow_heart': '💛',
+	'green_heart': '💚',
+	'blue_heart': '💙',
+	'purple_heart': '💜',
+	'black_heart': '🖤',
+	'white_heart': '🤍',
+	'brown_heart': '🤎',
+	'broken_heart': '💔',
+	'sparkling_heart': '💖',
+	'heartpulse': '💗',
+	'heartbeat': '💓',
+	'revolving_hearts': '💞',
+	'two_hearts': '💕',
+	'heart_decoration': '💟',
+	'heavy_heart_exclamation': '❣️',
+	'fire': '🔥',
+	'100': '💯',
+	'star': '⭐',
+	'star2': '🌟',
+	'sparkles': '✨',
+	'boom': '💥',
+	'collision': '💥',
+	'zap': '⚡',
+	'sunny': '☀️',
+	'rainbow': '🌈',
+
+	// Objects and symbols
+	'tada': '🎉',
+	'confetti_ball': '🎊',
+	'balloon': '🎈',
+	'gift': '🎁',
+	'trophy': '🏆',
+	'medal': '🏅',
+	'first_place_medal': '🥇',
+	'second_place_medal': '🥈',
+	'third_place_medal': '🥉',
+	'crown': '👑',
+	'gem': '💎',
+	'moneybag': '💰',
+	'dollar': '💵',
+	'credit_card': '💳',
+	'bell': '🔔',
+	'no_bell': '🔕',
+	'bulb': '💡',
+	'flashlight': '🔦',
+	'wrench': '🔧',
+	'hammer': '🔨',
+	'nut_and_bolt': '🔩',
+	'gear': '⚙️',
+	'lock': '🔒',
+	'unlock': '🔓',
+	'key': '🔑',
+	'mag': '🔍',
+	'mag_right': '🔎',
+	'link': '🔗',
+	'paperclip': '📎',
+	'scissors': '✂️',
+	'pencil2': '✏️',
+	'memo': '📝',
+	'book': '📖',
+	'books': '📚',
+	'newspaper': '📰',
+	'clipboard': '📋',
+	'calendar': '📅',
+	'chart_with_upwards_trend': '📈',
+	'chart_with_downwards_trend': '📉',
+	'email': '📧',
+	'envelope': '✉️',
+	'inbox_tray': '📥',
+	'outbox_tray': '📤',
+	'package': '📦',
+	'phone': '📞',
+	'telephone_receiver': '📞',
+	'computer': '💻',
+	'desktop_computer': '🖥️',
+	'keyboard': '⌨️',
+	'printer': '🖨️',
+	'camera': '📷',
+	'video_camera': '📹',
+	'microphone': '🎤',
+	'headphones': '🎧',
+	'musical_note': '🎵',
+	'notes': '🎶',
+	'guitar': '🎸',
+	'movie_camera': '🎥',
+	'clapper': '🎬',
+	'tv': '📺',
+	'radio': '📻',
+	'stopwatch': '⏱️',
+	'alarm_clock': '⏰',
+	'hourglass': '⌛',
+	'hourglass_flowing_sand': '⏳',
+	'battery': '🔋',
+	'electric_plug': '🔌',
+	'rocket': '🚀',
+	'airplane': '✈️',
+	'car': '🚗',
+	'bike': '🚲',
+	'ship': '🚢',
+	'anchor': '⚓',
+	'warning': '⚠️',
+	'construction': '🚧',
+	'rotating_light': '🚨',
+	'traffic_light': '🚦',
+	'stop_sign': '🛑',
+	
+	// Food and drink
+	'coffee': '☕',
+	'tea': '🍵',
+	'beer': '🍺',
+	'beers': '🍻',
+	'wine_glass': '🍷',
+	'cocktail': '🍸',
+	'pizza': '🍕',
+	'hamburger': '🍔',
+	'fries': '🍟',
+	'hotdog': '🌭',
+	'taco': '🌮',
+	'burrito': '🌯',
+	'popcorn': '🍿',
+	'ice_cream': '🍦',
+	'doughnut': '🍩',
+	'cookie': '🍪',
+	'cake': '🎂',
+	'birthday': '🎂',
+	'chocolate_bar': '🍫',
+	'candy': '🍬',
+	'lollipop': '🍭',
+	'apple': '🍎',
+	'green_apple': '🍏',
+	'pear': '🍐',
+	'orange': '🍊',
+	'lemon': '🍋',
+	'banana': '🍌',
+	'watermelon': '🍉',
+	'grapes': '🍇',
+	'strawberry': '🍓',
+	'peach': '🍑',
+	'cherries': '🍒',
+	'avocado': '🥑',
+	'eggplant': '🍆',
+	'potato': '🥔',
+	'carrot': '🥕',
+	'corn': '🌽',
+	'hot_pepper': '🌶️',
+	'broccoli': '🥦',
+	'egg': '🥚',
+	'bacon': '🥓',
+	'croissant': '🥐',
+	'bread': '🍞',
+	'cheese': '🧀',
+	
+	// Animals
+	'dog': '🐕',
+	'dog2': '🐶',
+	'cat': '🐈',
+	'cat2': '🐱',
+	'mouse': '🐁',
+	'mouse2': '🐭',
+	'hamster': '🐹',
+	'rabbit': '🐰',
+	'rabbit2': '🐇',
+	'fox_face': '🦊',
+	'bear': '🐻',
+	'panda_face': '🐼',
+	'koala': '🐨',
+	'tiger': '🐯',
+	'tiger2': '🐅',
+	'lion_face': '🦁',
+	'lion': '🦁',
+	'cow': '🐄',
+	'cow2': '🐮',
+	'pig': '🐷',
+	'pig2': '🐖',
+	'pig_nose': '🐽',
+	'monkey': '🐒',
+	'monkey_face': '🐵',
+	'gorilla': '🦍',
+	'chicken': '🐔',
+	'penguin': '🐧',
+	'bird': '🐦',
+	'hatched_chick': '🐥',
+	'hatching_chick': '🐣',
+	'baby_chick': '🐤',
+	'eagle': '🦅',
+	'duck': '🦆',
+	'owl': '🦉',
+	'bat': '🦇',
+	'wolf': '🐺',
+	'boar': '🐗',
+	'horse': '🐴',
+	'unicorn': '🦄',
+	'unicorn_face': '🦄',
+	'bee': '🐝',
+	'honeybee': '🐝',
+	'bug': '🐛',
+	'butterfly': '🦋',
+	'snail': '🐌',
+	'beetle': '🪲',
+	'ant': '🐜',
+	'spider': '🕷️',
+	'spider_web': '🕸️',
+	'turtle': '🐢',
+	'snake': '🐍',
+	'lizard': '🦎',
+	'scorpion': '🦂',
+	'crab': '🦀',
+	'lobster': '🦞',
+	'shrimp': '🦐',
+	'squid': '🦑',
+	'octopus': '🐙',
+	'tropical_fish': '🐠',
+	'fish': '🐟',
+	'blowfish': '🐡',
+	'dolphin': '🐬',
+	'shark': '🦈',
+	'whale': '🐳',
+	'whale2': '🐋',
+	'crocodile': '🐊',
+	'leopard': '🐆',
+	'zebra_face': '🦓',
+	'goat': '🐐',
+	'ram': '🐏',
+	'sheep': '🐑',
+	'camel': '🐫',
+	'dromedary_camel': '🐪',
+	'llama': '🦙',
+	'giraffe_face': '🦒',
+	'elephant': '🐘',
+	'rhinoceros': '🦏',
+	'hippopotamus': '🦛',
+	'mouse_face': '🐭',
+	'rat': '🐀',
+	'chipmunk': '🐿️',
+	'hedgehog': '🦔',
+	'feet': '🐾',
+	'paw_prints': '🐾',
+	'dragon': '🐉',
+	'dragon_face': '🐲',
+
+	// Nature
+	'sun_with_face': '🌞',
+	'full_moon_with_face': '🌝',
+	'new_moon_with_face': '🌚',
+	'first_quarter_moon_with_face': '🌛',
+	'last_quarter_moon_with_face': '🌜',
+	'crescent_moon': '🌙',
+	'earth_americas': '🌎',
+	'earth_africa': '🌍',
+	'earth_asia': '🌏',
+	'cloud': '☁️',
+	'partly_sunny': '⛅',
+	'thunder_cloud_and_rain': '⛈️',
+	'snowflake': '❄️',
+	'snowman': '⛄',
+	'snowman_without_snow': '⛄',
+	'umbrella': '☂️',
+	'droplet': '💧',
+	'ocean': '🌊',
+	'rose': '🌹',
+	'tulip': '🌷',
+	'sunflower': '🌻',
+	'hibiscus': '🌺',
+	'cherry_blossom': '🌸',
+	'blossom': '🌼',
+	'bouquet': '💐',
+	'seedling': '🌱',
+	'evergreen_tree': '🌲',
+	'deciduous_tree': '🌳',
+	'palm_tree': '🌴',
+	'cactus': '🌵',
+	'herb': '🌿',
+	'shamrock': '☘️',
+	'four_leaf_clover': '🍀',
+	'maple_leaf': '🍁',
+	'fallen_leaf': '🍂',
+	'leaves': '🍃',
+	'mushroom': '🍄',
+
+	// Arrows and misc
+	'arrow_up': '⬆️',
+	'arrow_down': '⬇️',
+	'arrow_left': '⬅️',
+	'arrow_right': '➡️',
+	'arrow_upper_left': '↖️',
+	'arrow_upper_right': '↗️',
+	'arrow_lower_left': '↙️',
+	'arrow_lower_right': '↘️',
+	'left_right_arrow': '↔️',
+	'arrow_up_down': '↕️',
+	'arrows_counterclockwise': '🔄',
+	'arrows_clockwise': '🔃',
+	'back': '🔙',
+	'end': '🔚',
+	'on': '🔛',
+	'soon': '🔜',
+	'top': '🔝',
+	'new': '🆕',
+	'free': '🆓',
+	'up': '🆙',
+	'cool': '🆒',
+	'ok': '🆗',
+	'sos': '🆘',
+	'no_entry': '⛔',
+	'no_entry_sign': '🚫',
+	'name_badge': '📛',
+	'o': '⭕',
+	'white_circle': '⚪',
+	'black_circle': '⚫',
+	'red_circle': '🔴',
+	'blue_circle': '🔵',
+	'large_orange_diamond': '🔶',
+	'large_blue_diamond': '🔷',
+	'small_orange_diamond': '🔸',
+	'small_blue_diamond': '🔹',
+	'small_red_triangle': '🔺',
+	'small_red_triangle_down': '🔻',
+	'question': '❓',
+	'grey_question': '❔',
+	'exclamation': '❗',
+	'grey_exclamation': '❕',
+	'bangbang': '‼️',
+	'interrobang': '⁉️',
+	'hash': '#️⃣',
+	'asterisk': '*️⃣',
+	'zero': '0️⃣',
+	'one': '1️⃣',
+	'two': '2️⃣',
+	'three': '3️⃣',
+	'four': '4️⃣',
+	'five': '5️⃣',
+	'six': '6️⃣',
+	'seven': '7️⃣',
+	'eight': '8️⃣',
+	'nine': '9️⃣',
+	'keycap_ten': '🔟',
+	'a': '🅰️',
+	'b': '🅱️',
+	'ab': '🆎',
+	'cl': '🆑',
+	'o2': '🅾️',
+	'information_source': 'ℹ️',
+	'id': '🆔',
+	'm': 'Ⓜ️',
+	'ng': '🆖',
+	'parking': '🅿️',
+	'vs': '🆚',
+	'accept': '🉑',
+	'ideograph_advantage': '🉐',
+	'congratulations': '㊗️',
+	'secret': '㊙️',
+	'u6e80': '🈵',
+	'u7a7a': '🈳',
+	'copyright': '©️',
+	'registered': '®️',
+	'tm': '™️',
+
+	// People activities
+	'eyes': '👀',
+	'eye': '👁️',
+	'ear': '👂',
+	'nose': '👃',
+	'lips': '👄',
+	'tongue': '👅',
+	'brain': '🧠',
+	'anatomical_heart': '🫀',
+	'lungs': '🫁',
+	'bone': '🦴',
+	'tooth': '🦷',
+	'man': '👨',
+	'woman': '👩',
+	'boy': '👦',
+	'girl': '👧',
+	'baby': '👶',
+	'older_man': '👴',
+	'older_woman': '👵',
+	'person_with_blond_hair': '👱',
+	'man_with_gua_pi_mao': '👲',
+	'person_with_headscarf': '🧕',
+	'man_in_tuxedo': '🤵',
+	'bride_with_veil': '👰',
+	'pregnant_woman': '🤰',
+	'angel': '👼',
+	'santa': '🎅',
+	'mrs_claus': '🤶',
+	'superhero': '🦸',
+	'supervillain': '🦹',
+	'mage': '🧙',
+	'fairy': '🧚',
+	'vampire': '🧛',
+	'merperson': '🧜',
+	'elf': '🧝',
+	'genie': '🧞',
+	'zombie': '🧟',
+	'person_frowning': '🙍',
+	'person_with_pouting_face': '🙎',
+	'no_good': '🙅',
+	'ok_woman': '🙆',
+	'information_desk_person': '💁',
+	'raising_hand': '🙋',
+	'bow': '🙇',
+	'person_facepalming': '🤦',
+	'shrug': '🤷',
+	'cop': '👮',
+	'guardsman': '💂',
+	'construction_worker': '👷',
+	'prince': '🤴',
+	'princess': '👸',
+	'man_with_turban': '👳',
+	'detective': '🕵️',
+	'dancer': '💃',
+	'man_dancing': '🕺',
+	'dancers': '👯',
+	'person_running': '🏃',
+	'runner': '🏃',
+	'walking': '🚶',
+	'person_standing': '🧍',
+	'person_kneeling': '🧎',
+	'couple': '👫',
+	'two_men_holding_hands': '👬',
+	'two_women_holding_hands': '👭',
+	'couplekiss': '💏',
+	'couple_with_heart': '💑',
+	'family': '👪',
+};
+
+/**
+ * Convert Slack emoji name to Unicode emoji
+ */
+function slackEmojiToUnicode(slackName: string): string {
+	// Remove colons if present (e.g., ":white_check_mark:" -> "white_check_mark")
+	const cleanName = slackName.replace(/^:|:$/g, '').toLowerCase();
+	
+	// Check our mapping
+	if (SLACK_EMOJI_MAP[cleanName]) {
+		return SLACK_EMOJI_MAP[cleanName];
+	}
+	
+	// Handle skin tone variants (e.g., "thumbsup::skin-tone-2")
+	const baseName = cleanName.split('::')[0];
+	if (SLACK_EMOJI_MAP[baseName]) {
+		return SLACK_EMOJI_MAP[baseName];
+	}
+	
+	// If not found, return the original name wrapped in colons for display
+	// This allows the frontend to show ":unknown_emoji:" as fallback
+	return `:${cleanName}:`;
+}
 
 const clampNumber = (value: number, min: number, max: number) =>
 	Math.max(min, Math.min(max, value));
@@ -546,29 +1099,56 @@ async function syncSlackMessageToHConnect(
 
 /**
  * Find hConnect message by Slack timestamp
+ * Searches both channel messages and thread messages
  */
 async function findHConnectMessageBySlackTs(
 	serverId: string,
 	channelId: string,
 	slackTs: string
-): Promise<{ id: string; data: Record<string, any>; reactions?: Record<string, string[]> } | null> {
+): Promise<{ id: string; data: Record<string, any>; reactions?: Record<string, string[]>; threadId?: string } | null> {
+	// First, search in channel messages
 	const messagesSnapshot = await db
 		.collection(`servers/${serverId}/channels/${channelId}/messages`)
 		.where('slackMeta.messageTs', '==', slackTs)
 		.limit(1)
 		.get();
 
-	if (messagesSnapshot.empty) {
-		return null;
+	if (!messagesSnapshot.empty) {
+		const doc = messagesSnapshot.docs[0];
+		const data = doc.data() as Record<string, any>;
+		return {
+			id: doc.id,
+			data,
+			reactions: data.reactions || {}
+		};
 	}
 
-	const doc = messagesSnapshot.docs[0];
-	const data = doc.data() as Record<string, any>;
-	return {
-		id: doc.id,
-		data,
-		reactions: data.reactions || {}
-	};
+	// If not found, search in thread messages (collection group query)
+	// First get all threads for this channel
+	const threadsSnapshot = await db
+		.collection(`servers/${serverId}/channels/${channelId}/threads`)
+		.get();
+
+	for (const threadDoc of threadsSnapshot.docs) {
+		const threadMessagesSnapshot = await db
+			.collection(`servers/${serverId}/channels/${channelId}/threads/${threadDoc.id}/messages`)
+			.where('slackMeta.messageTs', '==', slackTs)
+			.limit(1)
+			.get();
+
+		if (!threadMessagesSnapshot.empty) {
+			const doc = threadMessagesSnapshot.docs[0];
+			const data = doc.data() as Record<string, any>;
+			return {
+				id: doc.id,
+				data,
+				reactions: data.reactions || {},
+				threadId: threadDoc.id
+			};
+		}
+	}
+
+	return null;
 }
 
 async function findThreadByParentMessageId(
@@ -651,6 +1231,19 @@ async function ensureThreadForParentMessage(options: {
 }
 
 /**
+ * Encode emoji to a Firestore-safe reaction key (matches frontend format)
+ */
+function encodeReactionKey(emoji: string): string {
+	const parts = Array.from(emoji ?? '')
+		.map((char) => {
+			const code = char.codePointAt(0);
+			return code !== undefined ? code.toString(16) : null;
+		})
+		.filter((part): part is string => Boolean(part));
+	return parts.length ? 'u' + parts.join('_') : 'u';
+}
+
+/**
  * Sync a Slack reaction to hConnect
  */
 async function syncSlackReactionToHConnect(
@@ -665,54 +1258,109 @@ async function syncSlackReactionToHConnect(
 		return;
 	}
 
+	// Skip reactions from our own bot to prevent loops
+	// When hConnect syncs a reaction to Slack, the bot adds it, and Slack sends a webhook back
+	if (workspace.botUserId && event.user === workspace.botUserId) {
+		logger.info('[slack] Skipping reaction from our own bot to prevent loop', { 
+			botUserId: workspace.botUserId,
+			reaction: event.reaction 
+		});
+		return;
+	}
+
 	// Only handle reactions on messages
 	if (event.item.type !== 'message') {
 		logger.info('[slack] Ignoring reaction on non-message item', { type: event.item.type });
 		return;
 	}
 
+	// Use the hConnect server ID from bridge if available (same logic as message sync)
+	const hconnectServerId = bridge.hconnectServerId || serverId;
+
 	// Find the corresponding hConnect message
 	const message = await findHConnectMessageBySlackTs(
-		serverId,
+		hconnectServerId,
 		bridge.hconnectChannelId,
 		event.item.ts
 	);
 
 	if (!message) {
-		logger.info('[slack] No matching hConnect message for reaction', { slackTs: event.item.ts });
+		logger.info('[slack] No matching hConnect message for reaction', { 
+			slackTs: event.item.ts,
+			serverId: hconnectServerId,
+			channelId: bridge.hconnectChannelId
+		});
 		return;
 	}
 
-	// Convert Slack emoji name to a simpler format
-	// Slack uses names like "thumbsup" while we might use "👍"
-	const emoji = `:${event.reaction}:`;
+	// Convert Slack emoji name to Unicode emoji
+	const unicodeEmoji = slackEmojiToUnicode(event.reaction);
+	// Create a Firestore-safe key from the emoji (matches hConnect's format)
+	const reactionKey = encodeReactionKey(unicodeEmoji);
 	const slackUserId = `slack:${event.user}`;
 
-	// Get current reactions on the message
-	const messageRef = db.doc(
-		`servers/${serverId}/channels/${bridge.hconnectChannelId}/messages/${message.id}`
-	);
+	// Build the correct message path (could be in channel or in a thread)
+	const messagePath = message.threadId
+		? `servers/${hconnectServerId}/channels/${bridge.hconnectChannelId}/threads/${message.threadId}/messages/${message.id}`
+		: `servers/${hconnectServerId}/channels/${bridge.hconnectChannelId}/messages/${message.id}`;
+	
+	const messageRef = db.doc(messagePath);
+
+	logger.info('[slack] Processing reaction', {
+		slackEmoji: event.reaction,
+		unicodeEmoji,
+		reactionKey,
+		isAdd,
+		messageId: message.id
+	});
 
 	if (isAdd) {
-		// Add reaction
+		// Add reaction using hConnect's format: reactions.{key}.emoji and reactions.{key}.users
 		await messageRef.update({
-			[`reactions.${event.reaction}`]: FieldValue.arrayUnion(slackUserId),
+			[`reactions.${reactionKey}.emoji`]: unicodeEmoji,
+			[`reactions.${reactionKey}.users.${slackUserId}`]: true,
 			updatedAt: Timestamp.now()
 		});
 		logger.info('[slack] Reaction added to hConnect message', {
 			messageId: message.id,
-			emoji,
+			threadId: message.threadId || null,
+			slackEmoji: event.reaction,
+			unicodeEmoji,
+			reactionKey,
 			user: slackUserId
 		});
 	} else {
-		// Remove reaction
-		await messageRef.update({
-			[`reactions.${event.reaction}`]: FieldValue.arrayRemove(slackUserId),
-			updatedAt: Timestamp.now()
-		});
+		// Remove reaction - need to use a transaction to check if we should delete the whole reaction
+		const snap = await messageRef.get();
+		const data = snap.data() ?? {};
+		const reactions: Record<string, any> = data.reactions ?? {};
+		const entry = reactions[reactionKey];
+		
+		if (entry?.users) {
+			const users = { ...entry.users };
+			delete users[slackUserId];
+			
+			if (Object.keys(users).length === 0) {
+				// No users left, delete the entire reaction
+				await messageRef.update({
+					[`reactions.${reactionKey}`]: FieldValue.delete(),
+					updatedAt: Timestamp.now()
+				});
+			} else {
+				// Still has users, just remove this user
+				await messageRef.update({
+					[`reactions.${reactionKey}.users.${slackUserId}`]: FieldValue.delete(),
+					updatedAt: Timestamp.now()
+				});
+			}
+		}
+		
 		logger.info('[slack] Reaction removed from hConnect message', {
 			messageId: message.id,
-			emoji,
+			threadId: message.threadId || null,
+			slackEmoji: event.reaction,
+			unicodeEmoji,
+			reactionKey,
 			user: slackUserId
 		});
 	}
@@ -1733,4 +2381,478 @@ async function fetchSlackChannelList(
 	} while (cursor);
 
 	return channels;
+}
+
+// ============ Outbound Reaction Sync (hConnect → Slack) ============
+
+/**
+ * Unicode emoji to Slack emoji name mapping (reverse of SLACK_EMOJI_MAP)
+ */
+const UNICODE_TO_SLACK: Record<string, string> = {
+	'✅': 'white_check_mark',
+	'✔️': 'heavy_check_mark',
+	'☑️': 'ballot_box_with_check',
+	'❌': 'x',
+	'❎': 'negative_squared_cross_mark',
+	'✖️': 'heavy_multiplication_x',
+	'👍': '+1',
+	'👎': '-1',
+	'👏': 'clap',
+	'👋': 'wave',
+	'🙌': 'raised_hands',
+	'🙏': 'pray',
+	'☝️': 'point_up',
+	'👇': 'point_down',
+	'👈': 'point_left',
+	'👉': 'point_right',
+	'👌': 'ok_hand',
+	'✌️': 'v',
+	'💪': 'muscle',
+	'😄': 'smile',
+	'😀': 'grinning',
+	'😃': 'smiley',
+	'😂': 'joy',
+	'😆': 'laughing',
+	'😅': 'sweat_smile',
+	'🤣': 'rofl',
+	'🙂': 'slightly_smiling_face',
+	'😉': 'wink',
+	'😊': 'blush',
+	'😍': 'heart_eyes',
+	'😘': 'kissing_heart',
+	'🤔': 'thinking_face',
+	'😐': 'neutral_face',
+	'😑': 'expressionless',
+	'😒': 'unamused',
+	'🙄': 'rolling_eyes',
+	'😬': 'grimacing',
+	'😌': 'relieved',
+	'😔': 'pensive',
+	'😪': 'sleepy',
+	'😴': 'sleeping',
+	'🤤': 'drooling_face',
+	'😞': 'disappointed',
+	'😟': 'worried',
+	'😕': 'confused',
+	'🙃': 'upside_down_face',
+	'🤑': 'money_mouth_face',
+	'😲': 'astonished',
+	'😳': 'flushed',
+	'😱': 'scream',
+	'😨': 'fearful',
+	'😰': 'cold_sweat',
+	'😢': 'cry',
+	'😭': 'sob',
+	'😠': 'angry',
+	'😡': 'rage',
+	'😤': 'triumph',
+	'💀': 'skull',
+	'💩': 'poop',
+	'👻': 'ghost',
+	'👽': 'alien',
+	'🤖': 'robot_face',
+	'🙈': 'see_no_evil',
+	'🙉': 'hear_no_evil',
+	'🙊': 'speak_no_evil',
+	'😎': 'sunglasses',
+	'🤓': 'nerd_face',
+	'🧐': 'face_with_monocle',
+	'🤩': 'star_struck',
+	'🥳': 'partying_face',
+	'😏': 'smirk',
+	'😋': 'yum',
+	'😛': 'stuck_out_tongue',
+	'😜': 'stuck_out_tongue_winking_eye',
+	'🤪': 'zany_face',
+	'😝': 'stuck_out_tongue_closed_eyes',
+	'🤗': 'hugging_face',
+	'🤫': 'shushing_face',
+	'🤐': 'zipper_mouth_face',
+	'🤨': 'raised_eyebrow',
+	'🤯': 'exploding_head',
+	'🤠': 'cowboy_hat_face',
+	'🤭': 'face_with_hand_over_mouth',
+	'🫡': 'saluting_face',
+	'🫠': 'melting_face',
+	'🥹': 'face_holding_back_tears',
+	'❤️': 'heart',
+	'🧡': 'orange_heart',
+	'💛': 'yellow_heart',
+	'💚': 'green_heart',
+	'💙': 'blue_heart',
+	'💜': 'purple_heart',
+	'🖤': 'black_heart',
+	'🤍': 'white_heart',
+	'🤎': 'brown_heart',
+	'💔': 'broken_heart',
+	'💖': 'sparkling_heart',
+	'💗': 'heartpulse',
+	'💓': 'heartbeat',
+	'💞': 'revolving_hearts',
+	'💕': 'two_hearts',
+	'💟': 'heart_decoration',
+	'❣️': 'heavy_heart_exclamation',
+	'🔥': 'fire',
+	'💯': '100',
+	'⭐': 'star',
+	'🌟': 'star2',
+	'✨': 'sparkles',
+	'💥': 'boom',
+	'⚡': 'zap',
+	'☀️': 'sunny',
+	'🌈': 'rainbow',
+	'🎉': 'tada',
+	'🎊': 'confetti_ball',
+	'🎈': 'balloon',
+	'🎁': 'gift',
+	'🏆': 'trophy',
+	'🏅': 'medal',
+	'🥇': 'first_place_medal',
+	'🥈': 'second_place_medal',
+	'🥉': 'third_place_medal',
+	'👑': 'crown',
+	'💎': 'gem',
+	'💰': 'moneybag',
+	'💵': 'dollar',
+	'💳': 'credit_card',
+	'🔔': 'bell',
+	'🔕': 'no_bell',
+	'💡': 'bulb',
+	'🔧': 'wrench',
+	'🔨': 'hammer',
+	'⚙️': 'gear',
+	'🔒': 'lock',
+	'🔓': 'unlock',
+	'🔑': 'key',
+	'🔍': 'mag',
+	'🔗': 'link',
+	'📎': 'paperclip',
+	'✂️': 'scissors',
+	'✏️': 'pencil2',
+	'📝': 'memo',
+	'📖': 'book',
+	'📚': 'books',
+	'📰': 'newspaper',
+	'📋': 'clipboard',
+	'📅': 'calendar',
+	'📈': 'chart_with_upwards_trend',
+	'📉': 'chart_with_downwards_trend',
+	'📧': 'email',
+	'✉️': 'envelope',
+	'📥': 'inbox_tray',
+	'📤': 'outbox_tray',
+	'📦': 'package',
+	'📞': 'phone',
+	'💻': 'computer',
+	'🖥️': 'desktop_computer',
+	'⌨️': 'keyboard',
+	'🖨️': 'printer',
+	'📷': 'camera',
+	'📹': 'video_camera',
+	'🎤': 'microphone',
+	'🎧': 'headphones',
+	'🎵': 'musical_note',
+	'🎶': 'notes',
+	'🎸': 'guitar',
+	'🎥': 'movie_camera',
+	'🎬': 'clapper',
+	'📺': 'tv',
+	'📻': 'radio',
+	'⏱️': 'stopwatch',
+	'⏰': 'alarm_clock',
+	'⌛': 'hourglass',
+	'⏳': 'hourglass_flowing_sand',
+	'🔋': 'battery',
+	'🔌': 'electric_plug',
+	'🚀': 'rocket',
+	'✈️': 'airplane',
+	'🚗': 'car',
+	'🚲': 'bike',
+	'🚢': 'ship',
+	'⚓': 'anchor',
+	'⚠️': 'warning',
+	'🚧': 'construction',
+	'🚨': 'rotating_light',
+	'🚦': 'traffic_light',
+	'🛑': 'stop_sign',
+	'☕': 'coffee',
+	'🍵': 'tea',
+	'🍺': 'beer',
+	'🍻': 'beers',
+	'🍷': 'wine_glass',
+	'🍸': 'cocktail',
+	'🍕': 'pizza',
+	'🍔': 'hamburger',
+	'🍟': 'fries',
+	'🌭': 'hotdog',
+	'🌮': 'taco',
+	'🌯': 'burrito',
+	'🍿': 'popcorn',
+	'🍦': 'ice_cream',
+	'🍩': 'doughnut',
+	'🍪': 'cookie',
+	'🎂': 'birthday',
+	'🍫': 'chocolate_bar',
+	'🍬': 'candy',
+	'🍭': 'lollipop',
+	'🍎': 'apple',
+	'🍏': 'green_apple',
+	'🍐': 'pear',
+	'🍊': 'orange',
+	'🍋': 'lemon',
+	'🍌': 'banana',
+	'🍉': 'watermelon',
+	'🍇': 'grapes',
+	'🍓': 'strawberry',
+	'🍑': 'peach',
+	'🍒': 'cherries',
+	'🥑': 'avocado',
+	'🍆': 'eggplant',
+	'🥔': 'potato',
+	'🥕': 'carrot',
+	'🌽': 'corn',
+	'🌶️': 'hot_pepper',
+	'🥦': 'broccoli',
+	'🥚': 'egg',
+	'🥓': 'bacon',
+	'🥐': 'croissant',
+	'🍞': 'bread',
+	'🧀': 'cheese',
+	'👀': 'eyes',
+	'👁️': 'eye',
+	'👂': 'ear',
+	'👃': 'nose',
+	'👄': 'lips',
+	'👅': 'tongue',
+	'🧠': 'brain',
+	'⬆️': 'arrow_up',
+	'⬇️': 'arrow_down',
+	'⬅️': 'arrow_left',
+	'➡️': 'arrow_right',
+	'🔄': 'arrows_counterclockwise',
+	'🔃': 'arrows_clockwise',
+	'🆕': 'new',
+	'🆓': 'free',
+	'🆙': 'up',
+	'🆒': 'cool',
+	'🆗': 'ok',
+	'🆘': 'sos',
+	'⛔': 'no_entry',
+	'🚫': 'no_entry_sign',
+	'⭕': 'o',
+	'⚪': 'white_circle',
+	'⚫': 'black_circle',
+	'🔴': 'red_circle',
+	'🔵': 'blue_circle',
+	'🔶': 'large_orange_diamond',
+	'🔷': 'large_blue_diamond',
+	'🔸': 'small_orange_diamond',
+	'🔹': 'small_blue_diamond',
+	'🔺': 'small_red_triangle',
+	'🔻': 'small_red_triangle_down',
+	'❓': 'question',
+	'❔': 'grey_question',
+	'❗': 'exclamation',
+	'❕': 'grey_exclamation',
+	'‼️': 'bangbang',
+	'⁉️': 'interrobang',
+};
+
+/**
+ * Convert Unicode emoji to Slack emoji name
+ */
+function unicodeToSlackEmoji(unicode: string): string {
+	// Direct lookup
+	if (UNICODE_TO_SLACK[unicode]) {
+		return UNICODE_TO_SLACK[unicode];
+	}
+	
+	// Try without variation selector (some emojis have \uFE0F suffix)
+	const withoutVariation = unicode.replace(/\uFE0F/g, '');
+	if (UNICODE_TO_SLACK[withoutVariation]) {
+		return UNICODE_TO_SLACK[withoutVariation];
+	}
+	
+	// Return the unicode as-is if no mapping found (Slack might still accept it)
+	return unicode;
+}
+
+/**
+ * Sync hConnect reaction changes to Slack
+ * Called from Firestore trigger when message reactions change
+ */
+export async function syncHConnectReactionToSlack(
+	serverId: string,
+	channelId: string,
+	messageId: string,
+	beforeReactions: Record<string, any> | undefined,
+	afterReactions: Record<string, any> | undefined,
+	threadId?: string
+): Promise<void> {
+	logger.info('[slack-outbound-reaction] syncHConnectReactionToSlack called', {
+		serverId,
+		channelId,
+		messageId,
+		threadId: threadId || null,
+		beforeKeys: beforeReactions ? Object.keys(beforeReactions) : [],
+		afterKeys: afterReactions ? Object.keys(afterReactions) : []
+	});
+
+	// Get the message to find its Slack timestamp
+	const messagePath = threadId
+		? `servers/${serverId}/channels/${channelId}/threads/${threadId}/messages/${messageId}`
+		: `servers/${serverId}/channels/${channelId}/messages/${messageId}`;
+	
+	const messageDoc = await db.doc(messagePath).get();
+	if (!messageDoc.exists) {
+		logger.warn('[slack-outbound-reaction] Message not found', { messagePath });
+		return;
+	}
+
+	const messageData = messageDoc.data();
+	const slackTs = messageData?.slackMeta?.messageTs || messageData?.slackTs;
+	
+	if (!slackTs) {
+		logger.info('[slack-outbound-reaction] Message has no Slack timestamp, skipping', { messageId });
+		return;
+	}
+
+	// Find active bridges for this channel that sync outbound
+	const bridges = await findBridgesForHConnectChannel(serverId, channelId);
+	const outboundBridges = bridges.filter(b =>
+		b.syncDirection === 'hconnect-to-slack' || b.syncDirection === 'bidirectional'
+	);
+
+	if (outboundBridges.length === 0) {
+		logger.info('[slack-outbound-reaction] No outbound bridges', { channelId });
+		return;
+	}
+
+	// Calculate added and removed reactions
+	const before = beforeReactions || {};
+	const after = afterReactions || {};
+	const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
+
+	for (const key of allKeys) {
+		const beforeEntry = before[key];
+		const afterEntry = after[key];
+		const emoji = afterEntry?.emoji || beforeEntry?.emoji;
+		
+		if (!emoji) continue;
+
+		// Get users before and after (handle both object format and array format)
+		const beforeUsers = new Set<string>(
+			beforeEntry?.users 
+				? (typeof beforeEntry.users === 'object' ? Object.keys(beforeEntry.users) : beforeEntry.users as string[])
+				: []
+		);
+		const afterUsers = new Set<string>(
+			afterEntry?.users
+				? (typeof afterEntry.users === 'object' ? Object.keys(afterEntry.users) : afterEntry.users as string[])
+				: []
+		);
+
+		// Find added users (in after but not in before) - excluding slack: users
+		const addedUsers = [...afterUsers].filter((u: string) => !beforeUsers.has(u) && !u.startsWith('slack:'));
+		// Find removed users (in before but not in after) - excluding slack: users
+		const removedUsers = [...beforeUsers].filter((u: string) => !afterUsers.has(u) && !u.startsWith('slack:'));
+
+		if (addedUsers.length === 0 && removedUsers.length === 0) {
+			continue; // No changes from hConnect users
+		}
+
+		const slackEmojiName = unicodeToSlackEmoji(emoji);
+		logger.info('[slack-outbound-reaction] Processing reaction change', {
+			emoji,
+			slackEmojiName,
+			addedUsers,
+			removedUsers
+		});
+
+		// Sync to each bridge
+		for (const bridge of outboundBridges) {
+			try {
+				const workspace = await getWorkspaceByTeamId(serverId, bridge.slackTeamId);
+				if (!workspace?.botAccessToken) {
+					logger.warn('[slack-outbound-reaction] No workspace/token for bridge', { bridgeId: bridge.id });
+					continue;
+				}
+
+				// Add reaction if any hConnect users added it (bot adds on behalf of all)
+				if (addedUsers.length > 0) {
+					try {
+						const response = await fetch('https://slack.com/api/reactions.add', {
+							method: 'POST',
+							headers: {
+								'Authorization': `Bearer ${workspace.botAccessToken}`,
+								'Content-Type': 'application/json'
+							},
+							body: JSON.stringify({
+								channel: bridge.slackChannelId,
+								timestamp: slackTs,
+								name: slackEmojiName
+							})
+						});
+
+						const result = await response.json() as { ok: boolean; error?: string };
+						if (!result.ok && result.error !== 'already_reacted') {
+							logger.warn('[slack-outbound-reaction] Failed to add reaction', {
+								error: result.error,
+								emoji: slackEmojiName
+							});
+						} else {
+							logger.info('[slack-outbound-reaction] Reaction added to Slack', {
+								emoji: slackEmojiName,
+								messageTs: slackTs,
+								addedBy: addedUsers
+							});
+						}
+					} catch (err) {
+						logger.error('[slack-outbound-reaction] Error adding reaction', { error: err });
+					}
+				}
+
+				// Remove reaction if all hConnect users removed it (only remove if no hConnect users left)
+				// We need to check if there are any non-slack users still reacting
+				const remainingHConnectUsers = [...afterUsers].filter((u: string) => !u.startsWith('slack:'));
+				if (removedUsers.length > 0 && remainingHConnectUsers.length === 0) {
+					try {
+						const response = await fetch('https://slack.com/api/reactions.remove', {
+							method: 'POST',
+							headers: {
+								'Authorization': `Bearer ${workspace.botAccessToken}`,
+								'Content-Type': 'application/json'
+							},
+							body: JSON.stringify({
+								channel: bridge.slackChannelId,
+								timestamp: slackTs,
+								name: slackEmojiName
+							})
+						});
+
+						const result = await response.json() as { ok: boolean; error?: string };
+						if (!result.ok && result.error !== 'no_reaction') {
+							logger.warn('[slack-outbound-reaction] Failed to remove reaction', {
+								error: result.error,
+								emoji: slackEmojiName
+							});
+						} else {
+							logger.info('[slack-outbound-reaction] Reaction removed from Slack', {
+								emoji: slackEmojiName,
+								messageTs: slackTs,
+								removedBy: removedUsers
+							});
+						}
+					} catch (err) {
+						logger.error('[slack-outbound-reaction] Error removing reaction', { error: err });
+					}
+				}
+			} catch (err) {
+				logger.error('[slack-outbound-reaction] Error processing bridge', {
+					bridgeId: bridge.id,
+					error: err
+				});
+			}
+		}
+	}
 }

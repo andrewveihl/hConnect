@@ -127,7 +127,7 @@ async function postJson<T>(body: Record<string, unknown>, options: PostOptions =
 		throw new Error(errors.join(' | '));
 	}
 	if (unsupportedIntent) {
-		throw new Error('AI intent not supported on the configured backend.');
+		throw new Error('AI intent not supported. Please ensure the app is updated to the latest version.');
 	}
 	throw new Error('AI request failed');
 }
