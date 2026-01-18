@@ -259,9 +259,13 @@
 			// Check if click is on the popover from a snapped FAB
 			const isPopover = clickedElement?.closest('.threads-popover') !== null;
 			
-			// Close if clicking outside tray, FAB, toggle button, and popover
+			// Check if click is on the ticket panel from a snapped TicketFab
+			const isTicketPanel = clickedElement?.closest('.ticket-panel') !== null;
+			const isSnappedTicketFab = clickedElement?.closest('.ticket-container--snapped') !== null;
+			
+			// Close if clicking outside tray, FAB, toggle button, popover, and ticket panel
 			// Let toggle button handle its own click for toggling
-			if (!fabTrayEl?.contains(target) && !isSnappedFab && !isToggleButton && !isPopover) {
+			if (!fabTrayEl?.contains(target) && !isSnappedFab && !isToggleButton && !isPopover && !isTicketPanel && !isSnappedTicketFab) {
 				fabTrayOpen = false;
 				unregisterTraySnapZones();
 				clearTrayInlineStyles();

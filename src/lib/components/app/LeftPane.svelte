@@ -14,10 +14,12 @@
 		Timestamp,
 		type Unsubscribe
 	} from 'firebase/firestore';
+	import { serverMemberships } from '$lib/stores';
 
 	import { LAST_LOCATION_STORAGE_KEY } from '$lib/constants/navigation';
 	import logoMarkUrl from '$lib/assets/Logo_transparent.png';
 	import { db } from '$lib/firestore/client';
+	import { getDb } from '$lib/firebase';
 	import { streamMyDMs } from '$lib/firestore/dms';
 	import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
 	import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
@@ -112,6 +114,7 @@
 	let fabTrayOpen = $state(false);
 	let registeredFabCount = $state(0);
 	const hasFabTray = $derived(registeredFabCount > 0);
+	
 	const currentStatusSelection = $derived(
 		myOverrideActive && myOverrideState ? myOverrideState : 'auto'
 	);
@@ -1214,6 +1217,24 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding-top: 0.25rem;
+	}
+
+	/* Support Dashboard Button */
+	:global(.rail-button--support) {
+		background: color-mix(in srgb, var(--color-panel-muted) 80%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-panel-muted) 45%, transparent);
+		color: #f97316;
+	}
+
+	:global(.rail-button--support:hover) {
+		background: color-mix(in srgb, #f97316 15%, transparent);
+		border-color: color-mix(in srgb, #f97316 35%, transparent);
+	}
+
+	:global(.rail-button--support.rail-button--active) {
+		background: color-mix(in srgb, #f97316 20%, transparent);
+		border-color: #f97316;
+		box-shadow: 0 0 12px color-mix(in srgb, #f97316 30%, transparent);
 	}
 
 

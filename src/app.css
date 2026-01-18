@@ -1911,6 +1911,24 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.125rem;
+  position: relative;
+}
+
+/* Subtle teal divider line between member groups */
+.member-group + .member-group::before {
+  content: '';
+  position: absolute;
+  top: -0.625rem;
+  left: 0.5rem;
+  right: 0.5rem;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--color-accent) 25%, transparent) 20%,
+    color-mix(in srgb, var(--color-accent) 25%, transparent) 80%,
+    transparent 100%
+  );
 }
 
 .member-group__header {
@@ -1923,6 +1941,24 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.02em;
   color: var(--text-50);
+  position: relative;
+}
+
+/* Midnight teal decorative line under group headers */
+.member-group__header::after {
+  content: '';
+  position: absolute;
+  left: 0.5rem;
+  right: 0.5rem;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--color-accent) 35%, transparent) 15%,
+    color-mix(in srgb, var(--color-accent) 35%, transparent) 85%,
+    transparent 100%
+  );
 }
 
 .member-group__count {
