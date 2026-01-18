@@ -1091,7 +1091,22 @@
 		{#if expanded}
 			<div class="ticket-panel" style={panelStyle}>
 				<div class="ticket-panel__header">
-					<h3><i class="bx bx-support"></i> Support Issues</h3>
+					<h3>
+						<i class="bx bx-support"></i> Support Issues
+						<button
+							type="button"
+							class="ticket-panel__dashboard-link"
+							title="Open Support Dashboard"
+							onclick={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								expanded = false;
+								goto('/support');
+							}}
+						>
+							<i class="bx bx-link-external"></i>
+						</button>
+					</h3>
 					<span class="ticket-panel__count">{openCount} active</span>
 				</div>
 
@@ -1440,6 +1455,32 @@
 
 	.ticket-panel__header h3 i {
 		color: #f97316;
+	}
+
+	.ticket-panel__dashboard-link {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		border-radius: 4px;
+		color: var(--color-text-secondary, #94a3b8);
+		transition: all 0.15s ease;
+		margin-left: 2px;
+		background: transparent;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.ticket-panel__dashboard-link:hover {
+		color: #f97316;
+		background: rgba(249, 115, 22, 0.15);
+	}
+
+	.ticket-panel__dashboard-link i {
+		font-size: 14px;
+		color: inherit;
 	}
 
 	.ticket-panel__count {

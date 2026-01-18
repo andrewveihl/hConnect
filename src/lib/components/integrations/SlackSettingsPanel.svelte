@@ -321,6 +321,28 @@
 		linkForm.slackChannelName = channel.name;
 	}
 
+	async function refreshSlackChannels() {
+		if (!linkForm.slackWorkspaceId) return;
+
+		loadingSlackChannels = true;
+		slackChannelsError = null;
+		try {
+			console.log('[slack] Refreshing channels for workspace:', linkForm.slackWorkspaceId);
+			slackChannels = await fetchSlackChannels(serverId, linkForm.slackWorkspaceId);
+			console.log('[slack] Refreshed channels:', slackChannels.length, slackChannels);
+			
+			if (slackChannels.length === 0) {
+				slackChannelsError = 'No channels found. Make sure the bot has "channels:read" and "groups:read" scopes, and is added to at least one channel.';
+			}
+		} catch (err: any) {
+			console.error('Failed to refresh Slack channels:', err);
+			const errorMsg = err?.message || err?.code || 'Unknown error';
+			slackChannelsError = `Failed to load channels: ${errorMsg}. You can still enter the channel ID manually.`;
+		} finally {
+			loadingSlackChannels = false;
+		}
+	}
+
 	function openConnectWorkspace() {
 		if (slackOAuthUrl) {
 			window.open(slackOAuthUrl, '_blank', 'width=600,height=700');
@@ -871,7 +893,21 @@
 
 					<!-- Slack Channel Dropdown -->
 					<div class="form-group">
-						<label for="slackChannel">Slack Channel</label>
+						<div class="label-with-action">
+							<label for="slackChannel">Slack Channel</label>
+							{#if linkForm.slackWorkspaceId}
+								<button 
+									type="button" 
+									class="refresh-btn" 
+									onclick={refreshSlackChannels}
+									disabled={loadingSlackChannels}
+									title="Refresh channel list"
+								>
+									<i class="bx {loadingSlackChannels ? 'bx-loader-alt bx-spin' : 'bx-refresh'}"></i>
+									<span>Refresh</span>
+								</button>
+							{/if}
+						</div>
 						{#if !linkForm.slackWorkspaceId}
 							<select id="slackChannel" disabled>
 								<option value="">Select a workspace first...</option>
@@ -1589,6 +1625,42 @@
 	.form-hint {
 		font-size: 0.75rem;
 		color: var(--text-50, #888);
+	}
+
+	.label-with-action {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.refresh-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		background: var(--bg-tertiary, #252525);
+		border: 1px solid var(--border, #333);
+		border-radius: 0.25rem;
+		color: var(--text-80, #ccc);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.refresh-btn:hover:not(:disabled) {
+		background: var(--bg-hover, #2a2a2a);
+		border-color: var(--accent, #7c5cff);
+		color: var(--accent, #7c5cff);
+	}
+
+	.refresh-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.refresh-btn i {
+		font-size: 0.875rem;
 	}
 
 	.checkbox-group {

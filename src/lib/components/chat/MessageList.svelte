@@ -2775,7 +2775,7 @@
 
 	.message-content--mine .message-body {
 		align-items: flex-end;
-		align-self: flex-end;
+		align-self: stretch;
 	}
 
 	.message-payload {
@@ -3352,8 +3352,8 @@
 		}
 
 		.message-action-bar--mine {
-			right: -2rem;
 			left: auto;
+			right: -2rem;
 		}
 
 		.message-action-bar--other {
@@ -3468,7 +3468,7 @@
 
 		.message-content--mine .message-body {
 			align-items: flex-start;
-			align-self: flex-start;
+			align-self: stretch;
 		}
 
 		.message-body,

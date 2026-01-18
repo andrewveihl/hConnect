@@ -6832,6 +6832,34 @@ $effect(() => {
 
 	.server-columns__members-pane {
 		border-left: none;
+		position: relative;
+		overflow: visible;
+	}
+
+	/* Midnight teal accent line on the left edge of members pane */
+	.server-columns__members-pane::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: var(--color-border-subtle);
+		z-index: 10;
+		pointer-events: none;
+	}
+
+	/* Midnight teal accent line on the right outer edge of members pane */
+	.server-columns__members-pane::after {
+		content: '';
+		position: absolute;
+		right: 0;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: var(--color-border-subtle);
+		z-index: 10;
+		pointer-events: none;
 	}
 
 	.thread-panel {
