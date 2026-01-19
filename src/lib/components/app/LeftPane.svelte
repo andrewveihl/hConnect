@@ -114,7 +114,33 @@
 	let fabTrayOpen = $state(false);
 	let registeredFabCount = $state(0);
 	const hasFabTray = $derived(registeredFabCount > 0);
-	
+
+	// Custom tooltip state
+	let hoveredServerId: string | null = $state(null);
+	let hoveredServerName: string | null = $state(null);
+	let tooltipY: number = $state(0);
+	let tooltipVisible = $state(false);
+	let tooltipTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	function showServerTooltip(serverId: string, name: string, event: MouseEvent) {
+		if (tooltipTimeout) clearTimeout(tooltipTimeout);
+		const target = event.currentTarget as HTMLElement;
+		const rect = target.getBoundingClientRect();
+		tooltipY = rect.top + rect.height / 2;
+		hoveredServerId = serverId;
+		hoveredServerName = name;
+		tooltipVisible = true;
+	}
+
+	function hideServerTooltip() {
+		if (tooltipTimeout) clearTimeout(tooltipTimeout);
+		tooltipTimeout = setTimeout(() => {
+			tooltipVisible = false;
+			hoveredServerId = null;
+			hoveredServerName = null;
+		}, 50);
+	}
+
 	const currentStatusSelection = $derived(
 		myOverrideActive && myOverrideState ? myOverrideState : 'auto'
 	);
@@ -813,8 +839,9 @@
 					class={`rail-button relative ${activeDmThreadId === dm.threadId ? 'rail-button--active' : ''}`}
 					class:rail-button--alert={activeDmThreadId !== dm.threadId}
 					aria-label={dm.title}
-					title={dm.title}
 					aria-current={activeDmThreadId === dm.threadId ? 'page' : undefined}
+					onmouseenter={(event) => showServerTooltip(dm.id, dm.title, event)}
+					onmouseleave={hideServerTooltip}
 				>
 					{#if dm.isGroup}
 						<div class="rail-button__avatar-wrap w-8 h-8 rounded-full bg-muted flex items-center justify-center">
@@ -846,11 +873,12 @@
 					type="button"
 					class={`rail-button ${activeServerId === s.id ? 'rail-button--active' : ''} ${draggingServerId === s.id ? 'rail-button--dragging' : ''}`}
 					aria-label={s.name}
-					title={s.name}
 					aria-current={activeServerId === s.id ? 'page' : undefined}
 					onclick={(event) => handleServerClick(event, s.id)}
 					use:serverRefAction={s.id}
 					onpointerdown={(event) => handleServerPointerDown(event, s.id)}
+					onmouseenter={(event) => showServerTooltip(s.id, s.name, event)}
+					onmouseleave={hideServerTooltip}
 					animate:flip={{ duration: 180 }}
 				>
 					{#if s.icon}
@@ -864,28 +892,29 @@
 					{#if $serverUnreadIndicators[s.id] && activeServerId !== s.id}
 						<span
 							class="server-activity-dot"
-							class:server-activity-dot--high={$serverUnreadIndicators[s.id].hasHighPriority}
-						></span>
-					{/if}
-				</button>
-			{/each}
-
-			<button
-				type="button"
-				class="rail-button rail-button--create"
-				onclick={handleCreateClick}
-				aria-label="Create server"
-				title={enableServerCreation ? 'Create server' : 'Server creation disabled'}
-				disabled={!enableServerCreation}
-				aria-disabled={!enableServerCreation}
-			>
-				<i class="bx bx-plus text-2xl leading-none"></i>
+						class:server-activity-dot--high={$serverUnreadIndicators[s.id].hasHighPriority}
+					></span>
+				{/if}
 			</button>
-			{#if reorderError}
-				<p class="rail-reorder-error">{reorderError}</p>
-			{/if}
-		</div>
+		{/each}
+
+		<button
+			type="button"
+			class="rail-button rail-button--create"
+			onclick={handleCreateClick}
+			aria-label="Create server"
+			onmouseenter={(event) => showServerTooltip('create', enableServerCreation ? 'Create server' : 'Server creation disabled', event)}
+			onmouseleave={hideServerTooltip}
+			disabled={!enableServerCreation}
+			aria-disabled={!enableServerCreation}
+		>
+			<i class="bx bx-plus text-2xl leading-none"></i>
+		</button>
+		{#if reorderError}
+			<p class="rail-reorder-error">{reorderError}</p>
+		{/if}
 	</div>
+</div>
 
 	<!-- FAB Snap Zones - floating icons can snap here, stacks dynamically -->
 	{#if !$isFabSnappingDisabled}
@@ -1079,6 +1108,18 @@
 	{/if}
 </aside>
 
+<!-- Custom Server Tooltip -->
+{#if tooltipVisible && hoveredServerName}
+	<div
+		class="rail-tooltip"
+		style:top="{tooltipY}px"
+		role="tooltip"
+		aria-hidden="true"
+	>
+		<span class="rail-tooltip__text">{hoveredServerName}</span>
+	</div>
+{/if}
+
 <NewServerModal bind:open={localCreateOpen} onClose={() => (localCreateOpen = false)} />
 
 <style>
@@ -1104,6 +1145,77 @@
 	:global(.rail-button--dragging) {
 		opacity: 0.65;
 		cursor: grabbing;
+	}
+
+	/* Custom Rail Tooltip */
+	.rail-tooltip {
+		position: fixed;
+		left: 80px;
+		transform: translateY(-50%);
+		z-index: 9999;
+		pointer-events: none;
+		animation: rail-tooltip-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	.rail-tooltip__text {
+		display: block;
+		padding: 0.5rem 0.875rem;
+		background: var(--color-panel);
+		border: 1px solid var(--color-border-subtle);
+		border-radius: var(--radius-md, 0.5rem);
+		box-shadow:
+			0 4px 12px rgba(0, 0, 0, 0.3),
+			0 0 0 1px rgba(255, 255, 255, 0.05);
+		color: var(--color-text-primary);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		white-space: nowrap;
+		position: relative;
+	}
+
+	/* Arrow pointing left */
+	.rail-tooltip__text::before {
+		content: '';
+		position: absolute;
+		left: -6px;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 0;
+		height: 0;
+		border-top: 6px solid transparent;
+		border-bottom: 6px solid transparent;
+		border-right: 6px solid var(--color-border-subtle);
+	}
+
+	.rail-tooltip__text::after {
+		content: '';
+		position: absolute;
+		left: -5px;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 0;
+		height: 0;
+		border-top: 5px solid transparent;
+		border-bottom: 5px solid transparent;
+		border-right: 5px solid var(--color-panel);
+	}
+
+	@keyframes rail-tooltip-in {
+		from {
+			opacity: 0;
+			transform: translateY(-50%) translateX(-4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(-50%) translateX(0);
+		}
+	}
+
+	/* Hide tooltip on mobile */
+	@media (max-width: 767px) {
+		.rail-tooltip {
+			display: none;
+		}
 	}
 
 	.server-activity-dot {

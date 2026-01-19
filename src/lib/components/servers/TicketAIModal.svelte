@@ -36,10 +36,11 @@
 	export let roles: RoleOption[] = [];
 	export let currentUserId: string | null = null;
 	export let members: MemberOption[] = [];
+	export let initialTab: 'analytics' | 'setup' = 'analytics';
 
 	const dispatch = createEventDispatcher<{ close: void }>();
 
-	let activeTab: 'analytics' | 'setup' = 'analytics';
+	let activeTab: 'analytics' | 'setup' = initialTab;
 	let analyticsSubTab: 'overview' | 'staff' | 'tickets' = 'overview';
 	let settings: TicketAiSettings = normalizeSettings();
 	let settingsLoadedFor: string | null = null;
@@ -94,6 +95,11 @@
 
 	$: if (!open) {
 		lastAnalyticsKey = '';
+	}
+
+	// Reset activeTab when modal opens
+	$: if (open) {
+		activeTab = initialTab;
 	}
 
 	const defaultAllowedRoles = () => {
@@ -182,6 +188,23 @@
 		settings = { ...settings, monitoredChannelIds: Array.from(set) };
 	}
 
+	function selectAllChannels() {
+		const textChannels = channels.filter((c) => c.type === 'text');
+		settings = { ...settings, monitoredChannelIds: textChannels.map((c) => c.id) };
+	}
+
+	function deselectAllChannels() {
+		settings = { ...settings, monitoredChannelIds: [] };
+	}
+
+	// Computed: are all text channels selected?
+	$: allChannelsSelected = (() => {
+		const textChannels = channels.filter((c) => c.type === 'text');
+		return textChannels.length > 0 && textChannels.every((c) => settings.monitoredChannelIds.includes(c.id));
+	})();
+
+	$: someChannelsSelected = settings.monitoredChannelIds.length > 0;
+
 	function toggleRole(id: string) {
 		const set = new Set(settings.allowedRoleIds);
 		if (set.has(id)) set.delete(id);
@@ -194,6 +217,24 @@
 		if (settings.staffMemberIds.includes(uid)) return;
 		settings = { ...settings, staffMemberIds: [...settings.staffMemberIds, uid] };
 		staffSearch = '';
+	}
+
+	function addMultipleStaff(uids: string[]) {
+		const existing = new Set(settings.staffMemberIds);
+		const toAdd = uids.filter((uid) => !existing.has(uid));
+		if (toAdd.length > 0) {
+			settings = { ...settings, staffMemberIds: [...settings.staffMemberIds, ...toAdd] };
+		}
+		staffSearch = '';
+	}
+
+	function addAllFilteredStaff() {
+		const uids = staffSuggestions.map((m) => m.uid);
+		addMultipleStaff(uids);
+	}
+
+	function clearAllStaff() {
+		settings = { ...settings, staffMemberIds: [] };
 	}
 
 	function addFirstSuggestion() {
@@ -1292,8 +1333,48 @@
 
 						<!-- Channels Section -->
 						<section class="settings-section">
-							<h4>Monitored Channels</h4>
-							<p class="settings-description">Select which channels to track for issue threads.</p>
+							<div class="section-header-row">
+								<div>
+									<h4>Monitored Channels</h4>
+									<p class="settings-description">Select which channels to track for issue threads.</p>
+								</div>
+								{#if channels.filter((c) => c.type === 'text').length > 0}
+									<div class="bulk-actions">
+										{#if allChannelsSelected}
+											<button
+												type="button"
+												class="bulk-action-btn"
+												on:click={deselectAllChannels}
+												disabled={!settings.enabled}
+											>
+												<i class="bx bx-checkbox-minus"></i>
+												Deselect All
+											</button>
+										{:else}
+											<button
+												type="button"
+												class="bulk-action-btn"
+												on:click={selectAllChannels}
+												disabled={!settings.enabled}
+											>
+												<i class="bx bx-checkbox-checked"></i>
+												Select All
+											</button>
+										{/if}
+										{#if someChannelsSelected && !allChannelsSelected}
+											<button
+												type="button"
+												class="bulk-action-btn bulk-action-btn--secondary"
+												on:click={deselectAllChannels}
+												disabled={!settings.enabled}
+											>
+												<i class="bx bx-x"></i>
+												Clear
+											</button>
+										{/if}
+									</div>
+								{/if}
+							</div>
 							<div class="channel-grid">
 								{#each channels.filter((c) => c.type === 'text') as channel}
 									<label class="channel-checkbox">
@@ -1321,27 +1402,79 @@
 							<div class="staff-grid">
 								<div class="staff-column">
 									<!-- svelte-ignore a11y_label_has_associated_control -->
-									<label class="settings-label">Staff Members</label>
-									<input
-										class="settings-input"
-										placeholder="Search members..."
-										bind:value={staffSearch}
-										disabled={!settings.enabled}
-										on:keydown={(e) => e.key === 'Enter' && addFirstSuggestion()}
-									/>
+									<label class="settings-label">Staff Members (Engineers)</label>
+									<div class="staff-input-row">
+										<input
+											class="settings-input"
+											placeholder="Search members..."
+											bind:value={staffSearch}
+											disabled={!settings.enabled}
+											on:keydown={(e) => e.key === 'Enter' && addFirstSuggestion()}
+										/>
+										{#if staffSuggestions.length > 1 && staffSearch.trim()}
+											<button
+												type="button"
+												class="add-all-btn"
+												on:click={addAllFilteredStaff}
+												disabled={!settings.enabled}
+												title="Add all {staffSuggestions.length} matching members"
+											>
+												Add All ({staffSuggestions.length})
+											</button>
+										{/if}
+									</div>
 									{#if staffSuggestions.length > 0 && staffSearch.trim()}
-										<div class="suggestions">
-											{#each staffSuggestions.slice(0, 5) as member}
+										<div class="suggestions suggestions--scrollable">
+											{#each staffSuggestions.slice(0, 15) as member}
 												<button
 													type="button"
 													class="suggestion"
 													on:click={() => addStaff(member.uid)}
 												>
+													<span class="suggestion-name">{member.displayName ?? member.nickname ?? member.uid}</span>
+													{#if member.email}
+														<span class="suggestion-email">{member.email}</span>
+													{/if}
+												</button>
+											{/each}
+											{#if staffSuggestions.length > 15}
+												<div class="suggestions-overflow">
+													+{staffSuggestions.length - 15} more — use "Add All" or refine search
+												</div>
+											{/if}
+										</div>
+									{/if}
+									{#if !staffSearch.trim() && settings.staffMemberIds.length === 0}
+										<div class="staff-quick-add">
+											<span class="quick-add-label">Quick add:</span>
+											{#each members.slice(0, 8) as member}
+												<button
+													type="button"
+													class="quick-add-chip"
+													on:click={() => addStaff(member.uid)}
+													disabled={!settings.enabled}
+												>
 													{member.displayName ?? member.nickname ?? member.email ?? member.uid}
 												</button>
 											{/each}
+											{#if members.length > 8}
+												<span class="quick-add-more">+{members.length - 8} more</span>
+											{/if}
 										</div>
 									{/if}
+									<div class="tags-header">
+										{#if settings.staffMemberIds.length > 0}
+											<span class="tags-count">{settings.staffMemberIds.length} engineer{settings.staffMemberIds.length !== 1 ? 's' : ''} assigned</span>
+											<button
+												type="button"
+												class="clear-all-btn"
+												on:click={clearAllStaff}
+												disabled={!settings.enabled}
+											>
+												Clear All
+											</button>
+										{/if}
+									</div>
 									<div class="tags">
 										{#each settings.staffMemberIds as uid}
 											<span class="tag">
@@ -1354,7 +1487,7 @@
 											</span>
 										{/each}
 										{#if settings.staffMemberIds.length === 0}
-											<span class="settings-empty-inline">No staff selected</span>
+											<span class="settings-empty-inline">No engineers assigned — search above or use quick add</span>
 										{/if}
 									</div>
 								</div>
@@ -2543,6 +2676,66 @@
 		color: var(--color-text-primary);
 	}
 
+	/* Section Header Row with bulk actions */
+	.section-header-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 0.875rem;
+	}
+
+	.section-header-row h4 {
+		margin-bottom: 0.25rem;
+	}
+
+	.section-header-row p {
+		margin-bottom: 0 !important;
+	}
+
+	.bulk-actions {
+		display: flex;
+		gap: 0.5rem;
+		flex-shrink: 0;
+	}
+
+	.bulk-action-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--color-border-subtle);
+		border-radius: var(--radius-md, 0.5rem);
+		background: var(--color-panel);
+		color: var(--text-70);
+		font-size: 0.75rem;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		white-space: nowrap;
+	}
+
+	.bulk-action-btn:hover:not(:disabled) {
+		background: var(--color-panel-muted);
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+	}
+
+	.bulk-action-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.bulk-action-btn--secondary {
+		background: transparent;
+		border-color: transparent;
+	}
+
+	.bulk-action-btn--secondary:hover:not(:disabled) {
+		background: color-mix(in srgb, #ef4444 10%, transparent);
+		border-color: transparent;
+		color: #ef4444;
+	}
+
 	/* Staff Grid */
 	.staff-grid {
 		display: grid;
@@ -2623,7 +2816,15 @@
 		border: 1px solid var(--color-border-subtle);
 	}
 
+	.suggestions--scrollable {
+		max-height: 280px;
+		overflow-y: auto;
+	}
+
 	.suggestion {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
 		padding: 0.5rem 0.625rem;
 		border: none;
 		border-radius: var(--radius-sm, 0.375rem);
@@ -2637,6 +2838,137 @@
 
 	.suggestion:hover {
 		background: var(--color-panel-muted);
+	}
+
+	.suggestion-name {
+		font-weight: 500;
+		color: var(--color-text-primary);
+	}
+
+	.suggestion-email {
+		font-size: 0.6875rem;
+		color: var(--text-50);
+	}
+
+	.suggestions-overflow {
+		padding: 0.5rem 0.625rem;
+		font-size: 0.6875rem;
+		color: var(--text-50);
+		text-align: center;
+		border-top: 1px solid var(--color-border-subtle);
+		margin-top: 0.25rem;
+	}
+
+	/* Staff input row with Add All button */
+	.staff-input-row {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.staff-input-row .settings-input {
+		flex: 1;
+	}
+
+	.add-all-btn {
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--color-accent);
+		border-radius: var(--radius-md, 0.5rem);
+		background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+		color: var(--color-accent);
+		font-size: 0.75rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		white-space: nowrap;
+	}
+
+	.add-all-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+	}
+
+	.add-all-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	/* Quick add chips */
+	.staff-quick-add {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+		align-items: center;
+		padding: 0.75rem;
+		border-radius: var(--radius-md, 0.5rem);
+		background: var(--color-panel);
+		border: 1px dashed var(--color-border-subtle);
+	}
+
+	.quick-add-label {
+		font-size: 0.6875rem;
+		color: var(--text-50);
+		margin-right: 0.25rem;
+	}
+
+	.quick-add-chip {
+		padding: 0.25rem 0.5rem;
+		border: 1px solid var(--color-border-subtle);
+		border-radius: 1rem;
+		background: transparent;
+		color: var(--text-70);
+		font-size: 0.6875rem;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.quick-add-chip:hover:not(:disabled) {
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+		background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+	}
+
+	.quick-add-chip:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.quick-add-more {
+		font-size: 0.6875rem;
+		color: var(--text-40);
+		font-style: italic;
+	}
+
+	/* Tags header with count and clear all */
+	.tags-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		min-height: 1.5rem;
+	}
+
+	.tags-count {
+		font-size: 0.6875rem;
+		color: var(--text-50);
+	}
+
+	.clear-all-btn {
+		padding: 0.25rem 0.5rem;
+		border: none;
+		border-radius: var(--radius-sm, 0.375rem);
+		background: transparent;
+		color: var(--text-50);
+		font-size: 0.6875rem;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.clear-all-btn:hover:not(:disabled) {
+		color: #ef4444;
+		background: color-mix(in srgb, #ef4444 10%, transparent);
+	}
+
+	.clear-all-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 
 	.tags {

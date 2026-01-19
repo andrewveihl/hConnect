@@ -52,11 +52,13 @@ Go to **OAuth & Permissions** and add these Bot Token Scopes:
 - `channels:history` - Read messages
 - `channels:read` - List channels
 - `chat:write` - Post messages
+- `chat:write.customize` - Post messages with custom username/avatar (shows hConnect usernames in Slack)
 - `groups:history` - Read private channel messages
 - `groups:read` - List private channels
 - `users:read` - Get user info
 - `team:read` - Get workspace info
-- `files:read` - Access shared files
+- `files:read` - Access shared files (download images/files from Slack to hConnect)
+- `files:write` - Upload files to Slack (sync images/files from hConnect to Slack)
 - `reactions:read` - Read reactions on messages
 - `reactions:write` - Add/remove reactions on messages
 
@@ -175,10 +177,27 @@ firebase deploy --only functions:slackWebhook,functions:slackOAuth
 | Complete OAuth flow | 4-6 hours | ✅ Done |
 | Bidirectional sync | 8-12 hours | ✅ Done |
 | Per-server credentials | 4-6 hours | ✅ Done |
-| Slack channel picker API | 4-6 hours | ⏳ Pending |
-| User identity mapping | 6-8 hours | ⏳ Pending |
-| File attachment proxy | 4-6 hours | ⏳ Pending |
-| Thread sync | 8-12 hours | ⏳ Pending |
+| Slack channel picker API | 4-6 hours | ✅ Done |
+| User identity mapping | 6-8 hours | ✅ Done |
+| File/image sync (bidirectional) | 4-6 hours | ✅ Done |
+| GIF sync (Giphy/Tenor) | 2-3 hours | ✅ Done |
+| Reaction sync | 4-6 hours | ✅ Done |
+| Thread sync | 8-12 hours | ✅ Done |
+| Custom hConnect avatar in Slack | 1-2 hours | ✅ Done |
+
+## What Syncs
+
+### Messages
+- **Text messages** - Full bidirectional sync with markdown conversion
+- **Images & files** - Uploaded files sync both directions (stored in Firebase Storage)
+- **GIFs** - Giphy/Tenor GIFs from Slack sync to hConnect as GIF messages
+- **Reactions** - Emoji reactions sync bidirectionally
+- **Thread replies** - Thread/reply structure preserved
+
+### User Display
+- Slack users show their Slack display name in hConnect
+- hConnect users show their display name in Slack (via `chat:write.customize`)
+- hConnect app uses a default logo when posting to Slack
 
 ## Testing
 

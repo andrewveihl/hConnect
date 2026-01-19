@@ -446,11 +446,14 @@ export function generateSlackOAuthUrl(serverId: string, clientId: string): strin
 		'channels:history',
 		'channels:read',
 		'chat:write',
+		'chat:write.customize',
+		'files:read',
 		'groups:history',
 		'groups:read',
-		'users:read',
-		'files:read',
-		'team:read'
+		'reactions:read',
+		'reactions:write',
+		'team:read',
+		'users:read'
 	].join(','));
 	// Include serverId in state so OAuth callback knows which server to update
 	const state = encodeURIComponent(JSON.stringify({

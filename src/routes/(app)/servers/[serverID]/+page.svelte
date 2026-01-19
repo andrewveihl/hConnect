@@ -1333,7 +1333,10 @@
 			const snap = await getDocs(q);
 			const older: any[] = [];
 			snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
-			messages = [...older, ...messages];
+			// Deduplicate when merging to prevent duplicate key errors
+			const existingIds = new Set(messages.map(m => m.id));
+			const uniqueOlder = older.filter(m => !existingIds.has(m.id));
+			messages = [...uniqueOlder, ...messages];
 			if (older.length) {
 				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
 				// Update cache with older messages
@@ -1361,7 +1364,10 @@
 			const snap = await getDocs(q);
 			const older: any[] = [];
 			snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
-			popoutMessages = [...older, ...popoutMessages];
+			// Deduplicate when merging to prevent duplicate key errors
+			const existingIds = new Set(popoutMessages.map(m => m.id));
+			const uniqueOlder = older.filter(m => !existingIds.has(m.id));
+			popoutMessages = [...uniqueOlder, ...popoutMessages];
 			if (older.length) {
 				popoutEarliestLoaded = older[0]?.createdAt ?? popoutEarliestLoaded;
 			}
@@ -1386,8 +1392,10 @@
 			const older: any[] = [];
 			snap.forEach((d) => older.push(toChatMessage(d.id, d.data())));
 			if (older.length > 0) {
-				// Prepend older messages without scroll jump
-				messages = [...older, ...messages];
+				// Prepend older messages without scroll jump, deduplicating to prevent duplicate key errors
+				const existingIds = new Set(messages.map(m => m.id));
+				const uniqueOlder = older.filter(m => !existingIds.has(m.id));
+				messages = [...uniqueOlder, ...messages];
 				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
 				// Update cache with backfilled messages
 				updateChannelCache(currServerId, channelId, older as CachedMessage[], {
@@ -1570,8 +1578,13 @@
 				showSkeletonMessages = false;
 				const nextMessages: any[] = [];
 				const seen = new Set<string>();
+				const seenMsgIds = new Set<string>();
 
 				for (const docSnap of snap.docs) {
+					// Skip duplicate message IDs (safety guard)
+					if (seenMsgIds.has(docSnap.id)) continue;
+					seenMsgIds.add(docSnap.id);
+					
 					const raw: any = docSnap.data();
 					const msg = toChatMessage(docSnap.id, raw);
 					nextMessages.push(msg);
@@ -1705,8 +1718,13 @@
 			(snap) => {
 				const nextMessages: any[] = [];
 				const seen = new Set<string>();
+				const seenMsgIds = new Set<string>();
 
 				for (const docSnap of snap.docs) {
+					// Skip duplicate message IDs (safety guard)
+					if (seenMsgIds.has(docSnap.id)) continue;
+					seenMsgIds.add(docSnap.id);
+					
 					const raw: any = docSnap.data();
 					const msg = toChatMessage(docSnap.id, raw);
 					nextMessages.push(msg);

@@ -14,7 +14,7 @@
 
 	const dispatch = createEventDispatcher<{
 		close: void;
-		configure: void;
+		configure: { tab: 'analytics' | 'setup' };
 		toggle: { enabled: boolean };
 	}>();
 
@@ -61,8 +61,8 @@
 		dispatch('close');
 	}
 
-	function openConfig() {
-		dispatch('configure');
+	function openConfig(tab: 'analytics' | 'setup' = 'analytics') {
+		dispatch('configure', { tab });
 	}
 </script>
 
@@ -162,10 +162,16 @@
 			<!-- Actions -->
 			<div class="popup-actions">
 				<button class="btn-secondary" on:click={close}>Close</button>
-				<button class="btn-primary" on:click={openConfig} disabled={loading}>
-					<i class="bx bx-cog"></i>
-					Configure
-				</button>
+				<div class="popup-actions__primary">
+					<button class="btn-analytics" on:click={() => openConfig('analytics')} disabled={loading}>
+						<i class="bx bx-bar-chart-alt-2"></i>
+						Analytics
+					</button>
+					<button class="btn-primary" on:click={() => openConfig('setup')} disabled={loading}>
+						<i class="bx bx-cog"></i>
+						Settings
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -428,11 +434,17 @@
 
 	.popup-actions {
 		display: flex;
-		justify-content: flex-end;
+		justify-content: space-between;
+		align-items: center;
 		gap: 0.625rem;
 		padding: 1rem 1.25rem;
 		background: color-mix(in srgb, var(--color-panel) 50%, var(--surface-root));
 		border-top: 1px solid var(--color-border-subtle);
+	}
+
+	.popup-actions__primary {
+		display: flex;
+		gap: 0.5rem;
 	}
 
 	.btn-secondary {
@@ -478,6 +490,34 @@
 	}
 
 	.btn-primary i {
+		font-size: 1rem;
+	}
+
+	.btn-analytics {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.625rem 1.125rem;
+		border: 1px solid var(--color-accent);
+		border-radius: var(--radius-md, 0.5rem);
+		background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+		color: var(--color-accent);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-analytics:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+	}
+
+	.btn-analytics:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.btn-analytics i {
 		font-size: 1rem;
 	}
 </style>

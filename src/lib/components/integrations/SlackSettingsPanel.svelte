@@ -23,11 +23,13 @@
 		resumeSlackBridge,
 		generateSlackOAuthUrl,
 		fetchSlackChannels,
+		removeServerSlackWorkspace,
 		type SlackChannelInfo
 	} from '$lib/admin/integrations/slack/store';
 	import type { SlackChannelBridge, SyncDirection, SlackAppCredentials } from '$lib/admin/integrations/slack/types';
 	import { REQUIRED_BOT_SCOPES } from '$lib/admin/integrations/slack/types';
 	import { getDb, getStorageInstance } from '$lib/firebase';
+	import { createChannel } from '$lib/firestore/channels';
 	import { doc, updateDoc } from 'firebase/firestore';
 	import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -50,6 +52,13 @@
 	let slackChannels = $state<SlackChannelInfo[]>([]);
 	let loadingSlackChannels = $state(false);
 	let slackChannelsError = $state<string | null>(null);
+
+	// Workspace unlinking state
+	let unlinkingWorkspaceId = $state<string | null>(null);
+	let confirmUnlinkWorkspaceId = $state<string | null>(null);
+
+	// Different workspace modal state
+	let showDifferentWorkspaceModal = $state(false);
 
 	// Server-level hConnect avatar override
 	let hconnectAvatarUrl = $state<string>('');
@@ -79,6 +88,21 @@
 		syncAttachments: true,
 		showSlackUsernames: true
 	});
+
+	// Create new hConnect channel state
+	let createNewChannel = $state(false);
+	let newChannelName = $state('');
+	let newChannelPrivate = $state(false);
+	let creatingChannel = $state(false);
+
+	// Bulk channel creation state
+	let bulkCreating = $state(false);
+	let bulkProgress = $state({ current: 0, total: 0, created: 0, skipped: 0 });
+	let showBulkModal = $state(false);
+	let bulkWorkspaceId = $state<string>('');
+	let bulkChannels = $state<SlackChannelInfo[]>([]);
+	let bulkSelectedChannels = $state<Set<string>>(new Set());
+	let loadingBulkChannels = $state(false);
 
 	// Subscriptions
 	let unsubscribeBridges: (() => void) | null = null;
@@ -225,15 +249,49 @@
 	}
 
 	async function handleCreateBridge() {
-		if (!linkForm.slackWorkspaceId || !linkForm.hconnectChannelId) {
+		if (!linkForm.slackWorkspaceId) {
 			return;
+		}
+
+		// Check if we need to create a new channel or use existing
+		let hconnectChannelId = linkForm.hconnectChannelId;
+		let hconnectChannelName = '';
+
+		if (createNewChannel) {
+			// Validate new channel name
+			const channelName = newChannelName.trim();
+			if (!channelName) {
+				return;
+			}
+
+			creatingChannel = true;
+			try {
+				// Create the new hConnect channel
+				hconnectChannelId = await createChannel(
+					serverId,
+					channelName,
+					'text',
+					newChannelPrivate,
+					[] // No role restrictions by default
+				);
+				hconnectChannelName = channelName;
+			} catch (err) {
+				console.error('Failed to create hConnect channel:', err);
+				creatingChannel = false;
+				return;
+			}
+			creatingChannel = false;
+		} else {
+			if (!hconnectChannelId) {
+				return;
+			}
+			const hconnectChannel = channels.find((c) => c.id === hconnectChannelId);
+			if (!hconnectChannel) return;
+			hconnectChannelName = hconnectChannel.name;
 		}
 
 		const workspace = workspaces.find((w) => w.id === linkForm.slackWorkspaceId);
 		if (!workspace) return;
-
-		const hconnectChannel = channels.find((c) => c.id === linkForm.hconnectChannelId);
-		if (!hconnectChannel) return;
 
 		await createSlackBridge({
 			slackWorkspaceId: workspace.id,
@@ -243,8 +301,8 @@
 			slackChannelName: linkForm.slackChannelName || 'Slack Channel',
 			hconnectServerId: serverId,
 			hconnectServerName: serverName,
-			hconnectChannelId: hconnectChannel.id,
-			hconnectChannelName: hconnectChannel.name,
+			hconnectChannelId: hconnectChannelId,
+			hconnectChannelName: hconnectChannelName,
 			syncDirection: linkForm.syncDirection,
 			status: 'active',
 			syncReactions: linkForm.syncReactions,
@@ -273,9 +331,10 @@
 		}
 	}
 
-	function resetLinkForm() {
+	async function resetLinkForm() {
+		const firstWorkspaceId = workspaces[0]?.id || '';
 		linkForm = {
-			slackWorkspaceId: workspaces[0]?.id || '',
+			slackWorkspaceId: firstWorkspaceId,
 			slackChannelId: '',
 			slackChannelName: '',
 			hconnectChannelId: '',
@@ -285,8 +344,31 @@
 			syncAttachments: true,
 			showSlackUsernames: true
 		};
+		// Reset create channel state
+		createNewChannel = false;
+		newChannelName = '';
+		newChannelPrivate = false;
+		creatingChannel = false;
+		
 		slackChannels = [];
 		slackChannelsError = null;
+
+		// Auto-load channels for the first workspace
+		if (firstWorkspaceId) {
+			loadingSlackChannels = true;
+			try {
+				slackChannels = await fetchSlackChannels(serverId, firstWorkspaceId);
+				if (slackChannels.length === 0) {
+					slackChannelsError = 'No channels found. Make sure the bot has "channels:read" and "groups:read" scopes, and is added to at least one channel.';
+				}
+			} catch (err: any) {
+				console.error('Failed to load Slack channels:', err);
+				const errorMsg = err?.message || err?.code || 'Unknown error';
+				slackChannelsError = `Failed to load channels: ${errorMsg}. You can still enter the channel ID manually.`;
+			} finally {
+				loadingSlackChannels = false;
+			}
+		}
 	}
 
 	async function handleWorkspaceChange(workspaceId: string) {
@@ -319,6 +401,9 @@
 	function handleSlackChannelSelect(channel: SlackChannelInfo) {
 		linkForm.slackChannelId = channel.id;
 		linkForm.slackChannelName = channel.name;
+		// Auto-fill new channel name with Slack channel name and set private based on Slack channel
+		newChannelName = channel.name;
+		newChannelPrivate = channel.is_private ?? false;
 	}
 
 	async function refreshSlackChannels() {
@@ -343,9 +428,157 @@
 		}
 	}
 
+	// Bulk channel creation functions
+	async function openBulkCreateModal() {
+		const firstWorkspaceId = workspaces[0]?.id || '';
+		if (!firstWorkspaceId) return;
+		
+		bulkWorkspaceId = firstWorkspaceId;
+		bulkChannels = [];
+		bulkSelectedChannels = new Set();
+		showBulkModal = true;
+		
+		await loadBulkChannels(firstWorkspaceId);
+	}
+
+	async function loadBulkChannels(workspaceId: string) {
+		if (!workspaceId) return;
+		
+		loadingBulkChannels = true;
+		try {
+			const allChannels = await fetchSlackChannels(serverId, workspaceId);
+			// Filter out channels that already have a bridge
+			const existingChannelIds = new Set(serverBridges.map(b => b.slackChannelId));
+			bulkChannels = allChannels.filter(c => !existingChannelIds.has(c.id));
+			// Select all by default
+			bulkSelectedChannels = new Set(bulkChannels.map(c => c.id));
+		} catch (err) {
+			console.error('Failed to load channels for bulk create:', err);
+			bulkChannels = [];
+		} finally {
+			loadingBulkChannels = false;
+		}
+	}
+
+	async function handleBulkWorkspaceChange(workspaceId: string) {
+		bulkWorkspaceId = workspaceId;
+		await loadBulkChannels(workspaceId);
+	}
+
+	function toggleBulkChannel(channelId: string) {
+		const newSet = new Set(bulkSelectedChannels);
+		if (newSet.has(channelId)) {
+			newSet.delete(channelId);
+		} else {
+			newSet.add(channelId);
+		}
+		bulkSelectedChannels = newSet;
+	}
+
+	function toggleAllBulkChannels() {
+		if (bulkSelectedChannels.size === bulkChannels.length) {
+			bulkSelectedChannels = new Set();
+		} else {
+			bulkSelectedChannels = new Set(bulkChannels.map(c => c.id));
+		}
+	}
+
+	async function handleBulkCreate() {
+		if (bulkSelectedChannels.size === 0) return;
+		
+		const workspace = workspaces.find(w => w.id === bulkWorkspaceId);
+		if (!workspace) return;
+
+		const selectedChannels = bulkChannels.filter(c => bulkSelectedChannels.has(c.id));
+		
+		bulkCreating = true;
+		bulkProgress = { current: 0, total: selectedChannels.length, created: 0, skipped: 0 };
+
+		for (const slackChannel of selectedChannels) {
+			bulkProgress.current++;
+			
+			try {
+				// Create the hConnect channel
+				const channelId = await createChannel(
+					serverId,
+					slackChannel.name,
+					'text',
+					slackChannel.is_private ?? false,
+					[]
+				);
+
+				// Create the bridge
+				await createSlackBridge({
+					slackWorkspaceId: workspace.id,
+					slackTeamId: workspace.teamId,
+					slackTeamName: workspace.teamName,
+					slackChannelId: slackChannel.id,
+					slackChannelName: slackChannel.name,
+					hconnectServerId: serverId,
+					hconnectServerName: serverName,
+					hconnectChannelId: channelId,
+					hconnectChannelName: slackChannel.name,
+					syncDirection: 'bidirectional',
+					status: 'active',
+					syncReactions: true,
+					syncThreads: true,
+					syncAttachments: true,
+					showSlackUsernames: true,
+					createdBy: ''
+				});
+
+				bulkProgress.created++;
+			} catch (err) {
+				console.error(`Failed to create channel ${slackChannel.name}:`, err);
+				bulkProgress.skipped++;
+			}
+		}
+
+		bulkCreating = false;
+		showBulkModal = false;
+	}
+
 	function openConnectWorkspace() {
 		if (slackOAuthUrl) {
-			window.open(slackOAuthUrl, '_blank', 'width=600,height=700');
+			// Navigate in main window to allow full Slack workspace selection
+			// This ensures the user can switch to a different Slack account/workspace
+			window.location.href = slackOAuthUrl;
+		}
+	}
+
+	function openDifferentWorkspace() {
+		// Show modal with instructions
+		showDifferentWorkspaceModal = true;
+	}
+
+	function copyOAuthUrl() {
+		if (slackOAuthUrl) {
+			navigator.clipboard.writeText(slackOAuthUrl);
+		}
+	}
+
+	async function handleUnlinkWorkspace(workspaceId: string) {
+		if (confirmUnlinkWorkspaceId !== workspaceId) {
+			// First click - ask for confirmation
+			confirmUnlinkWorkspaceId = workspaceId;
+			// Auto-reset confirmation after 3 seconds
+			setTimeout(() => {
+				if (confirmUnlinkWorkspaceId === workspaceId) {
+					confirmUnlinkWorkspaceId = null;
+				}
+			}, 3000);
+			return;
+		}
+		
+		// Second click - perform unlink
+		try {
+			unlinkingWorkspaceId = workspaceId;
+			await removeServerSlackWorkspace(serverId, workspaceId);
+			confirmUnlinkWorkspaceId = null;
+		} catch (err) {
+			console.error('[slack] Failed to unlink workspace:', err);
+		} finally {
+			unlinkingWorkspaceId = null;
 		}
 	}
 
@@ -507,6 +740,10 @@
 									<button class="btn btn--primary" onclick={openConnectWorkspace}>
 										Connect Slack Workspace
 									</button>
+									<button class="btn btn--text workspace-switch-hint" onclick={openDifferentWorkspace}>
+										<i class="bx bx-transfer-alt"></i>
+										Connect a different workspace?
+									</button>
 								</div>
 							{:else}
 								<div class="workspace-list">
@@ -524,9 +761,27 @@
 												<span class="workspace-domain">{workspace.teamDomain}.slack.com</span>
 											</div>
 											<span class="workspace-status">Connected</span>
+											<button 
+												class="btn btn--small btn--danger workspace-unlink-btn"
+												onclick={() => handleUnlinkWorkspace(workspace.id)}
+												disabled={unlinkingWorkspaceId === workspace.id}
+											>
+												{#if unlinkingWorkspaceId === workspace.id}
+													<i class="bx bx-loader-alt bx-spin"></i>
+												{:else if confirmUnlinkWorkspaceId === workspace.id}
+													Confirm?
+												{:else}
+													<i class="bx bx-unlink"></i>
+													Unlink
+												{/if}
+											</button>
 										</div>
 									{/each}
 								</div>
+								<button class="btn btn--text workspace-switch-hint" onclick={openDifferentWorkspace}>
+									<i class="bx bx-transfer-alt"></i>
+									Connect a different Slack workspace?
+								</button>
 							{/if}
 						</div>
 
@@ -535,16 +790,26 @@
 							<div class="section-header">
 								<h3>Channel Links</h3>
 								{#if hasWorkspaces}
-									<button
-										class="btn btn--small"
-										onclick={() => {
-											resetLinkForm();
-											view = 'link-channel';
-										}}
-									>
-										<i class="bx bx-link"></i>
-										Link Channel
-									</button>
+									<div class="section-header-actions">
+										<button
+											class="btn btn--small"
+											onclick={openBulkCreateModal}
+											title="Create hConnect channels for all Slack channels"
+										>
+											<i class="bx bx-layer-plus"></i>
+											Bulk Create
+										</button>
+										<button
+											class="btn btn--small"
+											onclick={() => {
+												resetLinkForm();
+												view = 'link-channel';
+											}}
+										>
+											<i class="bx bx-link"></i>
+											Link Channel
+										</button>
+									</div>
 								{/if}
 							</div>
 
@@ -555,9 +820,9 @@
 								{#if hasWorkspaces}
 									<button
 										class="btn btn--primary"
-										onclick={() => {
-											resetLinkForm();
+										onclick={async () => {
 											view = 'link-channel';
+											await resetLinkForm();
 										}}
 									>
 										Link Your First Channel
@@ -750,9 +1015,12 @@
 							<div class="step-content">
 								<strong>Configure OAuth Scopes</strong>
 								<p>Go to "OAuth & Permissions" and add these Bot Token Scopes:</p>
-								<code class="scopes-list">channels:history, channels:read, groups:history, groups:read, chat:write, chat:write.customize, users:read, team:read, files:read, reactions:read</code>
+								<code class="scopes-list">channels:history, channels:read, chat:write, chat:write.customize, files:read, files:write, groups:history, groups:read, reactions:read, reactions:write, team:read, users:read</code>
 								<p style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-50);">
-									<em>Note: <code>chat:write.customize</code> is required to show usernames in Slack</em>
+									<em>Note: <code>chat:write.customize</code> allows showing hConnect usernames in Slack messages</em>
+								</p>
+								<p style="margin-top: 0.25rem; font-size: 0.8rem; color: var(--text-50);">
+									<em>Note: <code>files:write</code> is required to sync images/files from hConnect to Slack</em>
 								</p>
 							</div>
 						</div>
@@ -980,13 +1248,53 @@
 
 					<!-- hConnect Channel -->
 					<div class="form-group">
-						<label for="hconnectChannel">hConnect Channel</label>
-						<select id="hconnectChannel" bind:value={linkForm.hconnectChannelId} required>
-							<option value="">Select channel...</option>
-							{#each channels.filter((c) => c.type === 'text') as channel (channel.id)}
-								<option value={channel.id}>#{channel.name}</option>
-							{/each}
-						</select>
+						<div class="label-with-action">
+							<label for="hconnectChannel">hConnect Channel</label>
+							<button 
+								type="button" 
+								class="create-channel-toggle"
+								onclick={() => {
+									createNewChannel = !createNewChannel;
+									if (createNewChannel && linkForm.slackChannelName) {
+										newChannelName = linkForm.slackChannelName;
+									}
+								}}
+							>
+								<i class="bx {createNewChannel ? 'bx-list-ul' : 'bx-plus'}"></i>
+								<span>{createNewChannel ? 'Select Existing' : 'Create New'}</span>
+							</button>
+						</div>
+						
+						{#if createNewChannel}
+							<!-- Create new channel form -->
+							<div class="create-channel-form">
+								<div class="create-channel-input">
+									<span class="channel-prefix">#</span>
+									<input
+										id="newChannelName"
+										type="text"
+										placeholder="channel-name"
+										bind:value={newChannelName}
+										required
+									/>
+								</div>
+								<label class="checkbox-label">
+									<input type="checkbox" bind:checked={newChannelPrivate} />
+									Private channel
+								</label>
+								<span class="form-hint">
+									A new hConnect channel will be created with this name
+								</span>
+							</div>
+						{:else}
+							<!-- Select existing channel -->
+							<select id="hconnectChannel" bind:value={linkForm.hconnectChannelId} required={!createNewChannel}>
+								<option value="">Select channel...</option>
+								{#each channels.filter((c) => c.type === 'text') as channel (channel.id)}
+									<option value={channel.id}>#{channel.name}</option>
+								{/each}
+							</select>
+						{/if}
 					</div>
 
 					<!-- Sync Direction -->
@@ -1023,15 +1331,23 @@
 					</div>
 
 					<div class="form-actions">
-						<button type="button" class="btn" onclick={() => (view = 'main')}>Cancel</button>
+						<button type="button" class="btn" onclick={() => (view = 'main')} disabled={creatingChannel}>Cancel</button>
 						<button
 							type="submit"
 							class="btn btn--primary"
-							disabled={!linkForm.slackWorkspaceId ||
+							disabled={creatingChannel ||
+								!linkForm.slackWorkspaceId ||
 								!linkForm.slackChannelId ||
-								!linkForm.hconnectChannelId}
+								(createNewChannel ? !newChannelName.trim() : !linkForm.hconnectChannelId)}
 						>
-							Create Link
+							{#if creatingChannel}
+								<i class="bx bx-loader-alt bx-spin"></i>
+								Creating...
+							{:else if createNewChannel}
+								Create Channel & Link
+							{:else}
+								Create Link
+							{/if}
 						</button>
 					</div>
 				</form>
@@ -1044,6 +1360,163 @@
 		<div class="error-toast">
 			<i class="bx bx-error-circle"></i>
 			<span>{error}</span>
+		</div>
+	{/if}
+
+	<!-- Bulk Create Modal -->
+	{#if showBulkModal}
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_interactive_supports_focus -->
+		<div class="modal-overlay" onclick={() => !bulkCreating && (showBulkModal = false)} role="presentation">
+			<div class="modal-content bulk-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-modal-title" tabindex="0" onkeydown={(e) => e.key === 'Escape' && !bulkCreating && (showBulkModal = false)} onclick={(e) => e.stopPropagation()}>
+				<div class="modal-header">
+					<h3 id="bulk-modal-title">Bulk Create Channels</h3>
+					<button class="modal-close" onclick={() => !bulkCreating && (showBulkModal = false)} aria-label="Close modal" disabled={bulkCreating}>
+						<i class="bx bx-x"></i>
+					</button>
+				</div>
+				<div class="modal-body">
+					{#if bulkCreating}
+						<div class="bulk-progress">
+							<div class="bulk-progress-header">
+								<i class="bx bx-loader-alt bx-spin"></i>
+								<span>Creating channels...</span>
+							</div>
+							<div class="bulk-progress-bar">
+								<div class="bulk-progress-fill" style="width: {(bulkProgress.current / bulkProgress.total) * 100}%"></div>
+							</div>
+							<div class="bulk-progress-stats">
+								<span>{bulkProgress.current} / {bulkProgress.total}</span>
+								<span class="bulk-stat-success">{bulkProgress.created} created</span>
+								{#if bulkProgress.skipped > 0}
+									<span class="bulk-stat-skipped">{bulkProgress.skipped} skipped</span>
+								{/if}
+							</div>
+						</div>
+					{:else}
+						<p class="modal-description">
+							Create hConnect channels for multiple Slack channels at once. Each selected channel will be created and linked automatically.
+						</p>
+						
+						{#if workspaces.length > 1}
+							<div class="form-group">
+								<label for="bulk-workspace">Workspace</label>
+								<select id="bulk-workspace" onchange={(e) => handleBulkWorkspaceChange(e.currentTarget.value)}>
+									{#each workspaces as workspace (workspace.id)}
+										<option value={workspace.id} selected={bulkWorkspaceId === workspace.id}>
+											{workspace.teamName}
+										</option>
+									{/each}
+								</select>
+							</div>
+						{/if}
+
+						{#if loadingBulkChannels}
+							<div class="loading-channels">
+								<i class="bx bx-loader-alt bx-spin"></i>
+								<span>Loading Slack channels...</span>
+							</div>
+						{:else if bulkChannels.length === 0}
+							<div class="empty-state empty-state--small">
+								<i class="bx bx-check-circle"></i>
+								<p>All Slack channels already have hConnect channels linked!</p>
+							</div>
+						{:else}
+							<div class="bulk-channel-list">
+								<div class="bulk-select-all">
+									<label class="checkbox-label">
+										<input 
+											type="checkbox" 
+											checked={bulkSelectedChannels.size === bulkChannels.length}
+											indeterminate={bulkSelectedChannels.size > 0 && bulkSelectedChannels.size < bulkChannels.length}
+											onchange={toggleAllBulkChannels}
+										/>
+										Select all ({bulkChannels.length} channels)
+									</label>
+								</div>
+								<div class="bulk-channels">
+									{#each bulkChannels as channel (channel.id)}
+										<label class="bulk-channel-item">
+											<input 
+												type="checkbox" 
+												checked={bulkSelectedChannels.has(channel.id)}
+												onchange={() => toggleBulkChannel(channel.id)}
+											/>
+											<span class="bulk-channel-name">
+												{channel.is_private ? '🔒' : '#'}{channel.name}
+											</span>
+											{#if channel.num_members}
+												<span class="bulk-channel-members">{channel.num_members} members</span>
+											{/if}
+										</label>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					{/if}
+				</div>
+				{#if !bulkCreating && bulkChannels.length > 0}
+					<div class="modal-footer">
+						<button class="btn" onclick={() => showBulkModal = false}>Cancel</button>
+						<button 
+							class="btn btn--primary" 
+							onclick={handleBulkCreate}
+							disabled={bulkSelectedChannels.size === 0}
+						>
+							Create {bulkSelectedChannels.size} Channel{bulkSelectedChannels.size !== 1 ? 's' : ''}
+						</button>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Different Workspace Modal -->
+	{#if showDifferentWorkspaceModal}
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_interactive_supports_focus -->
+		<div class="modal-overlay" onclick={() => showDifferentWorkspaceModal = false} role="presentation">
+			<div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="0" onkeydown={(e) => e.key === 'Escape' && (showDifferentWorkspaceModal = false)}>
+				<div class="modal-header">
+					<h3 id="modal-title">Connect a Different Workspace</h3>
+					<button class="modal-close" onclick={() => showDifferentWorkspaceModal = false} aria-label="Close modal">
+						<i class="bx bx-x"></i>
+					</button>
+				</div>
+				<div class="modal-body">
+					<p class="modal-description">
+						Slack's workspace dropdown only shows workspaces you're currently signed into in this browser. 
+						To connect a different workspace, use one of these options:
+					</p>
+					
+					<div class="modal-options">
+						<div class="modal-option">
+							<div class="option-number">1</div>
+							<div class="option-content">
+								<h4>Use Incognito/Private Window</h4>
+								<p>Open this link in an incognito window to sign into any workspace:</p>
+								<div class="url-copy-row">
+									<input type="text" readonly value={slackOAuthUrl} class="url-input" />
+									<button class="btn btn--small" onclick={copyOAuthUrl}>
+										<i class="bx bx-copy"></i>
+										Copy
+									</button>
+								</div>
+							</div>
+						</div>
+						
+						<div class="modal-option">
+							<div class="option-number">2</div>
+							<div class="option-content">
+								<h4>Sign into workspace first</h4>
+								<p>Sign into the other workspace in a new tab, then come back and click "Add Workspace"</p>
+								<a href="https://slack.com/signin#/signin" target="_blank" class="btn btn--small">
+									<i class="bx bx-link-external"></i>
+									Open Slack Sign In
+								</a>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -1476,6 +1949,50 @@
 		border-radius: 0.25rem;
 	}
 
+	.workspace-unlink-btn {
+		margin-left: auto;
+		flex-shrink: 0;
+	}
+
+	.btn--danger {
+		background: transparent;
+		color: var(--red, #ff4757);
+		border: 1px solid var(--red, #ff4757);
+	}
+
+	.btn--danger:hover:not(:disabled) {
+		background: rgba(255, 71, 87, 0.1);
+	}
+
+	.btn--danger:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.btn--text {
+		background: transparent;
+		border: none;
+		color: var(--text-50, #888);
+		padding: 0.5rem;
+		font-size: 0.8125rem;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+	}
+
+	.btn--text:hover {
+		color: var(--text-80, #ccc);
+	}
+
+	.btn--text i {
+		font-size: 1rem;
+	}
+
+	.workspace-switch-hint {
+		margin-top: 0.5rem;
+	}
+
 	/* Bridge List */
 	.bridge-list {
 		display: flex;
@@ -1632,6 +2149,70 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
+	}
+
+	.create-channel-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		background: var(--bg-tertiary, #252525);
+		border: 1px solid var(--border, #333);
+		border-radius: 0.25rem;
+		color: var(--text-80, #ccc);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.create-channel-toggle:hover {
+		background: var(--bg-hover, #2a2a2a);
+		border-color: var(--accent, #7c5cff);
+		color: var(--accent, #7c5cff);
+	}
+
+	.create-channel-toggle i {
+		font-size: 0.875rem;
+	}
+
+	.create-channel-form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.create-channel-input {
+		display: flex;
+		align-items: center;
+		background: var(--bg-secondary, #1a1a1a);
+		border: 1px solid var(--border, #333);
+		border-radius: 0.375rem;
+		overflow: hidden;
+	}
+
+	.create-channel-input:focus-within {
+		border-color: var(--accent, #7c5cff);
+	}
+
+	.channel-prefix {
+		padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+		color: var(--text-50, #888);
+		font-size: 0.875rem;
+		background: var(--bg-tertiary, #252525);
+		border-right: 1px solid var(--border, #333);
+	}
+
+	.create-channel-input input {
+		flex: 1;
+		padding: 0.5rem 0.75rem;
+		background: transparent;
+		border: none;
+		color: var(--text, #fff);
+		font-size: 0.875rem;
+	}
+
+	.create-channel-input input:focus {
+		outline: none;
 	}
 
 	.refresh-btn {
@@ -1996,6 +2577,257 @@
 	.channel-error .error-text {
 		font-size: 0.8125rem;
 		color: var(--red, #ff5c5c);
+	}
+
+	/* Different Workspace Modal */
+	.modal-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: 1rem;
+	}
+
+	.modal-content {
+		background: var(--bg-secondary, #1e1e1e);
+		border-radius: 0.75rem;
+		max-width: 500px;
+		width: 100%;
+		max-height: 90vh;
+		overflow-y: auto;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+	}
+
+	.modal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 1rem 1.25rem;
+		border-bottom: 1px solid var(--color-border-subtle, #333);
+	}
+
+	.modal-header h3 {
+		margin: 0;
+		font-size: 1.125rem;
+		font-weight: 600;
+	}
+
+	.modal-close {
+		background: none;
+		border: none;
+		color: var(--text-50, #888);
+		font-size: 1.5rem;
+		cursor: pointer;
+		padding: 0.25rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.modal-close:hover {
+		color: var(--text-80, #ccc);
+	}
+
+	.modal-body {
+		padding: 1.25rem;
+	}
+
+	.modal-description {
+		margin: 0 0 1.25rem 0;
+		color: var(--text-70, #aaa);
+		font-size: 0.9rem;
+		line-height: 1.5;
+	}
+
+	.modal-options {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.modal-option {
+		display: flex;
+		gap: 1rem;
+		padding: 1rem;
+		background: var(--bg-tertiary, #252525);
+		border-radius: 0.5rem;
+	}
+
+	.option-number {
+		width: 1.75rem;
+		height: 1.75rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--accent, #7c5cff);
+		color: white;
+		border-radius: 50%;
+		font-weight: 600;
+		font-size: 0.875rem;
+		flex-shrink: 0;
+	}
+
+	.option-content {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.option-content h4 {
+		margin: 0 0 0.5rem 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
+	}
+
+	.option-content p {
+		margin: 0 0 0.75rem 0;
+		color: var(--text-50, #888);
+		font-size: 0.8125rem;
+		line-height: 1.4;
+	}
+
+	.url-copy-row {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.url-input {
+		flex: 1;
+		min-width: 0;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-elevated, #333);
+		border: 1px solid var(--color-border-subtle, #444);
+		border-radius: 0.375rem;
+		color: var(--text-80, #ccc);
+		font-size: 0.75rem;
+		font-family: var(--font-mono, monospace);
+	}
+
+	.url-input:focus {
+		outline: none;
+		border-color: var(--accent, #7c5cff);
+	}
+
+	/* Bulk Create Modal */
+	.bulk-modal {
+		max-width: 550px;
+	}
+
+	.section-header-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.bulk-progress {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		padding: 1rem 0;
+	}
+
+	.bulk-progress-header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.9375rem;
+		color: var(--text-80, #ccc);
+	}
+
+	.bulk-progress-bar {
+		height: 8px;
+		background: var(--bg-tertiary, #252525);
+		border-radius: 4px;
+		overflow: hidden;
+	}
+
+	.bulk-progress-fill {
+		height: 100%;
+		background: var(--accent, #7c5cff);
+		border-radius: 4px;
+		transition: width 0.3s ease;
+	}
+
+	.bulk-progress-stats {
+		display: flex;
+		gap: 1rem;
+		font-size: 0.8125rem;
+		color: var(--text-50, #888);
+	}
+
+	.bulk-stat-success {
+		color: var(--green, #4ade80);
+	}
+
+	.bulk-stat-skipped {
+		color: var(--yellow, #fbbf24);
+	}
+
+	.bulk-channel-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.bulk-select-all {
+		padding-bottom: 0.5rem;
+		border-bottom: 1px solid var(--border, #333);
+	}
+
+	.bulk-channels {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		max-height: 300px;
+		overflow-y: auto;
+	}
+
+	.bulk-channel-item {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-tertiary, #252525);
+		border-radius: 0.375rem;
+		cursor: pointer;
+		transition: background 0.15s ease;
+	}
+
+	.bulk-channel-item:hover {
+		background: var(--bg-hover, #2a2a2a);
+	}
+
+	.bulk-channel-name {
+		flex: 1;
+		font-size: 0.875rem;
+		color: var(--text-80, #ccc);
+	}
+
+	.bulk-channel-members {
+		font-size: 0.75rem;
+		color: var(--text-50, #888);
+	}
+
+	.modal-footer {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.75rem;
+		padding: 1rem 1.25rem;
+		border-top: 1px solid var(--border, #333);
+	}
+
+	.empty-state--small {
+		padding: 1.5rem;
+	}
+
+	.empty-state--small i {
+		font-size: 2rem;
+		color: var(--green, #4ade80);
+	}
+
+	.empty-state--small p {
+		font-size: 0.875rem;
 	}
 
 </style>

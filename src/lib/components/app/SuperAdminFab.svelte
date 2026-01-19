@@ -1,10 +1,14 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { user } from '$lib/stores/user';
 	import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 	import { fabSnapStore, isFabSnappingDisabled, type SnapZone } from '$lib/stores/fabSnap';
+
+	// Page awareness - derived values defined after state declarations below
+	const isAdminPage = $derived($page?.url?.pathname?.startsWith('/admin') ?? false);
 
 	const superAdminEmails = superAdminEmailsStore();
 	const isSuperAdmin = $derived(
@@ -34,17 +38,25 @@
 	let snappedZoneId: string | null = $state(null);
 	let nearSnapZone: SnapZone | null = $state(null);
 	
+	// Page awareness - hide on admin pages unless snapped to tray
+	const isSnappedToTray = $derived(isSnapped && (snappedZoneId ?? '').startsWith('fab-tray-slot-'));
+	// Only hide on admin page if NOT snapped to the tray dock
+	const hideOnAdminPage = $derived(isAdminPage && !isSnappedToTray);
+	
 	// Tray awareness - for hiding when snapped to tray and tray is closed
 	let trayOpen = $state(false);
 	let userClosedTray = $state(true); // Start true so FABs snapped to tray are hidden until tray opens
 	let positionReady = $state(false); // Track if position has been calculated for tray-snapped FABs
 	let trayUnmounted = $state(false); // Track if tray component unmounted (vs user closing)
-	const hiddenInTray = $derived(
+	
+	// Combined hidden state - either hidden in closed tray OR hidden on admin page (when not in tray)
+	const hiddenInClosedTray = $derived(
 		isSnapped && 
 		(snappedZoneId ?? '').startsWith('fab-tray-slot-') && 
 		(!trayOpen || !positionReady) &&
 		!trayUnmounted
 	);
+	const shouldHide = $derived(hiddenInClosedTray || hideOnAdminPage);
 
 	function loadSavedPosition(): Position | null {
 		if (!browser) return null;
@@ -510,7 +522,8 @@
 		class:super-admin-fab-wrapper--ready={ready}
 		class:super-admin-fab-wrapper--snapped={isSnapped}
 		class:super-admin-fab-wrapper--near-snap={nearSnapZone !== null}
-		class:super-admin-fab-wrapper--hidden={hiddenInTray}
+		class:super-admin-fab-wrapper--hidden={hiddenInClosedTray}
+		class:super-admin-fab-wrapper--admin-hidden={hideOnAdminPage}
 		style="transform: translate3d({position.x}px, {position.y}px, 0);"
 	>
 		<button
@@ -555,6 +568,14 @@
 		opacity: 0 !important;
 		pointer-events: none !important;
 		visibility: hidden;
+	}
+
+	/* Hide instantly on admin pages (no transition) */
+	.super-admin-fab-wrapper--admin-hidden {
+		opacity: 0 !important;
+		pointer-events: none !important;
+		visibility: hidden;
+		transition: none !important;
 	}
 
 	.super-admin-fab-wrapper--snapped {

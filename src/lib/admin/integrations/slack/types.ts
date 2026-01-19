@@ -167,15 +167,15 @@ export const REQUIRED_BOT_SCOPES = [
 	'channels:history',
 	'channels:read',
 	'chat:write',
+	'chat:write.customize',
+	'files:read',
+	'files:write',
 	'groups:history',
 	'groups:read',
-	'im:history',
-	'im:read',
 	'reactions:read',
 	'reactions:write',
-	'users:read',
-	'files:read',
-	'team:read'
+	'team:read',
+	'users:read'
 ];
 
 // Scopes for user token (optional, for richer integration)
