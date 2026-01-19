@@ -69,14 +69,17 @@
 	let githubBranches = $state<GitHubBranch[]>([]);
 	let loadingBranches = $state(false);
 	let selectedBranch = $state<string>('');
+	let baseBranch = $state<string>('main'); // For comparing branches
 	let branchCommits = $state<Array<{ sha: string; message: string; date: string; timestamp: number }>>([]);
 	let loadingCommits = $state(false);
+	let compareMode = $state(false); // Toggle between all commits vs compare mode
 
 	// Custom dropdown states
 	let categoryDropdownOpen = $state(false);
 	let typeDropdownOpen = $state(false);
 	let audienceDropdownOpen = $state(false);
 	let branchDropdownOpen = $state(false);
+	let baseBranchDropdownOpen = $state(false);
 
 	$effect(() => {
 		announcements = [...data.announcements];
@@ -499,23 +502,31 @@
 	// GitHub API - Fetch branches
 	const GITHUB_REPO = 'andrewveihl/hConnect';
 	let githubRateLimited = $state(false);
+	let rateLimitReset = $state<string | null>(null);
+	
+	const checkRateLimit = (response: Response): boolean => {
+		if (response.status === 403 || response.status === 429) {
+			const resetHeader = response.headers.get('X-RateLimit-Reset');
+			rateLimitReset = resetHeader ? new Date(parseInt(resetHeader) * 1000).toLocaleTimeString() : 'soon';
+			console.warn(`GitHub API rate limited. Resets at ${rateLimitReset}`);
+			githubRateLimited = true;
+			return true;
+		}
+		return false;
+	};
 	
 	const fetchGitHubBranches = async () => {
 		loadingBranches = true;
 		githubRateLimited = false;
+		rateLimitReset = null;
 		try {
-			// Fetch branches (this is a lightweight call)
+			// Fetch branches - this gives us branch names and their HEAD commit SHAs
 			const branchesRes = await fetch(
 				`https://api.github.com/repos/${GITHUB_REPO}/branches?per_page=100`
 			);
 			
-			// Check for rate limiting
-			if (branchesRes.status === 403 || branchesRes.status === 429) {
-				const resetHeader = branchesRes.headers.get('X-RateLimit-Reset');
-				const resetTime = resetHeader ? new Date(parseInt(resetHeader) * 1000).toLocaleTimeString() : 'soon';
-				console.warn(`GitHub API rate limited. Resets at ${resetTime}`);
-				githubRateLimited = true;
-				showAdminToast({ type: 'warning', message: `GitHub rate limited. Try again at ${resetTime}` });
+			if (checkRateLimit(branchesRes)) {
+				showAdminToast({ type: 'warning', message: `GitHub rate limited. Try again at ${rateLimitReset}` });
 				return;
 			}
 			
@@ -525,45 +536,18 @@
 			const branches: GitHubBranch[] = await branchesRes.json();
 			console.log('Branches from GitHub:', branches.map(b => b.name));
 			
-			// Fetch recent commits from the repo (single API call, gets recent activity)
-			const commitsRes = await fetch(
-				`https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=100`
-			);
-			
-			let commitDates: Map<string, number> = new Map();
-			if (commitsRes.ok) {
-				const commits = await commitsRes.json();
-				// Map commit SHAs to their dates
-				for (const commit of commits) {
-					commitDates.set(commit.sha, new Date(commit.commit.committer.date).getTime());
-				}
-			}
-			
-			// Match branches to commit dates
-			const branchesWithDates = branches.map(branch => ({
-				...branch,
-				lastCommitDate: commitDates.get(branch.commit.sha) || 0
-			}));
-			
-			// Sort: branches with known dates first (by date), then others alphabetically
-			githubBranches = branchesWithDates.sort((a, b) => {
-				// Both have dates - sort by most recent
-				if (a.lastCommitDate && b.lastCommitDate) {
-					return b.lastCommitDate - a.lastCommitDate;
-				}
-				// One has date, one doesn't - dated one comes first
-				if (a.lastCommitDate && !b.lastCommitDate) return -1;
-				if (!a.lastCommitDate && b.lastCommitDate) return 1;
-				// Neither has date - sort alphabetically, but put 'main' first
-				if (a.name === 'main') return -1;
-				if (b.name === 'main') return 1;
+			// Instead of fetching each commit individually (expensive!), 
+			// just use the branches as-is and sort by name with main/master first
+			// The commit dates will be fetched when user selects a branch
+			githubBranches = branches.map(b => ({ ...b, lastCommitDate: 0 })).sort((a, b) => {
+				// Put main/master first
+				if (a.name === 'main' || a.name === 'master') return -1;
+				if (b.name === 'main' || b.name === 'master') return 1;
+				// Then sort alphabetically
 				return a.name.localeCompare(b.name);
 			});
 			
-			console.log('Branches sorted:', githubBranches.slice(0, 10).map(b => ({ 
-				name: b.name, 
-				date: b.lastCommitDate ? new Date(b.lastCommitDate).toLocaleString() : 'unknown'
-			})));
+			console.log('Branches loaded:', githubBranches.length);
 		} catch (err) {
 			console.error('Failed to fetch GitHub branches:', err);
 			showAdminToast({ type: 'error', message: 'Failed to load GitHub branches' });
@@ -579,18 +563,65 @@
 		}
 		loadingCommits = true;
 		try {
-			const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/commits?sha=${branch}&per_page=10`);
-			if (!response.ok) throw new Error('Failed to fetch commits');
-			const data = await response.json();
-			branchCommits = data.map((c: any) => ({
-				sha: c.sha.slice(0, 7),
-				message: c.commit.message.split('\n')[0].slice(0, 80),
-				date: new Date(c.commit.author.date).toLocaleDateString(),
-				timestamp: new Date(c.commit.author.date).getTime()
-			}));
+			let response: Response;
+			
+			if (compareMode && baseBranch && baseBranch !== branch) {
+				// Use compare API to get commits unique to the selected branch
+				response = await fetch(
+					`https://api.github.com/repos/${GITHUB_REPO}/compare/${baseBranch}...${branch}`
+				);
+				
+				if (checkRateLimit(response)) {
+					showAdminToast({ type: 'warning', message: `GitHub rate limited. Try again at ${rateLimitReset}` });
+					branchCommits = [];
+					return;
+				}
+				
+				if (!response.ok) {
+					const errorText = await response.text();
+					console.error('Compare API error:', response.status, errorText);
+					throw new Error(`Failed to compare branches: ${response.status}`);
+				}
+				
+				const data = await response.json();
+				console.log('Compare response:', { ahead: data.ahead_by, behind: data.behind_by, commits: data.commits?.length });
+				
+				branchCommits = (data.commits || []).map((c: any) => ({
+					sha: c.sha.slice(0, 7),
+					message: c.commit.message.split('\n')[0].slice(0, 100),
+					date: new Date(c.commit.author.date).toLocaleDateString(),
+					timestamp: new Date(c.commit.author.date).getTime()
+				})).reverse(); // Show oldest first for chronological order
+			} else {
+				// Regular mode - just get recent commits on the branch
+				response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/commits?sha=${branch}&per_page=15`);
+				
+				if (checkRateLimit(response)) {
+					showAdminToast({ type: 'warning', message: `GitHub rate limited. Try again at ${rateLimitReset}` });
+					branchCommits = [];
+					return;
+				}
+				
+				if (!response.ok) {
+					const errorText = await response.text();
+					console.error('Commits API error:', response.status, errorText);
+					throw new Error(`Failed to fetch commits: ${response.status}`);
+				}
+				
+				const data = await response.json();
+				console.log('Commits response:', data.length, 'commits');
+				
+				branchCommits = data.map((c: any) => ({
+					sha: c.sha.slice(0, 7),
+					message: c.commit.message.split('\n')[0].slice(0, 100),
+					date: new Date(c.commit.author.date).toLocaleDateString(),
+					timestamp: new Date(c.commit.author.date).getTime()
+				}));
+			}
 		} catch (err) {
 			console.error('Failed to fetch commits:', err);
 			branchCommits = [];
+			showAdminToast({ type: 'error', message: 'Failed to load commits. Check console for details.' });
 		} finally {
 			loadingCommits = false;
 		}
@@ -600,6 +631,21 @@
 		selectedBranch = branch;
 		branchDropdownOpen = false;
 		fetchBranchCommits(branch);
+	};
+
+	const selectBaseBranch = (branch: string) => {
+		baseBranch = branch;
+		baseBranchDropdownOpen = false;
+		if (selectedBranch) {
+			fetchBranchCommits(selectedBranch);
+		}
+	};
+
+	const toggleCompareMode = () => {
+		compareMode = !compareMode;
+		if (selectedBranch) {
+			fetchBranchCommits(selectedBranch);
+		}
 	};
 
 	const addCommitsAsFeatures = () => {
@@ -622,6 +668,7 @@
 			typeDropdownOpen = false;
 			audienceDropdownOpen = false;
 			branchDropdownOpen = false;
+			baseBranchDropdownOpen = false;
 		}
 	};
 
@@ -891,16 +938,27 @@
 										<i class="bx bxl-github text-lg text-sky-400"></i>
 										<span class="text-xs font-semibold uppercase tracking-wider text-sky-400">Import from GitHub</span>
 									</div>
-									<button
-										type="button"
-										class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-sky-400 transition hover:bg-sky-500/20"
-										onclick={(e) => { e.stopPropagation(); fetchGitHubBranches(); }}
-										disabled={loadingBranches}
-										aria-label="Refresh branches"
-									>
-										<i class="bx bx-refresh {loadingBranches ? 'animate-spin' : ''}"></i>
-										Refresh
-									</button>
+									<div class="flex items-center gap-2">
+										<button
+											type="button"
+											class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition {compareMode ? 'bg-emerald-500/20 text-emerald-400' : 'text-[color:var(--text-50,#94a3b8)] hover:bg-sky-500/20 hover:text-sky-400'}"
+											onclick={(e) => { e.stopPropagation(); toggleCompareMode(); }}
+											title={compareMode ? 'Showing commits unique to branch' : 'Click to compare branches'}
+										>
+											<i class="bx bx-git-compare"></i>
+											Compare
+										</button>
+										<button
+											type="button"
+											class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-sky-400 transition hover:bg-sky-500/20"
+											onclick={(e) => { e.stopPropagation(); fetchGitHubBranches(); }}
+											disabled={loadingBranches}
+											aria-label="Refresh branches"
+										>
+											<i class="bx bx-refresh {loadingBranches ? 'animate-spin' : ''}"></i>
+											Refresh
+										</button>
+									</div>
 								</div>
 								
 								{#if githubRateLimited}
@@ -909,78 +967,157 @@
 										<span>GitHub API rate limited. Wait a few minutes and click Refresh.</span>
 									</div>
 								{/if}
-								
-								<!-- Branch Dropdown -->
-								<div class="custom-dropdown relative mb-3">
-									<button
-										type="button"
-										class="flex w-full items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-4 py-3 text-left transition hover:border-sky-500/50"
-										onclick={(e) => { e.stopPropagation(); branchDropdownOpen = !branchDropdownOpen; }}
-									>
-										<div class="flex items-center gap-3">
-											<div class="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/20">
-												<i class="bx bx-git-branch text-sky-400"></i>
-											</div>
-											<div>
-												<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
-													{selectedBranch || 'Select a branch'}
-												</p>
-												<p class="text-xs text-[color:var(--text-50,#94a3b8)]">
-													{selectedBranch ? 'Pull recent commits' : 'Choose branch to import commits from'}
-												</p>
-											</div>
-										</div>
-										<i class="bx bx-chevron-down text-xl text-[color:var(--text-50,#94a3b8)] transition-transform {branchDropdownOpen ? 'rotate-180' : ''}"></i>
-									</button>
-									
-									{#if branchDropdownOpen}
-										<div class="absolute left-0 right-0 top-full z-50 mt-2 max-h-64 overflow-y-auto rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] bg-[color:var(--bg-base,#1a1a2e)] shadow-2xl">
-											{#if loadingBranches}
-												<div class="flex items-center justify-center py-8">
-													<i class="bx bx-loader-alt animate-spin text-2xl text-sky-400"></i>
+
+								<!-- Compare Mode: Base Branch + Feature Branch -->
+								{#if compareMode}
+									<div class="mb-3 grid grid-cols-2 gap-2">
+										<!-- Base Branch Dropdown -->
+										<div class="custom-dropdown relative">
+											<span class="mb-1 block text-xs text-[color:var(--text-50,#94a3b8)]">Base (compare from)</span>
+											<button
+												type="button"
+												class="flex w-full items-center justify-between rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-3 py-2 text-left text-sm transition hover:border-sky-500/50"
+												onclick={(e) => { e.stopPropagation(); baseBranchDropdownOpen = !baseBranchDropdownOpen; }}
+											>
+												<span class="truncate text-[color:var(--color-text-primary)]">{baseBranch || 'main'}</span>
+												<i class="bx bx-chevron-down text-[color:var(--text-50,#94a3b8)] transition-transform {baseBranchDropdownOpen ? 'rotate-180' : ''}"></i>
+											</button>
+											{#if baseBranchDropdownOpen}
+												<div class="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] bg-[color:var(--bg-base,#1a1a2e)] shadow-xl">
+													{#each githubBranches.filter(b => b.name !== selectedBranch) as branch}
+														<button
+															type="button"
+															class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition hover:bg-sky-500/10 {baseBranch === branch.name ? 'bg-sky-500/10' : ''}"
+															onclick={() => selectBaseBranch(branch.name)}
+														>
+															<span class="truncate text-[color:var(--color-text-primary)]">{branch.name}</span>
+															{#if baseBranch === branch.name}
+																<i class="bx bx-check ml-auto text-sky-400"></i>
+															{/if}
+														</button>
+													{/each}
 												</div>
-											{:else if githubRateLimited}
-												<div class="px-4 py-8 text-center">
-													<i class="bx bx-error-circle text-2xl text-amber-400"></i>
-													<p class="mt-2 text-sm text-amber-400">Rate limited</p>
-													<p class="text-xs text-[color:var(--text-50,#94a3b8)]">Try again in a few minutes</p>
-												</div>
-											{:else if githubBranches.length === 0}
-												<div class="px-4 py-8 text-center text-sm text-[color:var(--text-50,#94a3b8)]">
-													No branches found
-												</div>
-											{:else}
-												{#each githubBranches as branch}
-													<button
-														type="button"
-														class="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-sky-500/10 {selectedBranch === branch.name ? 'bg-sky-500/10' : ''}"
-														onclick={() => selectBranch(branch.name)}
-													>
-														<i class="bx bx-git-branch text-sky-400"></i>
-														<div class="flex-1 min-w-0">
-															<p class="text-sm font-medium text-[color:var(--color-text-primary)] truncate">{branch.name}</p>
-															<p class="text-xs text-[color:var(--text-50,#94a3b8)]">
-																{branch.lastCommitDate ? new Date(branch.lastCommitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : branch.commit.sha.slice(0, 7)}
-															</p>
-														</div>
-														{#if branch.protected}
-															<span class="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-400">protected</span>
-														{/if}
-														{#if selectedBranch === branch.name}
-															<i class="bx bx-check text-sky-400"></i>
-														{/if}
-													</button>
-												{/each}
 											{/if}
 										</div>
+										<!-- Feature Branch Dropdown -->
+										<div class="custom-dropdown relative">
+											<span class="mb-1 block text-xs text-[color:var(--text-50,#94a3b8)]">Feature (new commits)</span>
+											<button
+												type="button"
+												class="flex w-full items-center justify-between rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-3 py-2 text-left text-sm transition hover:border-sky-500/50"
+												onclick={(e) => { e.stopPropagation(); branchDropdownOpen = !branchDropdownOpen; }}
+											>
+												<span class="truncate text-[color:var(--color-text-primary)]">{selectedBranch || 'Select branch'}</span>
+												<i class="bx bx-chevron-down text-[color:var(--text-50,#94a3b8)] transition-transform {branchDropdownOpen ? 'rotate-180' : ''}"></i>
+											</button>
+											{#if branchDropdownOpen}
+												<div class="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] bg-[color:var(--bg-base,#1a1a2e)] shadow-xl">
+													{#each githubBranches.filter(b => b.name !== baseBranch) as branch}
+														<button
+															type="button"
+															class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition hover:bg-sky-500/10 {selectedBranch === branch.name ? 'bg-sky-500/10' : ''}"
+															onclick={() => selectBranch(branch.name)}
+														>
+															<span class="truncate text-[color:var(--color-text-primary)]">{branch.name}</span>
+															{#if branch.lastCommitDate}
+																<span class="ml-auto shrink-0 text-xs text-[color:var(--text-50,#94a3b8)]">
+																	{new Date(branch.lastCommitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+																</span>
+															{/if}
+															{#if selectedBranch === branch.name}
+																<i class="bx bx-check text-sky-400"></i>
+															{/if}
+														</button>
+													{/each}
+												</div>
+											{/if}
+										</div>
+									</div>
+									{#if selectedBranch && baseBranch}
+										<p class="mb-3 text-xs text-emerald-400">
+											<i class="bx bx-info-circle"></i>
+											Showing commits in <strong>{selectedBranch}</strong> that are not in <strong>{baseBranch}</strong>
+										</p>
 									{/if}
-								</div>
+								{:else}
+									<!-- Standard mode: Single Branch Dropdown -->
+									<div class="custom-dropdown relative mb-3">
+										<button
+											type="button"
+											class="flex w-full items-center justify-between rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)15%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)80%,transparent)] px-4 py-3 text-left transition hover:border-sky-500/50"
+											onclick={(e) => { e.stopPropagation(); branchDropdownOpen = !branchDropdownOpen; }}
+										>
+											<div class="flex items-center gap-3">
+												<div class="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/20">
+													<i class="bx bx-git-branch text-sky-400"></i>
+												</div>
+												<div>
+													<p class="text-sm font-medium text-[color:var(--color-text-primary)]">
+														{selectedBranch || 'Select a branch'}
+													</p>
+													<p class="text-xs text-[color:var(--text-50,#94a3b8)]">
+														{selectedBranch ? 'Pull recent commits' : 'Choose branch to import commits from'}
+													</p>
+												</div>
+											</div>
+											<i class="bx bx-chevron-down text-xl text-[color:var(--text-50,#94a3b8)] transition-transform {branchDropdownOpen ? 'rotate-180' : ''}"></i>
+										</button>
+										
+										{#if branchDropdownOpen}
+											<div class="absolute left-0 right-0 top-full z-50 mt-2 max-h-64 overflow-y-auto rounded-xl border border-[color:color-mix(in_srgb,var(--color-text-primary)20%,transparent)] bg-[color:var(--bg-base,#1a1a2e)] shadow-2xl">
+												{#if loadingBranches}
+													<div class="flex items-center justify-center py-8">
+														<i class="bx bx-loader-alt animate-spin text-2xl text-sky-400"></i>
+													</div>
+												{:else if githubRateLimited}
+													<div class="px-4 py-8 text-center">
+														<i class="bx bx-error-circle text-2xl text-amber-400"></i>
+														<p class="mt-2 text-sm text-amber-400">Rate limited</p>
+														<p class="text-xs text-[color:var(--text-50,#94a3b8)]">Try again in a few minutes</p>
+													</div>
+												{:else if githubBranches.length === 0}
+													<div class="px-4 py-8 text-center text-sm text-[color:var(--text-50,#94a3b8)]">
+														No branches found
+													</div>
+												{:else}
+													{#each githubBranches as branch}
+														<button
+															type="button"
+															class="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-sky-500/10 {selectedBranch === branch.name ? 'bg-sky-500/10' : ''}"
+															onclick={() => selectBranch(branch.name)}
+														>
+															<i class="bx bx-git-branch text-sky-400"></i>
+															<div class="flex-1 min-w-0">
+																<p class="text-sm font-medium text-[color:var(--color-text-primary)] truncate">{branch.name}</p>
+																<p class="text-xs text-[color:var(--text-50,#94a3b8)]">
+																	{branch.lastCommitDate ? new Date(branch.lastCommitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : branch.commit.sha.slice(0, 7)}
+																</p>
+															</div>
+															{#if branch.protected}
+																<span class="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-400">protected</span>
+															{/if}
+															{#if selectedBranch === branch.name}
+																<i class="bx bx-check text-sky-400"></i>
+															{/if}
+														</button>
+													{/each}
+												{/if}
+											</div>
+										{/if}
+									</div>
+								{/if}
 
 								<!-- Branch Commits -->
 								{#if selectedBranch}
 									<div class="rounded-lg border border-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] bg-[color:color-mix(in_srgb,var(--surface-panel)50%,transparent)]">
 										<div class="flex items-center justify-between border-b border-[color:color-mix(in_srgb,var(--color-text-primary)8%,transparent)] px-3 py-2">
-											<span class="text-xs font-medium text-[color:var(--text-60,#6b7280)]">Recent commits on {selectedBranch}</span>
+											<span class="text-xs font-medium text-[color:var(--text-60,#6b7280)]">
+												{#if compareMode && baseBranch}
+													{branchCommits.length} commit{branchCommits.length !== 1 ? 's' : ''} ahead of {baseBranch}
+												{:else}
+													Recent commits on {selectedBranch}
+												{/if}
+											</span>
 											<button
 												type="button"
 												class="flex items-center gap-1 rounded-lg bg-sky-500/20 px-2.5 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/30"
@@ -988,17 +1125,25 @@
 												disabled={loadingCommits || branchCommits.length === 0}
 											>
 												<i class="bx bx-import"></i>
-												Add as Features
+												Add All
 											</button>
 										</div>
 										{#if loadingCommits}
 											<div class="flex items-center justify-center py-6">
 												<i class="bx bx-loader-alt animate-spin text-lg text-sky-400"></i>
 											</div>
+										{:else if githubRateLimited}
+											<div class="px-3 py-6 text-center">
+												<i class="bx bx-error-circle text-xl text-amber-400"></i>
+												<p class="mt-1 text-xs text-amber-400">GitHub API rate limited</p>
+												<p class="text-xs text-[color:var(--text-50,#94a3b8)]">Try again at {rateLimitReset}</p>
+											</div>
 										{:else if branchCommits.length === 0}
-											<div class="px-3 py-6 text-center text-xs text-[color:var(--text-50,#94a3b8)]">No commits found</div>
+											<div class="px-3 py-6 text-center text-xs text-[color:var(--text-50,#94a3b8)]">
+												{compareMode ? 'No new commits found (branches may be identical)' : 'No commits found'}
+											</div>
 										{:else}
-											<div class="max-h-40 overflow-y-auto">
+											<div class="max-h-48 overflow-y-auto">
 												{#each branchCommits as commit}
 													<div class="flex items-start gap-2 border-b border-[color:color-mix(in_srgb,var(--color-text-primary)5%,transparent)] px-3 py-2 last:border-b-0">
 														<code class="shrink-0 rounded bg-[color:color-mix(in_srgb,var(--color-text-primary)10%,transparent)] px-1.5 py-0.5 text-xs text-sky-400">{commit.sha}</code>
