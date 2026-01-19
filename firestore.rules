@@ -728,8 +728,11 @@ service cloud.firestore {
 
       match /ticketAiIssues/{issueId} {
         allow read: if canViewTicketAi(serverId);
-        // Writes are performed by privileged backend only.
-        allow create, update, delete: if isSuperAdminUser();
+        // Staff members who can view can also claim/update issues
+        // Creates are handled by backend triggers, but updates are allowed for staff
+        allow create: if isSuperAdminUser();
+        allow update: if canViewTicketAi(serverId);
+        allow delete: if isSuperAdminUser();
       }
 
       match /ticketAiAnalytics/{timeRangeKey} {
