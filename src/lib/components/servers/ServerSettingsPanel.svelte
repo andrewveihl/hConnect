@@ -228,6 +228,7 @@
 	let roleAssignModalOpen = $state(false);
 	let domainModalOpen = $state(false);
 	let ticketAiModalOpen = $state(false);
+	let ticketAiModalInitialTab: 'analytics' | 'setup' = $state('analytics');
 	let ticketAiEnablePopupOpen = $state(false);
 	let banSearch = $state('');
 	let bans: Array<{ uid: string; reason?: string; bannedAt?: any }> = $state([]);
@@ -3840,7 +3841,6 @@
 											<div class="integration-card__content">
 												<div class="integration-card__header">
 													<span class="integration-card__title">Slack</span>
-													<span class="integration-card__badge">New</span>
 												</div>
 												<p class="integration-card__description">
 													Bridge Slack channels to sync messages with hConnect channels.
@@ -4101,8 +4101,10 @@
 		{roles}
 		currentUserId={$user?.uid ?? null}
 		members={membersWithProfiles}
+		initialTab={ticketAiModalInitialTab}
 		on:close={() => {
 			ticketAiModalOpen = false;
+			ticketAiModalInitialTab = 'analytics';
 			clearFeatureModal();
 		}}
 	/>
@@ -4117,8 +4119,9 @@
 		on:toggle={(e) => {
 			ticketAiEnabled = e.detail.enabled;
 		}}
-		on:configure={() => {
+		on:configure={(e) => {
 			ticketAiEnablePopupOpen = false;
+			ticketAiModalInitialTab = e.detail.tab;
 			ticketAiModalOpen = true;
 		}}
 	/>

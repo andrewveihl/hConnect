@@ -3,6 +3,8 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy, tick } from 'svelte';
+	
+	const PANEL_COLLAPSED_KEY = 'hconnect:desktop-user-panel-collapsed';
 	import { get } from 'svelte/store';
 	import { doc, onSnapshot, setDoc, deleteField, Timestamp } from 'firebase/firestore';
 	
@@ -72,6 +74,73 @@
 		return picked ?? 'You';
 	});
 
+	// Panel collapsed state
+	let panelCollapsed = $state(false);
+	let panelDragging = $state(false);
+	let panelDragStartX = $state(0);
+	let panelDragCurrentX = $state(0);
+	const DRAG_THRESHOLD = 60; // pixels to drag before snapping
+	const CLICK_THRESHOLD = 5; // pixels - if moved less than this, treat as click
+	
+	function setPanelCollapsed(collapsed: boolean) {
+		panelCollapsed = collapsed;
+		if (browser) {
+			localStorage.setItem(PANEL_COLLAPSED_KEY, collapsed ? '1' : '0');
+		}
+	}
+	
+	function handlePanelDragStart(event: MouseEvent | TouchEvent) {
+		// Only allow drag from avatar area
+		panelDragging = true;
+		const clientX = 'touches' in event ? event.touches[0].clientX : event.clientX;
+		panelDragStartX = clientX;
+		panelDragCurrentX = clientX;
+		
+		if (browser) {
+			document.addEventListener('mousemove', handlePanelDragMove);
+			document.addEventListener('mouseup', handlePanelDragEnd);
+			document.addEventListener('touchmove', handlePanelDragMove);
+			document.addEventListener('touchend', handlePanelDragEnd);
+		}
+	}
+	
+	function handlePanelDragMove(event: MouseEvent | TouchEvent) {
+		if (!panelDragging) return;
+		const clientX = 'touches' in event ? event.touches[0].clientX : event.clientX;
+		panelDragCurrentX = clientX;
+	}
+	
+	function handlePanelDragEnd(event: MouseEvent | TouchEvent) {
+		if (!panelDragging) return;
+		
+		const deltaX = panelDragCurrentX - panelDragStartX;
+		const absDeltaX = Math.abs(deltaX);
+		
+		// If barely moved, treat as a click - open settings
+		if (absDeltaX < CLICK_THRESHOLD) {
+			openUserSettings(event as MouseEvent);
+		}
+		// If expanded and dragged left enough, collapse
+		else if (!panelCollapsed && deltaX < -DRAG_THRESHOLD) {
+			setPanelCollapsed(true);
+		}
+		// If collapsed and dragged right enough, expand
+		else if (panelCollapsed && deltaX > DRAG_THRESHOLD) {
+			setPanelCollapsed(false);
+		}
+		
+		panelDragging = false;
+		panelDragStartX = 0;
+		panelDragCurrentX = 0;
+		
+		if (browser) {
+			document.removeEventListener('mousemove', handlePanelDragMove);
+			document.removeEventListener('mouseup', handlePanelDragEnd);
+			document.removeEventListener('touchmove', handlePanelDragMove);
+			document.removeEventListener('touchend', handlePanelDragEnd);
+		}
+	}
+
 	// FAB tray state - dynamic based on registered FABs
 	let fabTrayOpen = $state(false);
 	let fabTrayEl: HTMLDivElement | null = $state(null);
@@ -138,12 +207,18 @@
 		statusError = null;
 		try {
 			const firestore = db();
-			const ref = doc(firestore, 'profiles', uid, 'presence', 'override');
+			const overrideRef = doc(firestore, 'profiles', uid, 'presence', 'override');
+			const statusRef = doc(firestore, 'profiles', uid, 'presence', 'status');
+			
 			if (selection === 'auto') {
-				await setDoc(ref, { manualState: deleteField(), expiresAt: deleteField() }, { merge: true });
+				// Clear the override - remove manualState from both documents
+				await setDoc(overrideRef, { manualState: deleteField(), expiresAt: deleteField() }, { merge: true });
+				await setDoc(statusRef, { manualState: deleteField(), manualExpiresAt: deleteField() }, { merge: true });
 			} else {
 				const expiresAt = Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000);
-				await setDoc(ref, { manualState: selection, expiresAt }, { merge: true });
+				// Set the override in both documents so all components see it
+				await setDoc(overrideRef, { manualState: selection, expiresAt }, { merge: true });
+				await setDoc(statusRef, { manualState: selection, manualExpiresAt: expiresAt }, { merge: true });
 			}
 			statusMenuOpen = false;
 		} catch (err: any) {
@@ -498,6 +573,12 @@
 	}
 
 	onMount(() => {
+		// Load panel collapsed state from localStorage
+		if (browser) {
+			const stored = localStorage.getItem(PANEL_COLLAPSED_KEY);
+			panelCollapsed = stored === '1';
+		}
+		
 		const uid = get(user)?.uid;
 		if (uid && browser) {
 			const firestore = db();
@@ -615,29 +696,53 @@
 {/if}
 
 <!-- Modern user panel at the bottom of the sidebar -->
-<div class="desktop-user-panel">
-	<!-- User info section -->
-	<div class="desktop-user-panel__user-wrapper">
+<div class="desktop-user-panel" class:desktop-user-panel--collapsed={panelCollapsed} class:desktop-user-panel--dragging={panelDragging}>
+	<!-- Avatar section - always visible, changes behavior based on collapsed state -->
+	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+	<div
+		class="desktop-user-panel__avatar-section"
+		class:desktop-user-panel__avatar-section--collapsed={panelCollapsed}
+		role={panelCollapsed ? 'button' : undefined}
+		tabindex={panelCollapsed ? 0 : undefined}
+		onmousedown={panelCollapsed ? handlePanelDragStart : undefined}
+		ontouchstart={panelCollapsed ? handlePanelDragStart : undefined}
+		aria-label={panelCollapsed ? 'Drag right to expand, or click to open settings' : undefined}
+		title={panelCollapsed ? 'Drag right to expand' : undefined}
+	>
 		<div class="desktop-user-panel__avatar-wrapper">
-			<div class="desktop-user-panel__avatar-ring" class:desktop-user-panel__avatar-ring--active={isSettingsOpen || currentPath.startsWith('/settings')}>
-				<Avatar
-					user={$userProfile ?? $user}
-					size="sm"
-					isSelf={true}
-					class="desktop-user-panel__avatar"
-				/>
-			</div>
+			<button
+				type="button"
+				class="desktop-user-panel__avatar-btn-wrapper"
+				onclick={openUserSettings}
+				aria-label="Open user settings"
+				title="Open settings"
+			>
+				<div class="desktop-user-panel__avatar-ring" class:desktop-user-panel__avatar-ring--active={isSettingsOpen || currentPath.startsWith('/settings')}>
+					<Avatar
+						user={$userProfile ?? $user}
+						size="sm"
+						isSelf={true}
+						class="desktop-user-panel__avatar"
+					/>
+				</div>
+			</button>
 			<button
 				type="button"
 				class="status-indicator"
 				bind:this={statusButtonEl}
-				onclick={toggleStatusMenu}
+				onmousedown={panelCollapsed ? (e) => e.stopPropagation() : undefined}
+				ontouchstart={panelCollapsed ? (e) => e.stopPropagation() : undefined}
+				onclick={panelCollapsed ? (e) => { e.stopPropagation(); toggleStatusMenu(); } : toggleStatusMenu}
 				aria-label={`Set status (currently ${statusDotLabel()})`}
 				title="Set status"
 			>
 				<span class={`status-dot ${statusDotClass(myPresenceState)}`} aria-hidden="true"></span>
 			</button>
 		</div>
+	</div>
+	
+	<!-- Expanded content - user info and controls -->
+	<div class="desktop-user-panel__expanded-content" class:desktop-user-panel__expanded-content--hidden={panelCollapsed}>
 		<button 
 			type="button"
 			class="desktop-user-panel__user" 
@@ -647,7 +752,8 @@
 			<div class="desktop-user-panel__status">{statusDotLabel()}</div>
 		</button>
 	</div>
-	<div class="desktop-user-panel__controls">
+	<!-- Controls section - hidden when collapsed -->
+	<div class="desktop-user-panel__controls" class:desktop-user-panel__controls--hidden={panelCollapsed}>
 		<div class="desktop-user-panel__control">
 			<button
 				type="button"
@@ -757,10 +863,23 @@
 			</div>
 		{/if}
 	</div>
-</div>
-
-<!-- Status menu popup -->
-{#if statusMenuOpen}
+	<!-- Drag handle on the right edge - only when expanded -->
+	{#if !panelCollapsed}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div
+		class="desktop-user-panel__drag-handle"
+		role="separator"
+		aria-orientation="vertical"
+		aria-label="Drag left to collapse panel"
+		onmousedown={handlePanelDragStart}
+		ontouchstart={handlePanelDragStart}
+	>
+		<div class="desktop-user-panel__drag-handle-bar"></div>
+	</div>
+	{/if}
+	
+	<!-- Status menu popup -->
+	{#if statusMenuOpen}
 		<div
 			class="status-menu"
 			bind:this={statusMenuEl}
@@ -825,7 +944,8 @@
 				<div class="status-menu__hint">Manual statuses expire after 24 hours.</div>
 			{/if}
 		</div>
-{/if}
+	{/if}
+</div>
 
 <style>
 	/* ===== FAB TRAY TOGGLE - In controls section ===== */
@@ -1020,6 +1140,95 @@
 		transition: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
+	/* Collapsed state - compact pill with just avatar */
+	.desktop-user-panel--collapsed {
+		width: 72px;
+		min-width: 72px;
+		padding: 10px 14px;
+		gap: 8px;
+		height: 72px;
+	}
+
+	/* Dragging state - disable transition for immediate feedback */
+	.desktop-user-panel--dragging {
+		user-select: none;
+		transition: none;
+	}
+
+	/* Avatar section - always visible */
+	.desktop-user-panel__avatar-section {
+		display: flex;
+		align-items: center;
+		flex-shrink: 0;
+	}
+
+	.desktop-user-panel__avatar-section--collapsed {
+		cursor: grab;
+	}
+
+	.desktop-user-panel__avatar-section--collapsed:active {
+		cursor: grabbing;
+	}
+
+	/* Expanded content - user info that fades/slides */
+	.desktop-user-panel__expanded-content {
+		display: flex;
+		align-items: center;
+		flex: 1;
+		min-width: 0;
+		opacity: 1;
+		transform: translateX(0);
+		transition: opacity 200ms ease-out, transform 200ms ease-out;
+	}
+
+	.desktop-user-panel__expanded-content--hidden {
+		opacity: 0;
+		transform: translateX(-10px);
+		width: 0;
+		overflow: hidden;
+		pointer-events: none;
+	}
+
+	/* Controls - also fade/slide */
+	.desktop-user-panel__controls--hidden {
+		opacity: 0;
+		transform: translateX(-10px);
+		width: 0;
+		overflow: hidden;
+		pointer-events: none;
+	}
+
+	/* Collapsed wrapper - holds the avatar for drag-to-expand */
+	.desktop-user-panel__collapsed-wrapper {
+		display: flex;
+		align-items: center;
+		cursor: grab;
+	}
+
+	.desktop-user-panel__collapsed-wrapper:active {
+		cursor: grabbing;
+	}
+
+	/* Right-side drag handle for collapsing - invisible overlay */
+	.desktop-user-panel__drag-handle {
+		position: absolute;
+		right: 0;
+		top: 0;
+		bottom: 0;
+		width: 20px;
+		cursor: grab;
+		z-index: 10;
+		border-radius: 0 16px 16px 0;
+	}
+
+	.desktop-user-panel__drag-handle:active {
+		cursor: grabbing;
+	}
+
+	.desktop-user-panel__drag-handle-bar {
+		display: none;
+	}
+
 	@media (min-width: 768px) {
 		.desktop-user-panel {
 			display: flex;
@@ -1032,14 +1241,11 @@
 		gap: 12px;
 		flex: 1;
 		min-width: 0;
-		max-width: calc(100% - 90px);
 	}
 
 	.desktop-user-panel__user {
 		display: flex;
 		flex-direction: column;
-		flex: 1;
-		min-width: 0;
 		padding: 4px 2px;
 		border-radius: 10px;
 		cursor: pointer;
@@ -1059,6 +1265,22 @@
 	.desktop-user-panel__avatar-wrapper {
 		position: relative;
 		flex-shrink: 0;
+	}
+
+	/* Clickable avatar button wrapper for settings */
+	.desktop-user-panel__avatar-btn-wrapper {
+		position: relative;
+		flex-shrink: 0;
+		background: transparent;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		border-radius: 9999px;
+		transition: all 200ms ease;
+	}
+
+	.desktop-user-panel__avatar-btn-wrapper:hover {
+		transform: scale(1.05);
 	}
 
 	.desktop-user-panel__avatar-ring {
@@ -1152,8 +1374,6 @@
 		font-weight: 600;
 		color: var(--color-text-primary);
 		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
 		line-height: 1.3;
 		letter-spacing: -0.015em;
 	}
@@ -1175,6 +1395,9 @@
 		gap: 6px;
 		flex-shrink: 0;
 		position: relative;
+		opacity: 1;
+		transform: translateX(0);
+		transition: opacity 200ms ease-out, transform 200ms ease-out;
 	}
 
 	.desktop-user-panel__control {

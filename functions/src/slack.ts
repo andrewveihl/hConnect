@@ -9,7 +9,9 @@ import { onRequest, onCall, HttpsError } from 'firebase-functions/v2/https';
 import type { Request, Response } from 'express';
 import { db } from './firebase';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 import * as crypto from 'crypto';
+import { randomUUID } from 'crypto';
 
 // ============ Types ============
 
@@ -46,6 +48,8 @@ interface SlackEvent {
 	subtype?: string;
 	bot_id?: string;
 	files?: SlackFile[];
+	// Slack attachments (unfurled links, Giphy, etc.)
+	attachments?: SlackAttachment[];
 	// Reaction events
 	reaction?: string;
 	item?: {
@@ -63,6 +67,29 @@ interface SlackFile {
 	mimetype: string;
 	url_private: string;
 	size: number;
+}
+
+interface SlackAttachment {
+	id?: number;
+	service_name?: string; // e.g., 'giphy', 'tenor'
+	service_icon?: string;
+	image_url?: string;
+	thumb_url?: string;
+	original_url?: string;
+	fallback?: string;
+	title?: string;
+	title_link?: string;
+	from_url?: string;
+	is_animated?: boolean;
+	// Block Kit structure for GIFs (Giphy/Tenor via Slack)
+	blocks?: Array<{
+		type: string;
+		block_id?: string;
+		image_url?: string;
+		alt_text?: string;
+		is_animated?: boolean;
+		title?: { type: string; text: string };
+	}>;
 }
 
 interface SlackChannelBridge {
@@ -105,6 +132,9 @@ const THREAD_DEFAULT_TTL_HOURS = 24;
 const THREAD_MAX_MEMBER_LIMIT = 20;
 const THREAD_ARCHIVE_MAX_HOURS = 7 * 24;
 const THREAD_VISIBILITY = 'inherit_parent_with_exceptions';
+
+// Default hConnect icon URL for Slack messages (when user has no avatar)
+const DEFAULT_HCONNECT_ICON = 'https://firebasestorage.googleapis.com/v0/b/hconnect-6212b.appspot.com/o/app%2Flogo-icon.png?alt=media';
 
 // Slack emoji name to Unicode mapping (common emojis)
 const SLACK_EMOJI_MAP: Record<string, string> = {
@@ -700,6 +730,295 @@ const pickMessageAuthorId = (data?: Record<string, any> | null): string | null =
 	return picked || null;
 };
 
+// ============ GIF URL Extraction Helpers ============
+
+/**
+ * Extract GIF URL from Slack attachments (unfurled Giphy, Tenor, etc.)
+ */
+function extractGifFromAttachments(attachments?: SlackAttachment[]): string | null {
+	if (!attachments || attachments.length === 0) return null;
+
+	for (const attachment of attachments) {
+		// First check blocks array (new Slack format for Giphy/Tenor)
+		if (attachment.blocks && attachment.blocks.length > 0) {
+			for (const block of attachment.blocks) {
+				if (block.type === 'image' && block.image_url) {
+					const lowerUrl = block.image_url.toLowerCase();
+					// Check if it's animated or from a GIF service
+					if (block.is_animated || lowerUrl.includes('.gif') || 
+					    lowerUrl.includes('giphy') || lowerUrl.includes('tenor') || lowerUrl.includes('gfycat')) {
+						return block.image_url;
+					}
+				}
+			}
+		}
+
+		// Check if this is from a GIF service (legacy format)
+		const serviceName = attachment.service_name?.toLowerCase() || '';
+		const isGifService = serviceName.includes('giphy') || serviceName.includes('tenor') || serviceName.includes('gfycat');
+		
+		// Check if it's an animated image
+		const isAnimated = attachment.is_animated === true;
+		
+		// Get the best available image URL
+		const imageUrl = attachment.image_url || attachment.thumb_url;
+		
+		if (imageUrl) {
+			// Check if URL contains .gif or is from a known GIF service
+			const lowerUrl = imageUrl.toLowerCase();
+			if (isGifService || isAnimated || lowerUrl.includes('.gif') || 
+			    lowerUrl.includes('giphy') || lowerUrl.includes('tenor') || lowerUrl.includes('gfycat')) {
+				return imageUrl;
+			}
+		}
+		
+		// Also check original_url and from_url for GIF sources
+		const originalUrl = attachment.original_url || attachment.from_url;
+		if (originalUrl) {
+			const lowerUrl = originalUrl.toLowerCase();
+			if (lowerUrl.includes('giphy.com') || lowerUrl.includes('tenor.com') || 
+			    lowerUrl.includes('gfycat.com') || lowerUrl.endsWith('.gif')) {
+				// Return the image_url if available, otherwise try to construct one
+				return attachment.image_url || attachment.thumb_url || originalUrl;
+			}
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Extract GIF URL from message text (direct GIF links)
+ */
+function extractGifUrlFromText(text: string): string | null {
+	if (!text) return null;
+
+	// Pattern to match common GIF URLs
+	const gifUrlPatterns = [
+		// Direct .gif URLs
+		/(https?:\/\/[^\s<>]+\.gif)(?:\?[^\s<>]*)?/i,
+		// Giphy URLs
+		/(https?:\/\/(?:media\d*\.)?giphy\.com\/[^\s<>]+)/i,
+		// Tenor URLs
+		/(https?:\/\/(?:media\.)?tenor\.com\/[^\s<>]+)/i,
+		// Gfycat URLs  
+		/(https?:\/\/(?:thumbs\.)?gfycat\.com\/[^\s<>]+)/i,
+		// Imgur GIFs
+		/(https?:\/\/i\.imgur\.com\/[^\s<>]+\.gif)/i
+	];
+
+	for (const pattern of gifUrlPatterns) {
+		const match = text.match(pattern);
+		if (match) {
+			return match[1];
+		}
+	}
+
+	return null;
+}
+
+// ============ File Handling Helpers ============
+
+/**
+ * Build a Firebase Storage download URL with token
+ */
+function buildStorageDownloadUrl(bucketName: string, filePath: string, token: string): string {
+	return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
+}
+
+/**
+ * Determine if a file is an image based on mimetype
+ */
+function isImageMimetype(mimetype: string | undefined): boolean {
+	if (!mimetype) return false;
+	return mimetype.startsWith('image/');
+}
+
+/**
+ * Download a file from Slack's private URL and upload to Firebase Storage
+ * Returns the public download URL or null if failed
+ */
+async function downloadSlackFileToStorage(
+	file: SlackFile,
+	botToken: string,
+	serverId: string,
+	channelId: string,
+	messageId: string
+): Promise<{ url: string; storagePath: string } | null> {
+	try {
+		logger.info('[slack-file] Downloading file from Slack', {
+			fileId: file.id,
+			fileName: file.name,
+			mimetype: file.mimetype,
+			size: file.size
+		});
+
+		// Download the file from Slack (requires bot token for private URLs)
+		const response = await fetch(file.url_private, {
+			headers: {
+				'Authorization': `Bearer ${botToken}`
+			}
+		});
+
+		if (!response.ok) {
+			logger.error('[slack-file] Failed to download from Slack', {
+				fileId: file.id,
+				status: response.status
+			});
+			return null;
+		}
+
+		const buffer = Buffer.from(await response.arrayBuffer());
+
+		// Upload to Firebase Storage
+		const bucket = getStorage().bucket();
+		const timestamp = Date.now();
+		const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+		const storagePath = `servers/${serverId}/channels/${channelId}/slack-files/${timestamp}_${safeFileName}`;
+		const storageFile = bucket.file(storagePath);
+
+		const downloadToken = randomUUID();
+		await storageFile.save(buffer, {
+			metadata: {
+				contentType: file.mimetype || 'application/octet-stream',
+				metadata: {
+					firebaseStorageDownloadTokens: downloadToken,
+					originalSlackFileId: file.id,
+					originalFileName: file.name
+				}
+			}
+		});
+
+		const downloadUrl = buildStorageDownloadUrl(bucket.name, storagePath, downloadToken);
+
+		logger.info('[slack-file] File uploaded to Storage', {
+			fileId: file.id,
+			storagePath,
+			downloadUrl: downloadUrl.substring(0, 80) + '...'
+		});
+
+		return { url: downloadUrl, storagePath };
+	} catch (err) {
+		logger.error('[slack-file] Error downloading/uploading file', {
+			fileId: file.id,
+			error: err
+		});
+		return null;
+	}
+}
+
+/**
+ * Upload a file from URL to Slack
+ * Returns the Slack file ID or null if failed
+ */
+async function uploadFileToSlack(
+	botToken: string,
+	channelId: string,
+	fileUrl: string,
+	fileName: string,
+	threadTs?: string
+): Promise<{ ok: boolean; fileId?: string; error?: string }> {
+	try {
+		logger.info('[slack-file-upload] Downloading file for Slack upload', { fileUrl: fileUrl.substring(0, 80) });
+
+		// Download the file first
+		const response = await fetch(fileUrl);
+		if (!response.ok) {
+			logger.error('[slack-file-upload] Failed to download file', { status: response.status });
+			return { ok: false, error: 'download_failed' };
+		}
+
+		const buffer = Buffer.from(await response.arrayBuffer());
+		const contentType = response.headers.get('content-type') || 'application/octet-stream';
+		const fileSize = buffer.length;
+
+		logger.info('[slack-file-upload] File downloaded', { 
+			fileName, 
+			contentType, 
+			size: fileSize 
+		});
+
+		// Step 1: Get upload URL from Slack
+		const getUploadUrlResponse = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${botToken}`,
+				'Content-Type': 'application/x-www-form-urlencoded'
+			},
+			body: new URLSearchParams({
+				filename: fileName,
+				length: fileSize.toString()
+			})
+		});
+
+		const uploadUrlResult = await getUploadUrlResponse.json() as { 
+			ok: boolean; 
+			upload_url?: string; 
+			file_id?: string; 
+			error?: string 
+		};
+
+		if (!uploadUrlResult.ok || !uploadUrlResult.upload_url) {
+			logger.error('[slack-file-upload] Failed to get upload URL', { error: uploadUrlResult.error });
+			return { ok: false, error: uploadUrlResult.error || 'get_upload_url_failed' };
+		}
+
+		logger.info('[slack-file-upload] Got upload URL', { fileId: uploadUrlResult.file_id });
+
+		// Step 2: Upload file to the URL
+		const uploadResponse = await fetch(uploadUrlResult.upload_url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': contentType
+			},
+			body: buffer
+		});
+
+		if (!uploadResponse.ok) {
+			logger.error('[slack-file-upload] Failed to upload to URL', { status: uploadResponse.status });
+			return { ok: false, error: 'upload_failed' };
+		}
+
+		// Step 3: Complete the upload
+		const completeParams: Record<string, string> = {
+			files: JSON.stringify([{ id: uploadUrlResult.file_id, title: fileName }]),
+			channel_id: channelId
+		};
+		
+		if (threadTs) {
+			completeParams.thread_ts = threadTs;
+		}
+
+		const completeResponse = await fetch('https://slack.com/api/files.completeUploadExternal', {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${botToken}`,
+				'Content-Type': 'application/x-www-form-urlencoded'
+			},
+			body: new URLSearchParams(completeParams)
+		});
+
+		const completeResult = await completeResponse.json() as { 
+			ok: boolean; 
+			files?: Array<{ id: string }>; 
+			error?: string 
+		};
+
+		if (!completeResult.ok) {
+			logger.error('[slack-file-upload] Failed to complete upload', { error: completeResult.error });
+			return { ok: false, error: completeResult.error };
+		}
+
+		logger.info('[slack-file-upload] File uploaded to Slack', { 
+			fileId: completeResult.files?.[0]?.id || uploadUrlResult.file_id 
+		});
+		return { ok: true, fileId: completeResult.files?.[0]?.id || uploadUrlResult.file_id };
+	} catch (err) {
+		logger.error('[slack-file-upload] Error uploading file to Slack', { error: err });
+		return { ok: false, error: 'upload_exception' };
+	}
+}
+
 // ============ Credentials Helpers ============
 
 /**
@@ -754,7 +1073,11 @@ function verifySlackSignature(
 	// Check timestamp is within 5 minutes
 	const time = Math.floor(Date.now() / 1000);
 	if (Math.abs(time - parseInt(timestamp)) > 300) {
-		logger.warn('[slack] Request timestamp too old');
+		logger.warn('[slack] Request timestamp too old', {
+			serverTime: time,
+			requestTime: parseInt(timestamp),
+			diff: Math.abs(time - parseInt(timestamp))
+		});
 		return false;
 	}
 
@@ -765,10 +1088,21 @@ function verifySlackSignature(
 		.update(sigBaseString, 'utf8')
 		.digest('hex');
 
-	return crypto.timingSafeEqual(
+	const isValid = crypto.timingSafeEqual(
 		Buffer.from(mySignature, 'utf8'),
 		Buffer.from(signature, 'utf8')
 	);
+
+	if (!isValid) {
+		logger.warn('[slack] Signature verification failed', {
+			receivedSignature: signature.substring(0, 20) + '...',
+			computedSignature: mySignature.substring(0, 20) + '...',
+			bodyLength: body.length,
+			bodyPreview: body.substring(0, 100)
+		});
+	}
+
+	return isValid;
 }
 
 // ============ Slack API Helpers ============
@@ -922,13 +1256,27 @@ async function syncSlackMessageToHConnect(
 	workspace: SlackWorkspace,
 	serverId: string
 ): Promise<void> {
+	logger.info('[slack] syncSlackMessageToHConnect called', {
+		eventType: event.type,
+		subtype: event.subtype,
+		hasFiles: !!(event.files && event.files.length > 0),
+		fileCount: event.files?.length || 0,
+		hasAttachments: !!(event.attachments && event.attachments.length > 0),
+		attachmentCount: event.attachments?.length || 0,
+		// Log the full attachment objects to see what Slack sends
+		attachmentsRaw: event.attachments ? JSON.stringify(event.attachments).substring(0, 500) : null,
+		text: event.text?.substring(0, 100),
+		user: event.user,
+		botId: event.bot_id
+	});
+
 	// Skip bot messages to avoid loops
 	if (event.bot_id || event.subtype === 'bot_message') {
 		logger.info('[slack] Skipping bot message');
 		return;
 	}
 
-	// Skip message subtypes we don't handle
+	// Skip message subtypes we don't handle (except file_share which we do want)
 	const skipSubtypes = ['channel_join', 'channel_leave', 'channel_topic', 'channel_purpose'];
 	if (event.subtype && skipSubtypes.includes(event.subtype)) {
 		logger.info('[slack] Skipping system message', { subtype: event.subtype });
@@ -953,11 +1301,6 @@ async function syncSlackMessageToHConnect(
 	const hconnectServerId = bridge.hconnectServerId || serverId;
 	const hconnectChannelId = bridge.hconnectChannelId;
 	const slackUid = `slack:${event.user}`;
-
-	// Create the message document
-	let messageRef = db
-		.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`)
-		.doc();
 
 	// Check if this is a thread reply and find the parent message
 	let replyToId: string | null = null;
@@ -1005,13 +1348,296 @@ async function syncSlackMessageToHConnect(
 		}
 	}
 
-	if (threadTarget) {
-		messageRef = db
-			.collection(
-				`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`
-			)
-			.doc();
+	// Process file attachments if present and bridge has attachment sync enabled
+	const hasFiles = event.files && event.files.length > 0;
+	const shouldSyncAttachments = bridge.syncAttachments !== false; // Default to true
+
+	// Check for GIF URLs in attachments (unfurled Giphy/Tenor links)
+	const gifFromAttachment = extractGifFromAttachments(event.attachments);
+	
+	// Also check for GIF URLs in message text
+	const gifFromText = extractGifUrlFromText(content);
+	
+	const externalGifUrl = gifFromAttachment || gifFromText;
+
+	// Handle external GIFs (from Giphy, Tenor, or direct URLs)
+	if (externalGifUrl && shouldSyncAttachments) {
+		logger.info('[slack] Found external GIF URL', {
+			gifUrl: externalGifUrl.substring(0, 80),
+			source: gifFromAttachment ? 'attachment' : 'text'
+		});
+
+		const messageRef = threadTarget
+			? db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`).doc()
+			: db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`).doc();
+
+		// Create a GIF message with the external URL (no need to download/re-upload)
+		const gifMessageData = {
+			uid: slackUid,
+			authorId: slackUid,
+			type: 'gif',
+			url: externalGifUrl,
+			plainTextContent: 'shared a GIF',
+			text: 'shared a GIF',
+			content: 'shared a GIF',
+			author: {
+				displayName: authorName,
+				photoURL: authorAvatar || null,
+				isSlackUser: true
+			},
+			displayName: authorName,
+			slackMeta: {
+				teamId: event.team || bridge.slackTeamId,
+				channelId: event.channel,
+				userId: event.user,
+				messageTs: event.ts,
+				threadTs: event.thread_ts || null,
+				bridgeId: bridge.id,
+				isThreadReply
+			},
+			createdAt: Timestamp.now(),
+			updatedAt: Timestamp.now(),
+			isSlackMessage: true,
+			...(threadTarget && {
+				serverId: hconnectServerId,
+				channelId: hconnectChannelId,
+				threadId: threadTarget.id
+			}),
+			...(replyToId && !threadTarget && { replyTo: replyToId }),
+			...(isThreadReply && { isThreadReply: true })
+		};
+
+		await messageRef.set(gifMessageData);
+
+		logger.info('[slack] External GIF synced to hConnect', {
+			bridgeId: bridge.id,
+			messageId: messageRef.id,
+			gifUrl: externalGifUrl.substring(0, 60)
+		});
+
+		// Update thread and bridge stats
+		if (threadTarget) {
+			const ttlHours = typeof threadTarget.data?.ttlHours === 'number'
+				? threadTarget.data.ttlHours
+				: THREAD_DEFAULT_TTL_HOURS;
+
+			await db
+				.doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
+				.update({
+					lastMessageAt: Timestamp.now(),
+					lastMessagePreview: 'shared a GIF',
+					autoArchiveAt: nextAutoArchiveAt(ttlHours),
+					status: 'active',
+					archivedAt: null,
+					messageCount: FieldValue.increment(1)
+				});
+		}
+
+		await db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
+			lastSyncAt: Timestamp.now(),
+			messageCount: FieldValue.increment(1)
+		});
+
+		return;
 	}
+
+	if (hasFiles && shouldSyncAttachments) {
+		logger.info('[slack] Message has file attachments', {
+			fileCount: event.files!.length,
+			files: event.files!.map(f => ({ id: f.id, name: f.name, mimetype: f.mimetype }))
+		});
+
+		// Process each file as a separate message
+		for (const file of event.files!) {
+			const messageRef = threadTarget
+				? db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`).doc()
+				: db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`).doc();
+
+			// Try to download and upload the file to Firebase Storage
+			const uploadResult = await downloadSlackFileToStorage(
+				file,
+				workspace.botAccessToken,
+				hconnectServerId,
+				hconnectChannelId,
+				messageRef.id
+			);
+
+			if (uploadResult) {
+				// Determine if this is a GIF - if so, use gif type instead of file type
+				const isGif = file.mimetype === 'image/gif';
+				
+				const baseMessageData = {
+					uid: slackUid,
+					authorId: slackUid,
+					author: {
+						displayName: authorName,
+						photoURL: authorAvatar || null,
+						isSlackUser: true
+					},
+					displayName: authorName,
+					slackMeta: {
+						teamId: event.team || bridge.slackTeamId,
+						channelId: event.channel,
+						userId: event.user,
+						messageTs: event.ts,
+						threadTs: event.thread_ts || null,
+						bridgeId: bridge.id,
+						isThreadReply,
+						fileId: file.id
+					},
+					createdAt: Timestamp.now(),
+					updatedAt: Timestamp.now(),
+					isSlackMessage: true,
+					...(threadTarget && {
+						serverId: hconnectServerId,
+						channelId: hconnectChannelId,
+						threadId: threadTarget.id
+					}),
+					...(replyToId && !threadTarget && { replyTo: replyToId }),
+					...(isThreadReply && { isThreadReply: true })
+				};
+
+				const fileMessageData = isGif
+					? {
+						// GIF type message - hConnect expects url at root level
+						...baseMessageData,
+						type: 'gif',
+						url: uploadResult.url,
+						plainTextContent: content || 'shared a GIF',
+						text: content || 'shared a GIF',
+						content: content || 'shared a GIF',
+						gifMeta: {
+							originalName: file.name,
+							storagePath: uploadResult.storagePath,
+							size: file.size
+						}
+					}
+					: {
+						// Regular file type message
+						...baseMessageData,
+						type: 'file',
+						file: {
+							name: file.name,
+							url: uploadResult.url,
+							size: file.size,
+							contentType: file.mimetype,
+							storagePath: uploadResult.storagePath
+						},
+						plainTextContent: `Shared ${file.name}`,
+						text: content || `Shared ${file.name}`,
+						content: content || `Shared ${file.name}`
+					};
+
+				await messageRef.set(fileMessageData);
+
+				logger.info('[slack] File message synced to hConnect', {
+					bridgeId: bridge.id,
+					messageId: messageRef.id,
+					fileName: file.name,
+					messageType: isGif ? 'gif' : 'file'
+				});
+			} else {
+				// Fallback: create a text message with a note about the failed file
+				logger.warn('[slack] Failed to download Slack file, creating text reference', {
+					fileId: file.id,
+					fileName: file.name
+				});
+			}
+		}
+
+		// If there's also text content (not just files), create a separate text message
+		if (content && content.trim()) {
+			await createTextMessageFromSlack(
+				event, bridge, workspace, serverId,
+				hconnectServerId, hconnectChannelId, slackUid,
+				authorName, authorAvatar, content,
+				replyToId, isThreadReply, threadTarget
+			);
+		}
+
+		// Update thread and bridge stats
+		if (threadTarget) {
+			const preview = previewFromText(content, 120) || 'Shared a file';
+			const ttlHours = typeof threadTarget.data?.ttlHours === 'number'
+				? threadTarget.data.ttlHours
+				: THREAD_DEFAULT_TTL_HOURS;
+
+			await db
+				.doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
+				.update({
+					lastMessageAt: Timestamp.now(),
+					lastMessagePreview: preview,
+					autoArchiveAt: nextAutoArchiveAt(ttlHours),
+					status: 'active',
+					archivedAt: null,
+					messageCount: FieldValue.increment(event.files!.length + (content?.trim() ? 1 : 0))
+				});
+		}
+
+		await db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
+			lastSyncAt: Timestamp.now(),
+			messageCount: FieldValue.increment(event.files!.length + (content?.trim() ? 1 : 0))
+		});
+
+		return;
+	}
+
+	// No files - create a regular text message
+	await createTextMessageFromSlack(
+		event, bridge, workspace, serverId,
+		hconnectServerId, hconnectChannelId, slackUid,
+		authorName, authorAvatar, content,
+		replyToId, isThreadReply, threadTarget
+	);
+
+	if (threadTarget) {
+		const preview = previewFromText(content, 120) || 'New message';
+		const ttlHours =
+			typeof threadTarget.data?.ttlHours === 'number'
+				? threadTarget.data.ttlHours
+				: THREAD_DEFAULT_TTL_HOURS;
+
+		await db
+			.doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
+			.update({
+				lastMessageAt: Timestamp.now(),
+				lastMessagePreview: preview,
+				autoArchiveAt: nextAutoArchiveAt(ttlHours),
+				status: 'active',
+				archivedAt: null,
+				messageCount: FieldValue.increment(1)
+			});
+	}
+
+	// Update bridge stats (using per-server path)
+	await db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
+		lastSyncAt: Timestamp.now(),
+		messageCount: FieldValue.increment(1)
+	});
+}
+
+/**
+ * Helper to create a text message from Slack
+ */
+async function createTextMessageFromSlack(
+	event: SlackEvent,
+	bridge: SlackChannelBridge,
+	workspace: SlackWorkspace,
+	serverId: string,
+	hconnectServerId: string,
+	hconnectChannelId: string,
+	slackUid: string,
+	authorName: string,
+	authorAvatar: string | undefined,
+	content: string,
+	replyToId: string | null,
+	isThreadReply: boolean,
+	threadTarget: { id: string; data: Record<string, any> } | null
+): Promise<void> {
+	// Create the message document
+	const messageRef = threadTarget
+		? db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}/messages`).doc()
+		: db.collection(`servers/${hconnectServerId}/channels/${hconnectChannelId}/messages`).doc();
 
 	const baseMessageData = {
 		// Core fields
@@ -1064,31 +1690,6 @@ async function syncSlackMessageToHConnect(
 			};
 
 	await messageRef.set(messageData);
-
-	if (threadTarget) {
-		const preview = previewFromText(content, 120) || 'New message';
-		const ttlHours =
-			typeof threadTarget.data?.ttlHours === 'number'
-				? threadTarget.data.ttlHours
-				: THREAD_DEFAULT_TTL_HOURS;
-
-		await db
-			.doc(`servers/${hconnectServerId}/channels/${hconnectChannelId}/threads/${threadTarget.id}`)
-			.update({
-				lastMessageAt: Timestamp.now(),
-				lastMessagePreview: preview,
-				autoArchiveAt: nextAutoArchiveAt(ttlHours),
-				status: 'active',
-				archivedAt: null,
-				messageCount: FieldValue.increment(1)
-			});
-	}
-
-	// Update bridge stats (using per-server path)
-	await db.doc(`servers/${hconnectServerId}/integrations/slack/bridges/${bridge.id}`).update({
-		lastSyncAt: Timestamp.now(),
-		messageCount: FieldValue.increment(1)
-	});
 
 	logger.info('[slack] Message synced to hConnect', {
 		bridgeId: bridge.id,
@@ -1290,6 +1891,17 @@ async function syncSlackReactionToHConnect(
 			serverId: hconnectServerId,
 			channelId: bridge.hconnectChannelId
 		});
+
+		// Even if no hConnect message found, still try to resolve tickets on green checkmark
+		// This handles cases where messages exist in hConnect but weren't synced from Slack
+		if (isAdd && isGreenCheckmarkReaction(event.reaction)) {
+			await resolveTicketFromSlackReaction(
+				hconnectServerId,
+				bridge.hconnectChannelId,
+				event.item.ts,
+				event.user
+			);
+		}
 		return;
 	}
 
@@ -1364,6 +1976,199 @@ async function syncSlackReactionToHConnect(
 			user: slackUserId
 		});
 	}
+
+	// Check if this is a green checkmark reaction being added - if so, resolve the associated ticket
+	if (isAdd && isGreenCheckmarkReaction(event.reaction)) {
+		await resolveTicketFromSlackCheckmark(
+			hconnectServerId,
+			bridge.hconnectChannelId,
+			message.id,
+			message.threadId || null,
+			event.user
+		);
+	}
+}
+
+/**
+ * Check if a Slack emoji name represents a green checkmark
+ */
+function isGreenCheckmarkReaction(emojiName: string): boolean {
+	const checkmarkEmojis = [
+		'white_check_mark',
+		'heavy_check_mark',
+		'ballot_box_with_check',
+		'check',
+		'✅',
+		'✔️',
+		'☑️'
+	];
+	return checkmarkEmojis.includes(emojiName.toLowerCase());
+}
+
+/**
+ * Resolve a ticket when a green checkmark is added on Slack
+ */
+async function resolveTicketFromSlackCheckmark(
+	serverId: string,
+	channelId: string,
+	messageId: string,
+	threadId: string | null,
+	slackUserId: string
+): Promise<void> {
+	try {
+		// First, determine potential ticket IDs
+		// Tickets can be stored by threadId or parentMessageId
+		const potentialTicketIds: string[] = [];
+
+		if (threadId) {
+			// If we're in a thread, use the threadId
+			potentialTicketIds.push(threadId);
+		}
+
+		// Also check if the message itself is a parent message that has a ticket
+		potentialTicketIds.push(messageId);
+
+		// If in a thread, also check if the thread was created from a message
+		if (threadId) {
+			const threadDoc = await db.doc(`servers/${serverId}/channels/${channelId}/threads/${threadId}`).get();
+			if (threadDoc.exists) {
+				const threadData = threadDoc.data();
+				if (threadData?.createdFromMessageId) {
+					potentialTicketIds.push(threadData.createdFromMessageId);
+				}
+			}
+		}
+
+		// Try to find and resolve the ticket
+		for (const ticketId of potentialTicketIds) {
+			const ticketRef = db.doc(`servers/${serverId}/ticketAiIssues/${ticketId}`);
+			const ticketSnap = await ticketRef.get();
+
+			if (ticketSnap.exists) {
+				const ticketData = ticketSnap.data();
+				
+				// Only resolve if not already closed
+				if (ticketData?.status !== 'closed') {
+					const now = Timestamp.now();
+					const rootCreatedAt = ticketData?.rootCreatedAt?.toDate?.() ?? ticketData?.createdAt?.toDate?.() ?? new Date();
+					const timeToResolutionMs = now.toDate().getTime() - rootCreatedAt.getTime();
+
+					// Build status timeline update
+					const statusTimeline = Array.isArray(ticketData?.statusTimeline) 
+						? [...ticketData.statusTimeline] 
+						: [];
+					statusTimeline.push({ status: 'closed', at: now });
+
+					await ticketRef.update({
+						status: 'closed',
+						closedAt: now,
+						timeToResolutionMs,
+						statusTimeline,
+						updatedAt: now,
+						resolvedViaSlack: true,
+						resolvedBySlackUser: `slack:${slackUserId}`
+					});
+
+					logger.info('[slack] Ticket resolved via Slack checkmark reaction', {
+						serverId,
+						channelId,
+						ticketId,
+						slackUserId
+					});
+
+					// Only resolve one ticket
+					return;
+				}
+			}
+		}
+
+		logger.debug('[slack] No open ticket found for checkmark reaction', {
+			serverId,
+			channelId,
+			messageId,
+			threadId,
+			potentialTicketIds
+		});
+	} catch (err) {
+		logger.error('[slack] Error resolving ticket from checkmark', {
+			serverId,
+			channelId,
+			messageId,
+			threadId,
+			error: err
+		});
+	}
+}
+
+/**
+ * Resolve a ticket from Slack reaction when we don't have a direct message match
+ * Uses Slack timestamp to find messages with slackMeta and then find tickets
+ */
+async function resolveTicketFromSlackReaction(
+	serverId: string,
+	channelId: string,
+	slackTs: string,
+	slackUserId: string
+): Promise<void> {
+	try {
+		// Look for messages with this Slack timestamp in slackMeta
+		// This handles messages that originated in hConnect and were synced to Slack
+		const messagesSnapshot = await db
+			.collection(`servers/${serverId}/channels/${channelId}/messages`)
+			.where('slackMeta.messageTs', '==', slackTs)
+			.limit(1)
+			.get();
+
+		if (!messagesSnapshot.empty) {
+			const msgDoc = messagesSnapshot.docs[0];
+			await resolveTicketFromSlackCheckmark(
+				serverId,
+				channelId,
+				msgDoc.id,
+				null,
+				slackUserId
+			);
+			return;
+		}
+
+		// Also search in threads - check all threads for messages with this slack timestamp
+		const threadsSnapshot = await db
+			.collection(`servers/${serverId}/channels/${channelId}/threads`)
+			.get();
+
+		for (const threadDoc of threadsSnapshot.docs) {
+			const threadMessagesSnapshot = await db
+				.collection(`servers/${serverId}/channels/${channelId}/threads/${threadDoc.id}/messages`)
+				.where('slackMeta.messageTs', '==', slackTs)
+				.limit(1)
+				.get();
+
+			if (!threadMessagesSnapshot.empty) {
+				const msgDoc = threadMessagesSnapshot.docs[0];
+				await resolveTicketFromSlackCheckmark(
+					serverId,
+					channelId,
+					msgDoc.id,
+					threadDoc.id,
+					slackUserId
+				);
+				return;
+			}
+		}
+
+		logger.debug('[slack] No ticket found for Slack checkmark reaction without hConnect message', {
+			serverId,
+			channelId,
+			slackTs
+		});
+	} catch (err) {
+		logger.error('[slack] Error in resolveTicketFromSlackReaction', {
+			serverId,
+			channelId,
+			slackTs,
+			error: err
+		});
+	}
 }
 
 // ============ Main Webhook Handler ============
@@ -1384,7 +2189,8 @@ export const slackWebhook = onRequest(
 			method: req.method,
 			payloadType: req.body?.type,
 			hasSignature: !!req.headers['x-slack-signature'],
-			hasTimestamp: !!req.headers['x-slack-request-timestamp']
+			hasTimestamp: !!req.headers['x-slack-request-timestamp'],
+			hasRawBody: !!(req as any).rawBody
 		});
 
 		// Only accept POST requests
@@ -1393,7 +2199,9 @@ export const slackWebhook = onRequest(
 			return;
 		}
 
-		const rawBody = JSON.stringify(req.body);
+		// Get the raw body for signature verification
+		// Firebase Functions provides rawBody on the request object
+		const rawBody = (req as any).rawBody?.toString('utf8') || JSON.stringify(req.body);
 		const timestamp = req.headers['x-slack-request-timestamp'] as string;
 		const signature = req.headers['x-slack-signature'] as string;
 		const payload = req.body as SlackEventPayload;
@@ -1505,6 +2313,15 @@ export const slackWebhook = onRequest(
 				if (eventType !== 'message') {
 					res.status(200).send('OK');
 					return;
+				}
+
+				// Log file information for debugging
+				if (event.files && event.files.length > 0) {
+					logger.info('[slack] Message has files attached', {
+						fileCount: event.files.length,
+						files: event.files.map(f => ({ id: f.id, name: f.name, mimetype: f.mimetype })),
+						subtype: event.subtype
+					});
 				}
 
 				// Find bridge for this channel
@@ -1752,9 +2569,49 @@ async function postToSlack(
 	if (username) {
 		payload.username = username;
 	}
-	if (iconUrl) {
-		payload.icon_url = iconUrl;
+	// Use provided icon or fall back to default hConnect icon
+	payload.icon_url = iconUrl || DEFAULT_HCONNECT_ICON;
+	// Add thread_ts for thread replies
+	if (threadTs) {
+		payload.thread_ts = threadTs;
 	}
+
+	const response = await fetch('https://slack.com/api/chat.postMessage', {
+		method: 'POST',
+		headers: {
+			'Authorization': `Bearer ${botToken}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify(payload)
+	});
+
+	return response.json() as Promise<{ ok: boolean; ts?: string; error?: string }>;
+}
+
+/**
+ * Post a message to Slack channel with media unfurling enabled (for GIFs)
+ */
+async function postToSlackWithUnfurl(
+	botToken: string,
+	channelId: string,
+	text: string,
+	username?: string,
+	iconUrl?: string,
+	threadTs?: string
+): Promise<{ ok: boolean; ts?: string; error?: string }> {
+	const payload: Record<string, unknown> = {
+		channel: channelId,
+		text: text,
+		unfurl_links: true,
+		unfurl_media: true
+	};
+
+	// Add username display if provided
+	if (username) {
+		payload.username = username;
+	}
+	// Use provided icon or fall back to default hConnect icon
+	payload.icon_url = iconUrl || DEFAULT_HCONNECT_ICON;
 	// Add thread_ts for thread replies
 	if (threadTs) {
 		payload.thread_ts = threadTs;
@@ -1814,6 +2671,9 @@ export async function syncHConnectMessageToSlack(
 		slackMeta?: { messageTs?: string };
 		photoURL?: string;
 		replyTo?: string | { messageId?: string }; // Parent message ID or reply reference object
+		type?: 'text' | 'gif' | 'file' | 'poll' | 'form';
+		file?: { name: string; url: string; size?: number; contentType?: string };
+		url?: string; // For gif type
 	}
 ): Promise<void> {
 	logger.info('[slack-outbound] syncHConnectMessageToSlack called', { 
@@ -1821,7 +2681,8 @@ export async function syncHConnectMessageToSlack(
 		channelId, 
 		messageId,
 		isSlackMessage: !!messageData.isSlackMessage,
-		hasSlackMeta: !!messageData.slackMeta?.messageTs
+		hasSlackMeta: !!messageData.slackMeta?.messageTs,
+		messageType: messageData.type || 'text'
 	});
 
 	// Skip if this message came from Slack (prevent loops)
@@ -1847,9 +2708,16 @@ export async function syncHConnectMessageToSlack(
 		return; // No outbound bridges configured
 	}
 
+	// Determine message type and prepare content
+	const msgType = messageData.type || 'text';
+	const isFileMessage = msgType === 'file' && messageData.file?.url;
+	const isGifMessage = msgType === 'gif' && messageData.url;
+
+	// For text messages, require non-empty text
 	const text = messageData.text || messageData.content || '';
-	if (!text.trim()) {
-		return; // Skip empty messages
+	if (!isFileMessage && !isGifMessage && !text.trim()) {
+		logger.info('[slack-outbound] Skipping empty text message', { messageId });
+		return;
 	}
 
 	const slackText = convertHConnectToSlack(text);
@@ -1914,6 +2782,16 @@ export async function syncHConnectMessageToSlack(
 				continue;
 			}
 
+			// Skip file/attachment sync if bridge has it disabled
+			if ((isFileMessage || isGifMessage) && bridge.syncAttachments === false) {
+				logger.info('[slack-outbound] Skipping file/gif - syncAttachments disabled', {
+					bridgeId: bridge.id,
+					messageId,
+					messageType: msgType
+				});
+				continue;
+			}
+
 			// Get workspace for bot token (now from per-server path)
 			const workspace = await getWorkspaceByTeamId(serverId, bridge.slackTeamId);
 			if (!workspace) {
@@ -1925,16 +2803,85 @@ export async function syncHConnectMessageToSlack(
 				continue;
 			}
 
-			// Post to Slack - always show the hConnect user's display name
-			// Pass parentSlackTs for thread replies
-			const result = await postToSlack(
-				workspace.botAccessToken,
-				bridge.slackChannelId,
-				slackText,
-				messageData.displayName || 'hConnect User',
-				avatarUrl,
-				parentSlackTs
-			);
+			let result: { ok: boolean; ts?: string; error?: string };
+
+			// Handle file uploads to Slack
+			if (isFileMessage && messageData.file) {
+				logger.info('[slack-outbound] Uploading file to Slack', {
+					bridgeId: bridge.id,
+					fileName: messageData.file.name,
+					fileUrl: messageData.file.url.substring(0, 60) + '...'
+				});
+
+				// First, post a message with the username indicating they shared a file
+				// This shows the correct username/avatar since file uploads always show as bot
+				const displayName = messageData.displayName || 'hConnect User';
+				const shareText = text.trim() 
+					? slackText 
+					: `_shared a file: ${messageData.file.name}_`;
+				
+				result = await postToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					shareText,
+					displayName,
+					avatarUrl,
+					parentSlackTs
+				);
+
+				// Then upload the file (will show as bot, but the message above shows who shared it)
+				const uploadResult = await uploadFileToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					messageData.file.url,
+					messageData.file.name,
+					parentSlackTs
+				);
+
+				if (!uploadResult.ok) {
+					// File upload failed - post a fallback link
+					logger.warn('[slack-outbound] File upload failed, posting link as fallback', {
+						error: uploadResult.error
+					});
+					await postToSlack(
+						workspace.botAccessToken,
+						bridge.slackChannelId,
+						`📎 <${messageData.file.url}|${messageData.file.name}>`,
+						displayName,
+						avatarUrl,
+						parentSlackTs
+					);
+				}
+			}
+			// Handle GIF messages - post the GIF URL directly (Slack will unfurl it)
+			else if (isGifMessage && messageData.url) {
+				logger.info('[slack-outbound] Posting GIF to Slack', {
+					bridgeId: bridge.id,
+					gifUrl: messageData.url.substring(0, 60) + '...'
+				});
+
+				// Post the GIF URL - Slack will unfurl it automatically
+				const gifText = text.trim() ? `${slackText}\n${messageData.url}` : messageData.url;
+				result = await postToSlackWithUnfurl(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					gifText,
+					messageData.displayName || 'hConnect User',
+					avatarUrl,
+					parentSlackTs
+				);
+			}
+			// Regular text message
+			else {
+				result = await postToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					slackText,
+					messageData.displayName || 'hConnect User',
+					avatarUrl,
+					parentSlackTs
+				);
+			}
 
 			if (!result.ok) {
 				logger.error('[slack-outbound] Failed to post to Slack', {
@@ -1976,7 +2923,8 @@ export async function syncHConnectMessageToSlack(
 			logger.info('[slack-outbound] Message synced to Slack', {
 				bridgeId: bridge.id,
 				slackTs: result.ts,
-				isThreadReply: !!parentSlackTs
+				isThreadReply: !!parentSlackTs,
+				messageType: msgType
 			});
 		} catch (err) {
 			logger.error('[slack-outbound] Error syncing to Slack', {
@@ -2007,15 +2955,21 @@ export async function syncHConnectThreadMessageToSlack(
 		isSlackMessage?: boolean;
 		slackMeta?: { messageTs?: string };
 		photoURL?: string;
+		type?: 'text' | 'gif' | 'file' | 'poll' | 'form';
+		file?: { name: string; url: string; size?: number; contentType?: string };
+		url?: string; // For gif type
 	}
 ): Promise<void> {
+	const msgType = messageData.type || 'text';
+	
 	logger.info('[slack-outbound-thread] syncHConnectThreadMessageToSlack called', {
 		serverId,
 		channelId,
 		threadId,
 		messageId,
 		isSlackMessage: !!messageData.isSlackMessage,
-		hasSlackMeta: !!messageData.slackMeta?.messageTs
+		hasSlackMeta: !!messageData.slackMeta?.messageTs,
+		messageType: msgType
 	});
 
 	// Skip if this message came from Slack (prevent loops)
@@ -2046,9 +3000,14 @@ export async function syncHConnectThreadMessageToSlack(
 		return;
 	}
 
+	// Determine message type and prepare content
+	const isFileMessage = msgType === 'file' && messageData.file?.url;
+	const isGifMessage = msgType === 'gif' && messageData.url;
+
 	const text = messageData.text || messageData.content || '';
-	if (!text.trim()) {
-		return; // Skip empty messages
+	if (!isFileMessage && !isGifMessage && !text.trim()) {
+		logger.info('[slack-outbound-thread] Skipping empty text message', { messageId, threadId });
+		return;
 	}
 
 	const slackText = convertHConnectToSlack(text);
@@ -2174,15 +3133,91 @@ export async function syncHConnectThreadMessageToSlack(
 				continue;
 			}
 
-			// Post to Slack as a thread reply
-			const result = await postToSlack(
-				workspace.botAccessToken,
-				bridge.slackChannelId,
-				slackText,
-				messageData.displayName || 'hConnect User',
-				avatarUrl,
-				parentSlackTs // This makes it a thread reply
-			);
+			// Skip file/attachment sync if bridge has it disabled
+			if ((isFileMessage || isGifMessage) && bridge.syncAttachments === false) {
+				logger.info('[slack-outbound-thread] Skipping file/gif - syncAttachments disabled', {
+					bridgeId: bridge.id,
+					messageId,
+					messageType: msgType
+				});
+				continue;
+			}
+
+			let result: { ok: boolean; ts?: string; error?: string };
+
+			// Handle file uploads to Slack
+			if (isFileMessage && messageData.file) {
+				logger.info('[slack-outbound-thread] Uploading file to Slack', {
+					bridgeId: bridge.id,
+					fileName: messageData.file.name
+				});
+
+				// First, post a message with the username indicating they shared a file
+				const displayName = messageData.displayName || 'hConnect User';
+				const shareText = text.trim() 
+					? slackText 
+					: `_shared a file: ${messageData.file.name}_`;
+				
+				result = await postToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					shareText,
+					displayName,
+					avatarUrl,
+					parentSlackTs
+				);
+
+				// Then upload the file
+				const uploadResult = await uploadFileToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					messageData.file.url,
+					messageData.file.name,
+					parentSlackTs // Thread reply
+				);
+
+				if (!uploadResult.ok) {
+					// File upload failed - post a fallback link
+					logger.warn('[slack-outbound-thread] File upload failed, posting link as fallback', {
+						error: uploadResult.error
+					});
+					await postToSlack(
+						workspace.botAccessToken,
+						bridge.slackChannelId,
+						`📎 <${messageData.file.url}|${messageData.file.name}>`,
+						displayName,
+						avatarUrl,
+						parentSlackTs
+					);
+				}
+			}
+			// Handle GIF messages - post the GIF URL directly
+			else if (isGifMessage && messageData.url) {
+				logger.info('[slack-outbound-thread] Posting GIF to Slack thread', {
+					bridgeId: bridge.id
+				});
+
+				const gifText = text.trim() ? `${slackText}\n${messageData.url}` : messageData.url;
+				result = await postToSlackWithUnfurl(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					gifText,
+					messageData.displayName || 'hConnect User',
+					avatarUrl,
+					parentSlackTs
+				);
+			}
+			// Regular text message - post to Slack as a thread reply
+			else {
+				result = await postToSlack(
+					workspace.botAccessToken,
+					bridge.slackChannelId,
+					slackText,
+					messageData.displayName || 'hConnect User',
+					avatarUrl,
+					parentSlackTs // This makes it a thread reply
+				);
+			}
 
 			if (!result.ok) {
 				logger.error('[slack-outbound-thread] Failed to post to Slack', {
@@ -2216,7 +3251,8 @@ export async function syncHConnectThreadMessageToSlack(
 			logger.info('[slack-outbound-thread] Thread message synced to Slack', {
 				bridgeId: bridge.id,
 				slackTs: result.ts,
-				parentSlackTs
+				parentSlackTs,
+				messageType: msgType
 			});
 		} catch (err) {
 			logger.error('[slack-outbound-thread] Error syncing to Slack', {

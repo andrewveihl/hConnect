@@ -226,10 +226,8 @@
 		<TicketFab />
 		<ThreadsFab />
 		<VoiceDebugFab />
-		{#if !isAdminPage}
-			<SuperAdminFab />
-			<DesktopUserBar />
-		{/if}
+		<SuperAdminFab />
+		<DesktopUserBar />
 	{/if}
 </div>
 
