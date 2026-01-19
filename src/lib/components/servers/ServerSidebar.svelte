@@ -24,6 +24,14 @@
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
 	import {
+		subscribeNotificationSettings,
+		toggleCategoryMute,
+		toggleChannelMute,
+		isCategoryMuted,
+		isChannelMuted,
+		type NotificationSettings
+	} from '$lib/firebase/notifications';
+	import {
 		collection,
 		doc,
 		getDoc,
@@ -296,6 +304,18 @@
 	let contextMenuRef: ContextMenu | null = $state(null);
 	let contextMenuTarget: { type: 'all' | 'category'; categoryId?: string } | null = $state(null);
 	let markingAsRead = $state(false);
+
+	// Notification settings for muting
+	let notificationSettings: NotificationSettings | null = $state(null);
+	let notificationSettingsUnsub: Unsubscribe | null = null;
+	let muteLoading = $state(false);
+
+	// Channel context menu state
+	let channelContextMenuRef: ContextMenu | null = $state(null);
+	let channelContextMenuTarget: { channelId: string; channelName: string; categoryId?: string | null } | null = $state(null);
+	let channelContextMenuLongPressTimer: number | null = null;
+	let channelContextMenuLongPressStart: { x: number; y: number } | null = null;
+	const CHANNEL_CONTEXT_MENU_LONG_PRESS_MS = 800; // Slightly longer for mobile to avoid accidental triggers
 
 	// Long-press tracking for context menu on mobile
 	let contextMenuLongPressTimer: number | null = null;
@@ -1056,11 +1076,43 @@
 		contextMenuLongPressStart = null;
 	}
 
+	async function handleToggleCategoryMute(categoryId: string) {
+		const uid = $user?.uid;
+		const sid = computedServerId;
+		if (!uid || !sid || !notificationSettings) return;
+		
+		muteLoading = true;
+		try {
+			const currentlyMuted = isCategoryMuted(notificationSettings, sid, categoryId);
+			const newMuted = !currentlyMuted;
+			
+			// If muting, also mark all channels in the category as read
+			if (newMuted) {
+				const channelIds = getChannelIdsForCategory(categoryId);
+				if (channelIds.length) {
+					await markMultipleChannelsRead(uid, sid, channelIds);
+				}
+			}
+			
+			await toggleCategoryMute(uid, sid, categoryId, newMuted);
+			
+			// Haptic feedback
+			if (browser && 'vibrate' in navigator) {
+				navigator.vibrate(30);
+			}
+		} catch (err) {
+			console.error('[ServerSidebar] Failed to toggle category mute:', err);
+		} finally {
+			muteLoading = false;
+		}
+	}
+
 	function getContextMenuItems() {
 		if (!contextMenuTarget) return [];
 
 		const target = contextMenuTarget.type;
 		const categoryId = contextMenuTarget.categoryId;
+		const sid = computedServerId;
 		
 		let channelIds: string[];
 		let label: string;
@@ -1082,12 +1134,126 @@
 		const unreadCount = getUnreadChannelIds(channelIds).length;
 		const hasUnreadChannels = unreadCount > 0;
 
-		return [
+		const items = [
 			{
 				label: hasUnreadChannels ? `${label} (${unreadCount})` : label,
 				icon: 'bx-check-double',
 				disabled: !hasUnreadChannels || markingAsRead,
 				action: () => markAllAsRead(target, categoryId)
+			}
+		];
+
+		// Add mute option for categories (folders)
+		if (target === 'category' && categoryId && sid && notificationSettings) {
+			const catMuted = isCategoryMuted(notificationSettings, sid, categoryId);
+			items.push({
+				label: catMuted ? 'Unmute Folder' : 'Mute Folder',
+				icon: catMuted ? 'bx-bell' : 'bx-bell-off',
+				disabled: muteLoading,
+				action: () => handleToggleCategoryMute(categoryId)
+			});
+		}
+
+		return items;
+	}
+
+	// ==================== Channel Context Menu Functions ====================
+
+	function openChannelContextMenu(
+		event: MouseEvent | PointerEvent,
+		channelId: string,
+		channelName: string,
+		categoryId?: string | null
+	) {
+		event.preventDefault();
+		event.stopPropagation();
+		channelContextMenuTarget = { channelId, channelName, categoryId };
+		channelContextMenuRef?.show(event.clientX, event.clientY);
+	}
+
+	function startChannelContextMenuLongPress(
+		event: PointerEvent,
+		channelId: string,
+		channelName: string,
+		categoryId?: string | null
+	) {
+		if (event.pointerType !== 'touch') return;
+		if (channelContextMenuLongPressTimer !== null) {
+			clearTimeout(channelContextMenuLongPressTimer);
+		}
+		channelContextMenuLongPressStart = { x: event.clientX, y: event.clientY };
+		channelContextMenuLongPressTimer = window.setTimeout(() => {
+			channelContextMenuLongPressTimer = null;
+			if (channelContextMenuLongPressStart) {
+				// Haptic feedback
+				if (browser && 'vibrate' in navigator) {
+					navigator.vibrate(50);
+				}
+				channelContextMenuTarget = { channelId, channelName, categoryId };
+				channelContextMenuRef?.show(channelContextMenuLongPressStart.x, channelContextMenuLongPressStart.y);
+			}
+		}, CHANNEL_CONTEXT_MENU_LONG_PRESS_MS);
+	}
+
+	function handleChannelContextMenuPointerMove(event: PointerEvent) {
+		if (!channelContextMenuLongPressStart) return;
+		const dx = Math.abs(event.clientX - channelContextMenuLongPressStart.x);
+		const dy = Math.abs(event.clientY - channelContextMenuLongPressStart.y);
+		if (dx > CONTEXT_MENU_LONG_PRESS_THRESHOLD || dy > CONTEXT_MENU_LONG_PRESS_THRESHOLD) {
+			cancelChannelContextMenuLongPress();
+		}
+	}
+
+	function cancelChannelContextMenuLongPress() {
+		if (channelContextMenuLongPressTimer !== null) {
+			clearTimeout(channelContextMenuLongPressTimer);
+			channelContextMenuLongPressTimer = null;
+		}
+		channelContextMenuLongPressStart = null;
+	}
+
+	async function handleToggleChannelMute() {
+		const uid = $user?.uid;
+		const sid = computedServerId;
+		const target = channelContextMenuTarget;
+		if (!uid || !sid || !target || !notificationSettings) return;
+		
+		muteLoading = true;
+		try {
+			const currentlyMuted = isChannelMuted(notificationSettings, sid, target.channelId, target.categoryId);
+			const newMuted = !currentlyMuted;
+			
+			// If muting, also mark the channel as read
+			if (newMuted) {
+				await markMultipleChannelsRead(uid, sid, [target.channelId]);
+			}
+			
+			await toggleChannelMute(uid, sid, target.channelId, newMuted);
+			
+			// Haptic feedback
+			if (browser && 'vibrate' in navigator) {
+				navigator.vibrate(30);
+			}
+		} catch (err) {
+			console.error('[ServerSidebar] Failed to toggle channel mute:', err);
+		} finally {
+			muteLoading = false;
+		}
+	}
+
+	function getChannelContextMenuItems() {
+		const target = channelContextMenuTarget;
+		const sid = computedServerId;
+		if (!target || !sid || !notificationSettings) return [];
+		
+		const muted = isChannelMuted(notificationSettings, sid, target.channelId, target.categoryId);
+		
+		return [
+			{
+				label: muted ? 'Unmute Channel' : 'Mute Channel',
+				icon: muted ? 'bx-bell' : 'bx-bell-off',
+				disabled: muteLoading,
+				action: handleToggleChannelMute
 			}
 		];
 	}
@@ -1693,10 +1859,12 @@
 		unsubProfileMembership?.();
 		unsubPersonalOrder?.();
 		unsubCategories?.();
+		notificationSettingsUnsub?.();
 		resetVoiceWatchers();
 		unsubscribeVoiceSession();
 		stopNotif?.();
 		cancelContextMenuLongPress();
+		cancelChannelContextMenuLongPress();
 		removeVoiceDebugSection('serverSidebar.channels');
 		removeVoiceDebugSection('serverSidebar.voicePresence');
 		removeVoiceDebugSection('serverSidebar.voiceSession');
@@ -2028,6 +2196,22 @@ $effect(() => {
 			subscribeAll(nextServer);
 		}
 	});
+
+	// Subscribe to notification settings for muting state
+	$effect(() => {
+		const uid = $user?.uid;
+		notificationSettingsUnsub?.();
+		notificationSettingsUnsub = null;
+		
+		if (uid) {
+			notificationSettingsUnsub = subscribeNotificationSettings(uid, (settings) => {
+				notificationSettings = settings;
+			});
+		} else {
+			notificationSettings = null;
+		}
+	});
+
 	$effect(() => {
 		if (browser && window.matchMedia('(min-width: 768px)').matches && computedServerId) {
 			if (activeChannelId && !visibleChannels.some((c) => c.id === activeChannelId)) {
@@ -2069,12 +2253,20 @@ $effect(() => {
 </script>
 
 {#snippet channelRow(c: Chan)}
+	{@const channelMuted = notificationSettings && computedServerId && isChannelMuted(notificationSettings, computedServerId, c.id, c.categoryId)}
 	<div
-		class={`channel-row ${activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''}`}
+		class={`channel-row ${activeChannelId === c.id || isVoiceChannelActive(c.id) ? 'channel-row--active' : ''} ${mentionHighlights.has(c.id) ? 'channel-row--mention' : ''} ${reorderMode !== 'none' && draggingChannelId === c.id ? 'channel-row--dragging' : ''} ${reorderMode !== 'none' && dragOverChannelId === c.id ? (dragOverAfter ? 'channel-row--drop-after' : 'channel-row--drop-before') : ''} ${channelMuted ? 'channel-row--muted' : ''}`}
 		role="listitem"
 		draggable={false}
 		use:channelRowRefAction={c.id}
-		onpointerdown={(event) => startChannelPointerDrag(event, c.id, c.type)}
+		onpointerdown={(event) => {
+			startChannelPointerDrag(event, c.id, c.type);
+			startChannelContextMenuLongPress(event, c.id, c.name, c.categoryId);
+		}}
+		onpointermove={handleChannelContextMenuPointerMove}
+		onpointerup={cancelChannelContextMenuLongPress}
+		onpointercancel={cancelChannelContextMenuLongPress}
+		oncontextmenu={(event) => openChannelContextMenu(event, c.id, c.name, c.categoryId)}
 	>
 		<button
 			type="button"
@@ -2098,18 +2290,22 @@ $effect(() => {
 			</span>
 			<span class="channel-name truncate">{c.name}</span>
 			<span class="channel-row__meta ml-auto">
-				{#if mentionHighlights.has(c.id)}
+				{#if channelMuted}
+					<span class="channel-muted-indicator" title="Muted">
+						<i class="bx bx-bell-off" aria-hidden="true"></i>
+					</span>
+				{:else if mentionHighlights.has(c.id)}
 					<span class="channel-mention-pill" title="You were mentioned">@</span>
 				{/if}
 				{#if c.type === 'voice'}
 					{#if (voicePresence[c.id]?.length ?? 0) > 0}
 						<span class="channel-voice-count">{voicePresence[c.id].length}</span>
 					{/if}
-				{:else if hasHighPriority(c.id) > 0}
+				{:else if !channelMuted && hasHighPriority(c.id) > 0}
 					<span class="channel-unread" aria-label={`${hasHighPriority(c.id)} unread high priority messages`}>
 						{hasHighPriority(c.id) > 99 ? '99+' : hasHighPriority(c.id)}
 					</span>
-				{:else if hasUnread(c.id)}
+				{:else if !channelMuted && hasUnread(c.id)}
 					<span class="channel-blue-dot" aria-hidden="true" title="New messages"></span>
 				{/if}
 			</span>
@@ -2287,6 +2483,7 @@ $effect(() => {
 				{#if item.type === 'category'}
 					{@const cat = item.category}
 					{@const categoryChannels = item.channels}
+					{@const categoryMuted = notificationSettings && computedServerId && isCategoryMuted(notificationSettings, computedServerId, cat.id)}
 					<!-- Category Header - Draggable for admins, right-click/long-press for mark as read -->
 					<div
 						role="listitem"
@@ -2297,7 +2494,7 @@ $effect(() => {
 					>
 						<button
 							type="button"
-							class="category-header"
+							class="category-header {categoryMuted ? 'category-header--muted' : ''}"
 							onclick={() => toggleCategoryCollapse(cat.id)}
 							oncontextmenu={(e) => openContextMenu(e, 'category', cat.id)}
 							onpointerdown={(e) => { if (e.pointerType === 'touch') startContextMenuLongPress(e, 'category', cat.id); }}
@@ -2311,6 +2508,11 @@ $effect(() => {
 								aria-hidden="true"
 							></i>
 							<span class="category-name">{cat.name}</span>
+							{#if categoryMuted}
+								<span class="category-muted-indicator" title="Category muted">
+									<i class="bx bx-bell-off" aria-hidden="true"></i>
+								</span>
+							{/if}
 							{#if canManageChannels}
 								<i class="bx bx-grid-vertical category-drag-handle" aria-hidden="true" title="Drag to reorder"></i>
 							{/if}
@@ -2361,6 +2563,13 @@ $effect(() => {
 	bind:this={contextMenuRef}
 	items={getContextMenuItems()}
 	onClose={() => { contextMenuTarget = null; }}
+/>
+
+<!-- Context menu for channel muting -->
+<ContextMenu
+	bind:this={channelContextMenuRef}
+	items={getChannelContextMenuItems()}
+	onClose={() => { channelContextMenuTarget = null; }}
 />
 
 <svelte:window
@@ -2703,6 +2912,24 @@ $effect(() => {
 		color: var(--color-text-primary);
 	}
 
+	/* Muted category styling */
+	.category-header--muted {
+		opacity: 0.5;
+	}
+
+	.category-header--muted:hover {
+		opacity: 0.7;
+	}
+
+	.category-muted-indicator {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--color-text-muted);
+		font-size: 0.65rem;
+		margin-left: 0.25rem;
+	}
+
 	.category-header-wrapper:first-child .category-header {
 		margin-top: 0;
 	}
@@ -2752,6 +2979,24 @@ $effect(() => {
 	.channel-row:hover,
 	.channel-row--active {
 		background: transparent;
+	}
+
+	/* Muted channel styling */
+	.channel-row--muted .channel-row__button {
+		opacity: 0.5;
+	}
+
+	.channel-row--muted:hover .channel-row__button {
+		opacity: 0.7;
+	}
+
+	.channel-muted-indicator {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--color-text-muted);
+		font-size: 0.7rem;
+		margin-left: 0.25rem;
 	}
 
 	.channel-row--armed {

@@ -12,6 +12,7 @@ import {
   fetchNotificationSettings,
   fetchPresence,
   perChannelKey,
+  perCategoryKey,
   perRoleKey,
   type DeviceTokenRecord
 } from './settings';
@@ -451,7 +452,7 @@ function presenceAllowsHere(presence: Awaited<ReturnType<typeof fetchPresence>>)
 function respectsSettings(
   settings: NotificationSettings,
   candidate: CandidateTarget,
-  opts: { serverId?: string; channelId?: string; threadId?: string | null; isDM?: boolean }
+  opts: { serverId?: string; channelId?: string; categoryId?: string | null; threadId?: string | null; isDM?: boolean }
 ): boolean {
   if (settings.globalMute) return false;
   if (settings.doNotDisturbUntil && settings.doNotDisturbUntil > Date.now()) return false;
@@ -461,6 +462,8 @@ function respectsSettings(
   }
   if (!opts.serverId || !opts.channelId) return false;
   if (settings.muteServerIds?.includes(opts.serverId)) return false;
+  // Check if channel's category is muted
+  if (opts.categoryId && settings.muteCategoryIds?.[perCategoryKey(opts.serverId, opts.categoryId)]) return false;
   if (settings.perChannelMute?.[perChannelKey(opts.serverId, opts.channelId)]) return false;
   if (opts.threadId && settings.allowThreadPush === false) return false;
 
@@ -491,7 +494,7 @@ function respectsSettings(
 function getFilterReason(
   settings: NotificationSettings,
   candidate: CandidateTarget,
-  opts: { serverId?: string; channelId?: string; threadId?: string | null; isDM?: boolean }
+  opts: { serverId?: string; channelId?: string; categoryId?: string | null; threadId?: string | null; isDM?: boolean }
 ): string | null {
   if (settings.globalMute) return 'globalMute';
   if (settings.doNotDisturbUntil && settings.doNotDisturbUntil > Date.now()) return 'doNotDisturb';
@@ -501,6 +504,8 @@ function getFilterReason(
   }
   if (!opts.serverId || !opts.channelId) return 'missing_server_or_channel';
   if (settings.muteServerIds?.includes(opts.serverId)) return 'server_muted';
+  // Check if channel's category is muted
+  if (opts.categoryId && settings.muteCategoryIds?.[perCategoryKey(opts.serverId, opts.categoryId)]) return 'category_muted';
   if (settings.perChannelMute?.[perChannelKey(opts.serverId, opts.channelId)]) return 'channel_muted';
   if (opts.threadId && settings.allowThreadPush === false) return 'threads_disabled';
 
@@ -534,7 +539,7 @@ function getFilterReason(
 
 async function filterCandidates(
   candidates: CandidateTarget[],
-  opts: { serverId?: string; channelId?: string; threadId?: string | null; isDM?: boolean }
+  opts: { serverId?: string; channelId?: string; categoryId?: string | null; threadId?: string | null; isDM?: boolean }
 ): Promise<DeliveryTarget[]> {
   const deliveries: DeliveryTarget[] = [];
   const filtered: { uid: string; reason: string }[] = [];
@@ -1346,6 +1351,7 @@ export async function handleServerMessage(event: ChannelMessageEvent) {
   const recipients = await filterCandidates(candidates, {
     serverId,
     channelId,
+    categoryId: channel?.categoryId ?? null,
     threadId: null,
     isDM: false
   });
@@ -1435,6 +1441,7 @@ export async function handleThreadMessage(event: ThreadMessageEvent) {
   const recipients = await filterCandidates(candidates, {
     serverId,
     channelId,
+    categoryId: channel?.categoryId ?? null,
     threadId,
     isDM: false
   });
