@@ -51,15 +51,23 @@ try {
   logger.warn('firebase config unavailable', err);
 }
 
+// Helper to ensure Base64 string is URL-safe (web-push requires URL-safe Base64)
+function toUrlSafeBase64(str: string): string {
+  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 const VAPID_SUBJECT =
   process.env.VAPID_SUBJECT ?? functionsConfig.vapid?.subject ?? 'mailto:support@hconnect.app';
-const VAPID_PUBLIC_KEY =
-  process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? '';
-const VAPID_PRIVATE_KEY =
+// Convert VAPID keys to URL-safe Base64 format
+const VAPID_PUBLIC_KEY = toUrlSafeBase64(
+  process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? ''
+);
+const VAPID_PRIVATE_KEY = toUrlSafeBase64(
   process.env.FCM_VAPID_PRIVATE_KEY ??
   process.env.VAPID_PRIVATE_KEY ??
   functionsConfig.vapid?.private_key ??
-  '';
+  ''
+);
 const APP_BASE_URL =
   process.env.APP_BASE_URL ??
   functionsConfig.app?.base_url ??
@@ -69,12 +77,17 @@ const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (WEB_PUSH_AVAILABLE) {
   try {
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    logger.info('[push] VAPID configured successfully', {
+      publicKeyLength: VAPID_PUBLIC_KEY.length,
+      privateKeyLength: VAPID_PRIVATE_KEY.length
+    });
   } catch (err) {
     logger.error('Failed to configure web push VAPID details', err);
   }
 } else {
   logger.warn('Web push disabled (missing VAPID keys)');
 }
+
 
 type MessageContext = {
   serverId?: string;
@@ -454,6 +467,23 @@ function respectsSettings(
   candidate: CandidateTarget,
   opts: { serverId?: string; channelId?: string; categoryId?: string | null; threadId?: string | null; isDM?: boolean }
 ): boolean {
+  // Log mute checks for debugging
+  logger.info('[notify] respectsSettings mute check', {
+    uid: candidate.uid,
+    serverId: opts.serverId,
+    channelId: opts.channelId,
+    categoryId: opts.categoryId,
+    globalMute: settings.globalMute,
+    muteServerIds: settings.muteServerIds,
+    muteCategoryIds: settings.muteCategoryIds,
+    perChannelMute: settings.perChannelMute,
+    serverMuted: opts.serverId ? settings.muteServerIds?.includes(opts.serverId) : false,
+    categoryKey: opts.serverId && opts.categoryId ? perCategoryKey(opts.serverId, opts.categoryId) : null,
+    categoryMuted: opts.serverId && opts.categoryId ? settings.muteCategoryIds?.[perCategoryKey(opts.serverId, opts.categoryId)] : false,
+    channelKey: opts.serverId && opts.channelId ? perChannelKey(opts.serverId, opts.channelId) : null,
+    channelMuted: opts.serverId && opts.channelId ? settings.perChannelMute?.[perChannelKey(opts.serverId, opts.channelId)] : false
+  });
+
   if (settings.globalMute) return false;
   if (settings.doNotDisturbUntil && settings.doNotDisturbUntil > Date.now()) return false;
   if (opts.isDM) {
@@ -1092,6 +1122,10 @@ async function sendSafariWebPush(subscription: WebPushSubscription, body: string
     return;
   }
   try {
+    // Convert keys to URL-safe Base64 (web-push library requires this format)
+    const authKey = toUrlSafeBase64(subscription.keys.auth);
+    const p256dhKey = toUrlSafeBase64(subscription.keys.p256dh);
+    
     logger.info('[push] Sending Safari web push', {
       endpointPreview: subscription.endpoint.slice(0, 50) + '...'
     });
@@ -1107,8 +1141,8 @@ async function sendSafariWebPush(subscription: WebPushSubscription, body: string
       {
         endpoint: subscription.endpoint,
         keys: {
-          auth: subscription.keys.auth,
-          p256dh: subscription.keys.p256dh
+          auth: authKey,
+          p256dh: p256dhKey
         },
         expirationTime: subscription.expirationTime ?? null
       },
