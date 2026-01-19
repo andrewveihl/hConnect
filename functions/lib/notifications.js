@@ -34,12 +34,17 @@ try {
 catch (err) {
     firebase_functions_1.logger.warn('firebase config unavailable', err);
 }
+// Helper to ensure Base64 string is URL-safe (web-push requires URL-safe Base64)
+function toUrlSafeBase64(str) {
+    return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? functionsConfig.vapid?.subject ?? 'mailto:support@hconnect.app';
-const VAPID_PUBLIC_KEY = process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? '';
-const VAPID_PRIVATE_KEY = process.env.FCM_VAPID_PRIVATE_KEY ??
+// Convert VAPID keys to URL-safe Base64 format
+const VAPID_PUBLIC_KEY = toUrlSafeBase64(process.env.PUBLIC_FCM_VAPID_KEY ?? process.env.VAPID_PUBLIC_KEY ?? functionsConfig.vapid?.public_key ?? '');
+const VAPID_PRIVATE_KEY = toUrlSafeBase64(process.env.FCM_VAPID_PRIVATE_KEY ??
     process.env.VAPID_PRIVATE_KEY ??
     functionsConfig.vapid?.private_key ??
-    '';
+    '');
 const APP_BASE_URL = process.env.APP_BASE_URL ??
     functionsConfig.app?.base_url ??
     'https://hconnect-6212b.web.app';
@@ -47,6 +52,10 @@ const WEB_PUSH_AVAILABLE = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (WEB_PUSH_AVAILABLE) {
     try {
         web_push_1.default.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+        firebase_functions_1.logger.info('[push] VAPID configured successfully', {
+            publicKeyLength: VAPID_PUBLIC_KEY.length,
+            privateKeyLength: VAPID_PRIVATE_KEY.length
+        });
     }
     catch (err) {
         firebase_functions_1.logger.error('Failed to configure web push VAPID details', err);
@@ -384,6 +393,22 @@ function presenceAllowsHere(presence) {
     return raw === 'online' || raw === 'active' || raw === 'idle';
 }
 function respectsSettings(settings, candidate, opts) {
+    // Log mute checks for debugging
+    firebase_functions_1.logger.info('[notify] respectsSettings mute check', {
+        uid: candidate.uid,
+        serverId: opts.serverId,
+        channelId: opts.channelId,
+        categoryId: opts.categoryId,
+        globalMute: settings.globalMute,
+        muteServerIds: settings.muteServerIds,
+        muteCategoryIds: settings.muteCategoryIds,
+        perChannelMute: settings.perChannelMute,
+        serverMuted: opts.serverId ? settings.muteServerIds?.includes(opts.serverId) : false,
+        categoryKey: opts.serverId && opts.categoryId ? (0, settings_1.perCategoryKey)(opts.serverId, opts.categoryId) : null,
+        categoryMuted: opts.serverId && opts.categoryId ? settings.muteCategoryIds?.[(0, settings_1.perCategoryKey)(opts.serverId, opts.categoryId)] : false,
+        channelKey: opts.serverId && opts.channelId ? (0, settings_1.perChannelKey)(opts.serverId, opts.channelId) : null,
+        channelMuted: opts.serverId && opts.channelId ? settings.perChannelMute?.[(0, settings_1.perChannelKey)(opts.serverId, opts.channelId)] : false
+    });
     if (settings.globalMute)
         return false;
     if (settings.doNotDisturbUntil && settings.doNotDisturbUntil > Date.now())
@@ -396,6 +421,9 @@ function respectsSettings(settings, candidate, opts) {
     if (!opts.serverId || !opts.channelId)
         return false;
     if (settings.muteServerIds?.includes(opts.serverId))
+        return false;
+    // Check if channel's category is muted
+    if (opts.categoryId && settings.muteCategoryIds?.[(0, settings_1.perCategoryKey)(opts.serverId, opts.categoryId)])
         return false;
     if (settings.perChannelMute?.[(0, settings_1.perChannelKey)(opts.serverId, opts.channelId)])
         return false;
@@ -442,6 +470,9 @@ function getFilterReason(settings, candidate, opts) {
         return 'missing_server_or_channel';
     if (settings.muteServerIds?.includes(opts.serverId))
         return 'server_muted';
+    // Check if channel's category is muted
+    if (opts.categoryId && settings.muteCategoryIds?.[(0, settings_1.perCategoryKey)(opts.serverId, opts.categoryId)])
+        return 'category_muted';
     if (settings.perChannelMute?.[(0, settings_1.perChannelKey)(opts.serverId, opts.channelId)])
         return 'channel_muted';
     if (opts.threadId && settings.allowThreadPush === false)
@@ -981,6 +1012,9 @@ async function sendSafariWebPush(subscription, body) {
         return;
     }
     try {
+        // Convert keys to URL-safe Base64 (web-push library requires this format)
+        const authKey = toUrlSafeBase64(subscription.keys.auth);
+        const p256dhKey = toUrlSafeBase64(subscription.keys.p256dh);
         firebase_functions_1.logger.info('[push] Sending Safari web push', {
             endpointPreview: subscription.endpoint.slice(0, 50) + '...'
         });
@@ -993,8 +1027,8 @@ async function sendSafariWebPush(subscription, body) {
         await web_push_1.default.sendNotification({
             endpoint: subscription.endpoint,
             keys: {
-                auth: subscription.keys.auth,
-                p256dh: subscription.keys.p256dh
+                auth: authKey,
+                p256dh: p256dhKey
             },
             expirationTime: subscription.expirationTime ?? null
         }, body, pushOptions);
@@ -1195,6 +1229,7 @@ async function handleServerMessage(event) {
     const recipients = await filterCandidates(candidates, {
         serverId,
         channelId,
+        categoryId: channel?.categoryId ?? null,
         threadId: null,
         isDM: false
     });
@@ -1276,6 +1311,7 @@ async function handleThreadMessage(event) {
     const recipients = await filterCandidates(candidates, {
         serverId,
         channelId,
+        categoryId: channel?.categoryId ?? null,
         threadId,
         isDM: false
     });

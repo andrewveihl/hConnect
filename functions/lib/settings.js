@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.defaultNotificationSettings = void 0;
 exports.fetchNotificationSettings = fetchNotificationSettings;
 exports.perChannelKey = perChannelKey;
+exports.perCategoryKey = perCategoryKey;
 exports.perRoleKey = perRoleKey;
 exports.fetchPresence = fetchPresence;
 exports.fetchDeviceTokens = fetchDeviceTokens;
@@ -13,6 +14,7 @@ exports.defaultNotificationSettings = {
     globalMute: false,
     muteDMs: false,
     muteServerIds: [],
+    muteCategoryIds: {},
     perChannelMute: {},
     perRoleMute: {},
     allowMentionPush: true,
@@ -44,6 +46,9 @@ async function fetchNotificationSettings(uid) {
 }
 function perChannelKey(serverId, channelId) {
     return `${serverId}/${channelId}`;
+}
+function perCategoryKey(serverId, categoryId) {
+    return `${serverId}/${categoryId}`;
 }
 function perRoleKey(serverId, roleId) {
     return `${serverId}/${roleId}`;
