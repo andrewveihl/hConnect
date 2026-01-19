@@ -204,29 +204,38 @@ async function generateAnnouncement(body: AnnouncementPayload) {
 		general: 'announcement'
 	};
 
-	const systemPrompt = `You are the copywriter for ${appName}, a team collaboration app. Write release notes in Apple's App Store style - clean, scannable, and concise.
+	const systemPrompt = `You are a release notes writer for ${appName}, a team collaboration and communication app. Your job is to transform developer commit messages and technical notes into user-friendly release notes.
 
-STYLE GUIDE (mimic Apple's app update notes):
-- Title: Short, punchy, 3-6 words max. Often starts with emoji or action word.
-- Body: Clean bullet points, each 1-2 short sentences max
-- Each bullet starts with the feature/fix name in bold, then brief description
-- Use simple, direct language - no marketing fluff
-- Be specific about what changed, not vague promises
-- Keep total length under 150 words
+IMPORTANT GUIDELINES:
+1. INTERPRET commit messages - they are often shorthand. "fix navbar" → "Fixed navigation menu issues"
+2. GROUP related changes - multiple commits about the same feature should become one bullet
+3. TRANSLATE technical jargon - "refactor store" → "Improved app performance", "fix SSR hydration" → "Fixed page loading issues"
+4. SKIP internal/dev-only changes - things like "update deps", "lint fixes", "merge main" should be omitted or summarized as "Various improvements"
+5. FOCUS on user impact - what does this change MEAN for users?
 
-EXAMPLE FORMAT:
-**Voice Calls** - Crystal clear audio with reduced latency
-**Dark Mode** - Easy on the eyes, works system-wide  
-**Bug Fixes** - Squashed issues with notifications and message sync
+OUTPUT FORMAT:
+- Title: 3-6 words, can include emoji, should capture the main theme (e.g., "🚀 Faster & More Reliable" or "Voice Chat Improvements")
+- Body: Use **bold** for feature names, bullet points with "-", 1-2 sentences per item max
+- Keep total length reasonable (100-200 words)
+
+EXAMPLE INPUT:
+- fix mobile nav z-index
+- add voice call reconnection
+- update firebase deps  
+- fix SSR hydration error
+- improve call quality codec
+
+EXAMPLE OUTPUT:
+{"title": "🎯 Smoother Calls & Navigation", "message": "**Voice Calls** - Improved audio quality and automatic reconnection when your connection drops\n\n**Navigation** - Fixed mobile menu overlay issues\n\n**Performance** - Various under-the-hood improvements for a snappier experience"}
 
 Return ONLY valid JSON: {"title": "...", "message": "..."}`;
 
 	const featureList = features.map(f => `- ${f}`).join('\n');
-	const userPrompt = `Write ${categoryContext[category]} notes for ${appName}${version ? ` v${version}` : ''}:
+	const userPrompt = `Transform these ${category === 'general' ? 'changes' : categoryContext[category] + ' notes'} for ${appName}${version ? ` v${version}` : ''} into user-friendly release notes:
 
 ${featureList}
 
-Keep it Apple-style: clean, scannable bullet points. JSON only.`;
+Remember: Interpret and group related changes, skip internal-only items, focus on user impact. JSON only.`;
 
 	const raw = await callOpenAI(
 		[
