@@ -10,6 +10,7 @@ export const defaultNotificationSettings: NotificationSettings = {
   globalMute: false,
   muteDMs: false,
   muteServerIds: [],
+  muteCategoryIds: {},
   perChannelMute: {},
   perRoleMute: {},
   allowMentionPush: true,
@@ -43,6 +44,10 @@ export async function fetchNotificationSettings(uid: string): Promise<Notificati
 
 export function perChannelKey(serverId: string, channelId: string) {
   return `${serverId}/${channelId}`;
+}
+
+export function perCategoryKey(serverId: string, categoryId: string) {
+  return `${serverId}/${categoryId}`;
 }
 
 export function perRoleKey(serverId: string, roleId: string) {

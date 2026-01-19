@@ -609,3 +609,19 @@ export async function markMultipleChannelsRead(
 
 	await batch.commit();
 }
+
+/**
+ * Mark an entire server as read by fetching all channels and marking them read.
+ * Used when muting a server.
+ * @param uid - The user's uid
+ * @param serverId - The server id
+ */
+export async function markServerAsRead(uid: string, serverId: string): Promise<void> {
+	const db = getDb();
+	const channelsRef = collection(db, 'servers', serverId, 'channels');
+	const channelSnap = await getDocs(channelsRef);
+	const channelIds = channelSnap.docs.map((d) => d.id);
+	if (channelIds.length) {
+		await markMultipleChannelsRead(uid, serverId, channelIds);
+	}
+}

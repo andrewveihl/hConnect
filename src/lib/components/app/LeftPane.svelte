@@ -23,6 +23,7 @@
 	import { streamMyDMs } from '$lib/firestore/dms';
 	import { saveServerOrder, subscribeUserServers } from '$lib/firestore/servers';
 	import NewServerModal from '$lib/components/servers/NewServerModal.svelte';
+	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
 	import { superAdminEmailsStore } from '$lib/admin/superAdmin';
 	import { featureFlags } from '$lib/stores/featureFlags';
 	import { dmUnreadCount, notifications, serverUnreadIndicators } from '$lib/stores/notifications';
@@ -41,6 +42,13 @@
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import { fabSnapStore, isFabSnappingDisabled } from '$lib/stores/fabSnap';
+	import {
+		subscribeNotificationSettings,
+		toggleServerMute,
+		isServerMuted,
+		type NotificationSettings
+	} from '$lib/firebase/notifications';
+	import { markServerAsRead } from '$lib/firebase/unread';
 
 	interface Props {
 		activeServerId?: string | null;
@@ -122,6 +130,18 @@
 	let tooltipVisible = $state(false);
 	let tooltipTimeout: ReturnType<typeof setTimeout> | null = null;
 
+	// Server context menu state (for muting)
+	let serverContextMenuRef: ContextMenu | null = $state(null);
+	let contextMenuServerId: string | null = $state(null);
+	let contextMenuServerName: string | null = $state(null);
+	let notificationSettings: NotificationSettings | null = $state(null);
+	let notificationSettingsUnsub: (() => void) | null = null;
+	let serverMuteLoading = $state(false);
+	const LONG_PRESS_MS = 800; // Long press duration for mobile (slightly less than 1s for better UX)
+	let longPressTimer: number | null = null;
+	let longPressStart: { x: number; y: number } | null = null;
+	const LONG_PRESS_MOVE_THRESHOLD = 10;
+
 	function showServerTooltip(serverId: string, name: string, event: MouseEvent) {
 		if (tooltipTimeout) clearTimeout(tooltipTimeout);
 		const target = event.currentTarget as HTMLElement;
@@ -140,6 +160,96 @@
 			hoveredServerName = null;
 		}, 50);
 	}
+
+	// ==================== Server Context Menu (Mute) ====================
+
+	function openServerContextMenu(event: MouseEvent | PointerEvent, serverId: string, serverName: string) {
+		event.preventDefault();
+		event.stopPropagation();
+		contextMenuServerId = serverId;
+		contextMenuServerName = serverName;
+		serverContextMenuRef?.show(event.clientX, event.clientY);
+	}
+
+	function startServerLongPress(event: PointerEvent, serverId: string, serverName: string) {
+		if (event.pointerType !== 'touch') return;
+		if (longPressTimer !== null) {
+			clearTimeout(longPressTimer);
+		}
+		longPressStart = { x: event.clientX, y: event.clientY };
+		longPressTimer = window.setTimeout(() => {
+			longPressTimer = null;
+			if (longPressStart) {
+				// Haptic feedback
+				if (browser && 'vibrate' in navigator) {
+					navigator.vibrate(50);
+				}
+				contextMenuServerId = serverId;
+				contextMenuServerName = serverName;
+				serverContextMenuRef?.show(longPressStart.x, longPressStart.y);
+			}
+		}, LONG_PRESS_MS);
+	}
+
+	function handleServerPointerMove(event: PointerEvent) {
+		if (!longPressStart) return;
+		const dx = Math.abs(event.clientX - longPressStart.x);
+		const dy = Math.abs(event.clientY - longPressStart.y);
+		if (dx > LONG_PRESS_MOVE_THRESHOLD || dy > LONG_PRESS_MOVE_THRESHOLD) {
+			cancelServerLongPress();
+		}
+	}
+
+	function cancelServerLongPress() {
+		if (longPressTimer !== null) {
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
+		longPressStart = null;
+	}
+
+	async function handleToggleServerMute() {
+		const uid = $user?.uid;
+		const serverId = contextMenuServerId;
+		if (!uid || !serverId || !notificationSettings) return;
+		
+		serverMuteLoading = true;
+		try {
+			const currentlyMuted = isServerMuted(notificationSettings, serverId);
+			const newMuted = !currentlyMuted;
+			
+			// If muting, also mark all channels as read
+			if (newMuted) {
+				await markServerAsRead(uid, serverId);
+			}
+			
+			await toggleServerMute(uid, serverId, newMuted);
+			
+			// Haptic feedback
+			if (browser && 'vibrate' in navigator) {
+				navigator.vibrate(30);
+			}
+		} catch (err) {
+			console.error('[LeftPane] Failed to toggle server mute:', err);
+		} finally {
+			serverMuteLoading = false;
+		}
+	}
+
+	function getServerContextMenuItems() {
+		if (!contextMenuServerId || !notificationSettings) return [];
+		const muted = isServerMuted(notificationSettings, contextMenuServerId);
+		return [
+			{
+				label: muted ? 'Unmute Server' : 'Mute Server',
+				icon: muted ? 'bx-bell' : 'bx-bell-off',
+				action: handleToggleServerMute,
+				disabled: serverMuteLoading
+			}
+		];
+	}
+
+	// ==================== End Server Context Menu ====================
 
 	const currentStatusSelection = $derived(
 		myOverrideActive && myOverrideState ? myOverrideState : 'auto'
@@ -294,6 +404,15 @@
 		restartServerSubscription($user?.uid ?? null);
 		stopUserWatch = user.subscribe((next) => {
 			restartServerSubscription(next?.uid ?? null);
+			// Subscribe to notification settings for mute state
+			notificationSettingsUnsub?.();
+			if (next?.uid) {
+				notificationSettingsUnsub = subscribeNotificationSettings(next.uid, (settings) => {
+					notificationSettings = settings;
+				});
+			} else {
+				notificationSettings = null;
+			}
 		});
 
 		// Set up event listeners
@@ -317,6 +436,7 @@
 	onDestroy(() => stopUserWatch?.());
 	onDestroy(() => unsub?.());
 	onDestroy(() => dmRailUnsub?.());
+	onDestroy(() => notificationSettingsUnsub?.());
 	onDestroy(() => stopAutoScroll());
 	onDestroy(() => {
 		if (browser) {
@@ -869,14 +989,22 @@
 	>
 		<div class="rail-server-stack pb-4">
 			{#each displayedServers as s (s.id)}
+				{@const isMuted = notificationSettings && isServerMuted(notificationSettings, s.id)}
 				<button
 					type="button"
-					class={`rail-button ${activeServerId === s.id ? 'rail-button--active' : ''} ${draggingServerId === s.id ? 'rail-button--dragging' : ''}`}
+					class={`rail-button ${activeServerId === s.id ? 'rail-button--active' : ''} ${draggingServerId === s.id ? 'rail-button--dragging' : ''} ${isMuted ? 'rail-button--muted' : ''}`}
 					aria-label={s.name}
 					aria-current={activeServerId === s.id ? 'page' : undefined}
 					onclick={(event) => handleServerClick(event, s.id)}
+					oncontextmenu={(event) => openServerContextMenu(event, s.id, s.name)}
 					use:serverRefAction={s.id}
-					onpointerdown={(event) => handleServerPointerDown(event, s.id)}
+					onpointerdown={(event) => {
+						handleServerPointerDown(event, s.id);
+						startServerLongPress(event, s.id, s.name);
+					}}
+					onpointermove={handleServerPointerMove}
+					onpointerup={cancelServerLongPress}
+					onpointercancel={cancelServerLongPress}
 					onmouseenter={(event) => showServerTooltip(s.id, s.name, event)}
 					onmouseleave={hideServerTooltip}
 					animate:flip={{ duration: 180 }}
@@ -888,8 +1016,14 @@
 					{:else}
 						<span class="rail-button__fallback">{s.name.slice(0, 2).toUpperCase()}</span>
 					{/if}
-					<!-- Server activity dot -->
-					{#if $serverUnreadIndicators[s.id] && activeServerId !== s.id}
+					<!-- Muted indicator -->
+					{#if isMuted}
+						<span class="server-muted-indicator" title="Server muted">
+							<i class="bx bx-bell-off"></i>
+						</span>
+					{/if}
+					<!-- Server activity dot (hidden when muted) -->
+					{#if !isMuted && $serverUnreadIndicators[s.id] && activeServerId !== s.id}
 						<span
 							class="server-activity-dot"
 						class:server-activity-dot--high={$serverUnreadIndicators[s.id].hasHighPriority}
@@ -1122,6 +1256,13 @@
 
 <NewServerModal bind:open={localCreateOpen} onClose={() => (localCreateOpen = false)} />
 
+<!-- Server mute context menu -->
+<ContextMenu
+	bind:this={serverContextMenuRef}
+	items={getServerContextMenuItems()}
+	onClose={() => { contextMenuServerId = null; contextMenuServerName = null; }}
+/>
+
 <style>
 	:global(.rail-button) {
 		transition:
@@ -1235,6 +1376,36 @@
 	.server-activity-dot--high {
 		background: var(--color-accent);
 		animation: activity-pulse 2s ease-in-out infinite;
+	}
+
+	/* Muted server indicator */
+	.server-muted-indicator {
+		position: absolute;
+		bottom: -3px;
+		right: -3px;
+		width: 16px;
+		height: 16px;
+		border-radius: 999px;
+		background: var(--color-panel-muted);
+		border: 2px solid var(--color-panel);
+		pointer-events: none;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--color-text-tertiary);
+	}
+
+	.server-muted-indicator i {
+		font-size: 0.65rem;
+	}
+
+	:global(.rail-button--muted) {
+		opacity: 0.6;
+	}
+
+	:global(.rail-button--muted:hover) {
+		opacity: 0.85;
 	}
 
 	@keyframes activity-pulse {

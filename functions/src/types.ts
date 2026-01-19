@@ -38,6 +38,7 @@ export type ChannelDoc = {
   name?: string;
   type?: 'text' | 'voice';
   allowedRoleIds?: string[];
+  categoryId?: string | null;
 };
 
 export type ThreadDoc = {
@@ -66,6 +67,7 @@ export type NotificationSettings = {
   globalMute: boolean;
   muteDMs: boolean;
   muteServerIds: string[];
+  muteCategoryIds: Record<string, boolean>; // key format: "serverId/categoryId"
   perChannelMute: Record<string, boolean>;
   perRoleMute: Record<string, boolean>;
   allowMentionPush: boolean;
