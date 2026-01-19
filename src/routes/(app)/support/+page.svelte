@@ -574,6 +574,12 @@
 		
 		if (!text || ticket.sending || !uid) return;
 
+		// Need a threadId to send messages
+		if (!ticket.issue.threadId) {
+			console.error('[Support] Cannot send message: no threadId for ticket', ticket.issue.id);
+			return;
+		}
+
 		const idx = openTickets.findIndex((t) => t.issue.id === ticket.issue.id);
 		if (idx < 0) return;
 
