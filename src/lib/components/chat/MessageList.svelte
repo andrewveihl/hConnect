@@ -96,6 +96,8 @@
 		hideReplyPreview?: boolean;
 		replyTargetId?: string | null;
 		scrollToMessageId?: string | null;
+		/** Signal to force scroll to message even if same ID (increment to trigger) */
+		scrollToMessageSignal?: number;
 		/** Whether the current user is a Ticket AI staff member */
 		isTicketAiStaff?: boolean;
 		/** Server ID for ticket creation */
@@ -110,6 +112,8 @@
 		ticketedMessageIds?: Set<string>;
 		pinnedMessageIds?: Set<string>;
 		canPinMessages?: boolean;
+		/** Set of message IDs highlighted from search */
+		searchHighlightedIds?: Set<string>;
 	}
 
 	let {
@@ -122,6 +126,7 @@
 		hideReplyPreview = false,
 		replyTargetId = null,
 		scrollToMessageId = null,
+		scrollToMessageSignal = 0,
 		isTicketAiStaff = false,
 		serverId = null,
 		channelId = null,
@@ -129,7 +134,8 @@
 		dmThreadId = null,
 		ticketedMessageIds = new Set<string>(),
 		pinnedMessageIds = new Set<string>(),
-		canPinMessages = false
+		canPinMessages = false,
+		searchHighlightedIds = new Set<string>()
 	}: Props = $props();
 
 	let scroller = $state<HTMLDivElement | null>(null);
@@ -143,6 +149,7 @@
 	let lastFirstMessageId: string | null = null;
 	let highlightedMessageId = $state<string | null>(null);
 	let lastScrollToMessageId: string | null = null;
+	let lastScrollToMessageSignal = $state(0);
 	let creatingTicketForMessageId = $state<string | null>(null);
 	let editTextareaEl = $state<HTMLTextAreaElement | null>(null);
 
@@ -898,9 +905,13 @@
 	});
 
 	run(() => {
-		// Scroll to specific message when scrollToMessageId changes
-		if (scrollToMessageId && scrollToMessageId !== lastScrollToMessageId) {
+		// Scroll to specific message when scrollToMessageId changes or signal increments
+		const signalChanged = scrollToMessageSignal !== lastScrollToMessageSignal;
+		const idChanged = scrollToMessageId && scrollToMessageId !== lastScrollToMessageId;
+		
+		if (scrollToMessageId && (idChanged || signalChanged)) {
 			lastScrollToMessageId = scrollToMessageId;
+			lastScrollToMessageSignal = scrollToMessageSignal;
 			// Wait for messages to render then scroll
 			tick().then(() => scrollToMessage(scrollToMessageId));
 		}
@@ -1473,6 +1484,7 @@
 			{@const minuteKey = isSystem ? null : minuteKeyFor(m)}
 			{@const minuteHovered = minuteKey && hoveredMinuteKey === minuteKey}
 			{@const isHighlighted = highlightedMessageId === m.id}
+			{@const isSearchHighlighted = searchHighlightedIds?.has?.(m.id) ?? false}
 			{@const showAdd =
 				!isSystem &&
 				Boolean(
@@ -1484,7 +1496,7 @@
 			{@const threadMeta = threadStats?.[m.id]}
 			{#if isSystem}
 				<div
-					class="message-row message-row--system flex w-full justify-center {isHighlighted
+					class="message-row message-row--system flex w-full justify-center {isHighlighted || isSearchHighlighted
 						? 'message-row--highlighted'
 						: ''}"
 					data-message-id={m.id}
@@ -1500,7 +1512,7 @@
 				</div>
 			{:else}
 				<div
-					class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''} ${isHighlighted ? 'message-row--highlighted' : ''}`}
+					class={`message-row flex w-full ${mine ? 'message-row--mine' : 'message-row--other'} ${continued ? 'message-row--continued' : ''} ${isHighlighted || isSearchHighlighted ? 'message-row--highlighted' : ''}`}
 					data-message-id={m.id}
 					onpointerenter={(event) => onMessagePointerEnter(event, m.id, minuteKey)}
 					onpointerleave={(event) => {
@@ -2306,6 +2318,7 @@
 	.message-row--highlighted {
 		background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.25);
 		animation: highlight-pulse 2s ease-out;
+		border-left: 3px solid var(--color-accent, #3b82f6);
 	}
 
 	@keyframes highlight-pulse {
@@ -2313,7 +2326,7 @@
 			background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.4);
 		}
 		100% {
-			background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.1);
+			background-color: rgba(var(--color-accent-rgb, 59, 130, 246), 0.15);
 		}
 	}
 

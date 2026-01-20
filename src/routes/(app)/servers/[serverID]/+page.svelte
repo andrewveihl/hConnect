@@ -225,6 +225,12 @@
 	let lastThreadStreamChannel: string | null = null;
 	let lastThreadStreamId: string | null = null;
 	let threadReadTimer: number | null = null;
+	// Message search state
+	let channelSearchVisible = $state(false);
+	let channelMessagePaneRef: { toggleSearch?: () => void; isSearchVisible?: () => boolean } | null = $state(null);
+	// Track if there are more older messages to load
+	let hasMoreChannelMessages = $state(true);
+	let isLoadingChannelMessages = $state(false);
 	// Ticket AI staff detection
 	let ticketAiSettings: TicketAiSettings | null = $state(null);
 	let ticketAiSettingsUnsub: Unsubscribe | null = null;
@@ -1321,9 +1327,14 @@
 	let backfillPending = $state(false); // Track if backfill is in progress
 
 	async function loadOlderMessages(currServerId: string, channelId: string) {
+		if (isLoadingChannelMessages) return; // Prevent concurrent loads
 		try {
+			isLoadingChannelMessages = true;
 			const database = db();
-			if (!earliestLoaded) return; // nothing to load yet
+			if (!earliestLoaded) {
+				isLoadingChannelMessages = false;
+				return; // nothing to load yet
+			}
 			const q = query(
 				collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
 				orderBy('createdAt', 'asc'),
@@ -1337,17 +1348,24 @@
 			const existingIds = new Set(messages.map(m => m.id));
 			const uniqueOlder = older.filter(m => !existingIds.has(m.id));
 			messages = [...uniqueOlder, ...messages];
+			
+			// Track if there are more messages
+			const hasMore = older.length >= PAGE_SIZE;
+			hasMoreChannelMessages = hasMore;
+			
 			if (older.length) {
 				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
 				// Update cache with older messages
 				updateChannelCache(currServerId, channelId, older as CachedMessage[], {
 					earliestLoaded,
-					hasOlderMessages: older.length >= PAGE_SIZE,
+					hasOlderMessages: hasMore,
 					prepend: true
 				});
 			}
 		} catch (err) {
 			console.error('Failed to load older messages', err);
+		} finally {
+			isLoadingChannelMessages = false;
 		}
 	}
 
@@ -2056,6 +2074,10 @@
 		}
 		const next = selectChannelObject(id);
 		activeChannel = next;
+		
+		// Reset message loading state for new channel
+		hasMoreChannelMessages = true;
+		isLoadingChannelMessages = false;
 		
 		// Clean up old channel listeners before subscribing to new ones
 		cleanupChannelListeners();
@@ -5819,6 +5841,10 @@ $effect(() => {
 											{ticketedMessageIds}
 											pinnedMessageIds={pinnedMessageIds}
 											canPinMessages={canPinMessages}
+											searchVisible={channelSearchVisible}
+											onSearchVisibilityChange={(visible) => (channelSearchVisible = visible)}
+											hasMoreMessages={hasMoreChannelMessages}
+											isLoadingMessages={isLoadingChannelMessages}
 											onVote={handleVote}
 											onSubmitForm={handleFormSubmit}
 											onReact={handleReaction}
@@ -6098,6 +6124,10 @@ $effect(() => {
 										{pinnedMessageIds}
 										canPinMessages={canPinMessages}
 										pinnedMessages={pinnedMessages}
+										searchVisible={channelSearchVisible}
+										onSearchVisibilityChange={(visible) => (channelSearchVisible = visible)}
+										hasMoreMessages={hasMoreChannelMessages}
+										isLoadingMessages={isLoadingChannelMessages}
 										on:pinnedOpen={(event) => handlePinnedOpen(event.detail ?? {})}
 										on:pinnedUnpin={(event) => handlePinnedUnpin(event.detail?.messageId)}
 										onVote={handleVote}
