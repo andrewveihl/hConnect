@@ -480,14 +480,23 @@ export async function handleTicketAiThreadMessage(
     }
   }
 
-  // Use channel message ticket if it exists, otherwise use/create thread ticket
-  const issueRef = channelMessageTicketRef && channelMessageTicket 
-    ? channelMessageTicketRef 
-    : db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
-  const existing = channelMessageTicket ?? (await (async () => {
-    const snap = await db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`).get();
-    return snap.exists ? (snap.data() as IssueDoc) : null;
-  })());
+  // Check if a thread-level ticket exists
+  const threadTicketRef = db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
+  const threadTicketSnap = await threadTicketRef.get();
+  const threadTicket = threadTicketSnap.exists ? (threadTicketSnap.data() as IssueDoc) : null;
+
+  // Only update existing tickets - don't create new tickets from thread replies
+  // Tickets should only be created from channel messages that pass AI classification
+  if (!channelMessageTicket && !threadTicket) {
+    logger.debug('[ticketAi] No existing ticket for thread reply, skipping', { 
+      serverId, channelId, threadId, messageId 
+    });
+    return;
+  }
+
+  // Use channel message ticket if it exists, otherwise use thread ticket
+  const issueRef = channelMessageTicket ? channelMessageTicketRef! : threadTicketRef;
+  const existing = channelMessageTicket ?? threadTicket;
 
   const createdAt = existing?.createdAt ?? Timestamp.fromDate(rootCreated);
   const rootTimestamp = existing?.rootCreatedAt ?? Timestamp.fromDate(rootCreated);

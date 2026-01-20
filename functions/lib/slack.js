@@ -2123,14 +2123,20 @@ async function findBridgesForHConnectChannel(serverId, channelId) {
  * Called from Firestore trigger in index.ts
  */
 async function syncHConnectMessageToSlack(serverId, channelId, messageId, messageData) {
+    const msgType = messageData.type || 'text';
     firebase_functions_1.logger.info('[slack-outbound] syncHConnectMessageToSlack called', {
         serverId,
         channelId,
         messageId,
         isSlackMessage: !!messageData.isSlackMessage,
         hasSlackMeta: !!messageData.slackMeta?.messageTs,
-        messageType: messageData.type || 'text'
+        messageType: msgType
     });
+    // Skip system messages (e.g., "X started a thread")
+    if (msgType === 'system' || messageData.systemKind) {
+        firebase_functions_1.logger.info('[slack-outbound] Skipping system message', { messageId, systemKind: messageData.systemKind });
+        return;
+    }
     // Skip if this message came from Slack (prevent loops)
     if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {
         firebase_functions_1.logger.info('[slack-outbound] Skipping message from Slack', { messageId });
@@ -2149,7 +2155,6 @@ async function syncHConnectMessageToSlack(serverId, channelId, messageId, messag
         return; // No outbound bridges configured
     }
     // Determine message type and prepare content
-    const msgType = messageData.type || 'text';
     const isFileMessage = msgType === 'file' && messageData.file?.url;
     const isGifMessage = msgType === 'gif' && messageData.url;
     // For text messages, require non-empty text
@@ -2343,6 +2348,11 @@ messageId, messageData) {
         hasSlackMeta: !!messageData.slackMeta?.messageTs,
         messageType: msgType
     });
+    // Skip system messages (e.g., "X started a thread")
+    if (msgType === 'system' || messageData.systemKind) {
+        firebase_functions_1.logger.info('[slack-outbound-thread] Skipping system message', { messageId, threadId, systemKind: messageData.systemKind });
+        return;
+    }
     // Skip if this message came from Slack (prevent loops)
     if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {
         firebase_functions_1.logger.info('[slack-outbound-thread] Skipping message from Slack', { messageId, threadId });

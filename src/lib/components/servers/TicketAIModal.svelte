@@ -175,7 +175,7 @@
 			settingsLoadedFor = serverId;
 		} catch (err) {
 			console.error('[TicketAIModal] failed to load settings', err);
-			saveError = 'Could not load Issue Tracker settings.';;
+			saveError = 'Could not load Operations Hub settings.';
 		} finally {
 			loadingSettings = false;
 		}
@@ -385,7 +385,7 @@
 			}
 		} catch (err) {
 			console.error('[TicketAIModal] failed to save settings', err);
-			saveError = 'Failed to save Issue Tracker settings.';;
+			saveError = 'Failed to save Operations Hub settings.';
 		} finally {
 			savingSettings = false;
 		}
@@ -725,7 +725,7 @@
 						<i class="bx bx-bot"></i>
 					</div>
 					<div>
-						<h2>Issue Tracker</h2>
+						<h2>Operations Hub</h2>
 						<p class="modal-header__subtitle">{serverName}</p>
 					</div>
 				</div>
@@ -1070,12 +1070,12 @@
 									</div>
 								{/if}
 
-								<!-- Issue Types -->
+								<!-- Opportunities -->
 								{#if cachedAnalytics}
 									{@const types = cachedAnalytics.issuesByType}
 									<div class="team-card">
 										<div class="team-card__header">
-											<h4><i class="bx bx-category"></i> Issue Types</h4>
+											<h4><i class="bx bx-category"></i> Opportunities</h4>
 										</div>
 										<div class="type-list">
 											{#each Object.entries(types) as [type, count]}
@@ -1314,7 +1314,7 @@
 						<section class="settings-section">
 							<div class="settings-section__header">
 								<div>
-									<h4>Enable Issue Tracker</h4>
+									<h4>Enable Operations Hub</h4>
 									<p>Turn on to start tracking issues in your channels.</p>
 								</div>
 								<label class="toggle-switch">
@@ -2131,6 +2131,7 @@
 
 	.chart-card--wide {
 		grid-column: span 1;
+		overflow: hidden;
 	}
 
 	.chart-card__header {
@@ -2154,6 +2155,7 @@
 
 	.chart-area {
 		min-height: 110px;
+		overflow: hidden;
 	}
 
 	.bar-chart {
@@ -2162,6 +2164,9 @@
 		gap: 6px;
 		height: 110px;
 		padding-bottom: 1.25rem;
+		overflow-x: auto;
+		overflow-y: hidden;
+		max-width: 100%;
 	}
 
 	.bar-group {

@@ -92,7 +92,7 @@
 
 			<!-- Content -->
 			<div class="popup-content">
-				<h2>Issue Tracker</h2>
+				<h2>Operations Hub</h2>
 				<p class="popup-description">
 					Track and analyze support issues in your channels. Get insights on response times,
 					resolution rates, and team performance—all powered by AI.
@@ -113,7 +113,7 @@
 							</div>
 							<p class="status-text">
 								{#if enabled}
-									Issue Tracker is monitoring your configured channels.
+									Operations Hub is monitoring your configured channels.
 								{:else}
 									Enable to start tracking issues and collecting analytics.
 								{/if}

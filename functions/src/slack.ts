@@ -2671,19 +2671,28 @@ export async function syncHConnectMessageToSlack(
 		slackMeta?: { messageTs?: string };
 		photoURL?: string;
 		replyTo?: string | { messageId?: string }; // Parent message ID or reply reference object
-		type?: 'text' | 'gif' | 'file' | 'poll' | 'form';
+		type?: 'text' | 'gif' | 'file' | 'poll' | 'form' | 'system';
+		systemKind?: string;
 		file?: { name: string; url: string; size?: number; contentType?: string };
 		url?: string; // For gif type
 	}
 ): Promise<void> {
+	const msgType = messageData.type || 'text';
+	
 	logger.info('[slack-outbound] syncHConnectMessageToSlack called', { 
 		serverId, 
 		channelId, 
 		messageId,
 		isSlackMessage: !!messageData.isSlackMessage,
 		hasSlackMeta: !!messageData.slackMeta?.messageTs,
-		messageType: messageData.type || 'text'
+		messageType: msgType
 	});
+
+	// Skip system messages (e.g., "X started a thread")
+	if (msgType === 'system' || messageData.systemKind) {
+		logger.info('[slack-outbound] Skipping system message', { messageId, systemKind: messageData.systemKind });
+		return;
+	}
 
 	// Skip if this message came from Slack (prevent loops)
 	if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {
@@ -2955,7 +2964,8 @@ export async function syncHConnectThreadMessageToSlack(
 		isSlackMessage?: boolean;
 		slackMeta?: { messageTs?: string };
 		photoURL?: string;
-		type?: 'text' | 'gif' | 'file' | 'poll' | 'form';
+		type?: 'text' | 'gif' | 'file' | 'poll' | 'form' | 'system';
+		systemKind?: string;
 		file?: { name: string; url: string; size?: number; contentType?: string };
 		url?: string; // For gif type
 	}
@@ -2971,6 +2981,12 @@ export async function syncHConnectThreadMessageToSlack(
 		hasSlackMeta: !!messageData.slackMeta?.messageTs,
 		messageType: msgType
 	});
+
+	// Skip system messages (e.g., "X started a thread")
+	if (msgType === 'system' || messageData.systemKind) {
+		logger.info('[slack-outbound-thread] Skipping system message', { messageId, threadId, systemKind: messageData.systemKind });
+		return;
+	}
 
 	// Skip if this message came from Slack (prevent loops)
 	if (messageData.isSlackMessage || messageData.slackMeta?.messageTs) {

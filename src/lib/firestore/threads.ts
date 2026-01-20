@@ -196,7 +196,13 @@ const threadNameFromSource = (text?: string | null) => {
 };
 
 const describeNames = (uids: string[], profiles?: ProfileNameMap) => {
-	return uids.map((uid) => normalizeText(profiles?.[uid]?.displayName) || uid);
+	return uids.map((uid) => {
+		const profileName = normalizeText(profiles?.[uid]?.displayName);
+		if (profileName) return profileName;
+		// Format slack:USER_ID as "Slack User" instead of showing raw ID
+		if (uid.startsWith('slack:')) return 'Slack User';
+		return uid;
+	});
 };
 
 const defaultDisplayName = (name?: string | null) => normalizeText(name) || 'Someone';
