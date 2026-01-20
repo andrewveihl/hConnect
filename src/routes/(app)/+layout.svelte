@@ -87,7 +87,7 @@
 	const currentPath = $derived($page?.url?.pathname ?? '/');
 	const isDmRoute = $derived(currentPath.startsWith('/dms'));
 	const showLeftPane = $derived(
-		currentPath === '/' || currentPath.startsWith('/servers/') || currentPath.startsWith('/dms') || currentPath.startsWith('/support')
+		currentPath === '/' || currentPath.startsWith('/servers/') || currentPath.startsWith('/dms') || currentPath.startsWith('/support') || currentPath.startsWith('/agile')
 	);
 	const activeServerId = $derived.by(() => {
 		const match = currentPath.match(/^\/servers\/([^/]+)/);

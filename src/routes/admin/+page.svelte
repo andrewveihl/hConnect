@@ -117,6 +117,14 @@
 	<div class="flex flex-wrap gap-2">
 		<button
 			type="button"
+			class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90"
+			onclick={() => goto('/admin/tbdf')}
+		>
+			<i class="bx bx-buildings"></i>
+			TBDF
+		</button>
+		<button
+			type="button"
 			class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90"
 			onclick={() => goto('/admin/features')}
 		>
