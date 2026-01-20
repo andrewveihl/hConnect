@@ -3,7 +3,6 @@
 	import { goto } from '$app/navigation';
 	import { user } from '$lib/stores/user';
 	import { serverStore } from '$lib/stores/server';
-	import { db } from '$lib/firebase/client';
 	import { doc, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 	import type { 
 		AgileTeam, 
