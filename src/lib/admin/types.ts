@@ -16,6 +16,13 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
 		description: 'Dashboard with key metrics'
 	},
 	{
+		id: 'tbdf',
+		label: 'TBDF',
+		href: '/admin/tbdf',
+		icon: 'bx-buildings',
+		description: 'Agile boards & project management'
+	},
+	{
 		id: 'servers',
 		label: 'Servers',
 		href: '/admin/servers',
