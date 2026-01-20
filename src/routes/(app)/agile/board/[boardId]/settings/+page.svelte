@@ -2,8 +2,6 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { user } from '$lib/stores/user';
-	import { serverStore } from '$lib/stores/server';
-	import { db } from '$lib/firebase/client';
 	import { doc, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 	import type { 
 		AgileTeam, 
@@ -38,7 +36,6 @@
 	const board = $derived(boardData?.board);
 	const boardId = $derived($page.params.boardId);
 	const currentUserId = $derived($user?.uid ?? '');
-	const currentServerId = $derived($serverStore?.id ?? '');
 	
 	// Check permissions
 	const userRole = $derived(board ? getUserRole(board, currentUserId) : null);

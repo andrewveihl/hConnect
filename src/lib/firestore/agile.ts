@@ -431,7 +431,7 @@ export type TeamHealthAggregated = {
 // ============================================================================
 
 // Default columns per spec: Backlog, Ready, Planned for Sprint, In Progress, Review, Test, Blocked, Done
-const DEFAULT_COLUMNS: BoardColumn[] = [
+export const DEFAULT_COLUMNS: BoardColumn[] = [
 	{ id: 'backlog', name: 'Backlog', status: 'backlog', color: '#6b7280', order: 0 },
 	{ id: 'ready', name: 'Ready', status: 'ready', color: '#0ea5e9', order: 1 },
 	{ id: 'planned', name: 'Planned for Sprint', status: 'planned', color: '#3b82f6', order: 2 },
@@ -443,7 +443,7 @@ const DEFAULT_COLUMNS: BoardColumn[] = [
 ];
 
 // Default T-shirt mapping to numeric weights
-const DEFAULT_TSHIRT_MAPPING: TShirtMapping = {
+export const DEFAULT_TSHIRT_MAPPING: TShirtMapping = {
 	XS: 1,
 	S: 2,
 	M: 3,
