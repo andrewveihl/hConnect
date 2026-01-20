@@ -1070,7 +1070,7 @@
 			class:ticket-fab--has-issues={openCount > 0 && enabled}
 			class:ticket-fab--snapped={isSnapped}
 			aria-label="Support Issues"
-			title={enabled ? `Support Issues (${openCount} open)` : 'Issue Tracker (Disabled)'}
+			title={enabled ? `Support Issues (${openCount} open)` : 'Operations Hub (Disabled)'}
 			onclick={handleFabClick}
 			onpointerdown={handlePointerDown}
 			onpointermove={handlePointerMove}
@@ -1113,7 +1113,7 @@
 				{#if staffServers.length === 0}
 					<div class="ticket-panel__empty">
 						<i class="bx bx-info-circle"></i>
-						<span>No servers with Issue Tracker access</span>
+						<span>No servers with Operations Hub access</span>
 					</div>
 				{:else if loading}
 					<div class="ticket-panel__empty">

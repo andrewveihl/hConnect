@@ -340,7 +340,7 @@
 					<!-- Show message when Ticket AI is disabled -->
 					<div class="ticket-panel__disabled-notice">
 						<i class="bx bx-info-circle"></i>
-						<p>Issue Tracker is not enabled for this server.</p>
+						<p>Operations Hub is not enabled for this server.</p>
 						<p class="ticket-panel__disabled-hint">Enable it in Server Settings → Integrations</p>
 					</div>
 				{:else}

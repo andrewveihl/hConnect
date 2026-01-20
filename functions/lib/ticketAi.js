@@ -395,14 +395,21 @@ async function handleTicketAiThreadMessage(event) {
             channelMessageTicket = channelTicketSnap.data();
         }
     }
-    // Use channel message ticket if it exists, otherwise use/create thread ticket
-    const issueRef = channelMessageTicketRef && channelMessageTicket
-        ? channelMessageTicketRef
-        : firebase_1.db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
-    const existing = channelMessageTicket ?? (await (async () => {
-        const snap = await firebase_1.db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`).get();
-        return snap.exists ? snap.data() : null;
-    })());
+    // Check if a thread-level ticket exists
+    const threadTicketRef = firebase_1.db.doc(`servers/${serverId}/ticketAiIssues/${threadId}`);
+    const threadTicketSnap = await threadTicketRef.get();
+    const threadTicket = threadTicketSnap.exists ? threadTicketSnap.data() : null;
+    // Only update existing tickets - don't create new tickets from thread replies
+    // Tickets should only be created from channel messages that pass AI classification
+    if (!channelMessageTicket && !threadTicket) {
+        firebase_functions_1.logger.debug('[ticketAi] No existing ticket for thread reply, skipping', {
+            serverId, channelId, threadId, messageId
+        });
+        return;
+    }
+    // Use channel message ticket if it exists, otherwise use thread ticket
+    const issueRef = channelMessageTicket ? channelMessageTicketRef : threadTicketRef;
+    const existing = channelMessageTicket ?? threadTicket;
     const createdAt = existing?.createdAt ?? firestore_1.Timestamp.fromDate(rootCreated);
     const rootTimestamp = existing?.rootCreatedAt ?? firestore_1.Timestamp.fromDate(rootCreated);
     const lastStatus = (existing?.status ?? 'opened');
