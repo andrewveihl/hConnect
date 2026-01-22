@@ -68,6 +68,9 @@
 		sending: boolean;
 		inputText: string;
 		unsubMessages?: Unsubscribe | null;
+		originalMessage?: string | null; // Full original message text
+		originalMessageLoading?: boolean;
+		threadCreated?: boolean; // Whether thread has been created (claimed)
 	};
 
 	type QuickResponse = {
@@ -135,7 +138,7 @@
 
 	// Client filter dropdown state
 	let clientMenuOpen = $state(false);
-	let clientMenuAnchor: HTMLDivElement | null = null;
+	let clientMenuAnchor = $state<HTMLDivElement | null>(null);
 
 	// Track which textareas are expanded (multi-line)
 	let expandedTextareas = $state<Set<string>>(new Set());
@@ -465,7 +468,27 @@
 		});
 	}
 
-	// Open a ticket in a new panel
+	// Fetch the original message content for a ticket
+	async function fetchOriginalMessage(issue: TicketIssue): Promise<string | null> {
+		if (!issue.parentMessageId) return null;
+		
+		try {
+			const db = getDb();
+			const msgRef = doc(db, 'servers', issue.serverId, 'channels', issue.channelId, 'messages', issue.parentMessageId);
+			const msgSnap = await getDoc(msgRef);
+			
+			if (msgSnap.exists()) {
+				const data = msgSnap.data();
+				return data?.text ?? data?.content ?? null;
+			}
+			return null;
+		} catch (err) {
+			console.error('[Support] Failed to fetch original message:', err);
+			return null;
+		}
+	}
+
+	// Open a ticket in a new panel - does NOT create thread automatically
 	async function openTicket(issue: TicketIssue) {
 		// Check if already open
 		const existingIdx = openTickets.findIndex((t) => t.issue.id === issue.id);
@@ -478,87 +501,148 @@
 		const server = staffServers.find((s) => s.id === issue.serverId);
 		const channelName = await fetchChannelName(issue.serverId, issue.channelId);
 
+		// Check if thread already exists
+		const hasThread = !!issue.threadId;
+
 		const newTicket: OpenTicket = {
 			issue,
 			serverName: server?.name ?? 'Unknown',
 			channelName,
 			messages: [],
-			loading: true,
+			loading: hasThread, // Only loading if we need to fetch messages
 			sending: false,
-			inputText: ''
+			inputText: '',
+			originalMessage: null,
+			originalMessageLoading: true,
+			threadCreated: hasThread
 		};
 
 		openTickets = [...openTickets, newTicket];
 		focusedTicketId = issue.id;
 		if (mobileViewport) mobileActiveTicket = issue.id;
 
-		// Ensure we have a threadId - create one if missing
-		let threadId = issue.threadId;
-		if (!threadId && issue.parentMessageId) {
-			try {
-				const uid = $user?.uid;
-				const displayName = $user?.displayName ?? $userProfile?.displayName ?? 'Staff';
-				
-				threadId = await createChannelThread({
-					serverId: issue.serverId,
-					channelId: issue.channelId,
-					sourceMessageId: issue.parentMessageId,
-					sourceMessageText: issue.summary?.slice(0, 100),
-					creator: { uid: uid ?? '', displayName },
-					initialMentions: issue.authorId ? [issue.authorId] : []
-				});
-
-				// Update the issue with the new threadId
-				const db = getDb();
-				const issueRef = doc(db, 'servers', issue.serverId, 'ticketAiIssues', issue.id);
-				await updateDoc(issueRef, { threadId });
-
-				// Update local issue reference
-				issue.threadId = threadId;
-				const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
-				if (idx >= 0) {
-					openTickets[idx].issue.threadId = threadId;
-				}
-			} catch (err) {
-				console.error('[Support] Failed to create thread:', err);
-				// Mark as not loading with error
-				const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
-				if (idx >= 0) {
-					openTickets[idx].loading = false;
-					openTickets = [...openTickets];
-				}
-				return;
+		// Fetch the original message in parallel
+		fetchOriginalMessage(issue).then((msg) => {
+			const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
+			if (idx >= 0) {
+				openTickets[idx].originalMessage = msg;
+				openTickets[idx].originalMessageLoading = false;
+				openTickets = [...openTickets];
 			}
-		}
+		});
 
-		if (!threadId) {
-			console.warn('[Support] No threadId available for issue:', issue.id);
+		// If thread already exists, subscribe to messages
+		if (issue.threadId) {
+			const unsub = streamThreadMessages(
+				issue.serverId,
+				issue.channelId,
+				issue.threadId,
+				(msgs) => {
+					const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
+					if (idx >= 0) {
+						openTickets[idx].messages = msgs;
+						openTickets[idx].loading = false;
+						openTickets = [...openTickets];
+					}
+				}
+			);
+
+			const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
+			if (idx >= 0) {
+				openTickets[idx].unsubMessages = unsub;
+			}
+		} else {
+			// No thread yet, mark as not loading
 			const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
 			if (idx >= 0) {
 				openTickets[idx].loading = false;
 				openTickets = [...openTickets];
 			}
-			return;
 		}
+	}
 
-		// Subscribe to messages
-		const unsub = streamThreadMessages(
-			issue.serverId,
-			issue.channelId,
-			threadId,
-			(msgs) => {
-				const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
-				if (idx >= 0) {
-					openTickets[idx].messages = msgs;
-					openTickets[idx].loading = false;
-					openTickets = [...openTickets];
-				}
-			}
-		);
+	// Claim ticket AND create thread - this is the main action for new tickets
+	async function claimAndStartThread(issue: TicketIssue) {
+		const uid = $user?.uid;
+		if (!uid) return;
 
 		const idx = openTickets.findIndex((t) => t.issue.id === issue.id);
-		if (idx >= 0) {
-			openTickets[idx].unsubMessages = unsub;
+		if (idx < 0) return;
+
+		// Mark as loading
+		openTickets[idx].loading = true;
+		openTickets = [...openTickets];
+
+		try {
+			const db = getDb();
+			const displayName = $user?.displayName ?? $userProfile?.displayName ?? 'Staff';
+
+			// Create the thread if it doesn't exist
+			let threadId = issue.threadId;
+			if (!threadId && issue.parentMessageId) {
+				threadId = await createChannelThread({
+					serverId: issue.serverId,
+					channelId: issue.channelId,
+					sourceMessageId: issue.parentMessageId,
+					sourceMessageText: issue.summary?.slice(0, 100),
+					creator: { uid, displayName },
+					initialMentions: issue.authorId ? [issue.authorId] : []
+				});
+
+				// Update the issue with the new threadId
+				const issueRef = doc(db, 'servers', issue.serverId, 'ticketAiIssues', issue.id);
+				await updateDoc(issueRef, { 
+					threadId,
+					staffMemberIds: [uid],
+					status: 'in_progress'
+				});
+
+				// Update local issue reference
+				issue.threadId = threadId;
+				openTickets[idx].issue.threadId = threadId;
+				openTickets[idx].threadCreated = true;
+			} else {
+				// Just claim it if thread exists
+				const issueRef = doc(db, 'servers', issue.serverId, 'ticketAiIssues', issue.id);
+				await updateDoc(issueRef, {
+					staffMemberIds: [uid],
+					status: 'in_progress'
+				});
+			}
+
+			// Subscribe to messages now that thread exists
+			if (threadId) {
+				const unsub = streamThreadMessages(
+					issue.serverId,
+					issue.channelId,
+					threadId,
+					(msgs) => {
+						const i = openTickets.findIndex((t) => t.issue.id === issue.id);
+						if (i >= 0) {
+							openTickets[i].messages = msgs;
+							openTickets[i].loading = false;
+							openTickets = [...openTickets];
+						}
+					}
+				);
+
+				openTickets[idx].unsubMessages = unsub;
+			}
+
+			openTickets = [...openTickets];
+		} catch (err) {
+			console.error('[Support] Failed to claim and start thread:', err);
+			openTickets[idx].loading = false;
+			openTickets = [...openTickets];
+		}
+	}
+
+	// Navigate to original message in channel (not thread)
+	function goToMessage(issue: TicketIssue) {
+		if (issue.parentMessageId) {
+			goto(`/servers/${issue.serverId}?channel=${issue.channelId}&message=${issue.parentMessageId}`);
+		} else {
+			goto(`/servers/${issue.serverId}?channel=${issue.channelId}`);
 		}
 	}
 
@@ -577,7 +661,7 @@
 		}
 	}
 
-	// Claim a ticket
+	// Claim a ticket (without creating thread - for already-threaded tickets)
 	async function claimTicket(issue: TicketIssue) {
 		const uid = $user?.uid;
 		if (!uid) return;
@@ -1445,6 +1529,14 @@
 								>
 									<i class="bx bx-link-external"></i>
 								</button>
+								<button
+									type="button"
+									class="action-btn"
+									onclick={() => goToMessage(ticket.issue)}
+									title="Go to original message"
+								>
+									<i class="bx bx-message-square-detail"></i>
+								</button>
 							</div>
 						</div>
 
@@ -1454,54 +1546,85 @@
 									<i class="bx bx-user"></i> {ticket.issue.authorName}
 								</div>
 							{/if}
-							<div class="ticket-panel__summary-text">{ticket.issue.summary}</div>
-						</div>
-
-						<div class="ticket-panel__messages">
-							{#if ticket.loading}
-								<div class="ticket-panel__loading">
-									<i class="bx bx-loader-alt bx-spin"></i>
-								</div>
-							{:else}
-								{#each ticket.messages as msg (msg.id)}
-									<div
-										class="message"
-										class:message--staff={msg.authorId === $user?.uid}
-									>
-										<div class="message__author">{msg.authorName ?? 'User'}</div>
-										<div class="message__text">{msg.text}</div>
-										<div class="message__time">{formatTimeAgo(msg.createdAt)}</div>
+							<div class="ticket-panel__original-message">
+								{#if ticket.originalMessageLoading}
+									<div class="ticket-panel__loading-inline">
+										<i class="bx bx-loader-alt bx-spin"></i> Loading message...
 									</div>
-								{/each}
-							{/if}
+								{:else if ticket.originalMessage}
+									<div class="ticket-panel__message-content">{ticket.originalMessage}</div>
+								{:else}
+									<div class="ticket-panel__summary-text">{ticket.issue.summary}</div>
+								{/if}
+							</div>
 						</div>
 
-						<div class="ticket-panel__input">
-							<input
-								type="text"
-								placeholder="Type a reply..."
-								bind:value={ticket.inputText}
-								onkeydown={(e) => {
-									if (e.key === 'Enter' && !e.shiftKey) {
-										e.preventDefault();
-										sendMessage(ticket);
-									}
-								}}
-								disabled={ticket.sending}
-							/>
-							<button
-								type="button"
-								class="send-btn"
-								onclick={() => sendMessage(ticket)}
-								disabled={!ticket.inputText.trim() || ticket.sending}
-							>
-								{#if ticket.sending}
-									<i class="bx bx-loader-alt bx-spin"></i>
+						<!-- Claim & Start Thread Button (shown when thread doesn't exist) -->
+						{#if !ticket.threadCreated}
+							<div class="ticket-panel__claim-section">
+								<button
+									type="button"
+									class="claim-thread-btn"
+									onclick={() => claimAndStartThread(ticket.issue)}
+									disabled={ticket.loading}
+								>
+									{#if ticket.loading}
+										<i class="bx bx-loader-alt bx-spin"></i>
+										Creating thread...
+									{:else}
+										<i class="bx bx-message-add"></i>
+										Claim & Start Thread
+									{/if}
+								</button>
+								<p class="claim-thread-hint">Start a thread to respond to this ticket</p>
+							</div>
+						{:else}
+							<div class="ticket-panel__messages">
+								{#if ticket.loading}
+									<div class="ticket-panel__loading">
+										<i class="bx bx-loader-alt bx-spin"></i>
+									</div>
 								{:else}
-									<i class="bx bx-send"></i>
+									{#each ticket.messages as msg (msg.id)}
+										<div
+											class="message"
+											class:message--staff={msg.authorId === $user?.uid}
+										>
+											<div class="message__author">{msg.authorName ?? 'User'}</div>
+											<div class="message__text">{msg.text}</div>
+											<div class="message__time">{formatTimeAgo(msg.createdAt)}</div>
+										</div>
+									{/each}
 								{/if}
-							</button>
-						</div>
+							</div>
+
+							<div class="ticket-panel__input">
+								<input
+									type="text"
+									placeholder="Type a reply..."
+									bind:value={ticket.inputText}
+									onkeydown={(e) => {
+										if (e.key === 'Enter' && !e.shiftKey) {
+											e.preventDefault();
+											sendMessage(ticket);
+										}
+									}}
+									disabled={ticket.sending}
+								/>
+								<button
+									type="button"
+									class="send-btn"
+									onclick={() => sendMessage(ticket)}
+									disabled={!ticket.inputText.trim() || ticket.sending}
+								>
+									{#if ticket.sending}
+										<i class="bx bx-loader-alt bx-spin"></i>
+									{:else}
+										<i class="bx bx-send"></i>
+									{/if}
+								</button>
+							</div>
+						{/if}
 					</div>
 				{/if}
 			{:else}
@@ -1562,6 +1685,17 @@
 									</button>
 									<button
 										type="button"
+										class="action-btn"
+										onclick={(e) => {
+											e.stopPropagation();
+											goToMessage(ticket.issue);
+										}}
+										title="Go to original message"
+									>
+										<i class="bx bx-message-square-detail"></i>
+									</button>
+									<button
+										type="button"
 										class="action-btn action-btn--close"
 										onclick={(e) => {
 											e.stopPropagation();
@@ -1580,28 +1714,60 @@
 										<i class="bx bx-user"></i> {ticket.issue.authorName}
 									</div>
 								{/if}
-								<div class="ticket-panel__summary-text">{truncate(ticket.issue.summary, 100)}</div>
-							</div>
-
-							<div class="ticket-panel__messages">
-								{#if ticket.loading}
-									<div class="ticket-panel__loading">
-										<i class="bx bx-loader-alt bx-spin"></i>
-									</div>
-								{:else}
-									{#each ticket.messages.slice(-20) as msg (msg.id)}
-										<div
-											class="message"
-											class:message--staff={msg.authorId === $user?.uid}
-										>
-											<div class="message__author">{msg.authorName ?? 'User'}</div>
-											<div class="message__text">{msg.text}</div>
+								<div class="ticket-panel__original-message">
+									{#if ticket.originalMessageLoading}
+										<div class="ticket-panel__loading-inline">
+											<i class="bx bx-loader-alt bx-spin"></i> Loading...
 										</div>
-									{/each}
-								{/if}
+									{:else if ticket.originalMessage}
+										<div class="ticket-panel__message-content">{truncate(ticket.originalMessage, 200)}</div>
+									{:else}
+										<div class="ticket-panel__summary-text">{truncate(ticket.issue.summary, 100)}</div>
+									{/if}
+								</div>
 							</div>
 
-							<div class="ticket-panel__input" class:is-expanded={expandedTextareas.has(ticket.issue.id)}>
+							<!-- Claim & Start Thread Button (shown when thread doesn't exist) -->
+							{#if !ticket.threadCreated}
+								<div class="ticket-panel__claim-section ticket-panel__claim-section--compact">
+									<button
+										type="button"
+										class="claim-thread-btn claim-thread-btn--compact"
+										onclick={(e) => {
+											e.stopPropagation();
+											claimAndStartThread(ticket.issue);
+										}}
+										disabled={ticket.loading}
+									>
+										{#if ticket.loading}
+											<i class="bx bx-loader-alt bx-spin"></i>
+											Creating...
+										{:else}
+											<i class="bx bx-message-add"></i>
+											Claim & Start Thread
+										{/if}
+									</button>
+								</div>
+							{:else}
+								<div class="ticket-panel__messages">
+									{#if ticket.loading}
+										<div class="ticket-panel__loading">
+											<i class="bx bx-loader-alt bx-spin"></i>
+										</div>
+									{:else}
+										{#each ticket.messages.slice(-20) as msg (msg.id)}
+											<div
+												class="message"
+												class:message--staff={msg.authorId === $user?.uid}
+											>
+												<div class="message__author">{msg.authorName ?? 'User'}</div>
+												<div class="message__text">{msg.text}</div>
+											</div>
+										{/each}
+									{/if}
+								</div>
+
+								<div class="ticket-panel__input" class:is-expanded={expandedTextareas.has(ticket.issue.id)}>
 								<div class="input-wrapper">
 									<button
 										type="button"
@@ -1734,6 +1900,7 @@
 									{/if}
 								</button>
 							</div>
+							{/if}
 						</div>
 					{/each}
 				</div>
@@ -2753,6 +2920,85 @@
 
 	.ticket-panel__summary-text {
 		color: var(--color-text-secondary);
+	}
+
+	.ticket-panel__original-message {
+		width: 100%;
+	}
+
+	.ticket-panel__loading-inline {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--color-text-muted);
+		font-size: 0.75rem;
+	}
+
+	.ticket-panel__message-content {
+		color: var(--color-text-primary);
+		line-height: 1.5;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.ticket-panel__claim-section {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		flex: 1;
+		padding: 2rem;
+		gap: 0.75rem;
+	}
+
+	.ticket-panel__claim-section--compact {
+		padding: 1rem;
+		flex: none;
+	}
+
+	.claim-thread-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
+		padding: 0.875rem 1.5rem;
+		background: var(--color-accent);
+		color: white;
+		border: none;
+		border-radius: 8px;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.claim-thread-btn:hover:not(:disabled) {
+		background: var(--color-accent-hover, #4f9eff);
+		transform: translateY(-1px);
+	}
+
+	.claim-thread-btn:disabled {
+		opacity: 0.7;
+		cursor: not-allowed;
+	}
+
+	.claim-thread-btn i {
+		font-size: 1.125rem;
+	}
+
+	.claim-thread-btn--compact {
+		padding: 0.625rem 1rem;
+		font-size: 0.8125rem;
+	}
+
+	.claim-thread-btn--compact i {
+		font-size: 0.9375rem;
+	}
+
+	.claim-thread-hint {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		margin: 0;
 	}
 
 	.ticket-panel__messages {

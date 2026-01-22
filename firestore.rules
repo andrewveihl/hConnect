@@ -329,6 +329,16 @@ service cloud.firestore {
         && (isDefaultSuperAdminEmail(email) || superAdminEmails()[email] == true);
     }
 
+    // Collection group rules for Super Admin cross-server queries
+    // These allow super admins to use collectionGroup queries for admin dashboards
+    match /{path=**}/ticketAiIssues/{issueId} {
+      allow read: if isSuperAdminUser();
+    }
+
+    match /{path=**}/ticketAiSettings/{settingsId} {
+      allow read: if isSuperAdminUser();
+    }
+
     match /notifications/{uid} {
       allow read, write: if isSignedIn() && request.auth.uid == uid;
 
