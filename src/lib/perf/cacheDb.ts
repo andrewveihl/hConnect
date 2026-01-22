@@ -68,6 +68,7 @@ export type ServerViewData = {
 		description?: string | null;
 		ownerId?: string | null;
 	};
+	collapsedCategoryIds?: string[]; // User's collapsed folder state for instant UI
 	updatedAt: number;
 };
 
@@ -112,6 +113,10 @@ let memoryDmRail: DMRailEntry[] | null = null;
 const memoryServerViews = new Map<string, ServerViewData>();
 const memoryThreadViews = new Map<string, ThreadViewData>();
 const memoryAvatarUrls = new Map<string, string>(); // url -> objectURL
+
+// localStorage keys for instant first-paint (synchronous access)
+const LS_SERVER_RAIL = 'hc_server_rail';
+const LS_DM_RAIL = 'hc_dm_rail';
 
 // Debug event log
 const eventLog: Array<{ time: number; event: string; key?: string; size?: number }> = [];
@@ -232,9 +237,41 @@ export async function getServerRail(uid: string): Promise<ServerRailEntry[]> {
 	}
 }
 
+/**
+ * Synchronous getter for preloaded server rail.
+ * Reads from localStorage if memory not yet populated (instant first paint).
+ * Use this for initial render before async operations.
+ */
+export function getServerRailSync(): ServerRailEntry[] {
+	if (memoryServerRail !== null) return memoryServerRail;
+	
+	// Try localStorage for instant first paint
+	if (browser) {
+		try {
+			const stored = localStorage.getItem(LS_SERVER_RAIL);
+			if (stored) {
+				const parsed = JSON.parse(stored);
+				if (Array.isArray(parsed)) {
+					memoryServerRail = parsed;
+					logEvent('serverRail:localStorage-hit', 'sync', parsed.length);
+					return parsed;
+				}
+			}
+		} catch {}
+	}
+	return [];
+}
+
 export async function setServerRail(uid: string, servers: ServerRailEntry[]): Promise<void> {
 	memoryServerRail = servers;
 	logEvent('serverRail:set', uid, servers.length);
+	
+	// Save to localStorage for instant first paint on refresh
+	if (browser) {
+		try {
+			localStorage.setItem(LS_SERVER_RAIL, JSON.stringify(servers));
+		} catch {}
+	}
 
 	try {
 		const db = await openDatabase();
@@ -289,9 +326,40 @@ export async function getDmRail(uid: string): Promise<DMRailEntry[]> {
 	}
 }
 
+/**
+ * Synchronous getter for preloaded DM rail.
+ * Reads from localStorage if memory not yet populated (instant first paint).
+ */
+export function getDmRailSync(): DMRailEntry[] {
+	if (memoryDmRail !== null) return memoryDmRail;
+	
+	// Try localStorage for instant first paint
+	if (browser) {
+		try {
+			const stored = localStorage.getItem(LS_DM_RAIL);
+			if (stored) {
+				const parsed = JSON.parse(stored);
+				if (Array.isArray(parsed)) {
+					memoryDmRail = parsed;
+					logEvent('dmRail:localStorage-hit', 'sync', parsed.length);
+					return parsed;
+				}
+			}
+		} catch {}
+	}
+	return [];
+}
+
 export async function setDmRail(uid: string, threads: DMRailEntry[]): Promise<void> {
 	memoryDmRail = threads;
 	logEvent('dmRail:set', uid, threads.length);
+	
+	// Save to localStorage for instant first paint on refresh
+	if (browser) {
+		try {
+			localStorage.setItem(LS_DM_RAIL, JSON.stringify(threads));
+		} catch {}
+	}
 
 	try {
 		const db = await openDatabase();
@@ -775,32 +843,42 @@ export async function preloadCacheFromDb(): Promise<void> {
 			const db = await openDatabase();
 			const now = Date.now();
 			
-			// Load server rail
+			// Load server rail (get the most recent entry - there's typically only one per user)
 			await new Promise<void>((resolve) => {
 				const tx = db.transaction(STORE_SERVER_RAIL, 'readonly');
 				const store = tx.objectStore(STORE_SERVER_RAIL);
-				const request = store.get('current');
+				const request = store.getAll();
 				request.onsuccess = () => {
-					const data = request.result as { servers: ServerRailEntry[] } | undefined;
-					if (data?.servers?.length) {
-						memoryServerRail = data.servers;
-						logEvent('preload:serverRail', 'loaded', data.servers.length);
+					const items = request.result as Array<{ uid: string; servers: ServerRailEntry[]; updatedAt?: number }> | undefined;
+					if (items?.length) {
+						// Use the most recently updated entry
+						const sorted = items.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+						const latest = sorted[0];
+						if (latest?.servers?.length) {
+							memoryServerRail = latest.servers;
+							logEvent('preload:serverRail', 'loaded', latest.servers.length);
+						}
 					}
 					resolve();
 				};
 				request.onerror = () => resolve();
 			});
 			
-			// Load DM rail
+			// Load DM rail (get the most recent entry)
 			await new Promise<void>((resolve) => {
 				const tx = db.transaction(STORE_DM_RAIL, 'readonly');
 				const store = tx.objectStore(STORE_DM_RAIL);
-				const request = store.get('current');
+				const request = store.getAll();
 				request.onsuccess = () => {
-					const data = request.result as { threads: DMRailEntry[] } | undefined;
-					if (data?.threads?.length) {
-						memoryDmRail = data.threads;
-						logEvent('preload:dmRail', 'loaded', data.threads.length);
+					const items = request.result as Array<{ uid: string; threads: DMRailEntry[]; updatedAt?: number }> | undefined;
+					if (items?.length) {
+						// Use the most recently updated entry
+						const sorted = items.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+						const latest = sorted[0];
+						if (latest?.threads?.length) {
+							memoryDmRail = latest.threads;
+							logEvent('preload:dmRail', 'loaded', latest.threads.length);
+						}
 					}
 					resolve();
 				};

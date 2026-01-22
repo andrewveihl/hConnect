@@ -185,9 +185,9 @@
 							</button>
 						</div>
 					{:else if burndownData.length > 0}
-						{@const max = getMaxPoints()}
 						<div class="burndown-chart">
 							<div class="chart-y-axis">
+								{@const max = getMaxPoints()}
 								<span>{max}</span>
 								<span>{Math.round(max * 0.75)}</span>
 								<span>{Math.round(max * 0.5)}</span>

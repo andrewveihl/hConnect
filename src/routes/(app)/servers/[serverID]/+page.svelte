@@ -225,12 +225,6 @@
 	let lastThreadStreamChannel: string | null = null;
 	let lastThreadStreamId: string | null = null;
 	let threadReadTimer: number | null = null;
-	// Message search state
-	let channelSearchVisible = $state(false);
-	let channelMessagePaneRef: { toggleSearch?: () => void; isSearchVisible?: () => boolean } | null = $state(null);
-	// Track if there are more older messages to load
-	let hasMoreChannelMessages = $state(true);
-	let isLoadingChannelMessages = $state(false);
 	// Ticket AI staff detection
 	let ticketAiSettings: TicketAiSettings | null = $state(null);
 	let ticketAiSettingsUnsub: Unsubscribe | null = null;
@@ -1320,21 +1314,16 @@
 	};
 
 	// Progressive loading: quick initial render, then backfill
-	const INITIAL_PAGE_SIZE = 5;   // First quick load for instant feel
-	const BACKFILL_PAGE_SIZE = 20; // Second load after initial render
+	const INITIAL_PAGE_SIZE = 25;  // Enough messages to fill the visible chat area
+	const BACKFILL_PAGE_SIZE = 25; // Second load after initial render
 	const PAGE_SIZE = 50;          // Pagination on scroll
 	let earliestLoaded: any = null; // Firestore Timestamp or Date
 	let backfillPending = $state(false); // Track if backfill is in progress
 
 	async function loadOlderMessages(currServerId: string, channelId: string) {
-		if (isLoadingChannelMessages) return; // Prevent concurrent loads
 		try {
-			isLoadingChannelMessages = true;
 			const database = db();
-			if (!earliestLoaded) {
-				isLoadingChannelMessages = false;
-				return; // nothing to load yet
-			}
+			if (!earliestLoaded) return; // nothing to load yet
 			const q = query(
 				collection(database, 'servers', currServerId, 'channels', channelId, 'messages'),
 				orderBy('createdAt', 'asc'),
@@ -1348,24 +1337,17 @@
 			const existingIds = new Set(messages.map(m => m.id));
 			const uniqueOlder = older.filter(m => !existingIds.has(m.id));
 			messages = [...uniqueOlder, ...messages];
-			
-			// Track if there are more messages
-			const hasMore = older.length >= PAGE_SIZE;
-			hasMoreChannelMessages = hasMore;
-			
 			if (older.length) {
 				earliestLoaded = older[0]?.createdAt ?? earliestLoaded;
 				// Update cache with older messages
 				updateChannelCache(currServerId, channelId, older as CachedMessage[], {
 					earliestLoaded,
-					hasOlderMessages: hasMore,
+					hasOlderMessages: older.length >= PAGE_SIZE,
 					prepend: true
 				});
 			}
 		} catch (err) {
 			console.error('Failed to load older messages', err);
-		} finally {
-			isLoadingChannelMessages = false;
 		}
 	}
 
@@ -1467,7 +1449,7 @@
 					const q = query(
 						collection(database, 'servers', currServerId, 'channels', channel.id, 'messages'),
 						orderBy('createdAt', 'desc'),
-						limit(5)
+						limit(25)
 					);
 					const snap = await getDocs(q);
 					
@@ -1517,49 +1499,26 @@
 			showSkeletonMessages = true;
 		}
 		
-		// FAST PATH: If no cached messages, fetch messages one at a time for progressive loading
-		// Each message is fetched and shown before the next, giving a smooth reveal
+		// FAST PATH: If no cached messages, fetch initial batch for quick display
 		if (initialLoad) {
 			try {
 				const messagesRef = collection(database, 'servers', currServerId, 'channels', channelId, 'messages');
-				const loadedMessages: any[] = [];
 				
-				// Fetch up to 5 messages one at a time
-				for (let i = 0; i < 5; i++) {
-					// Guard: stop if subscription changed
-					if (subscriptionVersion !== messagesSubscriptionVersion) return;
-					
-					// Build query to get next message (after the ones we've loaded)
-					let msgQuery;
-					if (loadedMessages.length === 0) {
-						// First message - get the most recent
-						msgQuery = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
-					} else {
-						// Get the message before the oldest we have
-						const oldestTime = loadedMessages[0]?.createdAt;
-						if (!oldestTime) break;
-						msgQuery = query(
-							messagesRef, 
-							orderBy('createdAt', 'desc'), 
-							where('createdAt', '<', oldestTime),
-							limit(1)
-						);
-					}
-					
-					const snap = await getDocs(msgQuery);
-					if (snap.empty) break; // No more messages
-					
-					// Add message to the front (since we're loading newest first, then going back)
-					const msg = toChatMessage(snap.docs[0].id, snap.docs[0].data());
-					loadedMessages.unshift(msg);
-					
-					// Show the messages so far
+				// Guard: stop if subscription changed
+				if (subscriptionVersion !== messagesSubscriptionVersion) return;
+				
+				// Fetch initial batch of messages
+				const msgQuery = query(messagesRef, orderBy('createdAt', 'desc'), limit(INITIAL_PAGE_SIZE));
+				const snap = await getDocs(msgQuery);
+				
+				if (!snap.empty && subscriptionVersion === messagesSubscriptionVersion) {
+					const loadedMessages = snap.docs.map(d => toChatMessage(d.id, d.data())).reverse();
 					showSkeletonMessages = false;
-					messages = [...loadedMessages];
+					messages = loadedMessages;
 					triggerScrollToBottom();
+				} else {
+					showSkeletonMessages = false;
 				}
-				
-				showSkeletonMessages = false;
 			} catch (err) {
 				// If quick fetch fails, just continue to listener
 				showSkeletonMessages = false;
@@ -1618,6 +1577,14 @@
 				}
 
 				const nextLen = nextMessages.length;
+				
+				// SMOOTH TRANSITION: Only scroll to bottom if genuinely new messages arrived
+				// This prevents the "jump" effect when cached data is replaced by live data
+				const prevMessages = untrack(() => messages);
+				const prevLastId = prevMessages[prevMessages.length - 1]?.id;
+				const nextLastId = nextMessages[nextMessages.length - 1]?.id;
+				const hasNewMessagesAtEnd = !prevLastId || prevLastId !== nextLastId;
+				
 				messages = nextMessages;
 				
 				// Update both caches with new messages
@@ -1651,7 +1618,11 @@
 					});
 				}
 				
-				triggerScrollToBottom();
+				// Only scroll to bottom if there are genuinely new messages at the end
+				// This prevents the jarring "jump" when live data replaces cached data
+				if (hasNewMessagesAtEnd) {
+					triggerScrollToBottom();
+				}
 				const prevEarliest = earliestLoaded;
 				if (nextLen) {
 					earliestLoaded = nextMessages[0]?.createdAt ?? null;
@@ -2074,10 +2045,6 @@
 		}
 		const next = selectChannelObject(id);
 		activeChannel = next;
-		
-		// Reset message loading state for new channel
-		hasMoreChannelMessages = true;
-		isLoadingChannelMessages = false;
 		
 		// Clean up old channel listeners before subscribing to new ones
 		cleanupChannelListeners();
@@ -5158,21 +5125,62 @@
 		if (currentServer !== prevServerForChannels) {
 			channelListServerId = currentServer;
 			
-			// INSTANT CHANNEL LOADING: Load cached channels immediately on server switch
-			// This prevents the "Select a channel" screen from flashing while waiting for Firestore
+			// INSTANT SERVER SWITCH: Full cache-first loading
+			// 1. Load cached channels immediately
+			// 2. Restore last active channel from memory
+			// 3. Load cached messages for that channel
+			// 4. Then background-sync from Firestore
+			
 			const cachedChannels = getCachedServerChannels(currentServer);
+			const rememberedChannelId = getRememberedChannel(currentServer);
+			
 			if (cachedChannels.length > 0) {
-				// We have cached channels - use them immediately instead of clearing to empty
+				// We have cached channels - use them immediately
 				messagesSubscriptionVersion++;
 				clearMessagesUnsub();
 				clearPopoutMessagesUnsub();
 				cleanupPopoutProfileSubscriptions();
 				resetThreadState({ resetCache: true });
 				messagesLoadError = null;
-				// Use cached channels instead of empty array
+				
+				// Use cached channels
 				channels = cachedChannels as Channel[];
-				activeChannel = null;
-				messages = [];
+				
+				// Try to restore the last active channel
+				let restoredChannel: Channel | null = null;
+				if (rememberedChannelId) {
+					restoredChannel = cachedChannels.find(c => c.id === rememberedChannelId) as Channel | undefined ?? null;
+				}
+				// Fall back to first text channel if remembered not found
+				if (!restoredChannel) {
+					restoredChannel = (cachedChannels.find(c => c.type === 'text') as Channel) ?? null;
+				}
+				
+				// Restore cached messages for the channel if available
+				if (restoredChannel && restoredChannel.type === 'text') {
+					activeChannel = restoredChannel;
+					
+					// Try to load cached messages for instant display
+					const channelCacheKey = threadKey(currentServer, restoredChannel.id);
+					const cachedMsgs = getThreadViewMemory(channelCacheKey);
+					if (cachedMsgs?.messages?.length) {
+						// Show cached messages instantly - no "jump"!
+						messages = cachedMsgs.messages.map((row: any) => toChatMessage(row.id, row));
+						earliestLoaded = messages[0]?.createdAt ?? null;
+					} else {
+						// No message cache - will load from Firestore
+						messages = [];
+					}
+					
+					// Start live subscription in background (will merge with cached)
+					subscribeMessages(currentServer, restoredChannel.id);
+					subscribeThreads(currentServer, restoredChannel.id);
+				} else {
+					activeChannel = null;
+					messages = [];
+				}
+				
+				// Reset other state
 				profiles = {};
 				channelMessagesPopout = false;
 				channelMessagesPopoutChannelId = null;
@@ -5184,13 +5192,14 @@
 				popoutEarliestLoaded = null;
 				clearPinnedState();
 				clearPopoutPinnedState();
-				// Also update lastSidebarChannels so syncVisibleChannels works correctly
+				
+				// Sync sidebar channels state
 				lastSidebarChannels = {
 					serverId: currentServer,
 					channels: cachedChannels as Channel[]
 				};
 			} else {
-				// No cache, use regular reset
+				// No cache - regular reset, will load fresh from Firestore
 				resetChannelState();
 			}
 			
@@ -5841,10 +5850,6 @@ $effect(() => {
 											{ticketedMessageIds}
 											pinnedMessageIds={pinnedMessageIds}
 											canPinMessages={canPinMessages}
-											searchVisible={channelSearchVisible}
-											onSearchVisibilityChange={(visible) => (channelSearchVisible = visible)}
-											hasMoreMessages={hasMoreChannelMessages}
-											isLoadingMessages={isLoadingChannelMessages}
 											onVote={handleVote}
 											onSubmitForm={handleFormSubmit}
 											onReact={handleReaction}
@@ -6124,10 +6129,6 @@ $effect(() => {
 										{pinnedMessageIds}
 										canPinMessages={canPinMessages}
 										pinnedMessages={pinnedMessages}
-										searchVisible={channelSearchVisible}
-										onSearchVisibilityChange={(visible) => (channelSearchVisible = visible)}
-										hasMoreMessages={hasMoreChannelMessages}
-										isLoadingMessages={isLoadingChannelMessages}
 										on:pinnedOpen={(event) => handlePinnedOpen(event.detail ?? {})}
 										on:pinnedUnpin={(event) => handlePinnedUnpin(event.detail?.messageId)}
 										onVote={handleVote}

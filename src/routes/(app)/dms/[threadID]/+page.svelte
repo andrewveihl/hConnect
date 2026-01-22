@@ -139,15 +139,10 @@
 	let earliestLoadedDoc: any = $state(null); // Track oldest message doc for pagination
 	const combinedScrollSignal = $derived(scrollResumeSignal);
 	let lastPendingThreadId: string | null = null;
-	// DM message search state
-	let dmSearchVisible = $state(false);
-	// Track if there are more older messages to load for search
-	let hasMoreDmMessages = $state(true);
-	let isLoadingDmMessages = $state(false);
 	
 	// Progressive loading: quick initial render, then backfill
-	const DM_INITIAL_PAGE_SIZE = 5;   // First quick load for instant feel
-	const DM_BACKFILL_PAGE_SIZE = 20; // Second load after initial render
+	const DM_INITIAL_PAGE_SIZE = 25;  // Enough messages to fill the visible chat area
+	const DM_BACKFILL_PAGE_SIZE = 25; // Second load after initial render
 	let dmBackfillPending = $state(false);
 
 	onMount(() => {
@@ -1066,9 +1061,6 @@
 				lastThreadID = currentThreadID;
 				syncInfoVisibility(false);
 				pendingReply = null;
-				// Reset message loading state for new thread
-				hasMoreDmMessages = true;
-				isLoadingDmMessages = false;
 				// Don't clear messages here - let the cache-first block handle it
 				// Only set loading state if no cache exists
 				if (!hasDMCache(currentThreadID)) {
@@ -1544,15 +1536,9 @@
 	});
 
 	async function handleLoadOlderMessages() {
-		if (!threadID || !earliestLoadedDoc || isLoadingDmMessages) return;
+		if (!threadID || !earliestLoadedDoc) return;
 		try {
-			isLoadingDmMessages = true;
 			const olderMsgs = await loadOlderDMMessages(threadID, earliestLoadedDoc);
-			
-			// Track if there are more messages
-			const hasMore = olderMsgs.length >= 50;
-			hasMoreDmMessages = hasMore;
-			
 			if (olderMsgs.length > 0) {
 				const olderConverted = olderMsgs.map((row: any) => toChatMessage(row.id, row));
 				// Deduplicate when prepending older messages
@@ -1564,7 +1550,7 @@
 				
 				// Update DM cache with older messages
 				updateDMCache(threadID, olderMsgs as CachedMessage[], {
-					hasOlderMessages: hasMore,
+					hasOlderMessages: olderMsgs.length >= 50,
 					prepend: true
 				});
 				
@@ -1581,8 +1567,6 @@
 			}
 		} catch (err) {
 			console.error('[DM] Failed to load older messages:', err);
-		} finally {
-			isLoadingDmMessages = false;
 		}
 	}
 
@@ -1964,10 +1948,6 @@
 					listClass="message-scroll-region relative flex-1 min-h-0 overflow-hidden p-3 sm:p-4 touch-pan-y dm-message-list"
 					inputWrapperClass="dm-chat-input-wrapper chat-input-region shrink-0 border-t border-subtle panel-muted"
 					inputPlaceholder="Message"
-					searchVisible={dmSearchVisible}
-					onSearchVisibilityChange={(visible) => (dmSearchVisible = visible)}
-					hasMoreMessages={hasMoreDmMessages}
-					isLoadingMessages={isLoadingDmMessages}
 					onVote={handleVote}
 					onSubmitForm={handleFormSubmit}
 					onReact={handleReaction}

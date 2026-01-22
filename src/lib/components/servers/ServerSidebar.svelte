@@ -19,7 +19,7 @@
 	import type { VoiceSession } from '$lib/stores/voice';
 	import { notifications, channelIndicators } from '$lib/stores/notifications';
 	import { markChannelActivityRead, markMultipleChannelsActivityRead, markServerActivityRead } from '$lib/stores/activityFeed';
-	import { getCachedServerChannels, updateServerChannelCache } from '$lib/stores/messageCache';
+	import { getCachedServerChannels, updateServerChannelCache, setCollapsedCategories } from '$lib/stores/messageCache';
 	import { markMultipleChannelsRead } from '$lib/firebase/unread';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
@@ -107,10 +107,10 @@
 		const memCached = categoryCacheMap.get(server);
 		if (memCached && memCached.length > 0) return memCached;
 		
-		// Fall back to sessionStorage
+		// Fall back to localStorage for persistence across refreshes
 		if (typeof window === 'undefined') return [];
 		try {
-			const raw = sessionStorage.getItem(`${CATEGORY_CACHE_PREFIX}${server}`);
+			const raw = localStorage.getItem(`${CATEGORY_CACHE_PREFIX}${server}`);
 			if (!raw) return [];
 			const parsed = JSON.parse(raw);
 			if (Array.isArray(parsed)) {
@@ -127,7 +127,7 @@
 		categoryCacheMap.set(server, cats);
 		if (typeof window === 'undefined') return;
 		try {
-			sessionStorage.setItem(`${CATEGORY_CACHE_PREFIX}${server}`, JSON.stringify(cats));
+			localStorage.setItem(`${CATEGORY_CACHE_PREFIX}${server}`, JSON.stringify(cats));
 		} catch {
 			// ignore
 		}
@@ -137,7 +137,7 @@
 	function loadCachedMemberState(server: string): { isMember: boolean; roleIds: string[]; profileMember: boolean } | null {
 		if (typeof window === 'undefined') return null;
 		try {
-			const raw = sessionStorage.getItem(`${MEMBER_CACHE_PREFIX}${server}`);
+			const raw = localStorage.getItem(`${MEMBER_CACHE_PREFIX}${server}`);
 			if (!raw) return null;
 			const parsed = JSON.parse(raw);
 			return {
@@ -153,7 +153,7 @@
 	function persistMemberState(server: string, isMember: boolean, roleIds: string[], profileMember: boolean) {
 		if (typeof window === 'undefined') return;
 		try {
-			sessionStorage.setItem(`${MEMBER_CACHE_PREFIX}${server}`, JSON.stringify({ isMember, roleIds, profileMember }));
+			localStorage.setItem(`${MEMBER_CACHE_PREFIX}${server}`, JSON.stringify({ isMember, roleIds, profileMember }));
 		} catch {
 			// ignore
 		}
@@ -182,7 +182,7 @@
 	function loadStoredChannels(server: string): Chan[] {
 		if (typeof window === 'undefined') return [];
 		try {
-			const raw = sessionStorage.getItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`);
+			const raw = localStorage.getItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`);
 			if (!raw) return [];
 			const parsed = JSON.parse(raw);
 			return Array.isArray(parsed)
@@ -197,7 +197,7 @@
 		if (typeof window === 'undefined') return;
 		try {
 			const trimmed = list.slice(0, CHANNEL_CACHE_STORAGE_LIMIT).map(normalizeChannelForStorage);
-			sessionStorage.setItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`, JSON.stringify(trimmed));
+			localStorage.setItem(`${CHANNEL_CACHE_STORAGE_PREFIX}${server}`, JSON.stringify(trimmed));
 		} catch {
 			// ignore storage errors
 		}
@@ -218,8 +218,24 @@
 		return sortChannelsByPosition(cached);
 	}
 
-	function applyChannelList(server: string, list: Chan[]) {
-		const sorted = sortChannelsByPosition(list);
+	function applyChannelList(server: string, list: Chan[], forceOverwrite = false) {
+		// Merge new data with existing cached data to prevent partial snapshots
+		// from causing visual "jumps" where channels disappear then reappear
+		const existingCached = loadStoredChannels(server);
+		let merged: Chan[];
+		
+		if (forceOverwrite || list.length >= existingCached.length) {
+			// New list is complete, use it directly
+			merged = list;
+		} else {
+			// New list might be partial - merge with cached to keep all channels
+			const map = new Map<string, Chan>();
+			existingCached.forEach((c) => map.set(c.id, c));
+			list.forEach((c) => map.set(c.id, c)); // New data wins for conflicts
+			merged = Array.from(map.values());
+		}
+		
+		const sorted = sortChannelsByPosition(merged);
 		channels = sorted;
 		updateServerChannelCache(server, sorted);
 		persistStoredChannels(server, sorted);
@@ -291,7 +307,18 @@
 
 	// Categories (folders) for channel grouping
 	let categories: Category[] = $state([]);
-	let collapsedCategories: Set<string> = $state(new Set());
+	// Initialize collapsed state from localStorage IMMEDIATELY to prevent flash of open folders
+	let collapsedCategories: Set<string> = $state((() => {
+		if (!serverId || !browser) return new Set<string>();
+		try {
+			const stored = localStorage.getItem(`hc_collapsed_${serverId}`);
+			if (stored) {
+				const arr = JSON.parse(stored);
+				if (Array.isArray(arr)) return new Set(arr.filter((id: unknown) => typeof id === 'string'));
+			}
+		} catch {}
+		return new Set<string>();
+	})());
 	let unsubCategories: Unsubscribe | null = null;
 
 	// Category drag-and-drop state
@@ -1393,7 +1420,8 @@
 	function watchChannelOrder(server: string) {
 		unsubPersonalOrder?.();
 		myChannelOrder = [];
-		collapsedCategories = new Set();
+		// DON'T reset collapsedCategories here - keep cached value until Firestore loads
+		// collapsedCategories is already initialized from localStorage
 		if (!$user?.uid) return;
 
 		const db = getDb();
@@ -1408,16 +1436,28 @@
 					myChannelOrder = [];
 				}
 				if (Array.isArray(data?.collapsedCategoryIds)) {
-					collapsedCategories = new Set(
+					const collapsed = new Set<string>(
 						data.collapsedCategoryIds.filter((id: unknown) => typeof id === 'string')
 					);
+					collapsedCategories = collapsed;
+					// Sync to message cache for smarter eviction
+					setCollapsedCategories(server, collapsed);
+					// Persist to localStorage for instant restore on refresh
+					saveLocalCollapsed(server, collapsed);
 				} else {
-					collapsedCategories = new Set();
+					// No collapsed data in Firestore - only reset if we don't have local cache
+					const localCached = loadLocalCollapsed(server);
+					if (localCached.size === 0) {
+						collapsedCategories = new Set();
+						setCollapsedCategories(server, new Set());
+					}
+					// Don't overwrite localStorage - keep existing preference
 				}
 			},
 			() => {
+				// Error fetching - preserve local cache, don't reset
 				myChannelOrder = [];
-				collapsedCategories = new Set();
+				// Don't reset collapsedCategories on error
 			}
 		);
 	}
@@ -1443,10 +1483,37 @@
 		});
 	}
 
+// LocalStorage keys for instant collapsed category restore
+	const COLLAPSED_STORAGE_PREFIX = 'hc_collapsed_';
+	
+	function loadLocalCollapsed(server: string): Set<string> {
+		if (!browser) return new Set();
+		try {
+			const stored = localStorage.getItem(`${COLLAPSED_STORAGE_PREFIX}${server}`);
+			if (stored) {
+				const arr = JSON.parse(stored);
+				if (Array.isArray(arr)) return new Set(arr.filter((id: unknown) => typeof id === 'string'));
+			}
+		} catch {}
+		return new Set();
+	}
+	
+	function saveLocalCollapsed(server: string, collapsed: Set<string>): void {
+		if (!browser) return;
+		try {
+			const arr = Array.from(collapsed).filter((id) => typeof id === 'string' && id.trim().length > 0);
+			localStorage.setItem(`${COLLAPSED_STORAGE_PREFIX}${server}`, JSON.stringify(arr));
+		} catch {}
+	}
+
 	async function saveCollapsedCategories(next: Set<string>) {
 		const targetServerId = computedServerId;
 		const uid = $user?.uid;
 		if (!targetServerId || !uid) return;
+		
+		// Save to localStorage immediately for instant restore
+		saveLocalCollapsed(targetServerId, next);
+		
 		const db = getDb();
 		const ids = Array.from(next).filter((id) => typeof id === 'string' && id.trim().length > 0);
 		try {
@@ -1469,6 +1536,11 @@
 		}
 		collapsedCategories = next; // trigger reactivity
 		void saveCollapsedCategories(next);
+		
+		// Notify message cache about collapsed state for smarter eviction
+		if (serverId) {
+			setCollapsedCategories(serverId, next);
+		}
 	}
 
 	// Category drag-and-drop handlers
@@ -1634,17 +1706,32 @@
 		channelFetchDenied = false;
 		let channelWatchBlocked = false;
 		channelVisibilityHint = null;
-		currentChannelServer = server;
-		if (switchingServer || channels.length === 0) {
-			const cached = readCachedChannels(server, allowFullChannelQuery);
-			if (cached.length) {
-				channels = cached;
-				syncVoicePresenceWatchers(channels);
-			} else if (switchingServer) {
-				channels = [];
-				syncVoicePresenceWatchers(channels);
-			}
+		
+		// SMOOTH TRANSITION: Always load from cache first, never clear existing channels
+		// This prevents the visual "jump" on refresh or server switch
+		const cached = readCachedChannels(server, allowFullChannelQuery);
+		if (cached.length > 0) {
+			// Use cached channels immediately
+			channels = cached;
+			syncVoicePresenceWatchers(channels);
 		}
+		
+		// Load collapsed categories from localStorage for INSTANT folder state
+		// localStorage is synchronous, so this works immediately on page refresh
+		const localCollapsed = loadLocalCollapsed(server);
+		if (localCollapsed.size > 0) {
+			collapsedCategories = localCollapsed;
+			setCollapsedCategories(server, localCollapsed);
+		}
+		
+		if (!cached.length && switchingServer && channels.length > 0 && currentChannelServer !== server) {
+			// Only clear channels if switching to a different server with no cache
+			channels = [];
+			syncVoicePresenceWatchers(channels);
+		}
+		// If channels.length === 0 and no cache, just leave empty (don't redundantly clear)
+		
+		currentChannelServer = server;
 
 		const db = getDb();
 		const baseCol = collection(db, 'servers', server, 'channels');

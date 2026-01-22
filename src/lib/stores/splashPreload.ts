@@ -297,9 +297,9 @@ export async function startSplashPreload(userId: string): Promise<void> {
 			if (cached.dms && cached.dms.length > 0) {
 				const { dmRailCache } = await import('./dmRailCache');
 				dmRailCache.set(userId, cached.dms);
-				// Also persist to sessionStorage for DMsSidebar to find
+				// Also persist to localStorage for DMsSidebar to find
 				try {
-					sessionStorage.setItem(`dm-rail:${userId}`, JSON.stringify(cached.dms));
+					localStorage.setItem(`dm-rail:${userId}`, JSON.stringify(cached.dms));
 				} catch {
 					// Ignore storage errors
 				}
@@ -568,9 +568,9 @@ export async function startSplashPreload(userId: string): Promise<void> {
 				const { dmRailCache } = await import('./dmRailCache');
 				dmRailCache.set(userId, preloadedDMs);
 				
-				// Also persist to sessionStorage
+				// Also persist to localStorage for instant restore on refresh
 				try {
-					sessionStorage.setItem(`dm-rail:${userId}`, JSON.stringify(preloadedDMs));
+					localStorage.setItem(`dm-rail:${userId}`, JSON.stringify(preloadedDMs));
 				} catch {
 					// Ignore storage errors
 				}

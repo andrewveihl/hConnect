@@ -139,16 +139,53 @@ type ServerUnreadState = {
 	hasHighPriority: boolean;
 };
 
+// localStorage caching for instant unread indicators on refresh
+const LS_SERVER_UNREAD = 'hc_server_unread';
+const LS_CHANNEL_INDICATORS = 'hc_channel_indicators';
+
+function loadCachedServerUnread(): Record<string, ServerUnreadState> {
+	if (typeof window === 'undefined') return {};
+	try {
+		const stored = localStorage.getItem(LS_SERVER_UNREAD);
+		if (stored) return JSON.parse(stored);
+	} catch {}
+	return {};
+}
+
+function loadCachedChannelIndicators(): Record<string, Record<string, ChannelIndicatorState>> {
+	if (typeof window === 'undefined') return {};
+	try {
+		const stored = localStorage.getItem(LS_CHANNEL_INDICATORS);
+		if (stored) return JSON.parse(stored);
+	} catch {}
+	return {};
+}
+
+function saveCachedServerUnread(data: Record<string, ServerUnreadState>): void {
+	if (typeof window === 'undefined') return;
+	try {
+		localStorage.setItem(LS_SERVER_UNREAD, JSON.stringify(data));
+	} catch {}
+}
+
+function saveCachedChannelIndicators(data: Record<string, Record<string, ChannelIndicatorState>>): void {
+	if (typeof window === 'undefined') return;
+	try {
+		localStorage.setItem(LS_CHANNEL_INDICATORS, JSON.stringify(data));
+	} catch {}
+}
+
 const notificationsInternal = writable<NotificationItem[]>([]);
 const notificationCountInternal = writable(0);
 const dmUnreadCountInternal = writable(0);
 const dmUnreadByIdInternal = writable<Record<string, number>>({});
 const channelUnreadCountInternal = writable(0);
 const readyInternal = writable(false);
+// Initialize from localStorage for instant first paint
 const channelIndicatorsInternal = writable<Record<string, Record<string, ChannelIndicatorState>>>(
-	{}
+	loadCachedChannelIndicators()
 );
-const serverUnreadInternal = writable<Record<string, ServerUnreadState>>({});
+const serverUnreadInternal = writable<Record<string, ServerUnreadState>>(loadCachedServerUnread());
 const threadUnreadCountInternal = writable(0);
 const threadUnreadByIdInternal = writable<Record<string, number>>({});
 let lastBadgeValue: number | null = null;
@@ -828,7 +865,7 @@ function scheduleRecompute() {
 	recomputeTimer = setTimeout(() => {
 		recomputeTimer = null;
 		recomputeNow();
-	}, 150);
+	}, 300); // Increased from 150ms to reduce CPU churn
 }
 
 function recomputeNow() {
@@ -954,6 +991,7 @@ function recomputeNow() {
 		}
 	}
 	channelIndicatorsInternal.set(indicatorPayload);
+	saveCachedChannelIndicators(indicatorPayload); // Persist for instant restore
 
 	// Compute server-level unread indicators
 	const serverUnreadPayload: Record<string, ServerUnreadState> = {};
@@ -975,6 +1013,7 @@ function recomputeNow() {
 		}
 	}
 	serverUnreadInternal.set(serverUnreadPayload);
+	saveCachedServerUnread(serverUnreadPayload); // Persist for instant restore
 
 	list.sort((a, b) => {
 		const aTime = a.lastActivity ?? 0;

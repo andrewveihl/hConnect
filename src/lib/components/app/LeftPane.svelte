@@ -31,7 +31,7 @@
 	import { openSettings, setSettingsSection, settingsUI } from '$lib/stores/settingsUI';
 	import { defaultSettingsSection } from '$lib/settings/sections';
 	import { serverRailCache, type ServerRailEntry } from '$lib/stores/serverRailCache';
-	import { subscribeServerRailOptimized, timeServerSwitch } from '$lib/perf';
+	import { subscribeServerRailOptimized, timeServerSwitch, getServerRailSync } from '$lib/perf';
 	import {
 		presenceFromSources,
 		presenceLabels,
@@ -78,7 +78,11 @@
 	}: Props = $props();
 
 	const initialServerUid = get(user)?.uid ?? null;
-	const initialServerList = initialServerUid ? serverRailCache.get(initialServerUid) ?? [] : [];
+	// Try IndexedDB-preloaded cache first (fastest), then fall back to in-memory Map
+	const preloadedServers = getServerRailSync();
+	const initialServerList = preloadedServers.length > 0 
+		? preloadedServers 
+		: (initialServerUid ? serverRailCache.get(initialServerUid) ?? [] : []);
 
 	let subscribedServerUid: string | null = initialServerUid;
 

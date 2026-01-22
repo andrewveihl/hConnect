@@ -20,7 +20,34 @@ export type UserProfile = {
 	};
 } | null;
 
-export const userProfile = writable<UserProfile>(null);
+// localStorage key for instant profile restore
+const LS_USER_PROFILE = 'hc_user_profile';
+
+// Try to load cached profile immediately for instant first paint
+function loadCachedProfile(): UserProfile {
+	if (!browser) return null;
+	try {
+		const stored = localStorage.getItem(LS_USER_PROFILE);
+		if (stored) {
+			const parsed = JSON.parse(stored);
+			if (parsed?.uid) return parsed;
+		}
+	} catch {}
+	return null;
+}
+
+function saveCachedProfile(profile: UserProfile): void {
+	if (!browser) return;
+	try {
+		if (profile) {
+			localStorage.setItem(LS_USER_PROFILE, JSON.stringify(profile));
+		} else {
+			localStorage.removeItem(LS_USER_PROFILE);
+		}
+	} catch {}
+}
+
+export const userProfile = writable<UserProfile>(loadCachedProfile());
 
 // Subscription management
 let profileUnsubscribe: (() => void) | null = null;
@@ -56,12 +83,13 @@ export async function startProfileListener() {
 			profileUnsubscribe = onSnapshot(profileRef, (snap) => {
 				if (!snap.exists()) {
 					userProfile.set(null);
+					saveCachedProfile(null);
 					return;
 				}
 
 				const data = snap.data() as Record<string, any>;
 				const settings = data.settings as Record<string, any> | undefined;
-				userProfile.set({
+				const profile: UserProfile = {
 					uid: u.uid,
 					displayName: data.displayName ?? data.name ?? null,
 					photoURL: data.photoURL ?? null,
@@ -74,7 +102,9 @@ export async function startProfileListener() {
 						customThemeId: settings.customThemeId ?? undefined,
 						keybinds: settings.keybinds ?? undefined
 					} : undefined
-				});
+				};
+				userProfile.set(profile);
+				saveCachedProfile(profile);
 			});
 		} catch (e) {
 			console.warn('Failed to subscribe to user profile:', e);

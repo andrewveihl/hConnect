@@ -4,6 +4,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { writable, get } from 'svelte/store';
+import { getServerViewMemory } from '$lib/perf/cacheDb';
 
 /* ===========================
    Configuration
@@ -12,6 +13,35 @@ const MAX_MESSAGES_PER_CHANNEL = 100; // Keep last N messages per channel
 const MAX_CACHED_CHANNELS = 30; // Max channels to keep in memory
 const MAX_CACHED_DMS = 20; // Max DM threads to keep in memory
 const MAX_CACHED_SERVERS = 15; // Max servers to keep channel lists cached
+
+/* ===========================
+   Collapsed Category Tracking
+   Channels in collapsed folders get lower cache priority
+=========================== */
+const collapsedCategories = new Map<string, Set<string>>(); // serverId -> Set of collapsed categoryIds
+
+/**
+ * Update which categories are collapsed for a server
+ * Called by ServerSidebar when collapse state changes
+ */
+export function setCollapsedCategories(serverId: string, categoryIds: Set<string>): void {
+	collapsedCategories.set(serverId, new Set(categoryIds));
+}
+
+/**
+ * Check if a category is collapsed
+ */
+export function isCategoryCollapsed(serverId: string, categoryId: string | null): boolean {
+	if (!categoryId) return false;
+	return collapsedCategories.get(serverId)?.has(categoryId) ?? false;
+}
+
+/**
+ * Clear collapsed state for a server
+ */
+export function clearCollapsedCategories(serverId: string): void {
+	collapsedCategories.delete(serverId);
+}
 
 /* ===========================
    Priority Channel Protection
@@ -42,6 +72,24 @@ export function clearPriorityChannels(): void {
 }
 
 /* ===========================
+   Performance: Cached timestamp to reduce Date.now() calls
+=========================== */
+let cachedNow = Date.now();
+let nowUpdateScheduled = false;
+
+function getNow(): number {
+	if (!nowUpdateScheduled) {
+		nowUpdateScheduled = true;
+		// Update timestamp every 100ms instead of every call
+		setTimeout(() => {
+			cachedNow = Date.now();
+			nowUpdateScheduled = false;
+		}, 100);
+	}
+	return cachedNow;
+}
+
+/* ===========================
    Utilities
 =========================== */
 /**
@@ -57,7 +105,39 @@ function getMessageTime(createdAt: any): number {
 }
 
 /**
+ * Binary search to find insertion index for a message (O(log n) vs O(n log n) for full sort)
+ * Returns the index where the message should be inserted to maintain sorted order
+ */
+function binarySearchInsertIndex(messages: CachedMessage[], targetTime: number): number {
+	let low = 0;
+	let high = messages.length;
+	
+	while (low < high) {
+		const mid = (low + high) >>> 1; // Faster than Math.floor
+		const midTime = getMessageTime(messages[mid].createdAt);
+		if (midTime < targetTime) {
+			low = mid + 1;
+		} else {
+			high = mid;
+		}
+	}
+	
+	return low;
+}
+
+/**
+ * Insert a message at the correct sorted position (O(log n) find + O(n) splice)
+ * Much faster than full sort for single insertions
+ */
+function insertMessageSorted(messages: CachedMessage[], message: CachedMessage): void {
+	const time = getMessageTime(message.createdAt);
+	const insertIdx = binarySearchInsertIndex(messages, time);
+	messages.splice(insertIdx, 0, message);
+}
+
+/**
  * Sort messages by createdAt timestamp (ascending)
+ * Use for bulk operations; for single inserts use insertMessageSorted
  */
 function sortMessagesByTime(messages: CachedMessage[]): CachedMessage[] {
 	return messages.sort((a, b) => getMessageTime(a.createdAt) - getMessageTime(b.createdAt));
@@ -109,7 +189,8 @@ type DMCacheState = {
 };
 
 /* ===========================
-   Stores
+   Stores - Using plain Maps for hot path performance
+   Svelte stores only for components that need reactivity
 =========================== */
 const channelCache = writable<ChannelCacheState>({
 	channels: new Map()
@@ -118,6 +199,14 @@ const channelCache = writable<ChannelCacheState>({
 const dmCache = writable<DMCacheState>({
 	threads: new Map()
 });
+
+// Fast direct Map access for read-heavy operations (bypasses Svelte reactivity)
+let channelCacheMap: Map<string, ChannelCacheEntry> = new Map();
+let dmCacheMap: Map<string, DMCacheEntry> = new Map();
+
+// Sync the fast maps with Svelte stores
+channelCache.subscribe(state => { channelCacheMap = state.channels; });
+dmCache.subscribe(state => { dmCacheMap = state.threads; });
 
 /* ===========================
    Channel Cache Functions
@@ -131,16 +220,31 @@ export function channelKey(serverId: string, channelId: string): string {
 }
 
 /**
- * Get cached messages for a channel (returns empty array if not cached)
+ * Get cached messages for a channel (returns direct reference for performance)
+ * NOTE: Do not mutate the returned array! Use updateChannelCache() for changes.
  */
 export function getCachedChannelMessages(serverId: string, channelId: string): CachedMessage[] {
-	const state = get(channelCache);
 	const key = channelKey(serverId, channelId);
-	const entry = state.channels.get(key);
+	const entry = channelCacheMap.get(key);
 	
 	if (entry) {
-		// Update last accessed time
-		entry.lastAccessed = Date.now();
+		// Update last accessed time (using cached timestamp)
+		entry.lastAccessed = getNow();
+		return entry.messages; // Direct reference, no copy
+	}
+	
+	return [];
+}
+
+/**
+ * Get a copy of cached messages (use when mutation is needed)
+ */
+export function getCachedChannelMessagesCopy(serverId: string, channelId: string): CachedMessage[] {
+	const key = channelKey(serverId, channelId);
+	const entry = channelCacheMap.get(key);
+	
+	if (entry) {
+		entry.lastAccessed = getNow();
 		return [...entry.messages];
 	}
 	
@@ -151,9 +255,8 @@ export function getCachedChannelMessages(serverId: string, channelId: string): C
  * Check if channel has cached messages
  */
 export function hasChannelCache(serverId: string, channelId: string): boolean {
-	const state = get(channelCache);
 	const key = channelKey(serverId, channelId);
-	return state.channels.has(key);
+	return channelCacheMap.has(key);
 }
 
 /**
@@ -168,6 +271,7 @@ export function updateChannelCache(
 		earliestLoaded?: any;
 		hasOlderMessages?: boolean;
 		prepend?: boolean; // For older messages loaded via pagination
+		categoryId?: string | null; // For eviction priority
 	}
 ): void {
 	channelCache.update((state) => {
@@ -200,7 +304,7 @@ export function updateChannelCache(
 		
 		state.channels.set(key, {
 			messages: newMessages,
-			lastAccessed: Date.now(),
+			lastAccessed: getNow(),
 			earliestLoaded: options?.earliestLoaded ?? existing?.earliestLoaded,
 			hasOlderMessages: options?.hasOlderMessages ?? existing?.hasOlderMessages ?? true
 		});
@@ -228,7 +332,7 @@ export function addMessageToChannelCache(
 			// No cache entry yet, create one with just this message
 			state.channels.set(key, {
 				messages: [message],
-				lastAccessed: Date.now(),
+				lastAccessed: getNow(),
 				hasOlderMessages: true
 			});
 		} else {
@@ -237,17 +341,16 @@ export function addMessageToChannelCache(
 			if (idx >= 0) {
 				existing.messages[idx] = message;
 			} else {
-				existing.messages.push(message);
-				// Keep sorted
-				existing.messages = sortMessagesByTime(existing.messages);
+				// Use binary insert instead of push + sort (O(log n) vs O(n log n))
+				insertMessageSorted(existing.messages, message);
 			}
 			
-			// Trim if needed
+			// Trim if needed (remove from front since messages are sorted oldest-first)
 			if (existing.messages.length > MAX_MESSAGES_PER_CHANNEL) {
-				existing.messages = existing.messages.slice(-MAX_MESSAGES_PER_CHANNEL);
+				existing.messages.splice(0, existing.messages.length - MAX_MESSAGES_PER_CHANNEL);
 			}
 			
-			existing.lastAccessed = Date.now();
+			existing.lastAccessed = getNow();
 		}
 		
 		return state;
@@ -306,18 +409,35 @@ export function clearServerCache(serverId: string): void {
 
 /**
  * Evict oldest channels when over limit
- * Protects priority channels (preloaded during splash) from eviction
+ * Priority order for eviction (first to evict):
+ * 1. Channels in collapsed categories (user isn't looking at them)
+ * 2. Oldest accessed non-priority channels
+ * 3. Never evict priority channels (preloaded during splash)
  */
 function evictOldChannels(state: ChannelCacheState): void {
 	if (state.channels.size <= MAX_CACHED_CHANNELS) return;
 	
+	const now = getNow();
 	const entries = Array.from(state.channels.entries())
 		// Filter out priority channels - they should never be evicted
 		.filter(([key]) => !priorityChannelKeys.has(key))
-		.sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
+		.map(([key, entry]) => {
+			const [serverId] = key.split(':');
+			// Check if this channel is in a collapsed category (lower priority = evict first)
+			const categoryId = (entry as any).categoryId;
+			const isInCollapsedCategory = categoryId && isCategoryCollapsed(serverId, categoryId);
+			return { key, entry, isInCollapsedCategory };
+		})
+		.sort((a, b) => {
+			// Collapsed category channels evicted first
+			if (a.isInCollapsedCategory && !b.isInCollapsedCategory) return -1;
+			if (!a.isInCollapsedCategory && b.isInCollapsedCategory) return 1;
+			// Then by last accessed time (oldest first)
+			return a.entry.lastAccessed - b.entry.lastAccessed;
+		});
 	
 	const toRemove = entries.slice(0, Math.max(0, state.channels.size - MAX_CACHED_CHANNELS));
-	for (const [key] of toRemove) {
+	for (const { key } of toRemove) {
 		state.channels.delete(key);
 	}
 }
@@ -327,15 +447,14 @@ function evictOldChannels(state: ChannelCacheState): void {
 =========================== */
 
 /**
- * Get cached messages for a DM thread
+ * Get cached messages for a DM thread (direct reference for performance)
  */
 export function getCachedDMMessages(threadId: string): CachedMessage[] {
-	const state = get(dmCache);
-	const entry = state.threads.get(threadId);
+	const entry = dmCacheMap.get(threadId);
 	
 	if (entry) {
-		entry.lastAccessed = Date.now();
-		return [...entry.messages];
+		entry.lastAccessed = getNow();
+		return entry.messages; // Direct reference, no copy
 	}
 	
 	return [];
@@ -345,8 +464,7 @@ export function getCachedDMMessages(threadId: string): CachedMessage[] {
  * Check if DM thread has cached messages
  */
 export function hasDMCache(threadId: string): boolean {
-	const state = get(dmCache);
-	return state.threads.has(threadId);
+	return dmCacheMap.has(threadId);
 }
 
 /**
@@ -385,7 +503,7 @@ export function updateDMCache(
 		
 		state.threads.set(threadId, {
 			messages: newMessages,
-			lastAccessed: Date.now(),
+			lastAccessed: getNow(),
 			earliestLoaded: options?.earliestLoaded ?? existing?.earliestLoaded,
 			hasOlderMessages: options?.hasOlderMessages ?? existing?.hasOlderMessages ?? true
 		});
@@ -407,7 +525,7 @@ export function addMessageToDMCache(threadId: string, message: CachedMessage): v
 		if (!existing) {
 			state.threads.set(threadId, {
 				messages: [message],
-				lastAccessed: Date.now(),
+				lastAccessed: getNow(),
 				hasOlderMessages: true
 			});
 		} else {
@@ -415,15 +533,16 @@ export function addMessageToDMCache(threadId: string, message: CachedMessage): v
 			if (idx >= 0) {
 				existing.messages[idx] = message;
 			} else {
-				existing.messages.push(message);
-				existing.messages = sortMessagesByTime(existing.messages);
+				// Use binary insert instead of push + sort (O(log n) vs O(n log n))
+				insertMessageSorted(existing.messages, message);
 			}
 			
+			// Trim from front (oldest messages)
 			if (existing.messages.length > MAX_MESSAGES_PER_CHANNEL) {
-				existing.messages = existing.messages.slice(-MAX_MESSAGES_PER_CHANNEL);
+				existing.messages.splice(0, existing.messages.length - MAX_MESSAGES_PER_CHANNEL);
 			}
 			
-			existing.lastAccessed = Date.now();
+			existing.lastAccessed = getNow();
 		}
 		
 		return state;
@@ -572,15 +691,46 @@ export function hasServerCache(serverId: string): boolean {
 }
 
 /**
- * Get cached channels for a server
+ * Get cached channels for a server.
+ * Checks in-memory Svelte store first, then falls back to IndexedDB-backed perf cache.
  */
 export function getCachedServerChannels(serverId: string): CachedChannel[] {
 	const state = get(serverCache);
 	const entry = state.servers.get(serverId);
 	
-	if (entry) {
+	if (entry && entry.channels.length > 0) {
 		entry.lastAccessed = Date.now();
 		return [...entry.channels];
+	}
+	
+	// Fall back to IndexedDB perf cache (loaded on app startup)
+	try {
+		const serverView = getServerViewMemory(serverId);
+		if (serverView?.channels?.length) {
+			// Also populate the in-memory cache for future reads
+			const channels = serverView.channels.map((ch: any) => ({
+				id: ch.id,
+				name: ch.name,
+				type: ch.type ?? 'text',
+				position: ch.position ?? 0,
+				isPrivate: ch.isPrivate ?? false,
+				allowedRoleIds: ch.allowedRoleIds ?? []
+			}));
+			
+			// Update in-memory cache
+			serverCache.update((s) => {
+				s.servers.set(serverId, {
+					channels,
+					meta: entry?.meta,
+					lastAccessed: Date.now()
+				});
+				return s;
+			});
+			
+			return channels;
+		}
+	} catch {
+		// Ignore errors (e.g., if perf module not yet loaded)
 	}
 	
 	return [];
@@ -602,7 +752,7 @@ export function getCachedServerMeta(serverId: string): CachedServerMeta | null {
 }
 
 /**
- * Update server channel cache
+ * Update server channel cache (both in-memory and IndexedDB)
  */
 export function updateServerChannelCache(
 	serverId: string,
@@ -622,6 +772,30 @@ export function updateServerChannelCache(
 		
 		return state;
 	});
+	
+	// Also persist to IndexedDB for offline/startup access
+	try {
+		// Import dynamically to avoid initialization issues
+		import('$lib/perf/cacheDb').then(({ setServerView, getServerViewMemory }) => {
+			const existingView = getServerViewMemory(serverId);
+			setServerView({
+				serverId,
+				channels: channels.map(ch => ({
+					id: ch.id,
+					name: ch.name,
+					type: ch.type ?? 'text',
+					position: ch.position ?? 0,
+					isPrivate: ch.isPrivate ?? false,
+					categoryId: null
+				})),
+				lastChannelId: existingView?.lastChannelId,
+				serverMeta: existingView?.serverMeta,
+				updatedAt: Date.now()
+			});
+		}).catch(() => {});
+	} catch {
+		// Ignore errors
+	}
 }
 
 /**
@@ -1065,10 +1239,10 @@ export async function preloadServerChannels(serverId: string): Promise<void> {
 		return;
 	}
 	
-	// Check sessionStorage first (faster than Firestore)
+	// Check localStorage first (faster than Firestore, persists across refresh)
 	if (typeof window !== 'undefined') {
 		try {
-			const stored = sessionStorage.getItem(`server-channels:${serverId}`);
+			const stored = localStorage.getItem(`server-channels:${serverId}`);
 			if (stored) {
 				const channels = JSON.parse(stored);
 				if (Array.isArray(channels) && channels.length > 0) {
@@ -1103,10 +1277,10 @@ export async function preloadServerChannels(serverId: string): Promise<void> {
 		if (channels.length > 0) {
 			updateServerChannelCache(serverId, channels);
 			
-			// Also persist to sessionStorage
+			// Also persist to localStorage for instant restore
 			if (typeof window !== 'undefined') {
 				try {
-					sessionStorage.setItem(
+					localStorage.setItem(
 						`server-channels:${serverId}`,
 						JSON.stringify(channels.slice(0, 200))
 					);

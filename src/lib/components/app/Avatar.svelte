@@ -96,8 +96,17 @@
 	const DEFAULT_GOOGLE_AVATAR_REF = '/google-default-avatar.png';
 	let defaultGoogleHash: string | null = null;
 	let defaultGoogleHashPromise: Promise<string | null> | null = null;
+	
+	// Cache computed hashes per URL to avoid expensive canvas operations
+	const hashCache = new Map<string, string | null>();
 
 	function computeImageHash(img: HTMLImageElement): string | null {
+		// Check cache first
+		const cacheKey = img.src;
+		if (hashCache.has(cacheKey)) {
+			return hashCache.get(cacheKey)!;
+		}
+		
 		if (typeof document === 'undefined') return null;
 		try {
 			const size = 8;
@@ -123,8 +132,18 @@
 			for (const value of values) {
 				bits += value >= avg ? '1' : '0';
 			}
+			
+			// Cache the result
+			hashCache.set(cacheKey, bits);
+			// Limit cache size
+			if (hashCache.size > 100) {
+				const firstKey = hashCache.keys().next().value;
+				if (firstKey) hashCache.delete(firstKey);
+			}
+			
 			return bits;
 		} catch {
+			hashCache.set(cacheKey, null);
 			return null;
 		}
 	}
@@ -386,6 +405,8 @@
 						class="w-full h-full object-cover"
 						draggable="false"
 						referrerpolicy="no-referrer"
+						loading="lazy"
+						decoding="async"
 						onerror={handleImageError}
 						onload={handleImageLoad}
 					/>
@@ -396,6 +417,8 @@
 						class="w-full h-full object-cover"
 						draggable="false"
 						referrerpolicy="no-referrer"
+						loading="lazy"
+						decoding="async"
 						onerror={handleImageError}
 						onload={handleImageLoad}
 					/>
