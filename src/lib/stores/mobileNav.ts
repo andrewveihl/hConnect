@@ -143,6 +143,17 @@ export const mobileSwipeProgress = {
 	}
 };
 
+// Simple store to track if server channel sidebar is showing (bypasses history-based overlay system)
+// This is set directly by the server page and checked by MobileNavBar
+const serverChannelSidebarStore = writable<boolean>(false);
+
+export const serverChannelSidebarOpen = {
+	subscribe: serverChannelSidebarStore.subscribe,
+	set: (open: boolean) => serverChannelSidebarStore.set(open),
+	open: () => serverChannelSidebarStore.set(true),
+	close: () => serverChannelSidebarStore.set(false)
+};
+
 // Track overlay state on document for CSS targeting
 if (browser) {
 	stackStore.subscribe((stack) => {

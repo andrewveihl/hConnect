@@ -81,12 +81,6 @@
 		label: string;
 	};
 
-	type ClientGroup = {
-		serverId: string;
-		serverName: string;
-		clients: ClientOption[];
-	};
-
 	// Storage keys
 	const OPEN_TICKETS_STORAGE_KEY = 'hconnect:support:openTickets';
 	const QUICK_RESPONSES_STORAGE_KEY = 'hconnect:support:quickResponses';
@@ -119,7 +113,7 @@
 	let channelNames = $state<Record<string, string>>({});
 	let openTickets = $state<OpenTicket[]>([]);
 	let sidebarFilter = $state<'unassigned' | 'mine' | 'all'>('unassigned');
-	let clientFilter = $state('all');
+	let clientFilters = $state<string[]>(['all']);
 	let sidebarCollapsed = $state(false);
 	let focusedTicketId = $state<string | null>(null);
 	let mobileActiveTicket = $state<string | null>(null);
@@ -138,6 +132,10 @@
 	let slashMenuActive = $state<string | null>(null); // ticket id when slash menu is open
 	let slashMenuQuery = $state('');
 	let slashMenuSelectedIndex = $state(0);
+
+	// Client filter dropdown state
+	let clientMenuOpen = $state(false);
+	let clientMenuAnchor: HTMLDivElement | null = null;
 
 	// Track which textareas are expanded (multi-line)
 	let expandedTextareas = $state<Set<string>>(new Set());
@@ -221,82 +219,55 @@
 		return allIssues;
 	});
 
-	const buildClientFilterValue = (serverId: string, clientKey: string): string =>
-		`${serverId}::${encodeURIComponent(clientKey)}`;
-
-	const clientGroups = $derived.by((): ClientGroup[] => {
-		const groupMap = new Map<
-			string,
-			{
-				serverName: string;
-				clients: Map<string, string>;
-			}
-		>();
-
+	const clientOptions = $derived.by((): ClientOption[] => {
+		const counts = new Map<string, number>();
 		for (const issue of allIssues) {
-			const serverId = issue.serverId;
-			const serverName = staffServers.find((s) => s.id === serverId)?.name ?? 'Unknown Server';
-
-			let group = groupMap.get(serverId);
-			if (!group) {
-				group = { serverName, clients: new Map() };
-				groupMap.set(serverId, group);
-			}
-
-			const authorId = issue.authorId?.trim();
-			const authorName = issue.authorName?.trim();
-			const clientKey = authorId || authorName;
-			if (!clientKey) continue;
-			const label = authorName || authorId || clientKey;
-			if (!group.clients.has(clientKey)) {
-				group.clients.set(clientKey, label);
-			}
+			counts.set(issue.serverId, (counts.get(issue.serverId) ?? 0) + 1);
 		}
-
-		return Array.from(groupMap.entries())
-			.map(([serverId, group]) => ({
-				serverId,
-				serverName: group.serverName,
-				clients: Array.from(group.clients.entries())
-					.map(([clientKey, label]) => ({
-						value: buildClientFilterValue(serverId, clientKey),
-						label
-					}))
-					.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+		return staffServers
+			.filter((server) => counts.has(server.id))
+			.map((server) => ({
+				value: server.id,
+				label: server.name
 			}))
-			.sort((a, b) =>
-				a.serverName.localeCompare(b.serverName, undefined, { sensitivity: 'base' })
-			);
+			.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
 	});
 
-	const activeClientFilter = $derived.by(() => {
-		if (clientFilter === 'all') return null;
-		const [serverId, encodedClientKey] = clientFilter.split('::');
-		if (!serverId || !encodedClientKey) return null;
-		try {
-			return { serverId, clientKey: decodeURIComponent(encodedClientKey) };
-		} catch {
-			return null;
-		}
+	const allClientsSelected = $derived.by(
+		() => clientFilters.length === 0 || clientFilters.includes('all')
+	);
+
+	const activeClientFilters = $derived.by(
+		() => new Set(clientFilters.filter((value) => value !== 'all'))
+	);
+
+	const clientFilterLabel = $derived.by(() => {
+		if (allClientsSelected) return 'All clients';
+		const selected = clientOptions
+			.filter((option) => activeClientFilters.has(option.value))
+			.map((option) => option.label);
+		if (selected.length === 0) return 'All clients';
+		if (selected.length === 1) return selected[0];
+		return `${selected[0]} +${selected.length - 1}`;
 	});
 
 	const filteredIssues = $derived.by(() => {
-		if (!activeClientFilter) return baseFilteredIssues;
-		return baseFilteredIssues.filter((issue) => {
-			const authorId = issue.authorId?.trim();
-			const authorName = issue.authorName?.trim();
-			const clientKey = authorId || authorName;
-			return issue.serverId === activeClientFilter.serverId && clientKey === activeClientFilter.clientKey;
-		});
+		if (allClientsSelected || activeClientFilters.size === 0) return baseFilteredIssues;
+		return baseFilteredIssues.filter((issue) => activeClientFilters.has(issue.serverId));
 	});
 
 	$effect(() => {
-		if (clientFilter === 'all') return;
-		const hasOption = clientGroups.some((group) =>
-			group.clients.some((client) => client.value === clientFilter)
-		);
-		if (!hasOption) {
-			clientFilter = 'all';
+		const valid = new Set(clientOptions.map((option) => option.value));
+		let next = clientFilters.filter((value) => value === 'all' || valid.has(value));
+		if (next.length === 0) {
+			clientFilters = ['all'];
+			return;
+		}
+		if (next.includes('all') && next.length > 1) {
+			next = ['all'];
+		}
+		if (next.length !== clientFilters.length) {
+			clientFilters = next;
 		}
 	});
 
@@ -954,6 +925,32 @@
 		return false;
 	}
 
+	function toggleClientMenu() {
+		clientMenuOpen = !clientMenuOpen;
+	}
+
+	function toggleClientFilter(value: string) {
+		if (value === 'all') {
+			clientFilters = ['all'];
+			return;
+		}
+		const next = new Set(clientFilters.filter((entry) => entry !== 'all'));
+		if (next.has(value)) {
+			next.delete(value);
+		} else {
+			next.add(value);
+		}
+		clientFilters = next.size > 0 ? Array.from(next) : ['all'];
+	}
+
+	function handleClientMenuKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			clientMenuOpen = false;
+		}
+	}
+
 	// ============ Sound Notifications ============
 
 	// Initialize notification sound
@@ -1100,11 +1097,21 @@
 			window.addEventListener('keydown', handleKeydown);
 		}
 
+		const handlePointerDown = (event: PointerEvent) => {
+			if (!clientMenuOpen || !clientMenuAnchor) return;
+			const target = event.target as Node | null;
+			if (target && !clientMenuAnchor.contains(target)) {
+				clientMenuOpen = false;
+			}
+		};
+
 		const unsubUser = user.subscribe((u) => {
 			if (u?.uid) {
 				subscribeToServers(u.uid, u.email ?? '');
 			}
 		});
+
+		window.addEventListener('pointerdown', handlePointerDown);
 
 		return () => {
 			unsubUser();
@@ -1119,6 +1126,7 @@
 			if (browser) {
 				window.removeEventListener('keydown', handleKeydown);
 			}
+			window.removeEventListener('pointerdown', handlePointerDown);
 		};
 	});
 </script>
@@ -1214,31 +1222,75 @@
 					</div>
 					<div class="support-sidebar__filter-row support-sidebar__filter-row--select">
 						<label class="filter-label" for="client-filter">Client</label>
-						<div class="filter-select">
-							<i class="bx bx-user filter-select__icon" aria-hidden="true"></i>
-							<select id="client-filter" bind:value={clientFilter}>
-								<option value="all">All clients</option>
-								{#each clientGroups as group (group.serverId)}
-									{#if group.clients.length > 0}
-										<optgroup label={group.serverName}>
-											{#each group.clients as client}
-												<option value={client.value}>{client.label}</option>
-											{/each}
-										</optgroup>
-									{/if}
-								{/each}
-							</select>
-							{#if clientFilter !== 'all'}
+						<div
+							class="filter-select"
+							class:filter-select--open={clientMenuOpen}
+							bind:this={clientMenuAnchor}
+						>
+							<i class="bx bx-server filter-select__icon" aria-hidden="true"></i>
+							<button
+								id="client-filter"
+								type="button"
+								class="filter-select__trigger"
+								aria-haspopup="listbox"
+								aria-expanded={clientMenuOpen}
+								onclick={toggleClientMenu}
+								onkeydown={handleClientMenuKeydown}
+							>
+								<span class="filter-select__label">{clientFilterLabel}</span>
+								<i class="bx bx-chevron-down filter-select__chevron" aria-hidden="true"></i>
+							</button>
+							{#if !allClientsSelected}
 								<button
 									type="button"
 									class="filter-clear-btn"
-									onclick={() => (clientFilter = 'all')}
+									onclick={() => toggleClientFilter('all')}
 									title="Clear client filter"
+									aria-label="Clear client filter"
 								>
 									<i class="bx bx-x"></i>
 								</button>
 							{/if}
-							<i class="bx bx-chevron-down filter-select__chevron" aria-hidden="true"></i>
+							{#if clientMenuOpen}
+								<div
+									class="filter-select__menu"
+									role="listbox"
+									aria-labelledby="client-filter"
+									aria-multiselectable="true"
+									onkeydown={handleClientMenuKeydown}
+								>
+									<button
+										type="button"
+										class="filter-select__option"
+										class:filter-select__option--active={allClientsSelected}
+										role="option"
+										aria-selected={allClientsSelected}
+										onclick={() => toggleClientFilter('all')}
+										onkeydown={handleClientMenuKeydown}
+									>
+										<span>All clients</span>
+										{#if allClientsSelected}
+											<i class="bx bx-check" aria-hidden="true"></i>
+										{/if}
+									</button>
+									{#each clientOptions as client}
+										<button
+											type="button"
+											class="filter-select__option"
+											class:filter-select__option--active={activeClientFilters.has(client.value)}
+											role="option"
+											aria-selected={activeClientFilters.has(client.value)}
+											onclick={() => toggleClientFilter(client.value)}
+											onkeydown={handleClientMenuKeydown}
+										>
+											<span>{client.label}</span>
+											{#if activeClientFilters.has(client.value)}
+												<i class="bx bx-check" aria-hidden="true"></i>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
 						</div>
 					</div>
 				</div>
@@ -1255,7 +1307,7 @@
 							<i class="bx bx-check-circle"></i>
 							<span>No tickets</span>
 							<p>
-								{clientFilter !== 'all'
+								{!allClientsSelected
 									? 'No tickets match this client filter.'
 									: sidebarFilter === 'unassigned'
 										? 'All tickets are assigned!'
@@ -2027,6 +2079,9 @@
 		border-radius: 10px;
 		box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
 		transition: border-color 150ms ease, box-shadow 150ms ease;
+		color-scheme: dark;
+		position: relative;
+		z-index: 2;
 	}
 
 	.filter-select:focus-within {
@@ -2041,18 +2096,75 @@
 		color: var(--color-text-muted);
 	}
 
-	.filter-select select {
+	.filter-select__trigger {
 		flex: 1;
 		min-width: 0;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		border: none;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-size: 0.75rem;
+		font-weight: 600;
+		padding: 0.2rem 0.15rem;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.filter-select__label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.filter-select__menu {
+		position: absolute;
+		top: calc(100% + 0.45rem);
+		left: 0;
+		right: 0;
+		background: var(--color-panel, #0f141c);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 70%, transparent);
+		border-radius: 12px;
+		box-shadow:
+			0 12px 28px rgba(0, 0, 0, 0.45),
+			inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		padding: 0.35rem;
+		max-height: 240px;
+		overflow-y: auto;
+		z-index: 10;
+	}
+
+	.filter-select__option {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.45rem 0.6rem;
 		border: none;
 		background: transparent;
 		color: var(--color-text-primary);
 		font-size: 0.75rem;
 		font-weight: 500;
-		outline: none;
-		appearance: none;
-		-webkit-appearance: none;
-		-moz-appearance: none;
+		border-radius: 8px;
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease;
+		text-align: left;
+	}
+
+	.filter-select__option:hover {
+		background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+	}
+
+	.filter-select__option--active {
+		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+		color: var(--color-accent);
+	}
+
+	.filter-select__option--active i {
+		color: var(--color-accent);
 	}
 
 	.filter-select .filter-select__chevron {
@@ -2064,6 +2176,11 @@
 	.filter-select:focus-within .filter-select__chevron {
 		color: var(--color-accent);
 		transform: translateY(1px);
+	}
+
+	.filter-select--open .filter-select__chevron {
+		transform: rotate(180deg);
+		color: var(--color-accent);
 	}
 
 	.filter-clear-btn {

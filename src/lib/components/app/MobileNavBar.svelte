@@ -18,7 +18,7 @@
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
 	import { setupSwipeGestures } from '$lib/utils/swipeGestures';
 	import { splashVisible } from '$lib/stores/splash';
-	import { mobileOverlayStack, mobileSwipeProgress } from '$lib/stores/mobileNav';
+	import { mobileOverlayStack, mobileSwipeProgress, serverChannelSidebarOpen } from '$lib/stores/mobileNav';
 	import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import { preloadServerChannels, preloadUserServers } from '$lib/stores/messageCache';
 	import Avatar from '$lib/components/app/Avatar.svelte';
@@ -113,7 +113,10 @@
 	const dockSuppressed = $derived(settingsActive);
 	
 	// Check if channel-list overlay is open (user swiped to see channels)
-	const channelListOpen = $derived($mobileOverlayStack.some(entry => entry.id === 'channel-list'));
+	// Also check the simple serverChannelSidebarOpen store which bypasses history issues
+	const channelListOpen = $derived(
+		$mobileOverlayStack.some(entry => entry.id === 'channel-list') || $serverChannelSidebarOpen
+	);
 	
 	// Track swipe progress for smooth dock animation
 	const swipeProgress = $derived($mobileSwipeProgress);
