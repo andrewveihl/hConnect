@@ -1155,7 +1155,7 @@
 				onclick={openPeoplePicker}
 				disabled={showPeoplePicker}
 			>
-				<i class="bx bx-plus text-xl"></i>
+				<i class="bx bx-plus text-lg leading-none"></i>
 			</button>
 		</div>
 	</div>
@@ -1361,8 +1361,8 @@
 	</div>
 
 	{#if showPeoplePicker}
-		<div class="people-picker absolute inset-0 z-20 flex flex-col text-primary">
-			<div class="px-4 py-3 border-b border-subtle flex items-center justify-between">
+		<div class="people-picker absolute inset-0 z-50 flex flex-col text-primary">
+			<div class="people-picker__header px-4 py-3 border-b border-subtle flex items-center justify-between">
 				<div>
 					<div class="text-base font-semibold">
 						{isGroupMode ? 'Create Group Chat' : 'Start a conversation'}
@@ -1576,6 +1576,7 @@
 <style>
 	/* Root sidebar container using CSS Grid for reliable height distribution */
 	.dms-sidebar-root {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		height: calc(100vh - var(--desktop-user-bar-height, 52px));
@@ -1614,9 +1615,11 @@
 	.dms-sidebar-header__new-btn {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.35rem;
-		padding: 0.35rem 0.6rem;
-		border-radius: 0.6rem;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border-radius: 0.5rem;
 		background: rgba(255, 255, 255, 0.08);
 		border: none;
 		color: var(--color-text-secondary);
@@ -1924,10 +1927,13 @@
 
 	.people-picker {
 		background: var(--color-panel);
-		backdrop-filter: blur(16px);
 		color: var(--color-text-primary);
-		padding-top: env(safe-area-inset-top, 0px);
-		padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-dock-height, 0px));
+	}
+
+	.people-picker__header {
+		padding-top: 0.75rem;
+		padding-left: 1rem;
+		padding-right: 1rem;
 	}
 
 	.people-picker__subtitle {
