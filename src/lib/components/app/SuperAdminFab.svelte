@@ -455,6 +455,15 @@
 			window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			
+			// Listen for mobile FAB clicks from mobile dock
+			const handleMobileFabClick = (e: CustomEvent<{ fabId: string }>) => {
+				if (e.detail.fabId === FAB_ID) {
+					// Navigate to admin page
+					goto('/admin');
+				}
+			};
+			window.addEventListener('mobileFabClick', handleMobileFabClick as EventListener);
 		}
 	});
 
@@ -463,6 +472,7 @@
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			// Note: mobileFabClick listener is cleaned up automatically since we're using browser check
 			// Unregister FAB from snap store if it was registered
 			if (isRegistered) {
 				fabSnapStore.unregisterFab(FAB_ID);
@@ -557,6 +567,13 @@
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 200ms ease;
+	}
+	
+	/* Hide floating FAB on mobile - it's shown in the mobile dock instead */
+	@media (max-width: 767px) {
+		.super-admin-fab-wrapper {
+			display: none !important;
+		}
 	}
 
 	.super-admin-fab-wrapper--ready {

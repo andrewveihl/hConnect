@@ -123,9 +123,6 @@
 	let fabSnapZoneEl: HTMLDivElement | null = $state(null);
 	const FAB_SNAP_ZONE_ID = 'left-rail-fab-snap';
 	let snapZones = $state<import('$lib/stores/fabSnap').SnapZone[]>([]);
-	let fabTrayOpen = $state(false);
-	let registeredFabCount = $state(0);
-	const hasFabTray = $derived(registeredFabCount > 0);
 
 	// Custom tooltip state
 	let hoveredServerId: string | null = $state(null);
@@ -362,22 +359,7 @@
 		activeSnapZoneId = event.detail.zoneId;
 	}
 
-	function handleFabTrayStateChange(event: CustomEvent<{ open: boolean; unmounting?: boolean }>) {
-		// Ignore unmounting events - don't update local state when tray component unmounts
-		if (event.detail.unmounting) return;
-		fabTrayOpen = event.detail.open;
-	}
 
-	function handleFabRegistryChanged(event: CustomEvent<{ count: number }>) {
-		registeredFabCount = event.detail.count;
-	}
-
-	function toggleFabTrayFromRail(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (!browser) return;
-		window.dispatchEvent(new CustomEvent('fabTrayToggleRequest'));
-	}
 
 	// Subscribe to snap zones updates
 	let snapZonesUnsub: (() => void) | null = null;
@@ -423,8 +405,6 @@
 		if (browser) {
 			window.addEventListener('resize', updateFabSnapZone);
 			window.addEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
-			window.addEventListener('fabTrayStateChange', handleFabTrayStateChange as EventListener);
-			window.addEventListener('fabRegistryChanged', handleFabRegistryChanged as EventListener);
 			
 			// Subscribe to snap zones
 			snapZonesUnsub = fabSnapStore.subscribe((state) => {
@@ -432,8 +412,6 @@
 					(z) => z.id === FAB_SNAP_ZONE_ID || z.id.startsWith(`${FAB_SNAP_ZONE_ID}-stack-`)
 				);
 			});
-
-			registeredFabCount = fabSnapStore.getRegisteredFabs().length;
 		}
 	});
 
@@ -447,8 +425,6 @@
 			fabSnapStore.unregisterZone(FAB_SNAP_ZONE_ID);
 			window.removeEventListener('resize', updateFabSnapZone);
 			window.removeEventListener('fabNearSnapZone', handleFabNearSnapZone as EventListener);
-			window.removeEventListener('fabTrayStateChange', handleFabTrayStateChange as EventListener);
-			window.removeEventListener('fabRegistryChanged', handleFabRegistryChanged as EventListener);
 			snapZonesUnsub?.();
 		}
 	});
@@ -1086,20 +1062,6 @@
 	</div>
 	{/if}
 
-	{#if hasFabTray}
-		<div class="rail-fab-tray-toggle">
-			<button
-				type="button"
-				class={`rail-button rail-button--fab-tray-toggle fab-tray__toggle ${fabTrayOpen ? 'rail-button--fab-tray-toggle-open' : ''}`}
-				onclick={toggleFabTrayFromRail}
-				aria-label={fabTrayOpen ? 'Hide widget dock' : 'Show widget dock'}
-				title={fabTrayOpen ? 'Hide widget dock' : 'Show widget dock'}
-			>
-				<i class={fabTrayOpen ? 'bx bx-chevron-down text-2xl leading-none' : 'bx bx-chevron-up text-2xl leading-none'}></i>
-			</button>
-		</div>
-	{/if}
-
 	{#if showBottomActions}
 		<div
 			class="rail-bottom w-full flex flex-col items-center gap-3 p-3 mt-auto"
@@ -1429,33 +1391,9 @@
 		}
 	}
 
-	.rail-fab-tray-toggle {
-		display: none;
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: calc(var(--mobile-dock-height, 0px) + env(safe-area-inset-bottom, 0px) + 8px);
-		justify-content: center;
-		z-index: 2;
-	}
-
-	.rail-button--fab-tray-toggle-open {
-		background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-		border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
-		color: var(--color-accent);
-	}
-
-	.rail-button--fab-tray-toggle-open:hover {
-		background: color-mix(in srgb, var(--color-accent) 26%, transparent);
-	}
-
 	@media (max-width: 767px) {
-		.rail-fab-tray-toggle {
-			display: flex;
-		}
-
 		.rail-server-stack {
-			padding-bottom: calc(1rem + var(--mobile-dock-height, 0px) + 56px);
+			padding-bottom: calc(1rem + var(--mobile-dock-height, 0px) + 16px);
 		}
 	}
 

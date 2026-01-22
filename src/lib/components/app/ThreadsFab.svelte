@@ -1122,6 +1122,15 @@
 		};
 		window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
 		
+		// Listen for mobile FAB clicks from mobile dock
+		const handleMobileFabClick = (e: CustomEvent<{ fabId: string }>) => {
+			if (e.detail.fabId === FAB_ID) {
+				// Navigate to mobile threads page
+				goto('/threads');
+			}
+		};
+		window.addEventListener('mobileFabClick', handleMobileFabClick as EventListener);
+		
 		// Update expiration times every minute
 		expirationInterval = setInterval(() => {
 			now = Date.now();
@@ -1133,6 +1142,7 @@
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			window.removeEventListener('mobileFabClick', handleMobileFabClick as EventListener);
 		};
 	});
 
@@ -1504,6 +1514,13 @@
 		touch-action: none;
 		--floating-fab-size: 3.1rem;
 		--floating-fab-snapped-size: 3rem;
+	}
+	
+	/* Hide floating FAB on mobile - it's shown in the mobile dock instead */
+	@media (max-width: 767px) {
+		.threads-fab-wrapper {
+			display: none !important;
+		}
 	}
 	
 	/* When snapped, increase z-index to appear above tray content */

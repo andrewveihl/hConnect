@@ -141,15 +141,37 @@
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			// Unregister FAB from snap store
+			fabSnapStore.unregisterFab(FAB_ID);
 		}
 	});
 
 	onMount(() => {
 		if (browser && draggable) {
+			// Register this FAB with the snap store for mobile dock
+			fabSnapStore.registerFab({
+				id: FAB_ID,
+				label: 'Voice',
+				icon: 'bx-phone'
+			});
+			
 			loadSavedPosition();
 			window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			
+			// Listen for mobile FAB clicks from mobile dock
+			const handleMobileFabClick = (e: CustomEvent<{ fabId: string }>) => {
+				if (e.detail.fabId === FAB_ID) {
+					// Open the voice interface
+					openVoice();
+				}
+			};
+			window.addEventListener('mobileFabClick', handleMobileFabClick as EventListener);
+			
+			return () => {
+				window.removeEventListener('mobileFabClick', handleMobileFabClick as EventListener);
+			};
 		}
 	});
 
@@ -615,6 +637,14 @@
 		user-select: none;
 		transition: box-shadow 200ms ease, transform 200ms ease;
 	}
+	
+	/* Hide floating FAB on mobile - it's shown in the mobile dock instead */
+	@media (max-width: 767px) {
+		.voice-mini-panel {
+			display: none !important;
+		}
+	}
+	
 	.voice-mini-panel.is-draggable {
 		will-change: transform;
 	}
