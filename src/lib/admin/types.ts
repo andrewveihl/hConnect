@@ -65,6 +65,13 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
 		description: 'Soft-deleted content'
 	},
 	{
+		id: 'support',
+		label: 'Support AI',
+		href: '/admin/support',
+		icon: 'bx-support',
+		description: 'Ticket AI management & analytics'
+	},
+	{
 		id: 'health',
 		label: 'System',
 		href: '/admin/health',

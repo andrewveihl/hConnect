@@ -38,14 +38,24 @@
 		'/admin/super-admins': 'Manage Super Admin allow list.',
 		'/admin/settings': 'Tune retention and safety preferences.',
 		'/admin/health': 'Monitor system health and performance.',
-		'/admin/announcements': 'Create and manage system alerts.'
+		'/admin/announcements': 'Create and manage system alerts.',
+		'/admin/support': 'Manage AI support tickets across all servers.',
+		'/admin/support/tickets': 'Search and manage all support tickets.',
+		'/admin/support/servers': 'Per-server support configuration.',
+		'/admin/support/analytics': 'Support AI usage analytics and metrics.',
+		'/admin/support/ticket': 'View and manage support ticket details.'
 	};
 
 	const manualTitles: Record<string, string> = {
 		'/admin/settings': 'Settings',
 		'/admin/super-admins': 'Super Admins',
 		'/admin/health': 'System Health',
-		'/admin/announcements': 'Announcements'
+		'/admin/announcements': 'Announcements',
+		'/admin/support': 'Support AI',
+		'/admin/support/tickets': 'All Tickets',
+		'/admin/support/servers': 'Server Config',
+		'/admin/support/analytics': 'Analytics',
+		'/admin/support/ticket': 'Ticket Details'
 	};
 
 	const fallbackDescription = $derived(descriptions[currentPath] ?? 'Super Admin area.');
