@@ -63,6 +63,7 @@ export async function markChannelRead(
 type ChannelState = {
 	id: string;
 	lastReadAt: Timestamp | null;
+	readCursorLoaded: boolean; // Track if we've received the read cursor at least once
 	recomputeRunning: boolean;
 	recomputeQueued: boolean;
 	stopLatest?: Unsubscribe;
@@ -307,6 +308,12 @@ export function subscribeUnreadForServer(
 		if (deniedChannels.has(channelId)) return;
 		const state = channelStates.get(channelId);
 		if (!state) return;
+		
+		// IMPORTANT: Don't compute unread until we've loaded the read cursor at least once.
+		// This prevents the "notifications flash" where all channels appear unread briefly
+		// before the user's actual read state is loaded from Firestore.
+		if (!state.readCursorLoaded) return;
+		
 		if (state.recomputeRunning) {
 			state.recomputeQueued = true;
 			return;
@@ -355,6 +362,7 @@ export function subscribeUnreadForServer(
 		const state: ChannelState = {
 			id: channelId,
 			lastReadAt: null,
+			readCursorLoaded: false, // Don't compute unread until we know the user's read state
 			recomputeRunning: false,
 			recomputeQueued: false
 		};
@@ -378,16 +386,18 @@ export function subscribeUnreadForServer(
 			(snap) => {
 				const data: any = snap.data() ?? {};
 				state.lastReadAt = data?.lastReadAt ?? null;
+				state.readCursorLoaded = true; // Now we know the read state - ok to compute unread
 				scheduleRecompute(channelId);
 			},
 			(err) => {
 				if (handlePermissionDenied(channelId, err)) return;
 				state.lastReadAt = null;
+				state.readCursorLoaded = true; // Error is also "loaded" - user has never read this channel
 				scheduleRecompute(channelId);
 			}
 		);
 
-		scheduleRecompute(channelId);
+		// Don't call scheduleRecompute here - wait for read cursor to load first
 	};
 
 	const handleChannelSnapshot = (snap: any) => {

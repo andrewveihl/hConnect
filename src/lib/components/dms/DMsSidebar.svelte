@@ -277,7 +277,7 @@
 	function loadStoredRail(uid: string): any[] | null {
 		if (typeof window === 'undefined') return null;
 		try {
-			const raw = sessionStorage.getItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`);
+			const raw = localStorage.getItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`);
 			if (!raw) return null;
 			const parsed = JSON.parse(raw);
 			return Array.isArray(parsed) ? parsed : null;
@@ -290,7 +290,7 @@
 		if (typeof window === 'undefined') return;
 		try {
 			const trimmed = Array.isArray(rows) ? rows.slice(0, DM_RAIL_STORAGE_LIMIT) : [];
-			sessionStorage.setItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`, JSON.stringify(trimmed));
+			localStorage.setItem(`${DM_RAIL_STORAGE_PREFIX}${uid}`, JSON.stringify(trimmed));
 		} catch {
 			// ignore storage errors
 		}

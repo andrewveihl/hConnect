@@ -2,11 +2,20 @@
 export const ssr = false;
 
 import { redirect } from '@sveltejs/kit';
+import { browser } from '$app/environment';
 
 export async function load() {
 	const { completeRedirectIfNeeded, waitForAuthInit, ensureFirebaseReady } =
 		await import('$lib/firebase');
 	const { user } = await import('$lib/stores/user');
+
+	// IMPORTANT: Preload IndexedDB cache FIRST (before any Firestore calls)
+	// This loads servers, channels, DMs, messages from local device storage
+	// so the app can paint instantly without waiting for network
+	if (browser) {
+		const { preloadCacheFromDb } = await import('$lib/perf');
+		await preloadCacheFromDb();
+	}
 
 	await completeRedirectIfNeeded?.();
 	await waitForAuthInit();

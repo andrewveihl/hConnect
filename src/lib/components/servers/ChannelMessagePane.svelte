@@ -1,9 +1,8 @@
 <script lang="ts">
-import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+import { createEventDispatcher, onMount } from 'svelte';
 import { browser } from '$app/environment';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
-import MessageSearch from '$lib/components/chat/MessageSearch.svelte';
 import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 import type { PinnedMessage, ReplyReferenceInput } from '$lib/firestore/messages';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
@@ -85,14 +84,6 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		pinnedMessageIds?: Set<string>;
 		canPinMessages?: boolean;
 		pinnedMessages?: PinnedMessage[];
-		/** External control for search visibility */
-		searchVisible?: boolean;
-		/** Callback when search visibility changes */
-		onSearchVisibilityChange?: (visible: boolean) => void;
-		/** Whether there are more messages that can be loaded */
-		hasMoreMessages?: boolean;
-		/** Whether messages are currently loading */
-		isLoadingMessages?: boolean;
 	}
 
 	let {
@@ -140,11 +131,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		onTicketError = () => {},
 		pinnedMessageIds = new Set<string>(),
 		canPinMessages = false,
-		pinnedMessages = [],
-		searchVisible = undefined,
-		onSearchVisibilityChange = undefined,
-		hasMoreMessages = false,
-		isLoadingMessages = false
+		pinnedMessages = []
 	}: Props = $props();
 
 	const dispatch = createEventDispatcher();
@@ -209,96 +196,13 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 	
 	// Check if this is a DM context (has dmThreadId prop)
 	const isDmChat = $derived(Boolean(dmThreadId));
-
-	// Message search state - internal state that can be overridden by props
-	let internalShowSearch = $state(false);
-	let searchScrollToMessageId = $state<string | null>(null);
-	let searchHighlightedIds = $state<Set<string>>(new Set());
-	let searchScrollSignal = $state(0);
-
-	// Use external control if provided, otherwise use internal state
-	const showSearch = $derived(searchVisible !== undefined ? searchVisible : internalShowSearch);
-
-	// Sync internal state with external control
-	$effect(() => {
-		if (searchVisible !== undefined) {
-			internalShowSearch = searchVisible;
-		}
-	});
-
-	// Global keyboard handler for Ctrl+F and Escape
-	function handleGlobalKeydown(event: KeyboardEvent) {
-		// Ctrl+F or Cmd+F to open search
-		if ((event.ctrlKey || event.metaKey) && event.key === 'f' && hasChannel) {
-			event.preventDefault();
-			const newState = true;
-			internalShowSearch = newState;
-			onSearchVisibilityChange?.(newState);
-		}
-		// Escape to close search (only if search is visible)
-		if (event.key === 'Escape' && showSearch) {
-			event.preventDefault();
-			handleSearchClose();
-		}
-	}
-
-	onMount(() => {
-		if (browser) {
-			window.addEventListener('keydown', handleGlobalKeydown);
-		}
-	});
-
-	onDestroy(() => {
-		if (browser) {
-			window.removeEventListener('keydown', handleGlobalKeydown);
-		}
-	});
-
-	function handleSearchClose() {
-		internalShowSearch = false;
-		searchScrollToMessageId = null;
-		searchHighlightedIds = new Set();
-		onSearchVisibilityChange?.(false);
-	}
-
-	function handleSearchNavigate(event: CustomEvent<{ messageId: string; index: number }>) {
-		// Increment signal to force scroll even to the same message
-		searchScrollSignal++;
-		searchScrollToMessageId = event.detail.messageId;
-		searchHighlightedIds = new Set([event.detail.messageId]);
-	}
-
-	// Export function to toggle search from parent
-	export function toggleSearch() {
-		const newState = !internalShowSearch;
-		internalShowSearch = newState;
-		onSearchVisibilityChange?.(newState);
-	}
-
-	export function isSearchVisible() {
-		return showSearch;
-	}	// Combine the passed scrollToMessageId with search navigation
-	const effectiveScrollToMessageId = $derived(searchScrollToMessageId ?? scrollToMessageId);
-
 </script>
 
 <div class="channel-message-pane">
 	{#if hasChannel}
 		<div class="message-pane-shell">
-			<!-- Message Search Bar -->
-			<MessageSearch
-				{messages}
-				{profiles}
-				visible={showSearch}
-				isLoading={isLoadingMessages}
-				hasMoreMessages={hasMoreMessages}
-				on:close={handleSearchClose}
-				on:navigate={handleSearchNavigate}
-				on:loadMore={onLoadMore}
-			/>
-			
 			{#if pinnedMessages?.length}
-				<div class="pinned-fab" class:pinned-fab--with-search={showSearch}>
+				<div class="pinned-fab">
 					<ChannelPinnedBar
 						items={pinnedMessages}
 						canManagePins={canPinMessages}
@@ -307,7 +211,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 					/>
 				</div>
 			{/if}
-			<div class={listClass} class:with-search={showSearch} style={scrollRegionStyle}>
+			<div class={listClass} style={scrollRegionStyle}>
 				<MessageList
 					{messages}
 					users={profiles}
@@ -316,9 +220,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 					{threadStats}
 					{pendingUploads}
 					scrollToBottomSignal={combinedScrollSignal}
-					scrollToMessageId={effectiveScrollToMessageId}
-					scrollToMessageSignal={searchScrollSignal}
-					searchHighlightedIds={searchHighlightedIds}
+					{scrollToMessageId}
 					{isTicketAiStaff}
 					{serverId}
 					{channelId}
@@ -428,11 +330,6 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		left: 0.5rem;
 		top: 0.35rem;
 		z-index: 5;
-		transition: top 150ms ease;
-	}
-
-	.pinned-fab--with-search {
-		top: 3.25rem;
 	}
 
 	.pinned-fab :global(.pinned-bar) {
@@ -448,11 +345,6 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 	.pinned-fab :global(.pinned-menu) {
 		left: 0;
 		right: auto;
-	}
-
-	/* Adjust message list when search bar is visible */
-	.with-search {
-		padding-top: 3rem !important;
 	}
 </style>
 

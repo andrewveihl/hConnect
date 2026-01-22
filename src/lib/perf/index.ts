@@ -5,9 +5,11 @@
 export {
 	// CacheDB
 	getServerRail,
+	getServerRailSync,
 	setServerRail,
 	setServerRailMemory,
 	getDmRail,
+	getDmRailSync,
 	setDmRail,
 	setDmRailMemory,
 	getServerView,

@@ -76,6 +76,17 @@
 		content: string;
 	};
 
+	type ClientOption = {
+		value: string;
+		label: string;
+	};
+
+	type ClientGroup = {
+		serverId: string;
+		serverName: string;
+		clients: ClientOption[];
+	};
+
 	// Storage keys
 	const OPEN_TICKETS_STORAGE_KEY = 'hconnect:support:openTickets';
 	const QUICK_RESPONSES_STORAGE_KEY = 'hconnect:support:quickResponses';
@@ -108,6 +119,7 @@
 	let channelNames = $state<Record<string, string>>({});
 	let openTickets = $state<OpenTicket[]>([]);
 	let sidebarFilter = $state<'unassigned' | 'mine' | 'all'>('unassigned');
+	let clientFilter = $state('all');
 	let sidebarCollapsed = $state(false);
 	let focusedTicketId = $state<string | null>(null);
 	let mobileActiveTicket = $state<string | null>(null);
@@ -203,10 +215,89 @@
 	const unassignedIssues = $derived(allIssues.filter((i) => (i.staffMemberIds?.length ?? 0) === 0));
 	const myIssues = $derived(allIssues.filter((i) => i.staffMemberIds?.includes($user?.uid ?? '')));
 
-	const filteredIssues = $derived.by(() => {
+	const baseFilteredIssues = $derived.by(() => {
 		if (sidebarFilter === 'unassigned') return unassignedIssues;
 		if (sidebarFilter === 'mine') return myIssues;
 		return allIssues;
+	});
+
+	const buildClientFilterValue = (serverId: string, clientKey: string): string =>
+		`${serverId}::${encodeURIComponent(clientKey)}`;
+
+	const clientGroups = $derived.by((): ClientGroup[] => {
+		const groupMap = new Map<
+			string,
+			{
+				serverName: string;
+				clients: Map<string, string>;
+			}
+		>();
+
+		for (const issue of allIssues) {
+			const serverId = issue.serverId;
+			const serverName = staffServers.find((s) => s.id === serverId)?.name ?? 'Unknown Server';
+
+			let group = groupMap.get(serverId);
+			if (!group) {
+				group = { serverName, clients: new Map() };
+				groupMap.set(serverId, group);
+			}
+
+			const authorId = issue.authorId?.trim();
+			const authorName = issue.authorName?.trim();
+			const clientKey = authorId || authorName;
+			if (!clientKey) continue;
+			const label = authorName || authorId || clientKey;
+			if (!group.clients.has(clientKey)) {
+				group.clients.set(clientKey, label);
+			}
+		}
+
+		return Array.from(groupMap.entries())
+			.map(([serverId, group]) => ({
+				serverId,
+				serverName: group.serverName,
+				clients: Array.from(group.clients.entries())
+					.map(([clientKey, label]) => ({
+						value: buildClientFilterValue(serverId, clientKey),
+						label
+					}))
+					.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+			}))
+			.sort((a, b) =>
+				a.serverName.localeCompare(b.serverName, undefined, { sensitivity: 'base' })
+			);
+	});
+
+	const activeClientFilter = $derived.by(() => {
+		if (clientFilter === 'all') return null;
+		const [serverId, encodedClientKey] = clientFilter.split('::');
+		if (!serverId || !encodedClientKey) return null;
+		try {
+			return { serverId, clientKey: decodeURIComponent(encodedClientKey) };
+		} catch {
+			return null;
+		}
+	});
+
+	const filteredIssues = $derived.by(() => {
+		if (!activeClientFilter) return baseFilteredIssues;
+		return baseFilteredIssues.filter((issue) => {
+			const authorId = issue.authorId?.trim();
+			const authorName = issue.authorName?.trim();
+			const clientKey = authorId || authorName;
+			return issue.serverId === activeClientFilter.serverId && clientKey === activeClientFilter.clientKey;
+		});
+	});
+
+	$effect(() => {
+		if (clientFilter === 'all') return;
+		const hasOption = clientGroups.some((group) =>
+			group.clients.some((client) => client.value === clientFilter)
+		);
+		if (!hasOption) {
+			clientFilter = 'all';
+		}
 	});
 
 	// Group issues by server for sidebar
@@ -1095,30 +1186,61 @@
 
 				<!-- Filters -->
 				<div class="support-sidebar__filters">
-					<button
-						type="button"
-						class="filter-btn"
-						class:filter-btn--active={sidebarFilter === 'unassigned'}
-						onclick={() => (sidebarFilter = 'unassigned')}
-					>
-						Unassigned ({unassignedIssues.length})
-					</button>
-					<button
-						type="button"
-						class="filter-btn"
-						class:filter-btn--active={sidebarFilter === 'mine'}
-						onclick={() => (sidebarFilter = 'mine')}
-					>
-						Mine ({myIssues.length})
-					</button>
-					<button
-						type="button"
-						class="filter-btn"
-						class:filter-btn--active={sidebarFilter === 'all'}
-						onclick={() => (sidebarFilter = 'all')}
-					>
-						All ({allIssues.length})
-					</button>
+					<div class="support-sidebar__filter-row">
+						<button
+							type="button"
+							class="filter-btn"
+							class:filter-btn--active={sidebarFilter === 'unassigned'}
+							onclick={() => (sidebarFilter = 'unassigned')}
+						>
+							Unassigned ({unassignedIssues.length})
+						</button>
+						<button
+							type="button"
+							class="filter-btn"
+							class:filter-btn--active={sidebarFilter === 'mine'}
+							onclick={() => (sidebarFilter = 'mine')}
+						>
+							Mine ({myIssues.length})
+						</button>
+						<button
+							type="button"
+							class="filter-btn"
+							class:filter-btn--active={sidebarFilter === 'all'}
+							onclick={() => (sidebarFilter = 'all')}
+						>
+							All ({allIssues.length})
+						</button>
+					</div>
+					<div class="support-sidebar__filter-row support-sidebar__filter-row--select">
+						<label class="filter-label" for="client-filter">Client</label>
+						<div class="filter-select">
+							<i class="bx bx-user filter-select__icon" aria-hidden="true"></i>
+							<select id="client-filter" bind:value={clientFilter}>
+								<option value="all">All clients</option>
+								{#each clientGroups as group (group.serverId)}
+									{#if group.clients.length > 0}
+										<optgroup label={group.serverName}>
+											{#each group.clients as client}
+												<option value={client.value}>{client.label}</option>
+											{/each}
+										</optgroup>
+									{/if}
+								{/each}
+							</select>
+							{#if clientFilter !== 'all'}
+								<button
+									type="button"
+									class="filter-clear-btn"
+									onclick={() => (clientFilter = 'all')}
+									title="Clear client filter"
+								>
+									<i class="bx bx-x"></i>
+								</button>
+							{/if}
+							<i class="bx bx-chevron-down filter-select__chevron" aria-hidden="true"></i>
+						</div>
+					</div>
 				</div>
 
 				<!-- Ticket List -->
@@ -1133,11 +1255,13 @@
 							<i class="bx bx-check-circle"></i>
 							<span>No tickets</span>
 							<p>
-								{sidebarFilter === 'unassigned'
-									? 'All tickets are assigned!'
-									: sidebarFilter === 'mine'
-										? "You don't have any tickets"
-										: 'No open tickets'}
+								{clientFilter !== 'all'
+									? 'No tickets match this client filter.'
+									: sidebarFilter === 'unassigned'
+										? 'All tickets are assigned!'
+										: sidebarFilter === 'mine'
+											? "You don't have any tickets"
+											: 'No open tickets'}
 							</p>
 						</div>
 					{:else}
@@ -1867,9 +1991,98 @@
 
 	.support-sidebar__filters {
 		display: flex;
-		gap: 0.25rem;
+		flex-direction: column;
+		gap: 0.5rem;
 		padding: 0.75rem;
 		border-bottom: 1px solid var(--color-border-subtle);
+	}
+
+	.support-sidebar__filter-row {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.support-sidebar__filter-row--select {
+		gap: 0.5rem;
+	}
+
+	.filter-label {
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: var(--color-text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.filter-select {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.35rem 0.5rem;
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 65%, transparent);
+		background: color-mix(in srgb, var(--color-panel) 78%, #0e1218);
+		border-radius: 10px;
+		box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+		transition: border-color 150ms ease, box-shadow 150ms ease;
+	}
+
+	.filter-select:focus-within {
+		border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+		box-shadow:
+			inset 0 1px 2px rgba(0, 0, 0, 0.25),
+			0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+	}
+
+	.filter-select__icon {
+		font-size: 0.9rem;
+		color: var(--color-text-muted);
+	}
+
+	.filter-select select {
+		flex: 1;
+		min-width: 0;
+		border: none;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-size: 0.75rem;
+		font-weight: 500;
+		outline: none;
+		appearance: none;
+		-webkit-appearance: none;
+		-moz-appearance: none;
+	}
+
+	.filter-select .filter-select__chevron {
+		font-size: 0.95rem;
+		color: var(--color-text-muted);
+		transition: color 150ms ease, transform 150ms ease;
+	}
+
+	.filter-select:focus-within .filter-select__chevron {
+		color: var(--color-accent);
+		transform: translateY(1px);
+	}
+
+	.filter-clear-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.35rem;
+		height: 1.35rem;
+		border: none;
+		background: transparent;
+		color: var(--color-text-muted);
+		border-radius: 4px;
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.filter-clear-btn:hover {
+		background: rgba(255, 255, 255, 0.08);
+		color: var(--color-text-primary);
 	}
 
 	.filter-btn {

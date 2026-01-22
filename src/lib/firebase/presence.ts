@@ -11,7 +11,7 @@ let heartbeat: ReturnType<typeof setInterval> | null = null;
 
 const windowUnsubs: Array<() => void> = [];
 
-const HEARTBEAT_INTERVAL = 30 * 1000; // 30 seconds for more accurate presence
+const HEARTBEAT_INTERVAL = 60 * 1000; // 60 seconds - increased from 30s to reduce Firestore writes
 
 type WindowEventKey = keyof WindowEventMap;
 
@@ -103,10 +103,22 @@ function stateFromEnvironment(): PresenceState {
 
 function startHeartbeat() {
 	if (heartbeat) return;
+	// Only run heartbeat if tab is visible (saves battery on mobile)
+	if (document.hidden) return;
 	heartbeat = setInterval(() => {
+		// Skip heartbeat when tab is hidden to save battery
+		if (document.hidden) return;
 		const state = stateFromEnvironment();
 		void writePresence(state, { force: true });
 	}, HEARTBEAT_INTERVAL);
+}
+
+function pauseHeartbeatIfHidden() {
+	if (document.hidden) {
+		clearHeartbeat();
+	} else {
+		startHeartbeat();
+	}
 }
 
 function stopTracking() {
@@ -128,6 +140,8 @@ function activateListeners() {
 		addDocumentListener('visibilitychange', () => {
 			const state = stateFromEnvironment();
 			void writePresence(state, { force: true });
+			// Pause/resume heartbeat based on visibility (saves battery on mobile)
+			pauseHeartbeatIfHidden();
 		})
 	);
 

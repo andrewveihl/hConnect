@@ -187,11 +187,11 @@
 			</p>
 		</main>
 	{:else}
-		{@const currentStatus = columns[currentColumn]}
-		{@const currentItems = itemsByStatus[currentStatus] || []}
-		{@const colInfo = columnLabels[currentStatus]}
 		<!-- Board Walk Mode -->
 		<main class="board-walk">
+			{@const currentStatus = columns[currentColumn]}
+			{@const currentItems = itemsByStatus[currentStatus] || []}
+			{@const colInfo = columnLabels[currentStatus]}
 
 			<div class="walk-header">
 				<div class="walk-progress">

@@ -247,11 +247,52 @@
 			</div>
 
 			<div class="filter-bar">
-				<div class="search-box"><i class="bx bx-search"></i><input type="text" placeholder="Search backlog..." bind:value={searchQuery} /></div>
-				<div class="filter-group"><label>Type</label><select bind:value={filterType}><option value="all">All Types</option><option value="story">Stories</option><option value="bug">Bugs</option><option value="task">Tasks</option></select></div>
-				{#if clientTags.length > 0}<div class="filter-group"><label>Client</label><select bind:value={filterClient}><option value={null}>All Clients</option>{#each clientTags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select></div>{/if}
-				<div class="filter-group"><label>Ready</label><select bind:value={filterReady}><option value="all">All</option><option value="ready">Ready</option><option value="not-ready">Not Ready</option></select></div>
-				<div class="filter-group"><label>Sort</label><select bind:value={sortBy}><option value="priority">Priority</option><option value="size">Size</option><option value="client">Client</option><option value="created">Created</option></select></div>
+				<div class="search-box">
+					<i class="bx bx-search"></i>
+					<input
+						type="text"
+						placeholder="Search backlog..."
+						bind:value={searchQuery}
+						aria-label="Search backlog"
+					/>
+				</div>
+				<div class="filter-group">
+					<label for="filter-type">Type</label>
+					<select id="filter-type" bind:value={filterType}>
+						<option value="all">All Types</option>
+						<option value="story">Stories</option>
+						<option value="bug">Bugs</option>
+						<option value="task">Tasks</option>
+					</select>
+				</div>
+				{#if clientTags.length > 0}
+					<div class="filter-group">
+						<label for="filter-client">Client</label>
+						<select id="filter-client" bind:value={filterClient}>
+							<option value={null}>All Clients</option>
+							{#each clientTags as tag (tag.id)}
+								<option value={tag.id}>{tag.name}</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
+				<div class="filter-group">
+					<label for="filter-ready">Ready</label>
+					<select id="filter-ready" bind:value={filterReady}>
+						<option value="all">All</option>
+						<option value="ready">Ready</option>
+						<option value="not-ready">Not Ready</option>
+					</select>
+				</div>
+				<div class="filter-group">
+					<label for="filter-sort">Sort</label>
+					<select id="filter-sort" bind:value={sortBy}>
+						<option value="priority">Priority</option>
+						<option value="size">Size</option>
+						<option value="client">Client</option>
+						<option value="created">Created</option>
+					</select>
+				</div>
 			</div>
 
 			{#if backlogItems.length === 0}
@@ -264,6 +305,9 @@
 					{#each backlogItems as item, index (item.id)}
 						{@const clientTag = getClientTag(item.clientTagId)}
 						{@const isReady = checkItemReady(item)}
+						{@const sizeLabelId = `size-label-${item.id}`}
+						{@const prioritySelectId = `priority-${item.id}`}
+						{@const clientSelectId = `client-${item.id}`}
 						<div class="backlog-item" class:urgent={item.isUrgent} class:ready={isReady} draggable={canEditPriority ? "true" : "false"} ondragstart={(e) => handleDragStart(e, item)} ondragover={handleDragOver} ondrop={(e) => handleDrop(e, item)}>
 							<div class="item-rank">{index + 1}</div>
 							<div class="item-type" title={item.type}><i class="bx {getTypeIcon(item.type)}"></i></div>
@@ -279,9 +323,52 @@
 								{#if item.description}<p class="item-desc">{item.description}</p>{/if}
 						</div>
 						<div class="item-meta">
-							<div class="size-selector"><label>Size</label><div class="size-buttons">{#each (['XS', 'S', 'M', 'L', 'XL'] as const) as size}<button type="button" class:active={item.tshirtSize === size} style="--size-color: {getSizeColor(size)}" onclick={() => handleUpdateSize(item, size)} title="{size} (~{tshirtMapping[size]}h)">{size}</button>{/each}</div></div>
-							{#if canEditPriority}<div class="priority-selector"><label>Priority</label><select value={item.priority} onchange={(e) => handleUpdatePriority(item, e.currentTarget.value as BacklogItem['priority'])}><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div>{/if}
-							{#if canEditPriority && clientTags.length > 0}<div class="client-selector"><label>Client</label><select value={item.clientTagId || ''} onchange={(e) => handleUpdateClient(item, e.currentTarget.value || undefined)}><option value="">None</option>{#each clientTags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select></div>{/if}
+							<div class="size-selector">
+								<span id={sizeLabelId} class="field-label">Size</span>
+								<div class="size-buttons" role="group" aria-labelledby={sizeLabelId}>
+									{#each (['XS', 'S', 'M', 'L', 'XL'] as const) as size}
+										<button
+											type="button"
+											class:active={item.tshirtSize === size}
+											style="--size-color: {getSizeColor(size)}"
+											onclick={() => handleUpdateSize(item, size)}
+											title="{size} (~{tshirtMapping[size]}h)"
+										>
+											{size}
+										</button>
+									{/each}
+								</div>
+							</div>
+							{#if canEditPriority}
+								<div class="priority-selector">
+									<label for={prioritySelectId}>Priority</label>
+									<select
+										id={prioritySelectId}
+										value={item.priority}
+										onchange={(e) => handleUpdatePriority(item, e.currentTarget.value as BacklogItem['priority'])}
+									>
+										<option value="critical">Critical</option>
+										<option value="high">High</option>
+										<option value="medium">Medium</option>
+										<option value="low">Low</option>
+									</select>
+								</div>
+							{/if}
+							{#if canEditPriority && clientTags.length > 0}
+								<div class="client-selector">
+									<label for={clientSelectId}>Client</label>
+									<select
+										id={clientSelectId}
+										value={item.clientTagId || ''}
+										onchange={(e) => handleUpdateClient(item, e.currentTarget.value || undefined)}
+									>
+										<option value="">None</option>
+										{#each clientTags as tag (tag.id)}
+											<option value={tag.id}>{tag.name}</option>
+										{/each}
+									</select>
+								</div>
+							{/if}
 						</div>
 						<div class="item-actions">
 							{#if item.tshirtSize === 'XL' || item.tshirtSize === 'L'}<button type="button" class="action-btn split" onclick={() => openSplitModal(item)} title="Split this item"><i class="bx bx-git-branch"></i></button>{/if}
@@ -309,10 +396,33 @@
 </div>
 
 {#if showCreateModal}
-	<div class="modal-overlay" onclick={() => showCreateModal = false} onkeydown={(e) => e.key === 'Escape' && (showCreateModal = false)} role="dialog" aria-modal="true">
-		<div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="document">
+	<div
+		class="modal-overlay"
+		role="button"
+		tabindex="0"
+		aria-label="Close dialog"
+		onclick={() => showCreateModal = false}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				showCreateModal = false;
+				return;
+			}
+			if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+				e.preventDefault();
+				showCreateModal = false;
+			}
+		}}
+	>
+		<div
+			class="modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="create-backlog-title"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+		>
 			<div class="modal-header">
-				<h2>Create Backlog Item</h2>
+				<h2 id="create-backlog-title">Create Backlog Item</h2>
 				<button type="button" class="close-btn" onclick={() => showCreateModal = false} aria-label="Close"><i class="bx bx-x"></i></button>
 			</div>
 			<div class="modal-body">
@@ -323,9 +433,29 @@
 				<div class="form-group"><label for="item-title">Title</label><input type="text" id="item-title" bind:value={newItem.title} placeholder={newItem.type === 'story' ? "As a user, I want to..." : "Short description"} /></div>
 				<div class="form-group"><label for="item-desc">Description</label><textarea id="item-desc" bind:value={newItem.description} placeholder="Describe the feature or issue..." rows="3"></textarea></div>
 				<div class="form-group">
-					<label>Acceptance Criteria</label>
-					{#each newItem.acceptanceCriteria as _, i}<div class="ac-row"><span class="ac-prefix">Given/When/Then</span><input type="text" bind:value={newItem.acceptanceCriteria[i]} placeholder="e.g., When I click submit, the form is saved" /><button type="button" class="remove-ac" onclick={() => removeAcceptanceCriteria(i)}><i class="bx bx-x"></i></button></div>{/each}
-					<button type="button" class="add-ac-btn" onclick={addAcceptanceCriteria}><i class="bx bx-plus"></i> Add Acceptance Criteria</button>
+					<span class="form-label">Acceptance Criteria</span>
+					{#each newItem.acceptanceCriteria as _, i}
+						<div class="ac-row">
+							<span class="ac-prefix">Given/When/Then</span>
+							<input
+								type="text"
+								bind:value={newItem.acceptanceCriteria[i]}
+								placeholder="e.g., When I click submit, the form is saved"
+							/>
+							<button
+								type="button"
+								class="remove-ac"
+								onclick={() => removeAcceptanceCriteria(i)}
+								aria-label="Remove acceptance criteria"
+								title="Remove acceptance criteria"
+							>
+								<i class="bx bx-x"></i>
+							</button>
+						</div>
+					{/each}
+					<button type="button" class="add-ac-btn" onclick={addAcceptanceCriteria}>
+						<i class="bx bx-plus"></i> Add Acceptance Criteria
+					</button>
 				</div>
 				<div class="form-row">
 					<div class="form-group"><label for="item-priority">Priority</label><select id="item-priority" bind:value={newItem.priority}><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div>
@@ -338,9 +468,35 @@
 {/if}
 
 {#if showUrgentModal}
-	<div class="modal-overlay" onclick={() => showUrgentModal = false} onkeydown={(e) => e.key === 'Escape' && (showUrgentModal = false)} role="dialog" aria-modal="true">
-		<div class="modal urgent-modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="document">
-			<div class="modal-header"><h2><i class="bx bx-error"></i> Urgent Intake</h2><button type="button" class="close-btn" onclick={() => showUrgentModal = false} aria-label="Close"><i class="bx bx-x"></i></button></div>
+	<div
+		class="modal-overlay"
+		role="button"
+		tabindex="0"
+		aria-label="Close dialog"
+		onclick={() => showUrgentModal = false}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				showUrgentModal = false;
+				return;
+			}
+			if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+				e.preventDefault();
+				showUrgentModal = false;
+			}
+		}}
+	>
+		<div
+			class="modal urgent-modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="urgent-intake-title"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+		>
+			<div class="modal-header">
+				<h2 id="urgent-intake-title"><i class="bx bx-error"></i> Urgent Intake</h2>
+				<button type="button" class="close-btn" onclick={() => showUrgentModal = false} aria-label="Close"><i class="bx bx-x"></i></button>
+			</div>
 			<div class="modal-body">
 				<div class="urgent-warning"><i class="bx bx-info-circle"></i><p>Urgent items bypass normal prioritization and go directly to the top of the backlog for immediate attention. Use sparingly.</p></div>
 				<div class="form-group"><label for="urgent-title">Title</label><input type="text" id="urgent-title" bind:value={newItem.title} placeholder="What needs to be done urgently?" /></div>
@@ -357,9 +513,35 @@
 {/if}
 
 {#if showSplitModal && selectedItem}
-	<div class="modal-overlay" onclick={() => showSplitModal = false} onkeydown={(e) => e.key === 'Escape' && (showSplitModal = false)} role="dialog" aria-modal="true">
-		<div class="modal split-modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}} role="document">
-			<div class="modal-header"><h2><i class="bx bx-git-branch"></i> Split Item</h2><button type="button" class="close-btn" onclick={() => showSplitModal = false} aria-label="Close"><i class="bx bx-x"></i></button></div>
+	<div
+		class="modal-overlay"
+		role="button"
+		tabindex="0"
+		aria-label="Close dialog"
+		onclick={() => showSplitModal = false}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') {
+				showSplitModal = false;
+				return;
+			}
+			if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+				e.preventDefault();
+				showSplitModal = false;
+			}
+		}}
+	>
+		<div
+			class="modal split-modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="split-item-title"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+		>
+			<div class="modal-header">
+				<h2 id="split-item-title"><i class="bx bx-git-branch"></i> Split Item</h2>
+				<button type="button" class="close-btn" onclick={() => showSplitModal = false} aria-label="Close"><i class="bx bx-x"></i></button>
+			</div>
 			<div class="modal-body">
 				<div class="split-info"><p>Splitting: <strong>{selectedItem.key}</strong> - {selectedItem.title}</p><p class="split-hint">Large items should be split into smaller, deliverable pieces.</p></div>
 				<div class="split-items">
@@ -433,10 +615,10 @@
 	.item-priority { padding: 0.125rem 0.5rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; text-transform: uppercase; }
 	.ready-badge { display: flex; align-items: center; gap: 0.25rem; padding: 0.125rem 0.375rem; background: color-mix(in srgb, #22c55e 15%, transparent); border-radius: 0.25rem; font-size: 0.625rem; font-weight: 500; color: #22c55e; }
 	.item-title { margin: 0; font-size: 0.9375rem; font-weight: 500; color: var(--color-text-primary); }
-	.item-desc { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-50); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+	.item-desc { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-50); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 	.item-meta { display: flex; flex-direction: column; gap: 0.5rem; min-width: 140px; }
 	.size-selector, .priority-selector, .client-selector { display: flex; flex-direction: column; gap: 0.25rem; }
-	.size-selector label, .priority-selector label, .client-selector label { font-size: 0.625rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-40); }
+	.size-selector label, .size-selector .field-label, .priority-selector label, .client-selector label { font-size: 0.625rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-40); }
 	.size-buttons { display: flex; gap: 0.25rem; }
 	.size-buttons button { flex: 1; padding: 0.25rem; background: var(--text-06); border: 1px solid var(--text-12); border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; color: var(--text-50); cursor: pointer; transition: all 0.1s; }
 	.size-buttons button:hover { background: var(--text-10); color: var(--size-color); }
@@ -471,7 +653,7 @@
 	.urgent-warning i { font-size: 1.25rem; color: #f59e0b; }
 	.urgent-warning p { margin: 0; font-size: 0.8125rem; color: var(--text-60); }
 	.form-group { margin-bottom: 1rem; }
-	.form-group label { display: block; margin-bottom: 0.375rem; font-size: 0.8125rem; font-weight: 500; color: var(--color-text-primary); }
+	.form-group label, .form-group .form-label { display: block; margin-bottom: 0.375rem; font-size: 0.8125rem; font-weight: 500; color: var(--color-text-primary); }
 	.form-group input, .form-group select, .form-group textarea { width: 100%; padding: 0.5rem 0.75rem; background: var(--color-bg); border: 1px solid var(--text-12); border-radius: 0.375rem; font-size: 0.875rem; color: var(--color-text-primary); font-family: inherit; }
 	.form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline: none; border-color: var(--color-accent); }
 	.form-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
