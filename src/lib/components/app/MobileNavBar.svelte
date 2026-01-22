@@ -22,6 +22,7 @@
 	import { LAST_SERVER_KEY, SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import { preloadServerChannels, preloadUserServers } from '$lib/stores/messageCache';
 	import Avatar from '$lib/components/app/Avatar.svelte';
+	import { fabSnapStore, type RegisteredFab } from '$lib/stores/fabSnap';
 
 	type LinkKey = 'activity' | 'dms';
 
@@ -152,6 +153,29 @@
 		return false;
 	});
 	
+	// ===== Mobile Dock Pages (swipeable) =====
+	// Page 0: Main nav (Server, DMs, Activity, Profile)
+	// Page 1: FAB icons (only if user has any FABs registered)
+	let dockPage = $state(0);
+	let registeredFabs: RegisteredFab[] = $state([]);
+	let fabStoreUnsub: (() => void) | null = null;
+	
+	// Has FABs available determines if page 2 exists
+	const hasFabPage = $derived(registeredFabs.length > 0);
+	const totalDockPages = $derived(hasFabPage ? 2 : 1);
+	
+	// Swipe state for dock pages
+	let dockSwipeStartX = $state(0);
+	let dockSwipeCurrentX = $state(0);
+	let isDockSwiping = $state(false);
+	let dockContainerEl: HTMLElement | null = $state(null);
+	
+	// Calculate swipe offset for smooth animation
+	const dockSwipeOffset = $derived.by(() => {
+		if (!isDockSwiping) return 0;
+		return dockSwipeCurrentX - dockSwipeStartX;
+	});
+	
 	let navElement: HTMLElement | null = null;
 	let detachSwipeGestures: (() => void) | null = null;
 
@@ -171,10 +195,20 @@
 				clearServerChannelMemory();
 			}
 		});
+		
+		// Subscribe to FAB registry for page 2
+		fabStoreUnsub = fabSnapStore.subscribe((state) => {
+			registeredFabs = state.registeredFabs;
+			// If we're on page 2 but no FABs anymore, go back to page 1
+			if (dockPage === 1 && state.registeredFabs.length === 0) {
+				dockPage = 0;
+			}
+		});
 
 		return () => {
 			stopServers?.();
 			stopUser?.();
+			fabStoreUnsub?.();
 		};
 	});
 
@@ -412,95 +446,221 @@
 			void preloadServerChannels(shortcut.id);
 		}
 	}
+	
+	// ===== Dock Page Swipe Handlers =====
+	let dockSwipeStartY = $state(0);
+	
+	function handleDockTouchStart(event: TouchEvent) {
+		// Only handle if we have multiple pages
+		if (totalDockPages < 2) return;
+		
+		const touch = event.touches[0];
+		dockSwipeStartX = touch.clientX;
+		dockSwipeStartY = touch.clientY;
+		dockSwipeCurrentX = touch.clientX;
+		isDockSwiping = true;
+		
+		// Stop propagation immediately to prevent page behind from getting the event
+		event.stopPropagation();
+	}
+	
+	function handleDockTouchMove(event: TouchEvent) {
+		if (!isDockSwiping) return;
+		
+		const touch = event.touches[0];
+		dockSwipeCurrentX = touch.clientX;
+		
+		// Calculate deltas
+		const deltaX = Math.abs(dockSwipeCurrentX - dockSwipeStartX);
+		const deltaY = Math.abs(touch.clientY - dockSwipeStartY);
+		
+		// If horizontal swipe is dominant, prevent default and stop propagation
+		if (deltaX > 10 && deltaX > deltaY) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+	}
+	
+	function handleDockTouchEnd(event: TouchEvent) {
+		if (!isDockSwiping) return;
+		
+		// Stop propagation
+		event.stopPropagation();
+		
+		const swipeDistance = dockSwipeCurrentX - dockSwipeStartX;
+		const threshold = 50; // Minimum swipe distance to trigger page change
+		
+		if (swipeDistance < -threshold && dockPage < totalDockPages - 1) {
+			// Swipe left - go to next page
+			dockPage = dockPage + 1;
+		} else if (swipeDistance > threshold && dockPage > 0) {
+			// Swipe right - go to previous page
+			dockPage = dockPage - 1;
+		}
+		
+		// Reset swipe state
+		isDockSwiping = false;
+		dockSwipeStartX = 0;
+		dockSwipeStartY = 0;
+		dockSwipeCurrentX = 0;
+	}
+	
+	function handleDockTouchCancel(event: TouchEvent) {
+		event.stopPropagation();
+		isDockSwiping = false;
+		dockSwipeStartX = 0;
+		dockSwipeStartY = 0;
+		dockSwipeCurrentX = 0;
+	}
+	
+	// Handle FAB click on mobile (dispatch event for the FAB to handle)
+	function handleMobileFabClick(fab: RegisteredFab) {
+		if (!browser) return;
+		// Dispatch a custom event that the FAB components can listen for
+		window.dispatchEvent(new CustomEvent('mobileFabClick', { detail: { fabId: fab.id } }));
+	}
 </script>
 
 <nav 
 	class="mobile-dock md:hidden" 
 	class:mobile-dock--hidden={shouldHideDock || $splashVisible}
 	class:mobile-dock--swiping={isSwipingChannels}
+	class:mobile-dock--has-pages={hasFabPage}
 	style:--dock-reveal-progress={dockRevealProgress}
 	aria-label="Primary" 
 	bind:this={navElement}
+	ontouchstart={handleDockTouchStart}
+	ontouchmove={handleDockTouchMove}
+	ontouchend={handleDockTouchEnd}
+	ontouchcancel={handleDockTouchCancel}
 >
-	<div class="mobile-dock__inner">
-		<a
-			href={serverHref}
-			ontouchstart={handleServerTouchStart}
-			onmouseenter={handleServerTouchStart}
-			onclick={(event) => {
-				event.preventDefault();
-				closeSettings();
-				goto(serverHref);
-			}}
-			class={`mobile-dock__item mobile-dock__item--server ${serverActive && !dockSuppressed ? 'is-active' : ''} ${shortcut ? '' : 'is-placeholder'}`}
-			aria-label={shortcut?.name ?? 'Servers'}
-			aria-current={serverActive && !dockSuppressed ? 'page' : undefined}
-			title="Servers"
-		>
-			<span class="mobile-dock__icon-wrapper">
-				{#if shortcut?.icon}
-					<img
-						src={shortcut.icon}
-						alt={shortcut.name ?? 'Server icon'}
-						class="mobile-dock__server-icon"
-						loading="lazy"
-					/>
-				{:else if shortcut?.name}
-					<span class="mobile-dock__server-fallback">
-						{shortcut.name.slice(0, 1)}
-					</span>
-				{:else}
-					<span class="mobile-dock__server-placeholder">
-						<i class="bx bx-hash" aria-hidden="true"></i>
-					</span>
-				{/if}
-			</span>
-		</a>
-
-		{#each navLinks as link (link.key)}
-			{#if link.key !== 'dms' || enableDMs}
-				{@const active = dockSuppressed ? false : link.isActive(currentPath)}
-				{@const badge =
-					link.key === 'dms' ? $dmUnreadCount : link.key === 'activity' ? $activityUnreadCount : 0}
+	<div 
+		class="mobile-dock__pages-container"
+		bind:this={dockContainerEl}
+		style:transform={isDockSwiping 
+			? `translateX(calc(${-dockPage * 100}% + ${dockSwipeOffset}px))` 
+			: `translateX(${-dockPage * 100}%)`}
+		style:transition={isDockSwiping ? 'none' : 'transform 0.25s ease-out'}
+	>
+		<!-- Page 1: Main Navigation -->
+		<div class="mobile-dock__page">
+			<div class="mobile-dock__inner">
 				<a
-					href={link.href}
-					onclick={(event) => handleNav(event, link)}
-					class={`mobile-dock__item ${active ? 'is-active' : ''}`}
-					class:mobile-dock__item--alert={!active && badge > 0}
-					class:mobile-dock__item--dms={link.key === 'dms'}
-					class:mobile-dock__item--activity={link.key === 'activity'}
-					aria-label={link.label}
-					aria-current={active ? 'page' : undefined}
-					title={link.label}
+					href={serverHref}
+					ontouchstart={handleServerTouchStart}
+					onmouseenter={handleServerTouchStart}
+					onclick={(event) => {
+						event.preventDefault();
+						closeSettings();
+						goto(serverHref);
+					}}
+					class={`mobile-dock__item mobile-dock__item--server ${serverActive && !dockSuppressed ? 'is-active' : ''} ${shortcut ? '' : 'is-placeholder'}`}
+					aria-label={shortcut?.name ?? 'Servers'}
+					aria-current={serverActive && !dockSuppressed ? 'page' : undefined}
+					title="Servers"
 				>
 					<span class="mobile-dock__icon-wrapper">
-						<i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
-						{#if badge > 0}
-							<span class="mobile-dock__badge">{formatBadge(badge)}</span>
+						{#if shortcut?.icon}
+							<img
+								src={shortcut.icon}
+								alt={shortcut.name ?? 'Server icon'}
+								class="mobile-dock__server-icon"
+								loading="lazy"
+							/>
+						{:else if shortcut?.name}
+							<span class="mobile-dock__server-fallback">
+								{shortcut.name.slice(0, 1)}
+							</span>
+						{:else}
+							<span class="mobile-dock__server-placeholder">
+								<i class="bx bx-hash" aria-hidden="true"></i>
+							</span>
 						{/if}
 					</span>
 				</a>
-			{/if}
-		{/each}
 
-		<a
-			href="/settings"
-			onclick={openMobileSettings}
-			class={`mobile-dock__item mobile-dock__item--profile ${settingsActive ? 'is-active' : ''}`}
-			aria-label="Profile"
-			aria-current={settingsActive ? 'page' : undefined}
-			title="Profile"
-		>
-			<span class="mobile-dock__icon-wrapper mobile-dock__icon-wrapper--profile">
-				<Avatar
-					user={$userProfile ?? $user}
-					size="xs"
-					isSelf={true}
-					class="mobile-dock__avatar-wrap"
-				/>
-			</span>
-		</a>
+				{#each navLinks as link (link.key)}
+					{#if link.key !== 'dms' || enableDMs}
+						{@const active = dockSuppressed ? false : link.isActive(currentPath)}
+						{@const badge =
+							link.key === 'dms' ? $dmUnreadCount : link.key === 'activity' ? $activityUnreadCount : 0}
+						<a
+							href={link.href}
+							onclick={(event) => handleNav(event, link)}
+							class={`mobile-dock__item ${active ? 'is-active' : ''}`}
+							class:mobile-dock__item--alert={!active && badge > 0}
+							class:mobile-dock__item--dms={link.key === 'dms'}
+							class:mobile-dock__item--activity={link.key === 'activity'}
+							aria-label={link.label}
+							aria-current={active ? 'page' : undefined}
+							title={link.label}
+						>
+							<span class="mobile-dock__icon-wrapper">
+								<i class={`bx ${link.icon} mobile-dock__icon`} aria-hidden="true"></i>
+								{#if badge > 0}
+									<span class="mobile-dock__badge">{formatBadge(badge)}</span>
+								{/if}
+							</span>
+						</a>
+					{/if}
+				{/each}
+
+				<a
+					href="/settings"
+					onclick={openMobileSettings}
+					class={`mobile-dock__item mobile-dock__item--profile ${settingsActive ? 'is-active' : ''}`}
+					aria-label="Profile"
+					aria-current={settingsActive ? 'page' : undefined}
+					title="Profile"
+				>
+					<span class="mobile-dock__icon-wrapper mobile-dock__icon-wrapper--profile">
+						<Avatar
+							user={$userProfile ?? $user}
+							size="xs"
+							isSelf={true}
+							class="mobile-dock__avatar-wrap"
+						/>
+					</span>
+				</a>
+			</div>
+		</div>
+		
+		<!-- Page 2: FAB Icons (only rendered if FABs exist) -->
+		{#if hasFabPage}
+			<div class="mobile-dock__page mobile-dock__page--fabs">
+				<div class="mobile-dock__inner">
+					{#each registeredFabs as fab (fab.id)}
+						<button
+							type="button"
+							class="mobile-dock__item mobile-dock__fab-item"
+							onclick={() => handleMobileFabClick(fab)}
+							aria-label={fab.label}
+							title={fab.label}
+						>
+							<span class="mobile-dock__icon-wrapper">
+								<i class={`bx ${fab.icon} mobile-dock__icon`} aria-hidden="true"></i>
+							</span>
+						</button>
+					{/each}
+				</div>
+			</div>
+		{/if}
 	</div>
+	
+	<!-- Page indicator dots -->
+	{#if hasFabPage}
+		<div class="mobile-dock__dots">
+			{#each Array(totalDockPages) as _, i}
+				<button
+					type="button"
+					class="mobile-dock__dot"
+					class:mobile-dock__dot--active={dockPage === i}
+					onclick={() => dockPage = i}
+					aria-label={`Go to page ${i + 1}`}
+				></button>
+			{/each}
+		</div>
+	{/if}
 </nav>
 
 <style>
@@ -519,6 +679,7 @@
 			env(safe-area-inset-bottom, 0px) + 0.65rem
 		); /* Nudge nav content further upward */
 		height: var(--mobile-dock-height, calc(6rem + env(safe-area-inset-bottom, 0px)));
+		overflow: hidden; /* Clip the sliding pages */
 		/* Ensure no transparency */
 		/* Add a pseudo-element to guarantee flush color under home indicator */
 	}
@@ -726,6 +887,78 @@
 
 	.mobile-dock :global(.avatar-inner) {
 		border: none !important;
+	}
+	
+	/* ===== Swipeable Pages Container ===== */
+	.mobile-dock__pages-container {
+		display: flex;
+		flex-direction: row;
+		width: 100%;
+		height: 100%;
+		will-change: transform;
+	}
+	
+	.mobile-dock__page {
+		flex: 0 0 100%;
+		width: 100%;
+		min-width: 100%;
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-start;
+	}
+	
+	.mobile-dock__page--fabs {
+		/* FABs page - same styling as main page */
+		align-items: stretch;
+	}
+	
+	.mobile-dock__fab-item {
+		cursor: pointer;
+	}
+	
+	.mobile-dock__fab-item:active {
+		opacity: 0.7;
+	}
+	
+	/* ===== Page Indicator Dots ===== */
+	.mobile-dock__dots {
+		position: absolute;
+		bottom: calc(env(safe-area-inset-bottom, 0px) + 0.25rem);
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		gap: 0.35rem;
+		z-index: 10;
+	}
+	
+	.mobile-dock__dot {
+		width: 0.375rem;
+		height: 0.375rem;
+		border-radius: 50%;
+		background: var(--color-text-tertiary) !important;
+		opacity: 0.4;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		transition: opacity 0.15s ease, transform 0.15s ease;
+	}
+	
+	.mobile-dock__dot--active {
+		opacity: 1;
+		transform: scale(1.2);
+		background: var(--color-accent) !important;
+	}
+	
+	/* When has multiple pages, add padding at bottom for dots */
+	.mobile-dock--has-pages {
+		padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1.1rem);
+	}
+	
+	.mobile-dock--has-pages .mobile-dock__inner {
+		height: calc(
+			var(--mobile-dock-height, calc(6rem + env(safe-area-inset-bottom, 0px))) -
+				env(safe-area-inset-bottom, 0px) - 1.1rem
+		);
 	}
 
 	/* Hide on desktop screens */

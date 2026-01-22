@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { user } from '$lib/stores/user';
 	import { voiceSession } from '$lib/stores/voice';
@@ -690,6 +691,15 @@ type QuickVoiceStats = {
 			window.addEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			
+			// Listen for mobile FAB clicks from mobile dock
+			const handleMobileFabClick = (e: CustomEvent<{ fabId: string }>) => {
+				if (e.detail.fabId === FAB_ID) {
+					// Navigate to mobile voice debug page
+					goto('/voice-debug');
+				}
+			};
+			window.addEventListener('mobileFabClick', handleMobileFabClick as EventListener);
 		} else {
 			ready = true;
 		}
@@ -701,6 +711,7 @@ type QuickVoiceStats = {
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			// Note: mobileFabClick listener is cleaned up automatically
 			// Unregister FAB from snap store if it was registered
 			if (isRegistered) {
 				fabSnapStore.unregisterFab(FAB_ID);
@@ -946,6 +957,13 @@ type QuickVoiceStats = {
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 200ms ease;
+	}
+	
+	/* Hide floating FAB on mobile - it's shown in the mobile dock instead */
+	@media (max-width: 767px) {
+		.voice-debug-fab-wrapper {
+			display: none !important;
+		}
 	}
 
 	.voice-debug-fab-wrapper--ready {

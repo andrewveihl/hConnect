@@ -845,6 +845,15 @@
 		window.addEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 		// Listen for tray state changes
 		window.addEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+		
+		// Listen for mobile FAB clicks from mobile dock
+		const handleMobileFabClick = (e: CustomEvent<{ fabId: string }>) => {
+			if (e.detail.fabId === FAB_ID) {
+				// Navigate to mobile support page
+				goto('/support');
+			}
+		};
+		window.addEventListener('mobileFabClick', handleMobileFabClick as EventListener);
 
 		return () => {
 			userUnsub();
@@ -853,6 +862,7 @@
 			window.removeEventListener('fabSnapZoneUpdated', handleSnapZoneUpdated);
 			window.removeEventListener('fabSnapStateSynced', handleFabSnapSynced as EventListener);
 			window.removeEventListener('fabTrayStateChange', handleTrayStateChange as EventListener);
+			window.removeEventListener('mobileFabClick', handleMobileFabClick as EventListener);
 		};
 	});
 
@@ -1316,6 +1326,13 @@
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 200ms ease;
+	}
+	
+	/* Hide floating FAB on mobile - it's shown in the mobile dock instead */
+	@media (max-width: 767px) {
+		.ticket-container {
+			display: none !important;
+		}
 	}
 
 	.ticket-container--ready {
