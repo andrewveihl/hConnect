@@ -76,7 +76,7 @@
 	import { looksLikeImage } from '$lib/utils/fileType';
 	import type { PendingUploadPreview } from '$lib/components/chat/types';
 	import { resolveProfilePhotoURL } from '$lib/utils/profile';
-	import { openOverlay, closeOverlay, mobileSwipeProgress } from '$lib/stores/mobileNav';
+	import { openOverlay, closeOverlay, mobileSwipeProgress, serverChannelSidebarOpen } from '$lib/stores/mobileNav';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
 	import { SERVER_CHANNEL_MEMORY_KEY } from '$lib/constants/navigation';
 	import {
@@ -2357,6 +2357,39 @@
 	// This ensures the dock is visible even if a previous page (like DMs) left it suppressed
 	onMount(() => {
 		mobileDockSuppressed.reset();
+		// On mobile, ensure channel list shows on mount so dock is visible
+		const isMobileNow = browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches;
+		if (isMobileNow) {
+			showChannels = true;
+			showMembers = false;
+			openOverlay('channel-list');
+		}
+	});
+
+	// When navigating to a different server on mobile, show channel list to ensure dock is visible
+	let lastNavigatedServerId: string | null = null;
+	$effect(() => {
+		if (!serverId) return;
+		// Check mobile state directly since isMobile variable isn't reactive
+		const isMobileNow = browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches;
+		if (!isMobileNow) return;
+		// Trigger when serverId changes
+		if (lastNavigatedServerId !== null && serverId !== lastNavigatedServerId) {
+			showChannels = true;
+			showMembers = false;
+			// Also ensure overlay is synced immediately
+			openOverlay('channel-list');
+		}
+		lastNavigatedServerId = serverId;
+	});
+
+	// Sync showChannels with the simple serverChannelSidebarOpen store (for mobile nav dock visibility)
+	// This bypasses the history-based overlay system which can get out of sync during navigation
+	$effect(() => {
+		const isMobileNow = browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches;
+		if (isMobileNow) {
+			serverChannelSidebarOpen.set(showChannels);
+		}
 	});
 
 	// Sync showChannels/showMembers with global overlay stack so mobile nav can hide/show properly
@@ -3353,6 +3386,8 @@
 		memberPermsUnsub?.();
 		memberPermsUnsub = null;
 		memberPermsServer = null;
+		// Clear the mobile channel sidebar store when leaving the page
+		serverChannelSidebarOpen.close();
 	});
 
 	function markChannelReadFromMessages(

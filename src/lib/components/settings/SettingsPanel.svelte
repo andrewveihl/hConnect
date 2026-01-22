@@ -2146,16 +2146,18 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.pushEnabled}
 									disabled={pushToggleBusy || enablePushLoading}
 									onchange={handlePushToggleChange}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.pushEnabled}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.pushEnabled}
 									></span>
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
@@ -2176,16 +2178,18 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.desktopEnabled}
 									disabled={desktopToggleBusy}
 									onchange={handleDesktopToggleChange}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.desktopEnabled}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.desktopEnabled}
 									></span>
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
@@ -2211,7 +2215,7 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.emailEnabled}
 									onchange={() => {
 										notif.emailEnabled = !notif.emailEnabled;
@@ -2219,10 +2223,12 @@
 									}}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.emailEnabled}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.emailEnabled}
 									></span>
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
@@ -2244,7 +2250,7 @@
 								<label class="flex items-center gap-3">
 									<input
 										type="checkbox"
-										class="peer sr-only"
+										class="sr-only"
 										checked={notif.emailForDMs}
 										disabled={!notif.emailEnabled}
 										onchange={() => {
@@ -2253,10 +2259,12 @@
 										}}
 									/>
 									<span
-										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+										class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+										class:bg-[color:var(--color-accent)]={notif.emailForDMs}
 									>
 										<span
-											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+											class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+											class:translate-x-5={notif.emailForDMs}
 										></span>
 									</span>
 								</label>
@@ -2283,10 +2291,12 @@
 										}}
 									/>
 									<span
-										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+										class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+										class:bg-[color:var(--color-accent)]={notif.emailForMentions}
 									>
 										<span
-											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+											class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+											class:translate-x-5={notif.emailForMentions}
 										></span>
 									</span>
 								</label>
@@ -2304,7 +2314,7 @@
 								<label class="flex items-center gap-3">
 									<input
 										type="checkbox"
-										class="peer sr-only"
+										class="sr-only"
 										checked={notif.emailForChannelMessages}
 										disabled={!notif.emailEnabled}
 										onchange={() => {
@@ -2313,10 +2323,12 @@
 										}}
 									/>
 									<span
-										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+										class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+										class:bg-[color:var(--color-accent)]={notif.emailForChannelMessages}
 									>
 										<span
-											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+											class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+											class:translate-x-5={notif.emailForChannelMessages}
 										></span>
 									</span>
 								</label>
@@ -2336,7 +2348,7 @@
 								<label class="flex items-center gap-3">
 									<input
 										type="checkbox"
-										class="peer sr-only"
+										class="sr-only"
 										checked={notif.emailOnlyWhenNoPush}
 										disabled={!notif.emailEnabled}
 										onchange={() => {
@@ -2345,10 +2357,12 @@
 										}}
 									/>
 									<span
-										class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+										class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+										class:bg-[color:var(--color-accent)]={notif.emailOnlyWhenNoPush}
 									>
 										<span
-											class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+											class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+											class:translate-x-5={notif.emailOnlyWhenNoPush}
 										></span>
 									</span>
 								</label>
@@ -2377,7 +2391,7 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.allMessages}
 									onchange={() => {
 										notif.allMessages = !notif.allMessages;
@@ -2385,10 +2399,12 @@
 									}}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.allMessages}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.allMessages}
 									></span>
 								</span>
 							</label>
@@ -2406,7 +2422,7 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.mentions}
 									onchange={() => {
 										notif.mentions = !notif.mentions;
@@ -2414,10 +2430,12 @@
 									}}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.mentions}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.mentions}
 									></span>
 								</span>
 							</label>
@@ -2435,7 +2453,7 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={notif.dms}
 									onchange={() => {
 										notif.dms = !notif.dms;
@@ -2443,10 +2461,12 @@
 									}}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={notif.dms}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={notif.dms}
 									></span>
 								</span>
 							</label>
@@ -2465,15 +2485,17 @@
 							<label class="flex items-center gap-3">
 								<input
 									type="checkbox"
-									class="peer sr-only"
+									class="sr-only"
 									checked={soundPrefs.enabled}
 									onchange={() => updateSoundPref('enabled', !soundPrefs.enabled)}
 								/>
 								<span
-									class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+									class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+									class:bg-[color:var(--color-accent)]={soundPrefs.enabled}
 								>
 									<span
-										class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+										class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+										class:translate-x-5={soundPrefs.enabled}
 									></span>
 								</span>
 								<span class="text-xs text-[color:var(--text-70)]">
@@ -2515,16 +2537,18 @@
 										<label class="flex items-center">
 											<input
 												type="checkbox"
-												class="peer sr-only"
+												class="sr-only"
 												checked={soundPrefs.notificationSound}
 												onchange={() =>
 													updateSoundPref('notificationSound', !soundPrefs.notificationSound)}
 											/>
 											<span
-												class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+												class="relative inline-flex h-5 w-9 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+												class:bg-[color:var(--color-accent)]={soundPrefs.notificationSound}
 											>
 												<span
-													class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
+													class="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+													class:translate-x-4={soundPrefs.notificationSound}
 												></span>
 											</span>
 										</label>
@@ -2562,15 +2586,17 @@
 										<label class="flex items-center">
 											<input
 												type="checkbox"
-												class="peer sr-only"
+												class="sr-only"
 												checked={soundPrefs.callJoinSound}
 												onchange={() => updateSoundPref('callJoinSound', !soundPrefs.callJoinSound)}
 											/>
 											<span
-												class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+												class="relative inline-flex h-5 w-9 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+												class:bg-[color:var(--color-accent)]={soundPrefs.callJoinSound}
 											>
 												<span
-													class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
+													class="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+													class:translate-x-4={soundPrefs.callJoinSound}
 												></span>
 											</span>
 										</label>
@@ -2608,16 +2634,18 @@
 										<label class="flex items-center">
 											<input
 												type="checkbox"
-												class="peer sr-only"
+												class="sr-only"
 												checked={soundPrefs.callLeaveSound}
 												onchange={() =>
 													updateSoundPref('callLeaveSound', !soundPrefs.callLeaveSound)}
 											/>
 											<span
-												class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+												class="relative inline-flex h-5 w-9 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+												class:bg-[color:var(--color-accent)]={soundPrefs.callLeaveSound}
 											>
 												<span
-													class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
+													class="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+													class:translate-x-4={soundPrefs.callLeaveSound}
 												></span>
 											</span>
 										</label>
@@ -2653,16 +2681,18 @@
 										<label class="flex items-center">
 											<input
 												type="checkbox"
-												class="peer sr-only"
+												class="sr-only"
 												checked={soundPrefs.messageSendSound}
 												onchange={() =>
 													updateSoundPref('messageSendSound', !soundPrefs.messageSendSound)}
 											/>
 											<span
-												class="relative inline-flex h-5 w-9 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+												class="relative inline-flex h-5 w-9 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+												class:bg-[color:var(--color-accent)]={soundPrefs.messageSendSound}
 											>
 												<span
-													class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-4"
+													class="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+													class:translate-x-4={soundPrefs.messageSendSound}
 												></span>
 											</span>
 										</label>
@@ -3901,16 +3931,18 @@
 					<label class="flex items-center gap-3">
 						<input
 							type="checkbox"
-							class="peer sr-only"
+							class="sr-only"
 							bind:checked={aiAssist.enabled}
 							aria-label="Enable AI typing assistant"
 							onchange={queueAutoSave}
 						/>
 						<span
-							class="relative inline-flex h-6 w-11 rounded-full bg-[color:var(--color-border-subtle)] transition peer-checked:bg-[color:var(--color-accent)]"
+							class="relative inline-flex h-6 w-11 items-center rounded-full bg-[color:var(--color-border-subtle)] transition-colors duration-200"
+							class:bg-[color:var(--color-accent)]={aiAssist.enabled}
 						>
 							<span
-								class="absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5"
+								class="absolute left-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+								class:translate-x-5={aiAssist.enabled}
 							></span>
 						</span>
 					</label>
