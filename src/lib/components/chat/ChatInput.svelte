@@ -2794,6 +2794,8 @@
 		display: flex;
 		flex-direction: column;
 		z-index: 10;
+		max-width: 100%;
+		overflow: hidden;
 	}
 
 	.chat-input-root--dragging {
@@ -2845,6 +2847,13 @@
 		gap: 0.6rem;
 		position: relative;
 		z-index: 10;
+		max-width: 100%;
+		overflow: hidden;
+	}
+
+	.chat-input__form {
+		max-width: 100%;
+		min-width: 0;
 	}
 
 	.chat-input__action-column {
@@ -2918,6 +2927,10 @@
 		background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel) 90%);
 		box-shadow: none;
 		margin-bottom: 0.4rem;
+		max-width: 100%;
+		min-width: 0;
+		overflow: hidden;
+		box-sizing: border-box;
 	}
 
 	.reply-banner__indicator {
@@ -2947,6 +2960,9 @@
 		font-weight: 600;
 		color: var(--text-90);
 		font-size: 0.8rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.reply-banner__preview {
@@ -2956,6 +2972,7 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		max-width: 100%;
 	}
 
 	.ai-card {
@@ -3261,15 +3278,21 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.chat-input__editor {
 		position: relative;
+		min-width: 0;
+		max-width: 100%;
 	}
 
 	.chat-input__textarea-wrapper {
 		position: relative;
 		width: 100%;
+		min-width: 0;
+		max-width: 100%;
 	}
 
 	.chat-input__textarea-wrapper textarea {
