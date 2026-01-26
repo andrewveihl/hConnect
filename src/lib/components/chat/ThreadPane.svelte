@@ -457,17 +457,24 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
 		background: color-mix(in srgb, var(--color-panel) 98%, transparent);
 		border-left: 1px solid color-mix(in srgb, var(--color-border-subtle) 55%, transparent);
 		position: relative;
+		overflow: hidden;
 	}
 
 	.thread-pane__body {
 		flex: 1;
 		min-height: 0;
+		min-width: 0;
+		max-width: 100%;
 		display: flex;
 		flex-direction: column;
 		position: relative;
+		overflow: hidden;
 	}
 
 	.thread-pane__header {
@@ -744,6 +751,9 @@
 	.thread-pane__composer {
 		border-top: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
 		background: color-mix(in srgb, var(--color-panel) 96%, transparent);
+		max-width: 100%;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.sr-only {
@@ -759,9 +769,13 @@
 
 	.thread-compose-surface {
 		padding: 0.75rem 1rem 1rem;
+		max-width: 100%;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.thread-compose-surface :global(.chat-input-root) {
 		width: 100%;
+		max-width: 100%;
 	}
 </style>

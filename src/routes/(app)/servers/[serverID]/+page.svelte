@@ -1124,6 +1124,8 @@
 	let voiceInviteUrl: string | null = $state(null);
 	// Initialize isMobile immediately on browser to ensure nav bar visibility before onMount
 	let isMobile = $state(browser && typeof window !== 'undefined' && !window.matchMedia('(min-width: 768px)').matches);
+	// isTablet tracks the 768-1024px range where we show sidebar but use mobile-style panels for members/threads
+	let isTablet = $state(browser && typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches && !window.matchMedia('(min-width: 1024px)').matches);
 	let currentUserDisplayName = $state('');
 	let currentUserPhotoURL: string | null = $state(null);
 	const unsubscribeVoice = voiceSession.subscribe((value) => {
@@ -3048,13 +3050,16 @@
 
 		const onMedia = () => {
 			const nextIsMobile = !mdQuery.matches;
+			const nextIsTablet = mdQuery.matches && !lgQuery.matches;
 			isMobile = nextIsMobile;
+			isTablet = nextIsTablet;
 			if (!nextIsMobile) {
 				mobileVoicePane = 'chat';
 			} else if (voiceState?.visible) {
 				mobileVoicePane = 'call';
 			}
 			if (mdQuery.matches) showChannels = false;
+			// Only hide mobile-style panels when on lg+ screens (where desktop panels are visible)
 			if (lgQuery.matches) {
 				showMembers = false;
 				showThreadPanel = false;
@@ -3255,16 +3260,25 @@
 
 	function setupDesktopMembersWatcher() {
 		if (typeof window === 'undefined') return () => {};
-		const query = window.matchMedia(`(min-width: ${DESKTOP_MEMBERS_AUTO_COLLAPSE}px)`);
+		const wideQuery = window.matchMedia(`(min-width: ${DESKTOP_MEMBERS_AUTO_COLLAPSE}px)`);
+		const tabletQuery = window.matchMedia('(min-width: 768px) and (max-width: 1023px)');
 		const update = () => {
-			const wideEnough = query.matches;
+			const wideEnough = wideQuery.matches;
 			desktopMembersWideEnough = wideEnough;
-			desktopMembersVisible = wideEnough ? desktopMembersPreferred : false;
+			// On wide screens, auto-show based on preference. On tablet, controlled via showMembers.
+			if (wideEnough) {
+				desktopMembersVisible = desktopMembersPreferred;
+			} else if (!tabletQuery.matches) {
+				// Only hide on non-tablet screens that aren't wide enough
+				desktopMembersVisible = false;
+			}
 		};
-		query.addEventListener('change', update);
+		wideQuery.addEventListener('change', update);
+		tabletQuery.addEventListener('change', update);
 		update();
 		return () => {
-			query.removeEventListener('change', update);
+			wideQuery.removeEventListener('change', update);
+			tabletQuery.removeEventListener('change', update);
 		};
 	}
 
@@ -4810,7 +4824,8 @@
 		pendingThreadRoot = null;
 		attachThreadStream(thread);
 		prefetchThreadMemberProfiles(thread);
-		if (isMobile && mobileVoicePane === 'chat') {
+		// Show slide-out thread panel on mobile and tablet (md-lg) screens
+		if ((isMobile && mobileVoicePane === 'chat') || isTablet) {
 			showThreadPanel = true;
 		}
 		scheduleThreadRead();
@@ -5744,29 +5759,39 @@ $effect(() => {
 			style="border-radius: var(--radius-sm);"
 			class:invisible={isMobile && showChannels && !activeChannel}
 		>
-			<div class="flex flex-1 min-h-0 relative">
-				<div class="flex flex-1 min-h-0 flex-col">
+			<div class="flex flex-1 min-h-0 min-w-0 relative">
+				<div class="flex flex-1 min-h-0 min-w-0 flex-col">
 					<ChannelHeader
 						bind:this={channelHeaderEl}
 						channel={activeChannel}
 						thread={activeThread}
 						channelsVisible={showChannels}
 						membersVisible={!voiceState?.visible &&
-							(isMobile ? showMembers : desktopMembersVisible)}
+							(isMobile ? showMembers : desktopMembersVisible || showMembers)}
 						showMessageShortcut={true}
-						hideMembersToggle={!isMobile && !desktopMembersWideEnough}
+						hideMembersToggle={false}
 						onToggleChannels={() => {
 							showChannels = true;
 							showMembers = false;
 						}}
 						onToggleMembers={() => {
 							if (isMobile) {
-								showMembers = true;
-								showChannels = false;
+								// On mobile (< 768px), use full-screen slide-out panel
+								showMembers = !showMembers;
+								if (showMembers) showChannels = false;
+							} else if (isTablet) {
+								// On tablet (768-1024px), toggle desktop-style sidebar via showMembers
+								showMembers = !showMembers;
 							} else if (!activeThread) {
-								const nextVisible = !desktopMembersVisible;
-								desktopMembersPreferred = nextVisible;
-								desktopMembersVisible = desktopMembersWideEnough ? nextVisible : false;
+								// On wide screens (lg+), toggle the inline members pane
+								if (desktopMembersWideEnough) {
+									const nextVisible = !desktopMembersVisible;
+									desktopMembersPreferred = nextVisible;
+									desktopMembersVisible = nextVisible;
+								} else {
+									// Fallback to slide-out panel
+									showMembers = !showMembers;
+								}
 							}
 						}}
 						onOpenMessages={openChannelMessages}
@@ -5778,7 +5803,7 @@ $effect(() => {
 						onExitThread={() => closeThreadView()}
 					/>
 
-					<div class="flex-1 panel-muted flex flex-col min-h-0">
+					<div class="flex-1 panel-muted flex flex-col min-h-0 min-w-0">
 						{#if isMobile && voiceState}
 							<div
 								class="mobile-call-wrapper md:hidden"
@@ -6198,8 +6223,8 @@ $effect(() => {
 					</div>
 				</div>
 
-				{#if !voiceState?.visible && ((activeThread && !voiceDesktopLayout) || desktopMembersVisible)}
-					<div class="server-columns__members hidden lg:flex items-stretch">
+				{#if !voiceState?.visible && ((activeThread && !voiceDesktopLayout) || desktopMembersVisible || showMembers)}
+					<div class="server-columns__members hidden md:flex items-stretch">
 						{#if activeThread && !voiceDesktopLayout}
 							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -6317,7 +6342,7 @@ $effect(() => {
 	</div>
 </div>
 
-<!-- Members panel (slides from right) -->
+<!-- Members panel (slides from right) - MOBILE ONLY (< 768px) -->
 <div
 	class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform"
 	class:mobile-panel--dragging={memberSwipeActive}
@@ -6325,7 +6350,7 @@ $effect(() => {
 	style:pointer-events={showMembers ? 'auto' : 'none'}
 	aria-label="Members"
 >
-	<div class="mobile-panel__header md:hidden">
+	<div class="mobile-panel__header">
 		<button
 			class="mobile-panel__close -ml-2"
 			aria-label="Back to chat"
@@ -6352,15 +6377,15 @@ $effect(() => {
 	</div>
 </div>
 
-<!-- Thread panel (slides from right) -->
+<!-- Thread panel (slides from right) - shown on mobile and medium screens (up to lg breakpoint) -->
 <div
-	class="mobile-panel md:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform thread-panel"
+	class="mobile-panel lg:hidden fixed inset-0 z-50 flex flex-col transition-transform duration-300 will-change-transform thread-panel"
 	class:mobile-panel--dragging={threadSwipeActive}
 	style:transform={threadTransform}
 	style:pointer-events={activeThread && showThreadPanel ? 'auto' : 'none'}
 	aria-label="Thread view"
 >
-	<div class="flex-1 panel-muted flex flex-col min-h-0">
+	<div class="flex-1 panel-muted flex flex-col min-h-0 min-w-0 max-w-full overflow-hidden">
 		{#if activeThread}
 			<ThreadPane
 				root={activeThreadRoot}
@@ -6822,6 +6847,9 @@ $effect(() => {
 		display: flex;
 		flex-direction: column;
 		min-height: 0;
+		min-width: 0;
+		max-width: 100%;
+		overflow: hidden;
 	}
 
 	.thread-resize-handle {
@@ -6917,7 +6945,9 @@ $effect(() => {
 	.server-columns__members-pane {
 		border-left: none;
 		position: relative;
-		overflow: visible;
+		overflow: hidden;
+		min-width: 0;
+		flex-shrink: 1;
 	}
 
 	/* Midnight teal accent line on the left edge of members pane */
@@ -6948,11 +6978,18 @@ $effect(() => {
 
 	.thread-panel {
 		background: color-mix(in srgb, var(--color-panel) 95%, transparent);
+		width: 100%;
+		max-width: 100%;
+		overflow: hidden;
 	}
 
 	.thread-panel :global(.thread-pane) {
 		flex: 1;
 		min-height: 0;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.thread-members-sheet {

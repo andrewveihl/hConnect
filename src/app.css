@@ -1615,6 +1615,7 @@ body {
   right: auto;
   z-index: 10;
   width: 100%;
+  min-width: 0;
   background: var(--surface-root);
   max-height: 50vh;
   overflow-y: auto;
@@ -3177,6 +3178,7 @@ body {
   background: var(--surface-root);
   box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.3);
   border-radius: 0;
+  min-width: 0;
 }
 
 @media (max-width: 640px) {

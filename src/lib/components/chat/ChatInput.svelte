@@ -3279,6 +3279,7 @@
 		flex-direction: column;
 		gap: 0.35rem;
 		min-width: 0;
+		max-width: 100%;
 		overflow: hidden;
 	}
 

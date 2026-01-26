@@ -83,7 +83,7 @@
 
 	<div class="channel-header__right">
 		{#if thread}
-			<button type="button" class="channel-header__thread-exit" onclick={() => onExitThread?.()}>
+			<button type="button" class="channel-header__thread-exit md:hidden" onclick={() => onExitThread?.()}>
 				<i class="bx bx-arrow-back" aria-hidden="true"></i>
 				<span>Back to {channel?.name ?? 'channel'}</span>
 			</button>
@@ -99,10 +99,10 @@
 				<i class="bx bx-message-dots text-xl"></i>
 			</button>
 		{/if}
-		<!-- Members toggle button (desktop only, when not in thread and screen is wide enough) -->
+		<!-- Members toggle button (show on all screen sizes when not in thread) -->
 		{#if onToggleMembers && !thread && !hideMembersToggle}
 			<button
-				class="channel-header__members-toggle hidden md:flex"
+				class="channel-header__members-toggle"
 				type="button"
 				aria-label={membersVisible ? 'Hide members' : 'Show members'}
 				title={membersVisible ? 'Hide members' : 'Show members'}
