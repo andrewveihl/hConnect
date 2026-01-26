@@ -23,8 +23,9 @@
 	} from '$lib/admin/superAdmin';
 	import { showAdminToast } from '$lib/admin/stores/toast';
 	import { adminNav } from '$lib/admin/stores/adminNav';
-	import { ensureFirebaseReady, getDb, reauthenticateWithGoogleForPhoto } from '$lib/firebase';
+	import { ensureFirebaseReady, getDb, getFunctionsClient, reauthenticateWithGoogleForPhoto } from '$lib/firebase';
 	import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+	import { httpsCallable } from 'firebase/functions';
 	import { logAdminAction } from '$lib/admin/logs';
 	import { goto } from '$app/navigation';
 	import { isMobileViewport } from '$lib/stores/viewport';
@@ -69,6 +70,9 @@
 	let allServers = $state<Array<{ id: string; name: string; memberCount?: number }>>([]);
 	let loadingServers = $state(false);
 	let addingToServer = $state(false);
+	
+	// Fix sidebar state
+	let fixingSidebar = $state(false);
 
 	// User Groups state
 	let showGroupPicker = $state(false);
@@ -329,6 +333,27 @@
 			showAdminToast({ type: 'error', message: (err as Error)?.message ?? 'Failed to add user to server.' });
 		} finally {
 			addingToServer = false;
+		}
+	};
+
+	const handleFixUserSidebar = async () => {
+		if (!selectedUser) return;
+		fixingSidebar = true;
+		try {
+			const functions = await getFunctionsClient();
+			const fixSidebar = httpsCallable(functions, 'adminFixUserSidebar');
+			const result = await fixSidebar({ targetUid: selectedUser.uid });
+			const data = result.data as { ok: boolean; message: string; serversUpdated?: number; dmsMarkedRead?: number };
+			if (data.ok) {
+				showAdminToast({ type: 'success', message: data.message });
+			} else {
+				showAdminToast({ type: 'warning', message: data.message });
+			}
+		} catch (err) {
+			console.error('Fix sidebar failed:', err);
+			showAdminToast({ type: 'error', message: (err as Error)?.message ?? 'Failed to fix user sidebar.' });
+		} finally {
+			fixingSidebar = false;
 		}
 	};
 
@@ -1637,6 +1662,37 @@
 									</div>
 								</div>
 								{#if addingToGroup}
+									<i
+										class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
+									></i>
+								{:else}
+									<i class="bx bx-chevron-right text-xl text-[color:var(--text-50,#94a3b8)]"></i>
+								{/if}
+							</button>
+
+							<!-- Fix User Sidebar -->
+							<button
+								type="button"
+								class="flex w-full items-center justify-between rounded-xl border border-orange-500/30 p-4 transition hover:bg-orange-500/5"
+								onclick={handleFixUserSidebar}
+								disabled={fixingSidebar}
+							>
+								<div class="flex items-center gap-3">
+									<div
+										class="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-500/20"
+									>
+										<i class="bx bx-wrench text-lg text-orange-500"></i>
+									</div>
+									<div>
+										<p class="font-medium text-[color:var(--color-text-primary)]">
+											Fix User Sidebar
+										</p>
+										<p class="text-xs text-[color:var(--text-60,#6b7280)]">
+											Sync servers & mark DMs as read (fixes missing servers/phantom notifications)
+										</p>
+									</div>
+								</div>
+								{#if fixingSidebar}
 									<i
 										class="bx bx-loader-alt animate-spin text-xl text-[color:var(--text-50,#94a3b8)]"
 									></i>

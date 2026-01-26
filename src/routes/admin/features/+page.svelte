@@ -18,6 +18,8 @@
 	import { isMobileViewport } from '$lib/stores/viewport';
 	import { collection, endAt, getDocs, limit as fbLimit, orderBy, query, startAt } from 'firebase/firestore';
 	import { httpsCallable } from 'firebase/functions';
+	import { markAllDMsAsRead, triggerDMRailBackfill } from '$lib/firestore/dms';
+	import { clearAllCaches } from '$lib/perf/cacheDb';
 
 	interface Props {
 		data: PageData;
@@ -62,6 +64,11 @@
 	let testPushLoading = $state(false);
 	let testEmailAddress = $state('');
 	let testEmailLoading = $state(false);
+
+	// DM & Server fix state
+	let dmFixLoading = $state(false);
+	let serverRailBackfillLoading = $state(false);
+	let fullResetLoading = $state(false);
 
 	$effect(() => {
 		testEmailAddress = data?.user?.email ?? '';
@@ -418,6 +425,95 @@
 
 	const closeEmailLogs = () => {
 		emailLogsOpen = false;
+	};
+
+	const fixDMUnreadCounts = async () => {
+		if (!data?.user?.uid) {
+			showAdminToast({ type: 'error', message: 'You must be signed in to fix DM counts.' });
+			return;
+		}
+		dmFixLoading = true;
+		try {
+			const result = await markAllDMsAsRead(data.user.uid);
+			showAdminToast({
+				type: 'success',
+				message: `Marked ${result.success} DM threads as read${result.failed ? ` (${result.failed} failed)` : ''}.`
+			});
+		} catch (error) {
+			console.error('fixDMUnreadCounts failed', error);
+			showAdminToast({ type: 'error', message: 'Unable to fix DM counts. Try again.' });
+		} finally {
+			dmFixLoading = false;
+		}
+	};
+
+	const backfillServerRail = async () => {
+		serverRailBackfillLoading = true;
+		try {
+			const functions = await getFunctionsClient();
+			const backfill = httpsCallable(functions, 'backfillMyServerRail');
+			const result = await backfill();
+			const data = result.data as { ok: boolean; updated?: number; total?: number; message?: string };
+			if (data.ok) {
+				showAdminToast({
+					type: 'success',
+					message: data.message ?? `Server rail synced. ${data.updated ?? 0} of ${data.total ?? 0} servers updated.`
+				});
+			} else {
+				showAdminToast({ type: 'warning', message: data.message ?? 'Backfill returned no changes.' });
+			}
+		} catch (error) {
+			console.error('backfillServerRail failed', error);
+			showAdminToast({ type: 'error', message: 'Unable to sync server rail. Try again.' });
+		} finally {
+			serverRailBackfillLoading = false;
+		}
+	};
+
+	const fullSidebarReset = async () => {
+		if (!data?.user?.uid) {
+			showAdminToast({ type: 'error', message: 'You must be signed in.' });
+			return;
+		}
+		fullResetLoading = true;
+		try {
+			// 1. Clear all local caches
+			clearAllCaches();
+			
+			// 2. Clear localStorage items related to navigation/sidebar
+			if (browser) {
+				localStorage.removeItem(LAST_SERVER_KEY);
+				localStorage.removeItem(LAST_SERVER_CHANNEL_KEY);
+				localStorage.removeItem(LAST_LOCATION_STORAGE_KEY);
+				localStorage.removeItem(RESUME_DM_SCROLL_KEY);
+				localStorage.removeItem('hc_server_rail');
+				localStorage.removeItem('hc_dm_rail');
+				localStorage.removeItem('hc_server_unread');
+				localStorage.removeItem('hc_channel_indicators');
+			}
+			
+			// 3. Fix DM unread counts
+			const dmResult = await markAllDMsAsRead(data.user.uid);
+			
+			// 4. Trigger server rail backfill
+			try {
+				const functions = await getFunctionsClient();
+				const backfill = httpsCallable(functions, 'backfillMyServerRail');
+				await backfill();
+			} catch {
+				// Server rail backfill is optional
+			}
+			
+			showAdminToast({
+				type: 'success',
+				message: `Full reset complete! Marked ${dmResult.success} DMs as read. Refresh to see changes.`
+			});
+		} catch (error) {
+			console.error('fullSidebarReset failed', error);
+			showAdminToast({ type: 'error', message: 'Reset partially failed. Try refreshing anyway.' });
+		} finally {
+			fullResetLoading = false;
+		}
 	};
 
 	const resetNavigationMemory = () => {
@@ -859,6 +955,64 @@
 								<i class="bx bx-trash"></i>
 								Clear cache
 							</button>
+						</div>
+					</article>
+
+					<!-- DM/Server Sidebar Fix - PROMINENT -->
+					<article class="test-card test-card--highlight">
+						<div class="test-icon dm-fix">
+							<i class="bx bx-error-circle"></i>
+						</div>
+						<div class="test-content">
+							<h4>🚨 Sidebar Issues Fix</h4>
+							<p>
+								<strong>Use this if:</strong> DMs show as unread when they're not, servers aren't showing, 
+								or sidebar is corrupted after fresh install/sign-in.
+							</p>
+						</div>
+						<div class="test-actions test-actions--stacked">
+							<button 
+								type="button" 
+								class="btn warning" 
+								onclick={fullSidebarReset}
+								disabled={fullResetLoading}
+							>
+								{#if fullResetLoading}
+									<i class="bx bx-loader-alt bx-spin"></i>
+									Fixing...
+								{:else}
+									<i class="bx bx-wrench"></i>
+									Full Reset (Recommended)
+								{/if}
+							</button>
+							<div class="test-actions-row">
+								<button 
+									type="button" 
+									class="btn outline" 
+									onclick={fixDMUnreadCounts}
+									disabled={dmFixLoading}
+								>
+									{#if dmFixLoading}
+										<i class="bx bx-loader-alt bx-spin"></i>
+									{:else}
+										<i class="bx bx-message-check"></i>
+									{/if}
+									Mark All DMs Read
+								</button>
+								<button 
+									type="button" 
+									class="btn outline" 
+									onclick={backfillServerRail}
+									disabled={serverRailBackfillLoading}
+								>
+									{#if serverRailBackfillLoading}
+										<i class="bx bx-loader-alt bx-spin"></i>
+									{:else}
+										<i class="bx bx-server"></i>
+									{/if}
+									Sync Servers
+								</button>
+							</div>
 						</div>
 					</article>
 
@@ -1589,6 +1743,36 @@
 
 	.test-icon.voice i {
 		color: #14b8a6;
+	}
+
+	.test-icon.dm-fix {
+		background: color-mix(in srgb, #f97316 20%, transparent);
+	}
+
+	.test-icon.dm-fix i {
+		color: #f97316;
+	}
+
+	.test-card--highlight {
+		border: 2px solid color-mix(in srgb, #f97316 40%, transparent);
+		background: color-mix(in srgb, #f97316 8%, var(--card-bg));
+	}
+
+	.test-actions--stacked {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.test-actions-row {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.test-actions-row .btn {
+		flex: 1;
+		min-width: 120px;
+		justify-content: center;
 	}
 
 	.test-content h4 {

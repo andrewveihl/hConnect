@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.repairUserAvatarTokens = exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageReactionChanged = exports.onChannelMessageReactionChanged = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectReactionToSlack = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
+exports.repairUserAvatarTokens = exports.refreshUserGooglePhoto = exports.refreshAllGooglePhotos = exports.createTicketFromMessage = exports.getEmailNotificationLogs = exports.sendTestEmailNotificationHttp = exports.sendTestEmailNotification = exports.getPushDeviceDiagnostics = exports.sendTestPush = exports.syncServerMemberPhotos = exports.adminFixUserSidebar = exports.backfillMyServerRail = exports.backfillMyDMRail = exports.onDmMessageCreated = exports.onThreadMessageReactionChanged = exports.onChannelMessageReactionChanged = exports.onThreadMessageCreated = exports.onChannelMessageCreated = exports.cacheGoogleProfilePhoto = exports.getSlackChannels = exports.syncHConnectReactionToSlack = exports.syncHConnectThreadMessageToSlack = exports.syncHConnectMessageToSlack = exports.slackOAuth = exports.slackWebhook = exports.requestDomainAutoInvite = void 0;
 const firebase_functions_1 = require("firebase-functions");
 const crypto_1 = require("crypto");
 const firestore_1 = require("firebase-functions/v2/firestore");
@@ -441,6 +441,229 @@ exports.backfillMyDMRail = (0, https_1.onCall)({
         firebase_functions_1.logger.error('[backfillMyDMRail] Error', { callerUid, err });
         throw new https_1.HttpsError('internal', 'Failed to backfill DM rail');
     }
+});
+/**
+ * Callable function to backfill server rail entries for the calling user.
+ * This finds all servers the user is a member of and ensures
+ * they appear in the user's server sidebar list.
+ * Useful for recovering "missing" servers after a fresh install or sign-in.
+ */
+exports.backfillMyServerRail = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ALLOWED_ORIGINS
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    firebase_functions_1.logger.info('[backfillMyServerRail] Starting backfill', { callerUid });
+    try {
+        const seenServerIds = new Set();
+        let updated = 0;
+        let skipped = 0;
+        // Helper to process a server membership
+        const processServer = async (serverId, memberData, serverData) => {
+            if (seenServerIds.has(serverId))
+                return;
+            seenServerIds.add(serverId);
+            try {
+                // Build the rail entry
+                const payload = {
+                    name: serverData.name ?? serverId,
+                    icon: serverData.icon ?? null,
+                    joinedAt: memberData.joinedAt ?? memberData.createdAt ?? firestore_2.FieldValue.serverTimestamp(),
+                    position: typeof memberData.position === 'number' ? memberData.position : null
+                };
+                // Write to the user's server rail
+                await firebase_1.db.doc(`profiles/${callerUid}/servers/${serverId}`).set(payload, { merge: true });
+                updated++;
+                firebase_functions_1.logger.info('[backfillMyServerRail] Added server to rail', { serverId, name: payload.name });
+            }
+            catch (err) {
+                firebase_functions_1.logger.warn('[backfillMyServerRail] Failed to process server', { serverId, err });
+                skipped++;
+            }
+        };
+        // Strategy: Get all servers and check if user is a member of each
+        // This is more reliable than collectionGroup queries which require specific indexes
+        try {
+            const serversSnap = await firebase_1.db.collection('servers').limit(200).get();
+            firebase_functions_1.logger.info('[backfillMyServerRail] Checking servers for membership', { totalServers: serversSnap.size });
+            for (const serverDoc of serversSnap.docs) {
+                const serverId = serverDoc.id;
+                // Check if user is a member (document ID is the user's UID)
+                const memberSnap = await firebase_1.db.doc(`servers/${serverId}/members/${callerUid}`).get();
+                if (memberSnap.exists) {
+                    const memberData = memberSnap.data() ?? {};
+                    const serverData = serverDoc.data() ?? {};
+                    await processServer(serverId, memberData, serverData);
+                }
+            }
+            firebase_functions_1.logger.info('[backfillMyServerRail] Membership check complete', { found: seenServerIds.size });
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[backfillMyServerRail] Server iteration failed', { err });
+        }
+        // Also check existing rail entries and refresh their data
+        try {
+            const existingRailSnap = await firebase_1.db.collection(`profiles/${callerUid}/servers`).get();
+            for (const railDoc of existingRailSnap.docs) {
+                const serverId = railDoc.id;
+                if (!seenServerIds.has(serverId)) {
+                    // Verify the server exists and user is still a member
+                    const serverSnap = await firebase_1.db.doc(`servers/${serverId}`).get();
+                    if (serverSnap.exists) {
+                        const memberSnap = await firebase_1.db.doc(`servers/${serverId}/members/${callerUid}`).get();
+                        if (memberSnap.exists) {
+                            const memberData = memberSnap.data() ?? {};
+                            const serverData = serverSnap.data() ?? {};
+                            await processServer(serverId, memberData, serverData);
+                        }
+                        else {
+                            // User is no longer a member - could optionally remove from rail
+                            firebase_functions_1.logger.info('[backfillMyServerRail] User no longer member of server', { serverId });
+                            skipped++;
+                        }
+                    }
+                    else {
+                        // Server no longer exists
+                        firebase_functions_1.logger.info('[backfillMyServerRail] Server no longer exists', { serverId });
+                        skipped++;
+                    }
+                }
+            }
+            firebase_functions_1.logger.info('[backfillMyServerRail] Verified existing rail entries', { count: existingRailSnap.size });
+        }
+        catch (err) {
+            firebase_functions_1.logger.warn('[backfillMyServerRail] Failed to verify existing entries', { err });
+        }
+        firebase_functions_1.logger.info('[backfillMyServerRail] Complete', { callerUid, updated, skipped, total: seenServerIds.size });
+        return { ok: true, updated, skipped, total: seenServerIds.size };
+    }
+    catch (err) {
+        firebase_functions_1.logger.error('[backfillMyServerRail] Error', { callerUid, err });
+        throw new https_1.HttpsError('internal', 'Failed to backfill server rail');
+    }
+});
+/**
+ * Super Admin callable: Fix a user's sidebar by backfilling server rail and marking DMs as read.
+ * This is useful when users have sidebar issues after fresh install/sign-in.
+ */
+exports.adminFixUserSidebar = (0, https_1.onCall)({
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ALLOWED_ORIGINS
+}, async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid) {
+        throw new https_1.HttpsError('unauthenticated', 'Sign in required.');
+    }
+    if (!callerEmail) {
+        throw new https_1.HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+    // Check if caller is super admin
+    const superAdminsDoc = await firebase_1.db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin = emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+        throw new https_1.HttpsError('permission-denied', 'Super Admin access required.');
+    }
+    const targetUid = request.data?.targetUid;
+    if (!targetUid || typeof targetUid !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'Target user ID required.');
+    }
+    firebase_functions_1.logger.info('[adminFixUserSidebar] Starting fix for user', { callerUid, callerEmail, targetUid });
+    const results = {
+        serversFound: 0,
+        serversUpdated: 0,
+        dmsMarkedRead: 0,
+        errors: []
+    };
+    // Part 1: Backfill server rail
+    try {
+        const seenServerIds = new Set();
+        // Get all servers and check if target user is a member
+        const serversSnap = await firebase_1.db.collection('servers').limit(200).get();
+        firebase_functions_1.logger.info('[adminFixUserSidebar] Checking servers for membership', { totalServers: serversSnap.size, targetUid });
+        for (const serverDoc of serversSnap.docs) {
+            const serverId = serverDoc.id;
+            // Check if target user is a member (document ID is the user's UID)
+            const memberSnap = await firebase_1.db.doc(`servers/${serverId}/members/${targetUid}`).get();
+            if (memberSnap.exists) {
+                seenServerIds.add(serverId);
+                results.serversFound++;
+                const memberData = memberSnap.data() ?? {};
+                const serverData = serverDoc.data() ?? {};
+                // Build the rail entry
+                const payload = {
+                    name: serverData.name ?? serverId,
+                    icon: serverData.icon ?? null,
+                    joinedAt: memberData.joinedAt ?? memberData.createdAt ?? firestore_2.FieldValue.serverTimestamp(),
+                    position: typeof memberData.position === 'number' ? memberData.position : null
+                };
+                // Write to the user's server rail
+                await firebase_1.db.doc(`profiles/${targetUid}/servers/${serverId}`).set(payload, { merge: true });
+                results.serversUpdated++;
+                firebase_functions_1.logger.info('[adminFixUserSidebar] Added server to rail', { serverId, name: payload.name });
+            }
+        }
+        firebase_functions_1.logger.info('[adminFixUserSidebar] Server backfill complete', { found: seenServerIds.size, updated: results.serversUpdated });
+    }
+    catch (err) {
+        firebase_functions_1.logger.warn('[adminFixUserSidebar] Server backfill error', { err });
+        results.errors.push('Server backfill failed: ' + err.message);
+    }
+    // Part 2: Mark all DMs as read
+    try {
+        // Get all DM threads the target user is in from their rail
+        const railRef = firebase_1.db.collection(`profiles/${targetUid}/dms`);
+        const railSnap = await railRef.get();
+        const threadIds = [];
+        railSnap.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (!data?.hidden) {
+                threadIds.push(docSnap.id);
+            }
+        });
+        // Also check the main dms collection for threads they participate in
+        const dmsSnap = await firebase_1.db.collection('dms')
+            .where('participants', 'array-contains', targetUid)
+            .limit(100)
+            .get();
+        dmsSnap.forEach((docSnap) => {
+            if (!threadIds.includes(docSnap.id)) {
+                threadIds.push(docSnap.id);
+            }
+        });
+        firebase_functions_1.logger.info('[adminFixUserSidebar] Found DM threads to mark read', { count: threadIds.length });
+        // Mark each thread as read
+        for (const threadId of threadIds) {
+            try {
+                await firebase_1.db.doc(`dms/${threadId}/reads/${targetUid}`).set({
+                    lastReadAt: firestore_2.FieldValue.serverTimestamp(),
+                    lastReadMessageId: null
+                }, { merge: true });
+                results.dmsMarkedRead++;
+            }
+            catch (err) {
+                firebase_functions_1.logger.warn('[adminFixUserSidebar] Failed to mark DM as read', { threadId, err });
+            }
+        }
+        firebase_functions_1.logger.info('[adminFixUserSidebar] DM marking complete', { marked: results.dmsMarkedRead });
+    }
+    catch (err) {
+        firebase_functions_1.logger.warn('[adminFixUserSidebar] DM marking error', { err });
+        results.errors.push('DM marking failed: ' + err.message);
+    }
+    firebase_functions_1.logger.info('[adminFixUserSidebar] Complete', { callerEmail, targetUid, results });
+    return {
+        ok: results.errors.length === 0,
+        message: `Fixed sidebar: ${results.serversUpdated} servers synced, ${results.dmsMarkedRead} DMs marked read.`,
+        ...results
+    };
 });
 /**
  * Callable function to sync Google photos for all members of a server.

@@ -480,6 +480,266 @@ export const backfillMyDMRail = onCall(
 );
 
 /**
+ * Callable function to backfill server rail entries for the calling user.
+ * This finds all servers the user is a member of and ensures
+ * they appear in the user's server sidebar list.
+ * Useful for recovering "missing" servers after a fresh install or sign-in.
+ */
+export const backfillMyServerRail = onCall(
+  {
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ALLOWED_ORIGINS
+  },
+  async (request) => {
+    const callerUid = request.auth?.uid;
+    if (!callerUid) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+
+    logger.info('[backfillMyServerRail] Starting backfill', { callerUid });
+
+    try {
+      const seenServerIds = new Set<string>();
+      let updated = 0;
+      let skipped = 0;
+
+      // Helper to process a server membership
+      const processServer = async (serverId: string, memberData: Record<string, unknown>, serverData: Record<string, unknown>) => {
+        if (seenServerIds.has(serverId)) return;
+        seenServerIds.add(serverId);
+
+        try {
+          // Build the rail entry
+          const payload: Record<string, unknown> = {
+            name: serverData.name ?? serverId,
+            icon: serverData.icon ?? null,
+            joinedAt: memberData.joinedAt ?? memberData.createdAt ?? FieldValue.serverTimestamp(),
+            position: typeof memberData.position === 'number' ? memberData.position : null
+          };
+
+          // Write to the user's server rail
+          await db.doc(`profiles/${callerUid}/servers/${serverId}`).set(payload, { merge: true });
+          updated++;
+          
+          logger.info('[backfillMyServerRail] Added server to rail', { serverId, name: payload.name });
+        } catch (err) {
+          logger.warn('[backfillMyServerRail] Failed to process server', { serverId, err });
+          skipped++;
+        }
+      };
+
+      // Strategy: Get all servers and check if user is a member of each
+      // This is more reliable than collectionGroup queries which require specific indexes
+      try {
+        const serversSnap = await db.collection('servers').limit(200).get();
+        logger.info('[backfillMyServerRail] Checking servers for membership', { totalServers: serversSnap.size });
+        
+        for (const serverDoc of serversSnap.docs) {
+          const serverId = serverDoc.id;
+          
+          // Check if user is a member (document ID is the user's UID)
+          const memberSnap = await db.doc(`servers/${serverId}/members/${callerUid}`).get();
+          
+          if (memberSnap.exists) {
+            const memberData = memberSnap.data() ?? {};
+            const serverData = serverDoc.data() ?? {};
+            await processServer(serverId, memberData, serverData);
+          }
+        }
+        
+        logger.info('[backfillMyServerRail] Membership check complete', { found: seenServerIds.size });
+      } catch (err) {
+        logger.warn('[backfillMyServerRail] Server iteration failed', { err });
+      }
+
+      // Also check existing rail entries and refresh their data
+      try {
+        const existingRailSnap = await db.collection(`profiles/${callerUid}/servers`).get();
+        
+        for (const railDoc of existingRailSnap.docs) {
+          const serverId = railDoc.id;
+          if (!seenServerIds.has(serverId)) {
+            // Verify the server exists and user is still a member
+            const serverSnap = await db.doc(`servers/${serverId}`).get();
+            if (serverSnap.exists) {
+              const memberSnap = await db.doc(`servers/${serverId}/members/${callerUid}`).get();
+              if (memberSnap.exists) {
+                const memberData = memberSnap.data() ?? {};
+                const serverData = serverSnap.data() ?? {};
+                await processServer(serverId, memberData, serverData);
+              } else {
+                // User is no longer a member - could optionally remove from rail
+                logger.info('[backfillMyServerRail] User no longer member of server', { serverId });
+                skipped++;
+              }
+            } else {
+              // Server no longer exists
+              logger.info('[backfillMyServerRail] Server no longer exists', { serverId });
+              skipped++;
+            }
+          }
+        }
+        
+        logger.info('[backfillMyServerRail] Verified existing rail entries', { count: existingRailSnap.size });
+      } catch (err) {
+        logger.warn('[backfillMyServerRail] Failed to verify existing entries', { err });
+      }
+
+      logger.info('[backfillMyServerRail] Complete', { callerUid, updated, skipped, total: seenServerIds.size });
+      return { ok: true, updated, skipped, total: seenServerIds.size };
+    } catch (err) {
+      logger.error('[backfillMyServerRail] Error', { callerUid, err });
+      throw new HttpsError('internal', 'Failed to backfill server rail');
+    }
+  }
+);
+
+/**
+ * Super Admin callable: Fix a user's sidebar by backfilling server rail and marking DMs as read.
+ * This is useful when users have sidebar issues after fresh install/sign-in.
+ */
+export const adminFixUserSidebar = onCall(
+  {
+    region: 'us-central1',
+    invoker: 'public',
+    cors: ALLOWED_ORIGINS
+  },
+  async (request) => {
+    const callerUid = request.auth?.uid;
+    const callerEmail = request.auth?.token?.email;
+    if (!callerUid) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+    if (!callerEmail) {
+      throw new HttpsError('permission-denied', 'Email required for super admin verification.');
+    }
+
+    // Check if caller is super admin
+    const superAdminsDoc = await db.doc('appConfig/superAdmins').get();
+    const superAdminsData = superAdminsDoc.data();
+    const emailsMap = superAdminsData?.emails ?? {};
+    const isSuperAdmin =
+      emailsMap[callerEmail.toLowerCase()] === true || callerEmail.toLowerCase() === 'andrew@healthspaces.com';
+    if (!isSuperAdmin) {
+      throw new HttpsError('permission-denied', 'Super Admin access required.');
+    }
+
+    const targetUid = request.data?.targetUid;
+    if (!targetUid || typeof targetUid !== 'string') {
+      throw new HttpsError('invalid-argument', 'Target user ID required.');
+    }
+
+    logger.info('[adminFixUserSidebar] Starting fix for user', { callerUid, callerEmail, targetUid });
+
+    const results = {
+      serversFound: 0,
+      serversUpdated: 0,
+      dmsMarkedRead: 0,
+      errors: [] as string[]
+    };
+
+    // Part 1: Backfill server rail
+    try {
+      const seenServerIds = new Set<string>();
+
+      // Get all servers and check if target user is a member
+      const serversSnap = await db.collection('servers').limit(200).get();
+      logger.info('[adminFixUserSidebar] Checking servers for membership', { totalServers: serversSnap.size, targetUid });
+
+      for (const serverDoc of serversSnap.docs) {
+        const serverId = serverDoc.id;
+
+        // Check if target user is a member (document ID is the user's UID)
+        const memberSnap = await db.doc(`servers/${serverId}/members/${targetUid}`).get();
+
+        if (memberSnap.exists) {
+          seenServerIds.add(serverId);
+          results.serversFound++;
+
+          const memberData = memberSnap.data() ?? {};
+          const serverData = serverDoc.data() ?? {};
+
+          // Build the rail entry
+          const payload = {
+            name: serverData.name ?? serverId,
+            icon: serverData.icon ?? null,
+            joinedAt: memberData.joinedAt ?? memberData.createdAt ?? FieldValue.serverTimestamp(),
+            position: typeof memberData.position === 'number' ? memberData.position : null
+          };
+
+          // Write to the user's server rail
+          await db.doc(`profiles/${targetUid}/servers/${serverId}`).set(payload, { merge: true });
+          results.serversUpdated++;
+
+          logger.info('[adminFixUserSidebar] Added server to rail', { serverId, name: payload.name });
+        }
+      }
+
+      logger.info('[adminFixUserSidebar] Server backfill complete', { found: seenServerIds.size, updated: results.serversUpdated });
+    } catch (err) {
+      logger.warn('[adminFixUserSidebar] Server backfill error', { err });
+      results.errors.push('Server backfill failed: ' + (err as Error).message);
+    }
+
+    // Part 2: Mark all DMs as read
+    try {
+      // Get all DM threads the target user is in from their rail
+      const railRef = db.collection(`profiles/${targetUid}/dms`);
+      const railSnap = await railRef.get();
+      const threadIds: string[] = [];
+
+      railSnap.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (!data?.hidden) {
+          threadIds.push(docSnap.id);
+        }
+      });
+
+      // Also check the main dms collection for threads they participate in
+      const dmsSnap = await db.collection('dms')
+        .where('participants', 'array-contains', targetUid)
+        .limit(100)
+        .get();
+      
+      dmsSnap.forEach((docSnap) => {
+        if (!threadIds.includes(docSnap.id)) {
+          threadIds.push(docSnap.id);
+        }
+      });
+
+      logger.info('[adminFixUserSidebar] Found DM threads to mark read', { count: threadIds.length });
+
+      // Mark each thread as read
+      for (const threadId of threadIds) {
+        try {
+          await db.doc(`dms/${threadId}/reads/${targetUid}`).set({
+            lastReadAt: FieldValue.serverTimestamp(),
+            lastReadMessageId: null
+          }, { merge: true });
+          results.dmsMarkedRead++;
+        } catch (err) {
+          logger.warn('[adminFixUserSidebar] Failed to mark DM as read', { threadId, err });
+        }
+      }
+
+      logger.info('[adminFixUserSidebar] DM marking complete', { marked: results.dmsMarkedRead });
+    } catch (err) {
+      logger.warn('[adminFixUserSidebar] DM marking error', { err });
+      results.errors.push('DM marking failed: ' + (err as Error).message);
+    }
+
+    logger.info('[adminFixUserSidebar] Complete', { callerEmail, targetUid, results });
+    
+    return {
+      ok: results.errors.length === 0,
+      message: `Fixed sidebar: ${results.serversUpdated} servers synced, ${results.dmsMarkedRead} DMs marked read.`,
+      ...results
+    };
+  }
+);
+
+/**
  * Callable function to sync Google photos for all members of a server.
  * This fetches photos from Firebase Auth and stores them in profiles.
  */
