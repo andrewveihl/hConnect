@@ -365,13 +365,13 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		/* Add bottom padding to DM message list so content isn't hidden behind fixed input */
 		@media (min-width: 768px) {
 			.dm-message-list {
-				--chat-scroll-padding: 300px !important;
-				padding-bottom: 300px !important;
+				--chat-scroll-padding: 350px !important;
+				padding-bottom: 350px !important;
 			}
 			
 			/* Target the actual scrolling container inside */
 			.dm-message-list .chat-scroll {
-				padding-bottom: 300px !important;
+				padding-bottom: 350px !important;
 			}
 		}
 	</style>

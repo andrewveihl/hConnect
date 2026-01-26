@@ -3615,6 +3615,10 @@
 		outline: none;
 	}
 
+	:global(:root[data-theme='midnight']) .chat-link {
+		color: inherit;
+	}
+
 	.chat-gif {
 		display: block;
 		width: 100%;
