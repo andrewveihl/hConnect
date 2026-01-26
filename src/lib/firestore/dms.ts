@@ -256,7 +256,7 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 	const key = participantsKey(normalizedUids);
 	const otherUid = normalizedUids.find((uid) => uid !== actorUid) ?? null;
 
-	const toThread = async (docSnap: any, fallbackParticipants: string[]) => {
+	const toThread = async (docSnap: any, fallbackParticipants: string[], isNewThread = false) => {
 		const raw = docSnap.data() as DMThread & Record<string, any>;
 		const participants = resolveParticipantsFromDoc(raw, fallbackParticipants);
 		if (!participantsMatch(raw.participants, participants)) {
@@ -270,6 +270,10 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 				await upsertDMRailForUid(thread.id, actorUid, participants, thread.lastMessage ?? null, undefined, {
 					forceVisible: true
 				});
+				// Initialize read state for new threads to prevent phantom unread counts
+				if (isNewThread) {
+					await initializeReadState(thread.id, actorUid);
+				}
 			} catch {}
 		}
 		return thread;
@@ -297,10 +301,12 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 	// 2) Create deterministically at doc id == key
 	const docRef = doc(db, COL_DMS, key);
 	let existingSnap: any | null = null;
+	let threadExistedBefore = false;
 	try {
 		const snap = await getDoc(docRef);
 		if (snap.exists()) {
 			existingSnap = snap;
+			threadExistedBefore = true;
 		}
 	} catch (err) {
 		const code = (err as any)?.code;
@@ -351,14 +357,16 @@ export async function getOrCreateDMThread(uids: string[], actorUid?: string) {
 	}
 
 	if (existingSnap?.exists()) {
-		return await toThread(existingSnap, normalizedUids);
+		// Initialize read state for NEW threads only (not pre-existing ones)
+		const isNewThread = !threadExistedBefore;
+		return await toThread(existingSnap, normalizedUids, isNewThread);
 	}
 
 	if (!existingSnap?.exists()) {
 		throw new Error('Failed to create DM thread');
 	}
 
-	return await toThread(existingSnap, normalizedUids);
+	return await toThread(existingSnap, normalizedUids, true);
 }
 
 /** Create a group DM with 3+ participants. Returns the new thread. */
@@ -405,6 +413,13 @@ export async function createGroupDM(
 		);
 	} catch (err) {
 		console.warn('[dms] createGroupDM: failed to update rail for participants', err);
+	}
+
+	// Initialize read state for all participants to prevent phantom unread counts
+	try {
+		await Promise.all(normalizedUids.map((uid) => initializeReadState(docRef.id, uid)));
+	} catch (err) {
+		console.warn('[dms] createGroupDM: failed to initialize read state', err);
 	}
 
 	return {
@@ -579,6 +594,8 @@ export async function addGroupDMParticipant(
 			undefined,
 			{ forceVisible: true }
 		);
+		// Initialize read state so they don't see all old messages as unread
+		await initializeReadState(cleanThreadId, cleanNewUid);
 	} catch {}
 }
 
@@ -899,6 +916,27 @@ export async function deleteThreadForUser(threadId: string, uid: string) {
 /* ===========================
    Unread / notifications
 =========================== */
+
+/**
+ * Initialize read state for a user in a DM thread (prevents phantom unread counts).
+ * Only creates the read doc if it doesn't exist yet - won't overwrite existing read state.
+ */
+async function initializeReadState(threadId: string, uid: string) {
+	const db = getDb();
+	const rRef = doc(db, COL_DMS, threadId, SUB_READS, uid);
+	try {
+		const snap = await getDoc(rRef);
+		if (!snap.exists()) {
+			await setDoc(rRef, {
+				lastReadAt: serverTimestamp(),
+				lastReadMessageId: null
+			});
+		}
+	} catch (err) {
+		console.warn('[dms] initializeReadState: failed', { threadId, uid }, err);
+	}
+}
+
 export async function markThreadRead(
 	threadId: string,
 	uid: string,
@@ -1217,6 +1255,55 @@ export async function searchUsersByName(term: string, { limitTo = 25 } = {}) {
 	} catch {}
 
 	return results;
+}
+
+/**
+ * Mark all DM threads as read for a user.
+ * This fixes the "all messages showing as unread" bug that can happen
+ * when signing in on a new device or after a fresh install.
+ */
+export async function markAllDMsAsRead(uid: string): Promise<{ success: number; failed: number }> {
+	const db = getDb();
+	let success = 0;
+	let failed = 0;
+
+	// Get all DM threads the user is in from their rail
+	const railRef = collection(db, COL_PROFILES, uid, SUB_DM_RAIL);
+	const railSnap = await getDocs(railRef);
+	const threadIds: string[] = [];
+	
+	railSnap.forEach((docSnap) => {
+		const data = docSnap.data();
+		if (!data?.hidden) {
+			threadIds.push(docSnap.id);
+		}
+	});
+
+	// Also check the main dms collection for threads they participate in
+	const dmsQuery = query(
+		collection(db, COL_DMS),
+		where('participants', 'array-contains', uid),
+		limit(100)
+	);
+	const dmsSnap = await getDocs(dmsQuery);
+	dmsSnap.forEach((docSnap) => {
+		if (!threadIds.includes(docSnap.id)) {
+			threadIds.push(docSnap.id);
+		}
+	});
+
+	// Mark each thread as read
+	for (const threadId of threadIds) {
+		try {
+			await markThreadRead(threadId, uid, { at: serverTimestamp() });
+			success++;
+		} catch (err) {
+			console.warn(`[markAllDMsAsRead] Failed to mark thread ${threadId}:`, err);
+			failed++;
+		}
+	}
+
+	return { success, failed };
 }
 
 /**

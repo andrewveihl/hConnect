@@ -2718,7 +2718,6 @@ export async function syncHConnectMessageToSlack(
 	}
 
 	// Determine message type and prepare content
-	const msgType = messageData.type || 'text';
 	const isFileMessage = msgType === 'file' && messageData.file?.url;
 	const isGifMessage = msgType === 'gif' && messageData.url;
 
