@@ -695,6 +695,20 @@
 </div>
 {/if}
 
+<!-- Bell icon for Activity/Notifications - positioned above user panel -->
+<a
+	href="/"
+	class="desktop-activity-bell"
+	aria-label="Activity"
+	title="Activity"
+	onclick={(event) => {
+		event.preventDefault();
+		goto('/');
+	}}
+>
+	<i class="bx bx-bell"></i>
+</a>
+
 <!-- Modern user panel at the bottom of the sidebar -->
 <div class="desktop-user-panel" class:desktop-user-panel--collapsed={panelCollapsed} class:desktop-user-panel--dragging={panelDragging}>
 	<!-- Avatar section - always visible, changes behavior based on collapsed state -->
@@ -962,6 +976,54 @@
 	.fab-tray__toggle--open:hover {
 		color: var(--color-accent) !important;
 		background: color-mix(in srgb, var(--color-accent) 25%, transparent) !important;
+	}
+
+	/* ===== ACTIVITY BELL ICON ===== */
+	.desktop-activity-bell {
+		display: none;
+		position: fixed;
+		bottom: calc(72px + 20px + 16px); /* Position above user panel: panel height + bottom offset + gap */
+		left: 32px; /* Center above the collapsed panel position */
+		width: 48px;
+		height: 48px;
+		border-radius: 50%;
+		background: linear-gradient(135deg,
+			var(--color-panel) 0%,
+			color-mix(in srgb, var(--color-panel) 95%, var(--color-panel-muted) 5%) 100%
+		);
+		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 60%, transparent);
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15),
+			0 2px 4px rgba(0, 0, 0, 0.1);
+		z-index: 44;
+		align-items: center;
+		justify-content: center;
+		color: var(--color-text-secondary);
+		font-size: 1.35rem;
+		cursor: pointer;
+		transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+		text-decoration: none;
+	}
+
+	@media (min-width: 768px) {
+		.desktop-activity-bell {
+			display: flex;
+		}
+	}
+
+	.desktop-activity-bell:hover {
+		color: var(--color-accent);
+		border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+		transform: translateY(-2px);
+		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2),
+			0 2px 6px rgba(0, 0, 0, 0.1);
+	}
+
+	.desktop-activity-bell:active {
+		transform: translateY(0) scale(0.96);
+	}
+
+	.desktop-activity-bell i {
+		line-height: 1;
 	}
 
 	/* ===== FAB TRAY CONTENT ===== */
