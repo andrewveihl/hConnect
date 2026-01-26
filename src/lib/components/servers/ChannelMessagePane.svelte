@@ -313,6 +313,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		flex-direction: column;
 		flex: 1 1 auto;
 		min-height: 0;
+		min-width: 0;
 		width: 100%;
 	}
 
@@ -322,6 +323,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		flex-direction: column;
 		flex: 1 1 auto;
 		min-height: 0;
+		min-width: 0;
 		width: 100%;
 	}
 
