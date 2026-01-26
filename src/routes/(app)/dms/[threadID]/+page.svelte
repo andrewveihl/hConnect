@@ -2305,6 +2305,20 @@
 		flex-direction: column;
 	}
 
+	/* Mobile: Add bottom padding to DM message list so messages don't hide behind fixed input */
+	/* Android devices often don't support env(safe-area-inset-bottom) properly */
+	@media (max-width: 767px) {
+		:global(.dm-message-list) {
+			/* Match server chat padding - allow scrolling past last message */
+			padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0.5rem)) !important;
+		}
+
+		/* Also ensure the chat-scroll inside has proper padding */
+		:global(.dm-message-list .chat-scroll) {
+			padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0.5rem)) !important;
+		}
+	}
+
 	/* Desktop: Fix chat input visibility with fixed positioning */
 	@media (min-width: 768px) {
 		/* Chat input fixed to bottom */
@@ -2319,9 +2333,13 @@
 			padding: 0.5rem 1rem !important;
 		}
 
-		/* Add bottom padding to message list so messages don't hide behind fixed input */
+		/* Add bottom padding to message list - allow scrolling past last message */
 		:global(.dm-message-list) {
-			padding-bottom: 100px !important;
+			padding-bottom: 350px !important;
+		}
+
+		:global(.dm-message-list .chat-scroll) {
+			padding-bottom: 350px !important;
 		}
 	}
 
