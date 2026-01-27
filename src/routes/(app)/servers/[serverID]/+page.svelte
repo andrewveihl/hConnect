@@ -5888,6 +5888,7 @@ $effect(() => {
 											messages={mergedMessages}
 											{profiles}
 											currentUserId={$user?.uid ?? null}
+											currentUserDisplayName={$userProfile?.displayName ?? $user?.displayName ?? null}
 											{mentionOptions}
 											{replyTarget}
 											{threadStats}
@@ -6062,6 +6063,7 @@ $effect(() => {
 												messages={popoutMessages}
 												profiles={popoutProfiles}
 												currentUserId={$user?.uid ?? null}
+												currentUserDisplayName={$userProfile?.displayName ?? $user?.displayName ?? null}
 												{mentionOptions}
 												replyTarget={popoutReplyTarget}
 												{threadStats}
@@ -6167,6 +6169,7 @@ $effect(() => {
 										messages={mergedMessages}
 										{profiles}
 										currentUserId={$user?.uid ?? null}
+										currentUserDisplayName={$userProfile?.displayName ?? $user?.displayName ?? null}
 										{mentionOptions}
 										{replyTarget}
 										{threadStats}

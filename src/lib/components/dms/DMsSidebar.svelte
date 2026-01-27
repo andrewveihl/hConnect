@@ -4,7 +4,7 @@
 
 	import { createEventDispatcher, onDestroy, onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
+	import { doc, onSnapshot, collection, type Unsubscribe } from 'firebase/firestore';
 	import { db } from '$lib/firestore/client';
 	import { user } from '$lib/stores/user';
 	import {
@@ -21,6 +21,7 @@
 	import { dmRailCache } from '$lib/stores/dmRailCache';
 	import { dmUnreadById } from '$lib/stores/notifications';
 	import { presenceFromSources, presenceLabels, type PresenceState } from '$lib/presence/state';
+	import { featureFlags } from '$lib/stores/featureFlags';
 	import Avatar from '$lib/components/app/Avatar.svelte';
 
 	const dispatch = createEventDispatcher();
@@ -584,6 +585,127 @@
 
 	const presenceClassFromState = (state: PresenceState) =>
 		presenceClassMap[state] ?? presenceClassMap.offline;
+
+	/* ---------------- Typing indicators ---------------- */
+	const MAX_TYPING_SUBSCRIPTIONS = 15;
+	let typingByThread: Record<string, { users: Array<{ uid: string; displayName: string | null }> }> = $state({});
+	const typingUnsubs: Record<string, Unsubscribe> = {};
+	let typingDb: ReturnType<typeof db> | null = null;
+
+	function ensureTypingDb() {
+		if (typeof window === 'undefined') return null;
+		if (!typingDb) {
+			try {
+				typingDb = db();
+			} catch (err) {
+				return null;
+			}
+		}
+		return typingDb;
+	}
+
+	function unsubscribeTyping(threadId: string) {
+		if (!threadId || !typingUnsubs[threadId]) return;
+		typingUnsubs[threadId]!();
+		delete typingUnsubs[threadId];
+		if (typingByThread[threadId]) {
+			const next = { ...typingByThread };
+			delete next[threadId];
+			typingByThread = next;
+		}
+	}
+
+	function subscribeTyping(threadId: string) {
+		if (!threadId || typingUnsubs[threadId]) return;
+		const database = ensureTypingDb();
+		if (!database) return;
+		try {
+			const colRef = collection(database, 'dms', threadId, 'typing');
+			typingUnsubs[threadId] = onSnapshot(
+				colRef,
+				(snapshot) => {
+					const now = Date.now();
+					const users: Array<{ uid: string; displayName: string | null }> = [];
+					snapshot.forEach((docSnap) => {
+						const data = docSnap.data();
+						const uid = docSnap.id;
+						// Skip self
+						if (uid === me?.uid) return;
+						// Check if still valid (within 5 seconds)
+						const timestamp = data?.timestamp?.toMillis?.() ?? data?.timestamp ?? 0;
+						if (now - timestamp < 5000) {
+							users.push({ uid, displayName: data?.displayName ?? null });
+						}
+					});
+					typingByThread = { ...typingByThread, [threadId]: { users } };
+				},
+				() => {
+					unsubscribeTyping(threadId);
+				}
+			);
+		} catch (err) {
+			console.warn('Failed to subscribe to typing', err);
+		}
+	}
+
+	function cleanupTyping() {
+		for (const threadId in typingUnsubs) {
+			typingUnsubs[threadId]!();
+			delete typingUnsubs[threadId];
+		}
+		typingByThread = {};
+		typingDb = null;
+	}
+
+	function syncTypingSubscriptions() {
+		// Only subscribe if feature flag is enabled
+		if (!$featureFlags.enableTypingIndicators) {
+			cleanupTyping();
+			return;
+		}
+
+		// Get thread IDs we need typing for
+		const neededThreadIds = new Set<string>();
+		for (const t of filteredThreads.slice(0, MAX_TYPING_SUBSCRIPTIONS)) {
+			if (t.id) {
+				neededThreadIds.add(t.id);
+			}
+		}
+
+		// Unsubscribe from threads no longer needed
+		for (const threadId in typingUnsubs) {
+			if (!neededThreadIds.has(threadId)) {
+				unsubscribeTyping(threadId);
+			}
+		}
+
+		// Subscribe to new threads
+		for (const threadId of neededThreadIds) {
+			subscribeTyping(threadId);
+		}
+	}
+
+	// Reactively sync typing subscriptions when threads change
+	$effect(() => {
+		// Reference filteredThreads and feature flag to create dependency
+		if (filteredThreads.length >= 0 && $featureFlags) {
+			syncTypingSubscriptions();
+		}
+	});
+
+	// Cleanup typing subscriptions on destroy
+	onDestroy(() => cleanupTyping());
+
+	function getTypingTextForThread(threadId: string): string | null {
+		const typing = typingByThread[threadId];
+		if (!typing || !typing.users || typing.users.length === 0) return null;
+		
+		const names = typing.users.map(u => u.displayName || 'Someone').slice(0, 2);
+		if (names.length === 1) {
+			return `${names[0]} is typing...`;
+		}
+		return `${names.join(' and ')} are typing...`;
+	}
 
 	/* ---------------- Unread badges ---------------- */
 	// unreadMap is now derived from dmUnreadByIdValue (see below)
@@ -1328,7 +1450,16 @@
 												<span class="dm-thread__timestamp">{timestampLabel}</span>
 											{/if}
 										</div>
-										<div class="dm-thread__preview">{previewTextFor(t)}</div>
+										{#if getTypingTextForThread(t.id)}
+											<div class="dm-thread__preview dm-thread__preview--typing">
+												<span class="dm-thread__typing-dots">
+													<span></span><span></span><span></span>
+												</span>
+												{getTypingTextForThread(t.id)}
+											</div>
+										{:else}
+											<div class="dm-thread__preview">{previewTextFor(t)}</div>
+										{/if}
 									</div>
 									{#if (unreadMap[t.id] ?? 0) > 0}
 										<span class="dm-thread__unread">{unreadMap[t.id]}</span>
@@ -1579,11 +1710,11 @@
 		position: relative;
 		display: flex;
 		flex-direction: column;
-		height: calc(100vh - var(--desktop-user-bar-height, 52px));
-		height: calc(100dvh - var(--desktop-user-bar-height, 52px));
-		max-height: calc(100vh - var(--desktop-user-bar-height, 52px));
-		max-height: calc(100dvh - var(--desktop-user-bar-height, 52px));
+		height: 100%;
+		max-height: 100%;
+		min-height: 0;
 		overflow: hidden;
+		border-right: 1px solid var(--color-border-subtle);
 	}
 
 	/* Scroll wrapper takes all remaining space */
@@ -1787,6 +1918,52 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		line-height: 1.35;
+	}
+
+	.dm-thread__preview--typing {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		color: var(--color-accent, #5865f2);
+		font-style: italic;
+	}
+
+	.dm-thread__typing-dots {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+	}
+
+	.dm-thread__typing-dots span {
+		width: 4px;
+		height: 4px;
+		border-radius: 50%;
+		background: currentColor;
+		animation: dm-typing-bounce 1.4s ease-in-out infinite;
+		opacity: 0.6;
+	}
+
+	.dm-thread__typing-dots span:nth-child(1) {
+		animation-delay: 0s;
+	}
+
+	.dm-thread__typing-dots span:nth-child(2) {
+		animation-delay: 0.2s;
+	}
+
+	.dm-thread__typing-dots span:nth-child(3) {
+		animation-delay: 0.4s;
+	}
+
+	@keyframes dm-typing-bounce {
+		0%, 60%, 100% {
+			transform: translateY(0);
+			opacity: 0.4;
+		}
+		30% {
+			transform: translateY(-3px);
+			opacity: 1;
+		}
 	}
 
 	.dm-thread__content {
