@@ -673,6 +673,20 @@ service cloud.firestore {
             allow create, update: if isSignedIn();
             allow delete: if isServerAdmin(serverId);
           }
+
+          // Typing indicators for thread messages
+          match /typing/{uid} {
+            allow read: if isSignedIn();
+            allow create, update: if isSignedIn() && request.auth.uid == uid;
+            allow delete: if isSignedIn() && request.auth.uid == uid;
+          }
+        }
+
+        // Typing indicators for channel messages
+        match /typing/{uid} {
+          allow read: if isSignedIn() && canViewChannel(serverId, channelId);
+          allow create, update: if isSignedIn() && request.auth.uid == uid && canViewChannel(serverId, channelId);
+          allow delete: if isSignedIn() && request.auth.uid == uid;
         }
 
         match /calls/{callId} {
@@ -809,6 +823,13 @@ service cloud.firestore {
           || (isSignedIn()
           && uid == request.auth.uid
           && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
+      }
+
+      // Typing indicators for DM threads
+      match /typing/{uid} {
+        allow read: if isSuperAdminUser() || dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow create, update: if isSignedIn() && request.auth.uid == uid && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow delete: if isSignedIn() && request.auth.uid == uid;
       }
     }
 

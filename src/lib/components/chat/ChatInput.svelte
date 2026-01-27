@@ -26,6 +26,7 @@
 	import { SPECIAL_MENTION_IDS } from '$lib/data/specialMentions';
 	import { featureFlags } from '$lib/stores/featureFlags';
 	import { playSound } from '$lib/utils/sounds';
+	import { setTyping, clearTypingOnSend, type TypingLocation } from '$lib/stores/typing';
 
 	// Use types from the new separated components
 	type MentionCandidate = MentionCandidateType;
@@ -192,6 +193,12 @@
 		threadLabel?: string | null;
 		/** If false, the mobile dock won't be suppressed when the input is focused. Default: true */
 		suppressDockOnFocus?: boolean;
+		/** Typing indicator location - if provided, typing state will be broadcast */
+		typingLocation?: TypingLocation | null;
+		/** Current user ID for typing indicator */
+		currentUserId?: string | null;
+		/** Current user display name for typing indicator */
+		currentUserDisplayName?: string | null;
 		onSend?: (payload: ReplyablePayload<{ text: string; mentions?: MentionRecord[] }>) => void;
 		onUpload?: (payload: UploadRequest) => void;
 		onSendGif?: (payload: ReplyablePayload<{ url: string }>) => void;
@@ -210,12 +217,40 @@
 		aiAssistEnabled = false,
 		threadLabel = '',
 		suppressDockOnFocus = true,
+		typingLocation = null,
+		currentUserId = null,
+		currentUserDisplayName = null,
 		onSend = () => {},
 		onUpload = () => {},
 		onSendGif = () => {},
 		onCreatePoll = () => {},
 		onCreateForm = () => {}
 	}: Props = $props();
+
+	// Typing indicator: broadcast typing state when user types
+	const typingEnabled = $derived(
+		Boolean($featureFlags.enableTypingIndicators && typingLocation && currentUserId)
+	);
+
+	$effect(() => {
+		console.log('[ChatInput] Typing props:', { 
+			typingEnabled: typingEnabled, 
+			typingLocation, 
+			currentUserId,
+			featureFlag: $featureFlags.enableTypingIndicators
+		});
+	});
+
+	function broadcastTyping(isTyping: boolean) {
+		console.log('[ChatInput] broadcastTyping called:', { isTyping, typingEnabled, typingLocation, currentUserId });
+		if (!typingEnabled || !typingLocation || !currentUserId) return;
+		setTyping(typingLocation, currentUserId, currentUserDisplayName ?? null, isTyping);
+	}
+
+	function clearTyping() {
+		if (!typingLocation || !currentUserId) return;
+		clearTypingOnSend(typingLocation, currentUserId);
+	}
 
 	const dispatch = createEventDispatcher();
 
@@ -560,6 +595,7 @@
 			lastPredictionSeed = '';
 			mentionDraft.clear();
 			closeMentionMenu();
+			clearTyping();
 		}
 
 		if (hasAttachments) {
@@ -748,6 +784,12 @@
 		}
 		syncTextareaSize();
 		syncPredictionOverlay();
+		// Broadcast typing state when user types
+		if (text.trim()) {
+			broadcastTyping(true);
+		} else {
+			broadcastTyping(false);
+		}
 	}
 
 	function syncTextareaSize() {
@@ -2013,6 +2055,7 @@
 		cancelGeneralSuggestion();
 		clearPredictions();
 		clearRewriteState(true);
+		clearTyping();
 		if (predictionTimer) {
 			clearTimeout(predictionTimer);
 			predictionTimer = null;

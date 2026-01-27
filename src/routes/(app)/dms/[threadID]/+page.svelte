@@ -4,7 +4,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { user } from '$lib/stores/user';
+	import { user, userProfile } from '$lib/stores/user';
 	import { getDb } from '$lib/firebase';
 	import { doc, getDoc, onSnapshot, collection, query, orderBy, limit, getDocs, type Unsubscribe } from 'firebase/firestore';
 	import { mobileDockSuppressed } from '$lib/stores/ui';
@@ -1861,7 +1861,7 @@
 </script>
 
 <div class="flex flex-1 h-full min-h-0 overflow-hidden panel-muted gesture-pad-x dm-page" bind:this={swipeSurface}>
-	<div class="hidden md:block md:w-80 h-full border-r border-subtle panel-muted">
+	<div class="hidden md:block md:w-80 h-full panel-muted">
 		<DMsSidebar
 			bind:this={sidebarRef}
 			activeThreadId={threadID}
@@ -1935,6 +1935,7 @@
 					messages={mergedMessages}
 					profiles={messageUsers}
 					currentUserId={me?.uid ?? null}
+					currentUserDisplayName={$userProfile?.displayName ?? me?.displayName ?? null}
 					{mentionOptions}
 					replyTarget={pendingReply}
 					replySource={replySourceMessage}

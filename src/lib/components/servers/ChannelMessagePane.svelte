@@ -1,12 +1,20 @@
 <script lang="ts">
-import { createEventDispatcher, onMount } from 'svelte';
+import { createEventDispatcher, onMount, onDestroy } from 'svelte';
 import { browser } from '$app/environment';
 import MessageList from '$lib/components/chat/MessageList.svelte';
 import ChatInput from '$lib/components/chat/ChatInput.svelte';
+import TypingIndicator from '$lib/components/chat/TypingIndicator.svelte';
 import type { MentionDirectoryEntry } from '$lib/firestore/membersDirectory';
 import type { PinnedMessage, ReplyReferenceInput } from '$lib/firestore/messages';
 import type { PendingUploadPreview } from '$lib/components/chat/types';
 import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
+import { featureFlags } from '$lib/stores/featureFlags';
+import {
+	subscribeToTyping,
+	unsubscribeFromTyping,
+	type TypingLocation,
+	type TypingUser
+} from '$lib/stores/typing';
 
 	interface Props {
 		hasChannel?: boolean;
@@ -14,6 +22,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		messages?: any[];
 		profiles?: Record<string, any>;
 		currentUserId?: string | null;
+		currentUserDisplayName?: string | null;
 		mentionOptions?: MentionDirectoryEntry[];
 		listClass?: string;
 		inputWrapperClass?: string;
@@ -92,6 +101,7 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		messages = [],
 		profiles = {},
 		currentUserId = null,
+		currentUserDisplayName = null,
 		mentionOptions = [],
 		listClass = 'message-scroll-region flex-1 overflow-hidden p-3 sm:p-4',
 		inputWrapperClass = 'chat-input-region shrink-0 border-t border-subtle panel-muted',
@@ -179,6 +189,74 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		attachComposerObserver();
 	});
 
+	// Typing indicator logic
+	const typingLocation = $derived.by((): TypingLocation | null => {
+		if (dmThreadId) {
+			return { type: 'dm', threadId: dmThreadId };
+		}
+		if (serverId && channelId) {
+			return { type: 'channel', serverId, channelId, threadId };
+		}
+		return null;
+	});
+
+	const typingEnabled = $derived(
+		Boolean($featureFlags.enableTypingIndicators && typingLocation && currentUserId)
+	);
+
+	let typingUsers = $state<TypingUser[]>([]);
+	let typingUnsub: (() => void) | null = null;
+
+	$effect(() => {
+		const loc = typingLocation;
+		const enabled = typingEnabled;
+		const uid = currentUserId;
+
+		console.log('[ChannelMessagePane] Typing effect running:', { 
+			loc, 
+			enabled, 
+			uid, 
+			dmThreadId,
+			featureFlag: $featureFlags.enableTypingIndicators 
+		});
+
+		// Cleanup previous subscription
+		if (typingUnsub) {
+			typingUnsub();
+			typingUnsub = null;
+		}
+		typingUsers = [];
+
+		if (!enabled || !loc || !uid || !browser) {
+			console.log('[ChannelMessagePane] Typing subscription skipped:', { enabled, loc: !!loc, uid: !!uid });
+			return;
+		}
+
+		console.log('[ChannelMessagePane] Subscribing to typing at:', loc);
+		// Subscribe to typing updates
+		const store = subscribeToTyping(loc, uid);
+		typingUnsub = store.subscribe((state) => {
+			console.log('[ChannelMessagePane] Typing state update:', state.users);
+			typingUsers = state.users;
+		});
+
+		return () => {
+			if (typingUnsub) {
+				typingUnsub();
+				typingUnsub = null;
+			}
+			if (loc) unsubscribeFromTyping(loc);
+		};
+	});
+
+	onDestroy(() => {
+		if (typingUnsub) {
+			typingUnsub();
+			typingUnsub = null;
+		}
+		if (typingLocation) unsubscribeFromTyping(typingLocation);
+	});
+
 	const scrollRegionStyle = $derived(`--chat-input-height: ${Math.max(composerHeight, 0)}px`);
 	
 	// Detect if we're on desktop for DM chat input fix
@@ -246,6 +324,14 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 			{#if isDmChat && isDesktop}
 				<!-- Desktop DM: Render ChatInput as fixed element via portal to body -->
 				{#await import('$lib/components/util/Portal.svelte') then Portal}
+					<!-- Typing indicator positioned above the fixed chat input -->
+					{#if typingUsers.length > 0}
+						<Portal.default>
+							<div class="dm-typing-indicator-floating">
+								<TypingIndicator users={typingUsers} />
+							</div>
+						</Portal.default>
+					{/if}
 					<Portal.default>
 						<div
 							class="dm-desktop-chat-input"
@@ -260,6 +346,9 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 								{conversationContext}
 								{aiAssistEnabled}
 								threadLabel={threadLabel || channelName}
+								{typingLocation}
+								{currentUserId}
+								{currentUserDisplayName}
 								{onSend}
 								{onSendGif}
 								{onCreatePoll}
@@ -272,6 +361,12 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 					</Portal.default>
 				{/await}
 			{:else}
+				<!-- Typing indicator above input for mobile/server channels -->
+				{#if typingUsers.length > 0}
+					<div class="typing-indicator-above-input">
+						<TypingIndicator users={typingUsers} />
+					</div>
+				{/if}
 				<!-- Normal rendering for mobile and server channels -->
 				<div
 					class={inputWrapperClass}
@@ -287,6 +382,9 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 						{conversationContext}
 						{aiAssistEnabled}
 						threadLabel={threadLabel || channelName}
+						{typingLocation}
+						{currentUserId}
+						{currentUserDisplayName}
 						{onSend}
 						{onSendGif}
 						{onCreatePoll}
@@ -327,6 +425,25 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 		width: 100%;
 	}
 
+	.typing-indicator-wrapper {
+		flex-shrink: 0;
+		pointer-events: none;
+	}
+
+	.typing-indicator-wrapper :global(.typing-indicator) {
+		background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+		backdrop-filter: blur(4px);
+		border-radius: 0.5rem 0.5rem 0 0;
+		margin: 0 0.5rem;
+		padding: 0.375rem 0.75rem;
+	}
+
+	.typing-indicator-above-input {
+		flex-shrink: 0;
+		padding: 0.25rem 0.75rem;
+		pointer-events: none;
+	}
+
 	.pinned-fab {
 		position: absolute;
 		left: 0.5rem;
@@ -362,6 +479,30 @@ import ChannelPinnedBar from '$lib/components/servers/ChannelPinnedBar.svelte';
 			background: var(--color-panel-muted, #3a3f45) !important;
 			border-top: 1px solid var(--color-border-subtle, rgba(18, 22, 28, 0.45)) !important;
 			padding: 0.5rem 1rem !important;
+		}
+
+		/* Teal border line between DMs sidebar and chat area - extends full height */
+		.dm-desktop-chat-input::before {
+			content: '';
+			position: fixed;
+			top: 0;
+			bottom: 0;
+			left: 392px;
+			width: 1px;
+			background: var(--color-border-subtle);
+			pointer-events: none;
+			z-index: 10001;
+		}
+		
+		/* DM typing indicator floating above the fixed chat input */
+		.dm-typing-indicator-floating {
+			position: fixed !important;
+			bottom: 70px !important; /* Position above the chat input */
+			left: 392px !important;
+			right: 0 !important;
+			z-index: 9998 !important;
+			padding: 0.25rem 1rem 0.25rem 3.5rem !important; /* Extra left padding to align with input text */
+			pointer-events: none;
 		}
 		
 		/* Add bottom padding to DM message list so content isn't hidden behind fixed input */
