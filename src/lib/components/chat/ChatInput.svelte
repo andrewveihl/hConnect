@@ -3324,6 +3324,7 @@
 		color: transparent;
 		caret-color: var(--text-100);
 		background: transparent;
+		z-index: 1;
 	}
 
 	.chat-input__mention-overlay {
@@ -3341,7 +3342,7 @@
 		color: var(--text-100);
 		background: color-mix(in srgb, var(--color-panel) 80%, #1a1d21);
 		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--color-border-subtle) 90%, transparent);
+		border: 1px solid transparent;
 	}
 
 	.chat-input__mention-text {
@@ -3490,6 +3491,11 @@
 		}
 
 		.chat-input__textarea-wrapper textarea {
+			border-radius: 1.2rem;
+			padding-inline: 1rem;
+		}
+
+		.chat-input__mention-overlay {
 			border-radius: 1.2rem;
 			padding-inline: 1rem;
 		}
@@ -3813,6 +3819,14 @@
 		}
 
 		.chat-input__textarea-wrapper textarea {
+			padding-top: 0.35rem;
+			padding-bottom: 0.35rem;
+			padding-right: 3.5rem;
+			min-height: 2.25rem;
+			line-height: 1.35;
+		}
+
+		.chat-input__mention-overlay {
 			padding-top: 0.35rem;
 			padding-bottom: 0.35rem;
 			padding-right: 3.5rem;
