@@ -20,10 +20,12 @@ import {
 	GoogleAuthProvider,
 	OAuthProvider,
 	signInWithPopup,
+	signInWithCredential,
 	reauthenticateWithPopup,
 	onAuthStateChanged,
 	signOut
 } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import {
 	initializeFirestore,
 	persistentLocalCache,
@@ -227,8 +229,23 @@ export async function waitForAuthInit(): Promise<void> {
 /* ------------------------------------------------------------------ */
 export async function signInWithGoogle() {
 	await ensureFirebaseReady();
-	const provider = new GoogleAuthProvider();
-	await signInWithPopup(auth!, provider);
+	
+	// Use native Google Sign-In on Android/iOS
+	if (Capacitor.isNativePlatform()) {
+		const { GoogleAuth } = await import('@codetrix-studio/capacitor-google-auth');
+		await GoogleAuth.initialize({
+			clientId: '118576002113-tqhit7o1ik6huoho1udbv7j71p4843nk.apps.googleusercontent.com',
+			scopes: ['profile', 'email'],
+			grantOfflineAccess: true
+		});
+		const googleUser = await GoogleAuth.signIn();
+		const credential = GoogleAuthProvider.credential(googleUser.authentication.idToken);
+		await signInWithCredential(auth!, credential);
+	} else {
+		// Use popup on web
+		const provider = new GoogleAuthProvider();
+		await signInWithPopup(auth!, provider);
+	}
 	await afterLoginEnsureDoc();
 }
 

@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">hConnect</string>
+    <string name="title_activity_main">hConnect</string>
+    <string name="package_name">app.hconnect.android</string>
+    <string name="custom_url_scheme">app.hconnect.android</string>
+    <string name="server_client_id">118576002113-tqhit7o1ik6huoho1udbv7j71p4843nk.apps.googleusercontent.com</string>
+</resources>
