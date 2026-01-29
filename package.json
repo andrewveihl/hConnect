@@ -18,6 +18,10 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@capacitor/android": "^8.0.2",
+    "@capacitor/cli": "^8.0.2",
+    "@capacitor/core": "^8.0.2",
+    "@codetrix-studio/capacitor-google-auth": "3.4.0-rc.4",
     "@tailwindplus/elements": "^1.0.20",
     "express": "^4.22.1",
     "firebase": "^12.6.0",

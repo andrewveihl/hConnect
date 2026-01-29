@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "118576002113",
+    "project_id": "hconnect-6212b",
+    "storage_bucket": "hconnect-6212b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:118576002113:android:c246053156c993b6f542c0",
+        "android_client_info": {
+          "package_name": "app.hconnect.android"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "118576002113-tqhit7o1ik6huoho1udbv7j71p4843nk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCX_22cg2ZR4Km52Y1-KYaq3--lD9WGPr0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "118576002113-tqhit7o1ik6huoho1udbv7j71p4843nk.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
