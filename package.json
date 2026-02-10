@@ -23,6 +23,7 @@
     "@capacitor/core": "^8.0.2",
     "@codetrix-studio/capacitor-google-auth": "3.4.0-rc.4",
     "@tailwindplus/elements": "^1.0.20",
+    "boxicons": "^2.1.4",
     "express": "^4.22.1",
     "firebase": "^12.6.0",
     "firebase-admin": "^12.7.0",

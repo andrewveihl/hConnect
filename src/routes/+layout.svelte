@@ -1,5 +1,6 @@
 <script lang="ts">
 	import '../app.css';
+	import 'boxicons/css/boxicons.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import SplashScreen from '$lib/components/app/SplashScreen.svelte';
@@ -128,7 +129,7 @@
 		initClientErrorReporting();
 		initFabSnappingSettings();
 		const isMobile = shouldUseMobileSplash();
-		
+
 		// Start preloading in background (doesn't block splash)
 		let preloadUnsub: (() => void) | null = null;
 		preloadUnsub = user.subscribe((currentUser) => {
@@ -212,8 +213,8 @@
 		{#if shouldShowMobileSplash}
 			<SplashScreen {isAppReady} on:complete={() => { shouldShowMobileSplash = false; splashVisible.set(false); }} />
 		{/if}
-		<div 
-			class="app-shell__stage" 
+		<div
+			class="app-shell__stage"
 			data-app-ready={isAppReady}
 			style:visibility={shouldShowMobileSplash && !isAppReady ? 'hidden' : 'visible'}
 			style:opacity={shouldShowMobileSplash && !isAppReady ? '0' : '1'}
