@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { page } from '$app/state'
-	import { profile, servers, ChannelsState } from '$lib/data'
+	import { profile, ChannelsState } from '$lib/data'
 
 	let { children } = $props()
 
-	const server = $derived(servers.current?.find((server) => server.id === page.params.server_id))
+	const server = $derived(profile.servers?.find((server) => server.id === page.params.server_id))
 	const channels = $derived(new ChannelsState(page.params.server_id!))
 </script>
 

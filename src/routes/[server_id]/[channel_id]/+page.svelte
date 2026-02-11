@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { profile, ChannelsState, MessagesState } from '$lib/data'
+	import { ChannelsState, MessagesState } from '$lib/data'
 	import { page } from '$app/state'
 
 	const messages = $derived(new MessagesState(page.params.server_id!, page.params.channel_id!))

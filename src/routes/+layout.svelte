@@ -2,7 +2,7 @@
 	import './layout.css'
 	import favicon from '$lib/assets/favicon.svg'
 	import { Auth } from '$lib/components'
-	import { profile, servers } from '$lib/data'
+	import { profile } from '$lib/data'
 
 	let { children } = $props()
 </script>
@@ -14,7 +14,7 @@
 		<!-- 1. WORKSPACE BAR (Leftmost) -->
 		<ul class="flex w-16 flex-shrink-0 flex-col items-center space-y-4 bg-[#3F0E40] py-4">
 			<!-- to limit to profile servers: profile.servers -->
-			{#each servers.current as server (server.id)}
+			{#each profile.servers as server (server.id)}
 				<li
 					class="flex h-10 w-10 cursor-pointer items-center justify-center rounded-2xl bg-white/20 transition-all duration-200 hover:bg-white/30"
 				>
