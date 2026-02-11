@@ -12,7 +12,7 @@
 <div class="flex w-64 flex-shrink-0 flex-col border-l border-white/10 bg-[#3F0E40] text-purple-100">
 	<!-- Header -->
 	<div class="flex cursor-pointer items-center justify-between border-b border-white/10 p-4 hover:bg-black/10">
-		<h1 class="truncate text-lg font-bold">{server?.name}</h1>
+		<h1 class="truncate text-lg font-bold h-6">{server?.name}</h1>
 		<svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"
 			><path
 				d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"

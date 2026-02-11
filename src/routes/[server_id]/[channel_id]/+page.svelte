@@ -5,6 +5,11 @@
 	const messages = $derived(new MessagesState(page.params.server_id!, page.params.channel_id!))
 	const channels = $derived(new ChannelsState(page.params.server_id!))
 	const channel = $derived(channels.current?.find((channel) => channel.id === page.params.channel_id))
+
+	function fade(img: HTMLImageElement) {
+		const completed = () => img.style.opacity = '1'
+		img.onload = completed
+	}
 </script>
 
 <!-- 3. MAIN CONTENT AREA -->
@@ -50,9 +55,10 @@
 		{#each messages.current as message (message.id)}
 			<div class="group flex items-start">
 				<img
-					class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-blue-500 font-bold text-white"
+					class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-white font-bold opacity-0 transition-opacity duration-300 ease-in"
 					src={message.author.photoURL}
 					alt=""
+					use:fade
 				/>
 				<div class="ml-3">
 					<div class="flex items-baseline space-x-2">
