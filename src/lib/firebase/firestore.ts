@@ -1,6 +1,6 @@
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore'
+import { initializeFirestore, persistentLocalCache, persistentSingleTabManager } from 'firebase/firestore'
 import { app } from './app'
 
 export const firestore = initializeFirestore(app, {
-	localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+	localCache: persistentLocalCache({ tabManager: persistentSingleTabManager({ forceOwnership: true }) }),
 })
