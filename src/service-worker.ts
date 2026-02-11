@@ -42,7 +42,7 @@ const imageRoute = new Route(
 				purgeOnQuotaError: true,
 			}),
 		],
-	}),
+	})
 )
 
 registerRoute(imageRoute)

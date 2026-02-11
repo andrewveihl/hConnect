@@ -7,5 +7,5 @@ export default defineConfig({
 	plugins: [mkcert(), tailwindcss(), sveltekit()],
 	define: {
 		'process.env.NODE_ENV': '"production"',
-	}
+	},
 })

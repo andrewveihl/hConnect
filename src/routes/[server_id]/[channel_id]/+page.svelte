@@ -7,7 +7,7 @@
 	const channel = $derived(channels.current?.find((channel) => channel.id === page.params.channel_id))
 
 	function fade(img: HTMLImageElement) {
-		const completed = () => img.style.opacity = '1'
+		const completed = () => (img.style.opacity = '1')
 		img.onload = completed
 	}
 </script>
