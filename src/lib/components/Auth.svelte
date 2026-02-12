@@ -177,3 +177,9 @@
 {#if user.current}
 	{@render children()}
 {/if}
+
+<style>
+	.workspace-icon:hover {
+		border-radius: 12px;
+	}
+</style>

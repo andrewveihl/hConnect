@@ -8,10 +8,6 @@
 			</span>
 		</div>
 		<div class="flex items-center space-x-4 text-(--text-muted)">
-			<button class="rounded p-1 transition-colors hover:bg-(--surface-hover)">
-				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-				>
-			</button>
 			<div class="relative">
 			</div>
 		</div>

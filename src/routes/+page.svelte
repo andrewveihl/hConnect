@@ -5,6 +5,7 @@
 <div class="flex w-64 flex-shrink-0 flex-col border-l border-r border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)">
 	<!-- Header -->
 	<div class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)">
+		<!-- svelte-ignore a11y_missing_content -->
 		<h1 class="truncate text-lg font-bold text-(--text-primary)"></h1>
 		<svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"
 			><path

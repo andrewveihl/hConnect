@@ -24,7 +24,7 @@
 </Auth>
 
 <style>
-	main {
+	:global(main) {
 		scrollbar-gutter: stable;
 	}
 	/* Custom scrollbar for a cleaner look */
@@ -39,8 +39,5 @@
 		border-radius: 10px;
 		border: 2px solid transparent;
 		background-clip: content-box;
-	}
-	.workspace-icon:hover {
-		border-radius: 12px;
 	}
 </style>

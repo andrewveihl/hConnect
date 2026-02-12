@@ -26,7 +26,7 @@
 		</li>
 	{/each}
 	<li>
-		<button class="flex h-12 w-12 items-center justify-center rounded-full bg-(--rail-icon-bg) text-(--rail-add-text) transition-all duration-200 hover:bg-(--rail-icon-hover) hover:text-white">
+		<button class="flex h-12 w-12 items-center justify-center rounded-full bg-(--rail-icon-bg) text-(--rail-add-text) transition-all duration-200 hover:bg-(--rail-icon-hover) hover:text-white" aria-label="Add Server">
 			<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 5v14m-7-7h14" /></svg>
 		</button>
 	</li>
