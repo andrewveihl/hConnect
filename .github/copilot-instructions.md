@@ -93,3 +93,13 @@ No test framework is configured. Run `pnpm check` to validate changes.
 - Barrel exports via `index.ts` in `src/lib/data/` and `src/lib/components/`
 - Import Firebase instances from `$lib/firebase`, data classes from `$lib/data`
 - Tailwind CSS classes directly in markup (no CSS modules)
+
+## UI Consistency
+
+- **Single Source of Truth:** If a UI concept is map-driven (tabs, nav, statuses), change it only in the map. Do not mirror logic in `if/else` blocks. If needed, refactor to a map first.
+- **One Phrase Policy:** Do not introduce multiple string variants for the same status (e.g., "Coming Soon"). Use one exported constant.
+- **Accessibility:** Any interactive element must include correct ARIA and keyboard handling. Avoid invalid `aria-*` attributes.
+
+## Assets
+
+- Use SVG for logos and icons whenever feasible.
