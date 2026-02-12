@@ -9,10 +9,10 @@
 </script>
 
 <!-- 2. CHANNEL SIDEBAR -->
-<div class="flex w-64 flex-shrink-0 flex-col border-l border-white/10 bg-[#3F0E40] text-purple-100">
+<div class="flex w-64 flex-shrink-0 flex-col border-l border-r border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)">
 	<!-- Header -->
-	<div class="flex cursor-pointer items-center justify-between border-b border-white/10 p-4 hover:bg-black/10">
-		<h1 class="h-6 truncate text-lg font-bold">{server?.name}</h1>
+	<div class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)">
+		<h1 class="h-6 truncate text-lg font-bold text-(--text-primary)">{server?.name}</h1>
 		<svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"
 			><path
 				d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
@@ -21,10 +21,10 @@
 	</div>
 
 	<!-- Content Scrollable -->
-	<div class="flex-1 overflow-y-auto py-4">
+	<div class="hide-scrollbar flex-1 overflow-y-auto py-4">
 		<!-- Channels Section -->
 		<div class="mb-4 px-4">
-			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-white/60 uppercase">
+			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase">
 				<span>Channels</span>
 				<span class="cursor-pointer text-lg">+</span>
 			</div>
@@ -32,8 +32,8 @@
 				{#each channels.current as channel (channel.id)}
 					<li
 						class="cursor-pointer rounded px-2 py-1 {channel.id === page.params.channel_id
-							? 'bg-[#1164A3]'
-							: 'hover:bg-white/10'}"
+						? 'bg-(--channel-active) text-(--channel-text-active)'
+						: 'hover:bg-(--border-subtle)'}"
 					>
 						<a class="block h-full w-full" href="/{page.params.server_id}/{channel.id}">
 							# {channel.name}
@@ -46,3 +46,13 @@
 </div>
 
 {@render children()}
+
+<style>
+	.hide-scrollbar {
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+	.hide-scrollbar::-webkit-scrollbar {
+		display: none;
+	}
+</style>

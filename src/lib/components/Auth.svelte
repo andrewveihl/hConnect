@@ -10,29 +10,16 @@
 {/if}
 
 {#if user.current === null}
-	<div id="login-screen" class="flex h-full flex-col items-center justify-center px-4">
+	<div id="login-screen" class="flex h-full flex-col items-center justify-center bg-(--surface-base) px-4">
 		<div class="mb-10 flex flex-col items-center">
-			<!-- Slack-ish Logo Mockup -->
-			<div class="mb-8 flex items-center space-x-2">
-				<div class="grid h-8 w-8 grid-cols-2 gap-1">
-					<div class="rounded-sm bg-[#36C5F0]"></div>
-					<div class="rounded-sm bg-[#2EB67D]"></div>
-					<div class="rounded-sm bg-[#E01E5A]"></div>
-					<div class="rounded-sm bg-[#ECB22E]"></div>
-				</div>
-				<span class="text-3xl font-black tracking-tighter">slackish</span>
-			</div>
 
-			<h1 class="mb-3 text-4xl font-bold">Sign in to Slackish</h1>
-			<p class="text-lg text-gray-600">
-				We suggest using the <span class="font-bold">email address you use at work.</span>
-			</p>
+			<h1 class="mb-3 text-4xl font-bold text-(--text-primary)">Sign in to hConnect</h1>
 		</div>
 
 		<div class="w-full max-w-[400px] space-y-4">
 			<!-- Social Login Buttons -->
 			<button
-				class="flex w-full items-center justify-center space-x-3 rounded-md border-2 border-[#1d1c1d]/20 py-3 font-bold transition-all hover:border-[#1d1c1d]"
+				class="flex w-full items-center justify-center space-x-3 rounded-md border-2 border-(--border-default) bg-(--surface-card) py-3 font-bold text-(--text-primary) transition-all hover:border-(--accent)"
 				onclick={() => user.signin()}
 			>
 				<svg class="h-5 w-5" viewBox="0 0 24 24"
@@ -53,42 +40,14 @@
 				<span>Sign in with Google</span>
 			</button>
 			<button
-				class="flex w-full items-center justify-center space-x-3 rounded-md border-2 border-[#1d1c1d]/20 py-3 font-bold transition-all hover:border-[#1d1c1d]"
+				class="flex w-full items-center justify-center space-x-3 rounded-md border-2 border-(--border-default) bg-(--surface-card) py-3 font-bold text-(--text-primary) transition-all hover:border-(--accent)"
 			>
-				<svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20"
-					><path
-						d="M10 0C4.477 0 0 4.477 0 10c0 4.991 3.657 9.128 8.438 9.878v-6.987h-2.54V10h2.54V7.797c0-2.506 1.492-3.89 3.777-3.89 1.094 0 2.238.195 2.238.195v2.46h-1.26c-1.243 0-1.63.771-1.63 1.562V10h2.773l-.443 2.89h-2.33v6.988C16.343 19.128 20 14.991 20 10c0-5.523-4.477-10-10-10z"
-					></path></svg
-				>
-				<span>Sign in with Facebook</span>
+
+				<span>Sign in with Apple</span>
 			</button>
 
-			<div class="flex items-center py-4">
-				<div class="flex-grow border-t border-gray-200"></div>
-				<span class="mx-4 text-sm text-gray-500 uppercase">OR</span>
-				<div class="flex-grow border-t border-gray-200"></div>
 			</div>
-
-			<!-- Email Form -->
-			<div class="space-y-4">
-				<input
-					type="email"
-					id="email-input"
-					placeholder="name@work-email.com"
-					class="w-full rounded-md border-2 border-[#1d1c1d]/20 px-4 py-3 transition-all focus:border-[#1d1c1d] focus:ring-4 focus:ring-blue-100 focus:outline-none"
-				/>
-				<button
-					class="w-full rounded-md bg-[#4A154B] py-3 text-lg font-bold text-white transition-all hover:bg-[#5D1B5E]"
-				>
-					Sign In With Email
-				</button>
-			</div>
-
-			<p class="pt-4 text-center text-sm text-gray-500">
-				New to Slackish? <a href="#" class="text-blue-600 hover:underline">Create an account</a>
-			</p>
 		</div>
-	</div>
 
 	<!-- MAIN APP INTERFACE (Initially Hidden) -->
 	<div id="app-interface" class="flex hidden h-full">

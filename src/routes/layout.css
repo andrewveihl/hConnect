@@ -3,30 +3,142 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+	/* Accent */
+	--accent: #0d9e94;
+	--accent-hover: #0b8a80;
+	--accent-soft: rgba(13, 158, 148, 0.12);
+
+	/* Surfaces — teal-tinted light */
+	--surface-base: #f5fafa;
+	--surface-sidebar: #e6f3f2;
+	--surface-panel: #d5ece9;
+	--surface-card: #e0efed;
+	--surface-overlay: #f5fafa;
+	--surface-channel-sidebar: #e0efed;
+	--surface-input: #ffffff;
+	--surface-toolbar: #e6f3f2;
+	--surface-hover: rgba(13, 158, 148, 0.08);
+
+	/* Text — high contrast on light teal backgrounds */
+	--text-primary: #0f1a19;
+	--text-secondary: #3d4f4d;
+	--text-muted: #6b7d7b;
+	--text-on-accent: #ffffff;
+	--text-link: #0b7a72;
+	--text-timestamp: #6b7d7b;
+
+	/* Borders */
+	--border-subtle: rgba(13, 120, 112, 0.1);
+	--border-default: rgba(13, 120, 112, 0.18);
+	--border-input: #b3d4d1;
+	--border-input-focus: #0d9e94;
+
+	/* Status */
+	--status-online: #23a55a;
+	--status-dot-border: var(--surface-panel);
+
+	/* Semantic */
+	--danger: #d32f2f;
+	--danger-hover: #b71c1c;
+	--success: #23a55a;
+
+	/* Channel sidebar */
+	--channel-active: rgba(13, 158, 148, 0.22);
+	--channel-text: #3d4f4d;
+	--channel-text-active: #0f1a19;
+	--channel-section-text: #6b7d7b;
+	--channel-hover: rgba(13, 158, 148, 0.08);
+
+	/* Elevated panels */
+	--panel-border: rgba(13, 120, 112, 0.12);
+
+	/* Scrollbar */
+	--scrollbar-thumb: #b3d4d1;
+
+	/* Send button */
+	--send-bg: #0d9e94;
+	--send-hover: #0b8a80;
+
 	/* Server rail */
-	--rail-bg: #e3e5e8;
-	--rail-icon-bg: #ffffff;
-	--rail-icon-hover: #33c8bf;
-	--rail-divider: rgba(0, 0, 0, 0.1);
-	--rail-text: #2e3338;
-	--rail-add-text: #33c8bf;
+	--rail-bg: #c8e4e1;
+	--rail-icon-bg: #f5fafa;
+	--rail-icon-hover: #0d9e94;
+	--rail-divider: rgba(13, 120, 112, 0.15);
+	--rail-text: #0f1a19;
+	--rail-add-text: #0d9e94;
 
 	/* User panel */
-	--user-panel-bg: #d4d7dc;
-	--user-panel-text: #2e3338;
-	--user-panel-subtext: #6a6e73;
-	--user-panel-icon: #4f5660;
-	--user-panel-icon-hover-bg: rgba(0, 0, 0, 0.08);
-	--user-panel-status: #3ba55c;
+	--user-panel-bg: #d5ece9;
+	--user-panel-text: #0f1a19;
+	--user-panel-subtext: #3d4f4d;
+	--user-panel-icon: #3d4f4d;
+	--user-panel-icon-hover-bg: rgba(13, 158, 148, 0.1);
+	--user-panel-status: var(--status-online);
 }
 
 .dark {
+	/* Accent */
+	--accent: #33c8bf;
+	--accent-hover: #2ab3ab;
+	--accent-soft: rgba(51, 200, 191, 0.1);
+
+	/* Surfaces — neutral grey */
+	--surface-base: #313338;
+	--surface-sidebar: #2b2d31;
+	--surface-panel: #232428;
+	--surface-card: #2b2d31;
+	--surface-overlay: #383a40;
+	--surface-channel-sidebar: #2b2d31;
+	--surface-input: #383a40;
+	--surface-toolbar: #2b2d31;
+	--surface-hover: rgba(255, 255, 255, 0.06);
+
+	/* Text — readable on grey */
+	--text-primary: #f2f3f5;
+	--text-secondary: #b5bac1;
+	--text-muted: #80848e;
+	--text-on-accent: #0a1615;
+	--text-link: #33c8bf;
+	--text-timestamp: #949ba4;
+
+	/* Borders */
+	--border-subtle: rgba(255, 255, 255, 0.06);
+	--border-default: rgba(255, 255, 255, 0.12);
+	--border-input: #3f4147;
+	--border-input-focus: #33c8bf;
+
+	/* Status */
+	--status-online: #23a55a;
+	--status-dot-border: var(--surface-panel);
+
+	/* Semantic */
+	--danger: #ef5350;
+	--danger-hover: #e53935;
+	--success: #23a55a;
+
+	/* Channel sidebar */
+	--channel-active: rgba(255, 255, 255, 0.1);
+	--channel-text: #949ba4;
+	--channel-text-active: #f2f3f5;
+	--channel-section-text: #949ba4;
+	--channel-hover: rgba(255, 255, 255, 0.04);
+
+	/* Elevated panels */
+	--panel-border: transparent;
+
+	/* Scrollbar */
+	--scrollbar-thumb: #1a1b1e;
+
+	/* Send button */
+	--send-bg: #33c8bf;
+	--send-hover: #2ab3ab;
+
 	/* Server rail */
 	--rail-bg: #1e1f22;
-	--rail-icon-bg: #2b2d31;
+	--rail-icon-bg: #313338;
 	--rail-icon-hover: #33c8bf;
-	--rail-divider: rgba(255, 255, 255, 0.1);
-	--rail-text: #ffffff;
+	--rail-divider: rgba(255, 255, 255, 0.08);
+	--rail-text: #f2f3f5;
 	--rail-add-text: #33c8bf;
 
 	/* User panel */
@@ -35,5 +147,79 @@
 	--user-panel-subtext: #b5bac1;
 	--user-panel-icon: #b5bac1;
 	--user-panel-icon-hover-bg: rgba(255, 255, 255, 0.08);
-	--user-panel-status: #3ba55c;
+	--user-panel-status: #23a55a;
+}
+
+.midnight {
+	/* Accent */
+	--accent: #29e0c8;
+	--accent-hover: #1fcbb5;
+	--accent-soft: rgba(41, 224, 200, 0.08);
+
+	/* Surfaces — pitch black, panels differentiated by teal borders */
+	--surface-base: #000000;
+	--surface-sidebar: #000000;
+	--surface-panel: #000000;
+	--surface-card: #050505;
+	--surface-overlay: #080808;
+	--surface-channel-sidebar: #000000;
+	--surface-input: #050505;
+	--surface-toolbar: #000000;
+	--surface-hover: rgba(41, 224, 200, 0.08);
+
+	/* Text — readable on pure black */
+	--text-primary: #e4eaea;
+	--text-secondary: #8a9e9c;
+	--text-muted: #4f6664;
+	--text-on-accent: #000000;
+	--text-link: #29e0c8;
+	--text-timestamp: #5a7573;
+
+	/* Borders — visible teal outlines */
+	--border-subtle: rgba(41, 224, 200, 0.18);
+	--border-default: rgba(41, 224, 200, 0.25);
+	--border-input: rgba(41, 224, 200, 0.30);
+	--border-input-focus: #29e0c8;
+
+	/* Status */
+	--status-online: #23a55a;
+	--status-dot-border: #000000;
+
+	/* Semantic */
+	--danger: #f44336;
+	--danger-hover: #e53935;
+	--success: #23a55a;
+
+	/* Channel sidebar */
+	--channel-active: rgba(41, 224, 200, 0.14);
+	--channel-text: #8a9e9c;
+	--channel-text-active: #e4eaea;
+	--channel-section-text: #5a7573;
+	--channel-hover: rgba(41, 224, 200, 0.06);
+
+	/* Elevated panels — teal outline to separate sections */
+	--panel-border: rgba(41, 224, 200, 0.25);
+
+	/* Scrollbar */
+	--scrollbar-thumb: rgba(41, 224, 200, 0.15);
+
+	/* Send button */
+	--send-bg: #29e0c8;
+	--send-hover: #1fcbb5;
+
+	/* Server rail */
+	--rail-bg: #000000;
+	--rail-icon-bg: #050505;
+	--rail-icon-hover: #29e0c8;
+	--rail-divider: rgba(41, 224, 200, 0.25);
+	--rail-text: #e4eaea;
+	--rail-add-text: #29e0c8;
+
+	/* User panel */
+	--user-panel-bg: #000000;
+	--user-panel-text: #e4eaea;
+	--user-panel-subtext: #8a9e9c;
+	--user-panel-icon: #8a9e9c;
+	--user-panel-icon-hover-bg: rgba(41, 224, 200, 0.1);
+	--user-panel-status: #23a55a;
 }

@@ -1,44 +1,65 @@
 <script lang="ts">
-	let selected = $state('dark')
+	import { browser } from '$app/environment'
 
 	const themes = [
 		{
 			id: 'light',
 			label: 'Light',
-			bg: '#ffffff',
-			sidebar: '#f2f3f5',
-			text: '#060607'
+			bg: '#f5fafa',
+			sidebar: '#e0efed',
+			text: '#0f1a19',
+			className: ''
 		},
 		{
 			id: 'dark',
 			label: 'Dark',
 			bg: '#313338',
 			sidebar: '#2b2d31',
-			text: '#dbdee1'
+			text: '#f2f3f5',
+			className: 'dark'
 		},
 		{
 			id: 'midnight',
 			label: 'Midnight',
-			bg: '#0e0e10',
-			sidebar: '#0a0a0c',
-			text: '#a8a9ad'
+			bg: '#000000',
+			sidebar: '#000000',
+			text: '#e4eaea',
+			className: 'midnight'
 		}
 	] as const
+
+	let selected = $state(
+		(browser && localStorage.getItem('hconnect-theme')) || 'dark'
+	)
+
+	function applyTheme(themeId: string) {
+		selected = themeId
+		const theme = themes.find((t) => t.id === themeId)
+		if (!theme || !browser) return
+
+		const root = document.documentElement
+		// Remove all theme classes, then add the selected one
+		root.classList.remove('dark', 'midnight')
+		if (theme.className) {
+			root.classList.add(theme.className)
+		}
+		localStorage.setItem('hconnect-theme', themeId)
+	}
 </script>
 
 <div>
-	<h3 class="mb-1 text-xs font-bold tracking-wider text-white/40 uppercase">Theme</h3>
-	<p class="mb-4 text-sm text-white/50">Choose how hConnect looks to you.</p>
+	<h3 class="mb-1 text-xs font-bold tracking-wider text-(--text-muted) uppercase">Theme</h3>
+	<p class="mb-4 text-sm text-(--text-secondary)">Choose how hConnect looks to you.</p>
 
 	<div class="flex gap-4">
 		{#each themes as theme}
 			<button
 				class="group flex flex-col items-center gap-2"
-				onclick={() => selected = theme.id}
+				onclick={() => applyTheme(theme.id)}
 			>
 				<!-- Preview card -->
 				<div
-					class="relative h-24 w-32 overflow-hidden rounded-lg border-2 transition-all {selected === theme.id ? 'border-[#5865f2] shadow-lg shadow-[#5865f2]/20' : 'border-white/10 hover:border-white/20'}"
+					class="relative h-24 w-32 overflow-hidden rounded-lg border-2 transition-all {selected === theme.id ? 'border-(--accent) shadow-lg shadow-(--accent)/20' : 'border-(--border-default) hover:border-(--text-muted)'}"
 					style="background-color: {theme.bg}"
 				>
 					<!-- Fake sidebar -->
@@ -52,7 +73,7 @@
 					</div>
 					<!-- Checkmark -->
 					{#if selected === theme.id}
-						<div class="absolute right-1.5 bottom-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[#5865f2]">
+						<div class="absolute right-1.5 bottom-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-(--accent)">
 							<svg class="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
 							</svg>
@@ -60,7 +81,7 @@
 					{/if}
 				</div>
 				<!-- Label -->
-				<span class="text-sm font-medium {selected === theme.id ? 'text-white' : 'text-white/50'}">{theme.label}</span>
+				<span class="text-sm font-medium {selected === theme.id ? 'text-(--text-primary)' : 'text-(--text-muted)'}">{theme.label}</span>
 			</button>
 		{/each}
 	</div>

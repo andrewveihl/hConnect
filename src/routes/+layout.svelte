@@ -1,6 +1,6 @@
 <script lang="ts">
 	import './layout.css'
-	import favicon from '$lib/assets/favicon.svg'
+	import favicon from '$lib/assets/BrowserTabIcon/HSBrowserTab.png'
 	import { Auth, ServerRail, UserPanel } from '$lib/components'
 	import { user } from '$lib/data'
 
@@ -35,7 +35,7 @@
 		background: transparent;
 	}
 	::-webkit-scrollbar-thumb {
-		background: #4a154b;
+		background: var(--scrollbar-thumb);
 		border-radius: 10px;
 		border: 2px solid transparent;
 		background-clip: content-box;

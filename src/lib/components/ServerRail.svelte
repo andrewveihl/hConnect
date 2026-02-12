@@ -6,7 +6,7 @@
 	let activeServerId = $derived(page.params?.server_id)
 </script>
 
-<ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 bg-(--rail-bg) py-3">
+<ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 border-r border-(--border-subtle) bg-(--rail-bg) py-3">
 	<!-- App logo -->
 	<li class="mb-1">
 		<a href="/dms" class="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover)">
@@ -16,7 +16,7 @@
 	<li class="mx-auto mb-1 h-px w-8 bg-(--rail-divider)"></li>
 	{#each profile.servers as server (server.id)}
 		<li class="relative">
-			<a href="/{server.id}" class="group flex h-12 w-12 items-center justify-center rounded-full bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover) overflow-hidden ring-[3px] {activeServerId === server.id ? 'ring-[#33c8bf]' : 'ring-transparent'}">
+			<a href="/{server.id}" class="group flex h-12 w-12 items-center justify-center rounded-full bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover) overflow-hidden ring-[3px] {activeServerId === server.id ? 'ring-(--accent)' : 'ring-transparent'}">
 				{#if server.icon}
 					<img class="h-full w-full object-cover transition-opacity duration-200 group-hover:opacity-80" src={server.icon} alt={server.name} />
 				{:else}
