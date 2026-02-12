@@ -27,18 +27,27 @@
 
 <!-- Backdrop -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60" onclick={onclose} onkeydown={(e) => e.key === 'Escape' && onclose()}>
+<div
+	class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60"
+	onclick={onclose}
+	onkeydown={(e) => e.key === 'Escape' && onclose()}
+>
 	<!-- Modal box -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="flex h-[70vh] w-[750px] max-w-[90vw] overflow-hidden rounded-xl border border-(--panel-border) bg-(--surface-base) shadow-2xl" onclick={(e) => e.stopPropagation()}>
+	<div
+		class="flex h-[70vh] w-[750px] max-w-[90vw] overflow-hidden rounded-xl border border-(--panel-border) bg-(--surface-base) shadow-2xl"
+		onclick={(e) => e.stopPropagation()}
+	>
 		<!-- Sidebar -->
 		<div class="flex w-48 shrink-0 flex-col bg-(--surface-sidebar) p-3">
 			<h3 class="mb-1 px-2.5 text-xs font-bold tracking-wider text-(--text-muted) uppercase">User Settings</h3>
 			<nav class="flex flex-col gap-0.5 overflow-y-auto">
 				{#each Object.entries(tabs) as [id, tab]}
 					<button
-						class="rounded px-2.5 py-1.5 text-left text-sm transition-colors {active === id ? 'bg-(--surface-hover) text-(--text-primary)' : 'text-(--text-secondary) hover:bg-(--surface-hover) hover:text-(--text-primary)'}"
-						onclick={() => active = id as Tabs}
+						class="rounded px-2.5 py-1.5 text-left text-sm transition-colors {active === id
+							? 'bg-(--surface-hover) text-(--text-primary)'
+							: 'text-(--text-secondary) hover:bg-(--surface-hover) hover:text-(--text-primary)'}"
+						onclick={() => (active = id as Tabs)}
 					>
 						{tab.label}
 					</button>
@@ -48,7 +57,10 @@
 
 				<button
 					class="rounded px-2.5 py-1.5 text-left text-sm text-(--danger) transition-colors hover:bg-(--surface-hover) hover:text-(--danger-hover)"
-					onclick={() => { user.signout(); onclose() }}
+					onclick={() => {
+						user.signout()
+						onclose()
+					}}
 				>
 					Log Out
 				</button>

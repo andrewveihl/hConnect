@@ -5,6 +5,7 @@
 SvelteKit SPA (`ssr=false`, `adapter-static`) with Firebase Auth + Firestore. Tailwind CSS v4 via Vite plugin. Svelte 5 with `experimental.async` enabled.
 
 **Layer separation is strict:**
+
 - `src/lib/firebase/` — Firebase SDK initialization only (app, auth, firestore instances). No business logic.
 - `src/lib/data/` — Reactive data classes that wrap Firestore subscriptions. **All Firestore reads and writes MUST go through these classes.** Components never import from `firebase/firestore` directly.
 - `src/routes/` — UI components consume data classes via getters; never call Firestore APIs.
@@ -19,25 +20,25 @@ import { collection, onSnapshot } from 'firebase/firestore'
 import { firestore } from '../firebase/firestore'
 
 export class ExampleState {
-  #data?: ExampleType[]
-  #subscribe: VoidFunction
+	#data?: ExampleType[]
+	#subscribe: VoidFunction
 
-  constructor(parentId: string) {
-    this.#subscribe = createSubscriber((update) => {
-      const col = collection(firestore, 'parent', parentId, 'children')
-      return onSnapshot(col, (snap) => {
-        this.#data = snap.docs.map((doc) => ({ ...doc.data(), id: doc.id }))
-        update()
-      })
-    })
-  }
+	constructor(parentId: string) {
+		this.#subscribe = createSubscriber((update) => {
+			const col = collection(firestore, 'parent', parentId, 'children')
+			return onSnapshot(col, (snap) => {
+				this.#data = snap.docs.map((doc) => ({ ...doc.data(), id: doc.id }))
+				update()
+			})
+		})
+	}
 
-  get current() {
-    this.#subscribe()
-    return this.#data
-  }
+	get current() {
+		this.#subscribe()
+		return this.#data
+	}
 
-  // Write methods go here (addDoc, updateDoc, deleteDoc)
+	// Write methods go here (addDoc, updateDoc, deleteDoc)
 }
 ```
 
@@ -76,13 +77,13 @@ Firestore uses `persistentLocalCache` with `persistentSingleTabManager({ forceOw
 
 ## Build & Dev Commands
 
-| Command | Purpose |
-|---------|---------|
-| `pnpm dev` | Dev server (HTTPS via mkcert) |
-| `pnpm build` | Static production build |
-| `pnpm check` | TypeScript + Svelte type checking |
-| `pnpm lint` | Prettier check |
-| `pnpm format` | Prettier format |
+| Command       | Purpose                           |
+| ------------- | --------------------------------- |
+| `pnpm dev`    | Dev server (HTTPS via mkcert)     |
+| `pnpm build`  | Static production build           |
+| `pnpm check`  | TypeScript + Svelte type checking |
+| `pnpm lint`   | Prettier check                    |
+| `pnpm format` | Prettier format                   |
 
 No test framework is configured. Run `pnpm check` to validate changes.
 

@@ -4,13 +4,13 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<script>
-			(function() {
-				var theme = localStorage.getItem('hconnect-theme') || 'dark';
-				var root = document.documentElement;
-				root.classList.remove('dark', 'midnight');
-				if (theme === 'dark') root.classList.add('dark');
-				else if (theme === 'midnight') root.classList.add('midnight');
-			})();
+			;(function () {
+				var theme = localStorage.getItem('hconnect-theme') || 'dark'
+				var root = document.documentElement
+				root.classList.remove('dark', 'midnight')
+				if (theme === 'dark') root.classList.add('dark')
+				else if (theme === 'midnight') root.classList.add('midnight')
+			})()
 		</script>
 		<link rel="preconnect" href="https://firestore.googleapis.com" />
 		<link rel="preconnect" href="https://identitytoolkit.googleapis.com" />
@@ -20,7 +20,7 @@
 		%sveltekit.head%
 	</head>
 	<title>hConnect</title>
-	<body data-sveltekit-preload-data="hover" class="h-screen overflow-hidden font-sans antialiased bg-[--surface-base]">
+	<body data-sveltekit-preload-data="hover" class="h-screen overflow-hidden bg-[--surface-base] font-sans antialiased">
 		<div style="display: contents">%sveltekit.body%</div>
 	</body>
 </html>

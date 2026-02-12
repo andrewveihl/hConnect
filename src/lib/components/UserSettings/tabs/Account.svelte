@@ -11,7 +11,9 @@
 		{#if photoURL}
 			<img src={photoURL} alt={displayName} class="h-16 w-16 rounded-full object-cover" referrerpolicy="no-referrer" />
 		{:else}
-			<div class="flex h-16 w-16 items-center justify-center rounded-full bg-(--accent) text-xl font-bold text-(--text-on-accent)">
+			<div
+				class="flex h-16 w-16 items-center justify-center rounded-full bg-(--accent) text-xl font-bold text-(--text-on-accent)"
+			>
 				{displayName.charAt(0).toUpperCase()}
 			</div>
 		{/if}

@@ -178,7 +178,7 @@
 	/* Borders — visible teal outlines */
 	--border-subtle: rgba(41, 224, 200, 0.18);
 	--border-default: rgba(41, 224, 200, 0.25);
-	--border-input: rgba(41, 224, 200, 0.30);
+	--border-input: rgba(41, 224, 200, 0.3);
 	--border-input-focus: #29e0c8;
 
 	/* Status */

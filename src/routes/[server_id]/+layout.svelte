@@ -9,9 +9,13 @@
 </script>
 
 <!-- 2. CHANNEL SIDEBAR -->
-<div class="flex w-64 flex-shrink-0 flex-col border-l border-r border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)">
+<div
+	class="flex w-64 flex-shrink-0 flex-col border-r border-l border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)"
+>
 	<!-- Header -->
-	<div class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)">
+	<div
+		class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)"
+	>
 		<h1 class="h-6 truncate text-lg font-bold text-(--text-primary)">{server?.name}</h1>
 		<svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"
 			><path
@@ -24,7 +28,9 @@
 	<div class="hide-scrollbar flex-1 overflow-y-auto py-4">
 		<!-- Channels Section -->
 		<div class="mb-4 px-4">
-			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase">
+			<div
+				class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase"
+			>
 				<span>Channels</span>
 				<span class="cursor-pointer text-lg">+</span>
 			</div>
@@ -32,8 +38,8 @@
 				{#each channels.current as channel (channel.id)}
 					<li
 						class="cursor-pointer rounded px-2 py-1 {channel.id === page.params.channel_id
-						? 'bg-(--channel-active) text-(--channel-text-active)'
-						: 'hover:bg-(--border-subtle)'}"
+							? 'bg-(--channel-active) text-(--channel-text-active)'
+							: 'hover:bg-(--border-subtle)'}"
 					>
 						<a class="block h-full w-full" href="/{page.params.server_id}/{channel.id}">
 							# {channel.name}

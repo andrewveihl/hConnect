@@ -4,12 +4,10 @@
 	<header class="flex h-14 flex-shrink-0 items-center justify-between border-b border-(--border-default) px-6">
 		<div class="flex items-center space-x-2">
 			<span class="text-lg font-bold text-(--text-primary)"></span>
-			<span class="text-(--text-muted)">
-			</span>
+			<span class="text-(--text-muted)"> </span>
 		</div>
 		<div class="flex items-center space-x-4 text-(--text-muted)">
-			<div class="relative">
-			</div>
+			<div class="relative"></div>
 		</div>
 	</header>
 

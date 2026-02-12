@@ -2,9 +2,13 @@
 </script>
 
 <!-- 2. CHANNEL SIDEBAR -->
-<div class="flex w-64 flex-shrink-0 flex-col border-l border-r border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)">
+<div
+	class="flex w-64 flex-shrink-0 flex-col border-r border-l border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)"
+>
 	<!-- Header -->
-	<div class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)">
+	<div
+		class="flex cursor-pointer items-center justify-between border-b border-(--border-subtle) p-4 hover:bg-(--surface-hover)"
+	>
 		<!-- svelte-ignore a11y_missing_content -->
 		<h1 class="truncate text-lg font-bold text-(--text-primary)"></h1>
 		<svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"
@@ -18,7 +22,9 @@
 	<div class="flex-1 overflow-y-auto py-4">
 		<!-- Channels Section -->
 		<div class="mb-4 px-4">
-			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase">
+			<div
+				class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase"
+			>
 				<span>Channels</span>
 				<span class="cursor-pointer text-lg">+</span>
 			</div>
@@ -27,7 +33,9 @@
 
 		<!-- Direct Messages Section -->
 		<div class="px-4">
-			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase">
+			<div
+				class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase"
+			>
 				<span>Direct Messages</span>
 				<span class="cursor-pointer text-lg">+</span>
 			</div>

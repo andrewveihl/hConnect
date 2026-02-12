@@ -12,7 +12,6 @@
 {#if user.current === null}
 	<div id="login-screen" class="flex h-full flex-col items-center justify-center bg-(--surface-base) px-4">
 		<div class="mb-10 flex flex-col items-center">
-
 			<h1 class="mb-3 text-4xl font-bold text-(--text-primary)">Sign in to hConnect</h1>
 		</div>
 
@@ -42,12 +41,10 @@
 			<button
 				class="flex w-full items-center justify-center space-x-3 rounded-md border-2 border-(--border-default) bg-(--surface-card) py-3 font-bold text-(--text-primary) transition-all hover:border-(--accent)"
 			>
-
 				<span>Sign in with Apple</span>
 			</button>
-
-			</div>
 		</div>
+	</div>
 
 	<!-- MAIN APP INTERFACE (Initially Hidden) -->
 	<div id="app-interface" class="flex hidden h-full">
