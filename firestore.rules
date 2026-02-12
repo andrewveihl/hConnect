@@ -1,0 +1,1073 @@
+
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------------- Core helpers ---------------- */
+    /* ---------------- Core helpers ---------------- */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(serverId) {
+      return isSuperAdminUser()
+        || (
+          isSignedIn()
+            && (
+              exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid))
+              || exists(/databases/$(database)/documents/profiles/$(request.auth.uid)/servers/$(serverId))
+            )
+        );
+    }
+
+    // Owner: accept ownerId or (legacy) owner
+    function isServerOwner(serverId) {
+      return isSuperAdminUser()
+        || (isSignedIn()
+          && exists(/databases/$(database)/documents/servers/$(serverId))
+          && (
+            get(/databases/$(database)/documents/servers/$(serverId)).data.ownerId == request.auth.uid ||
+            get(/databases/$(database)/documents/servers/$(serverId)).data.owner == request.auth.uid
+          ));
+    }
+
+    function permKeyName(perm) {
+      return perm == "manageServer" ? "MANAGE_SERVER"
+        : perm == "manageRoles" ? "MANAGE_ROLES"
+        : perm == "manageChannels" ? "MANAGE_CHANNELS"
+        : perm == "manageMessages" ? "MANAGE_MESSAGES"
+        : perm == "viewServerMeta" ? "VIEW_SERVER_META"
+        : perm == "viewPublicChannels" ? "VIEW_PUBLIC_CHANNELS"
+        : perm == "viewMembers" ? "VIEW_MEMBERS"
+        : perm == "readMessageHistory" ? "READ_MESSAGE_HISTORY"
+        : perm == "viewMemberList" ? "VIEW_MEMBER_LIST"
+        : perm == "viewServerHome" ? "VIEW_SERVER_HOME"
+        : perm == "viewChannels" ? "VIEW_CHANNEL"
+        : perm == "sendMessages" ? "SEND_MESSAGES"
+        : perm == "connectVoice" ? "CONNECT_VOICE"
+        : perm == "speakVoice" ? "SPEAK_VOICE"
+        : perm;
+    }
+
+    function memberData(serverId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data
+        : {};
+    }
+
+    function roleDocExists(serverId, roleId) {
+      return roleId is string
+        && exists(/databases/$(database)/documents/servers/$(serverId)/roles/$(roleId));
+    }
+
+    function roleDoc(serverId, roleId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)/roles/$(roleId));
+    }
+
+    // Prefer explicit defaultRoleId, fall back to everyoneRoleId for legacy data.
+    function serverDefaultRoleId(serverId) {
+      let serverPath = /databases/$(database)/documents/servers/$(serverId);
+      let hasServer = exists(serverPath);
+      let data = hasServer ? get(serverPath).data : {};
+      return (hasServer && data.defaultRoleId is string)
+        ? data.defaultRoleId
+        : (hasServer && data.everyoneRoleId is string)
+          ? data.everyoneRoleId
+          : null;
+    }
+
+    // Legacy compatibility: expose explicit everyoneRoleId even when defaultRoleId is present.
+    function serverEveryoneRoleId(serverId) {
+      let serverPath = /databases/$(database)/documents/servers/$(serverId);
+      let hasServer = exists(serverPath);
+      let data = hasServer ? get(serverPath).data : {};
+      return (hasServer && data.everyoneRoleId is string) ? data.everyoneRoleId : null;
+    }
+
+    function roleAllowsPerm(serverId, roleId, permKey) {
+      return roleDocExists(serverId, roleId)
+        && (
+          (
+            roleDoc(serverId, roleId).data.permissions is map
+            && roleDoc(serverId, roleId).data.permissions[permKey] == true
+          )
+          || (
+            permKey == "VIEW_CHANNEL"
+            && roleDoc(serverId, roleId).data.permissionBits is number
+            && roleDoc(serverId, roleId).data.permissionBits >= 0
+          )
+        );
+    }
+
+    function isDefaultRoleChangeOnly() {
+      return request.resource != null
+        && resource != null
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["defaultRoleId"]);
+    }
+
+    function isValidDefaultRole(serverId) {
+      return request.resource != null
+        && request.resource.data.defaultRoleId is string
+        && roleDocExists(serverId, request.resource.data.defaultRoleId)
+        && roleDoc(serverId, request.resource.data.defaultRoleId).data.isOwnerRole != true;
+    }
+
+    // Legacy + new permissions compatibility: checks perms, then permissions map, then role-based fallbacks.
+    function hasPerm(serverId, perm) {
+      let mem = memberData(serverId);
+
+      let legacy = mem.perms is map && mem.perms[perm] == true;
+
+      let key = permKeyName(perm);
+      let modern = mem.permissions is map && mem.permissions[key] == true;
+
+      // Use the configured default role (and legacy everyone role) so baseline permissions are honored even if member docs lag.
+      let defaultRole = serverDefaultRoleId(serverId);
+      let everyoneRole = serverEveryoneRoleId(serverId);
+      let rolesAllow = roleAllowsPerm(serverId, defaultRole, key)
+        || (everyoneRole != defaultRole && roleAllowsPerm(serverId, everyoneRole, key));
+
+      // Baseline allowances for members.
+      let defaultAllow = (
+        perm == "viewChannels" ||
+        perm == "sendMessages" ||
+        perm == "readMessageHistory" ||
+        perm == "viewMemberList" ||
+        perm == "viewServerHome" ||
+        perm == "connectVoice" ||
+        perm == "speakVoice"
+      );
+
+      // Guest allowances for public servers.
+      let guestAllow = (
+        perm == "viewChannels" ||
+        perm == "viewPublicChannels" ||
+        perm == "sendMessages" ||
+        perm == "readMessageHistory" ||
+        perm == "viewMemberList" ||
+        perm == "viewServerHome" ||
+        perm == "connectVoice"
+      );
+
+      // Super admins always allowed. Members get member allowances. Signed-in guests get explicit/guest allowances.
+      return isSuperAdminUser()
+        || (isMember(serverId) && (legacy || modern || rolesAllow || defaultAllow))
+        || (isSignedIn() && (rolesAllow || guestAllow));
+    }
+
+    function isServerAdmin(serverId) {
+      return isSuperAdminUser()
+        || isServerOwner(serverId)
+        || hasPerm(serverId, "manageServer")
+        || hasPerm(serverId, "manageRoles");
+    }
+
+    function memberRoleIds(serverId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.roleIds is list
+        ? get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.roleIds
+        : [];
+    }
+
+    function channelDocExists(serverId, channelId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId));
+    }
+
+    function channelDoc(serverId, channelId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId));
+    }
+
+    // Private channel gating: admins allowed; private channels require overlap between allowedRoleIds and member/default role.
+    // Public channels are open to signed-in users.
+    function channelAllowsMember(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (
+          channelDocExists(serverId, channelId)
+            && (
+              channelIsPublic(serverId, channelId)
+              || (
+                channelDoc(serverId, channelId).data.allowedRoleIds is list
+                && channelDoc(serverId, channelId).data.allowedRoleIds.hasAny(
+                  (
+                    memberRoleIds(serverId) is list
+                      ? memberRoleIds(serverId)
+                      : []
+                  )
+                    .concat(defaultRoleId(serverId) != null ? [defaultRoleId(serverId)] : [])
+                    .concat(serverEveryoneRoleId(serverId) != null ? [serverEveryoneRoleId(serverId)] : [])
+                )
+              )
+            )
+        );
+    }
+
+    function channelIsPublic(serverId, channelId) {
+      return channelDocExists(serverId, channelId)
+        && channelDoc(serverId, channelId).data.isPrivate != true;
+    }
+
+    function defaultRoleId(serverId) {
+      return serverDefaultRoleId(serverId);
+    }
+
+    function serverIsPublic(serverId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId))
+        && get(/databases/$(database)/documents/servers/$(serverId)).data.isPublic == true;
+    }
+
+    // Member list visibility is permissioned; public servers stay readable by signed-in users.
+    // Any server member can view the member list.
+    function canViewMembers(serverId) {
+      return isSuperAdminUser()
+        || (isSignedIn() && serverIsPublic(serverId))
+        || isMember(serverId);
+    }
+
+    // Baseline visibility: signed-in users can see public servers; members/admins see their servers.
+    function canViewServerMeta(serverId) {
+      return isSuperAdminUser()
+        || serverIsPublic(serverId)
+        || (isMember(serverId) && (hasPerm(serverId, "viewServerMeta") || hasPerm(serverId, "viewServerHome") || hasPerm(serverId, "viewChannels")));
+    }
+
+    function canViewChannel(serverId, channelId) {
+      return (
+        (channelId != null && channelIsPublic(serverId, channelId))
+          ? true
+          : (
+            channelId != null
+              ? (channelAllowsMember(serverId, channelId) && isMember(serverId))
+              : (isMember(serverId) || isServerAdmin(serverId))
+          )
+      );
+    }
+    function canSendInChannel(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (canViewChannel(serverId, channelId) && hasPerm(serverId, "sendMessages"));
+    }
+    function canConnectVoice(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (
+          canViewChannel(serverId, channelId)
+          && (hasPerm(serverId, "connectVoice") || channelIsPublic(serverId, channelId))
+        );
+    }
+    function canSpeakVoice(serverId, channelId) {
+      return isServerAdmin(serverId)
+        || (canViewChannel(serverId, channelId) && (hasPerm(serverId, "speakVoice") || hasPerm(serverId, "connectVoice")));
+    }
+
+    // Ticket AI access gates
+    function ticketAiSettingsPath(serverId) {
+      return /databases/$(database)/documents/servers/$(serverId)/ticketAiSettings/current;
+    }
+
+    function ticketAiAllowedRoleIds(serverId) {
+      let settingsDoc = ticketAiSettingsPath(serverId);
+      return exists(settingsDoc)
+        && get(settingsDoc).data.allowedRoleIds is list
+        ? get(settingsDoc).data.allowedRoleIds
+        : [];
+    }
+
+    function memberHasTicketAiAccess(serverId) {
+      return isSignedIn()
+        && memberRoleIds(serverId) is list
+        && ticketAiAllowedRoleIds(serverId).hasAny(memberRoleIds(serverId));
+    }
+
+    function ticketAiStaffMemberIds(serverId) {
+      let settingsDoc = ticketAiSettingsPath(serverId);
+      return exists(settingsDoc)
+        && get(settingsDoc).data.staffMemberIds is list
+        ? get(settingsDoc).data.staffMemberIds
+        : [];
+    }
+
+    function isTicketAiStaffMember(serverId) {
+      return isSignedIn()
+        && ticketAiStaffMemberIds(serverId).hasAny([request.auth.uid]);
+    }
+
+    function canViewTicketAi(serverId) {
+      return isSuperAdminUser()
+        || isServerOwner(serverId)
+        || isServerAdmin(serverId)
+        || memberHasTicketAiAccess(serverId)
+        || isTicketAiStaffMember(serverId);
+    }
+
+    function canManageTicketAi(serverId) {
+      return isSuperAdminUser()
+        || isServerOwner(serverId)
+        || isServerAdmin(serverId)
+        || memberHasTicketAiAccess(serverId);
+    }
+
+    function currentUserEmail() {
+      return isSignedIn() && request.auth.token.email is string
+        ? request.auth.token.email
+        : null;
+    }
+
+    function superAdminEmails() {
+      return exists(/databases/$(database)/documents/appConfig/superAdmins)
+        && get(/databases/$(database)/documents/appConfig/superAdmins).data.emails is map
+        ? get(/databases/$(database)/documents/appConfig/superAdmins).data.emails
+        : {};
+    }
+
+    function isDefaultSuperAdminEmail(email) {
+      return email != null && email.matches('(?i)^andrew@healthspaces\\.com$');
+    }
+
+    function isSuperAdminUser() {
+      let email = currentUserEmail();
+      return email != null
+        && (isDefaultSuperAdminEmail(email) || superAdminEmails()[email] == true);
+    }
+
+    // Collection group rules for Super Admin cross-server queries
+    // These allow super admins to use collectionGroup queries for admin dashboards
+    match /{path=**}/ticketAiIssues/{issueId} {
+      allow read: if isSuperAdminUser();
+    }
+
+    match /{path=**}/ticketAiSettings/{settingsId} {
+      allow read: if isSuperAdminUser();
+    }
+
+    match /notifications/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+      match /items/{itemId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    function threadDocExists(serverId, channelId, threadId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId));
+    }
+
+    function threadDoc(serverId, channelId, threadId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId));
+    }
+
+    function threadHasMember(serverId, channelId, threadId, uid) {
+      return threadDocExists(serverId, channelId, threadId)
+        && threadDoc(serverId, channelId, threadId).data.memberUids is list
+        && uid in threadDoc(serverId, channelId, threadId).data.memberUids;
+    }
+
+    function hasThreadPermission(serverId, channelId, threadId, perm) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId)/permissions/$(request.auth.uid))
+        && get(/databases/$(database)/documents/servers/$(serverId)/channels/$(channelId)/threads/$(threadId)/permissions/$(request.auth.uid)).data[perm] == true;
+    }
+
+    function canReadThread(serverId, channelId, threadId) {
+      return canViewChannel(serverId, channelId)
+        || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
+        // Also respect explicit per-profile thread membership docs used by the client.
+        || (isSignedIn()
+          && exists(/databases/$(database)/documents/profiles/$(request.auth.uid)/threadMembership/$(threadId)))
+        || hasThreadPermission(serverId, channelId, threadId, "canRead");
+    }
+
+    function canPostThread(serverId, channelId, threadId) {
+      return canSendInChannel(serverId, channelId)
+        || (isSignedIn() && threadHasMember(serverId, channelId, threadId, request.auth.uid))
+        || hasThreadPermission(serverId, channelId, threadId, "canPost");
+    }
+
+    function isReactionOnlyUpdate() {
+      return request.resource != null
+        && resource != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["reactions"]);
+    }
+
+    // Allow DM authors to edit only their message text/content while preserving author fields.
+    function isDmTextEdit() {
+      return request.resource != null
+        && resource != null
+        && request.auth != null
+        && request.auth.uid == resource.data.uid
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["text", "content", "plainTextContent", "editedAt"])
+        && request.resource.data.text is string
+        && request.resource.data.text != ''
+        && request.resource.data.content == request.resource.data.text
+        && request.resource.data.plainTextContent == request.resource.data.text;
+    }
+
+    /* ---------------- DM helpers (legacy tolerant) ---------------- */
+
+    function docHasParticipant(docData, uid) {
+      return (
+        (docData.participants is list && uid in docData.participants) ||
+        (docData.participantUids is list && uid in docData.participantUids) ||
+        (
+          docData.participantsMap is map &&
+          docData.participantsMap[uid] != null &&
+          docData.participantsMap[uid] != false
+        )
+      );
+    }
+
+    // Check if user is a group admin (creator or in adminUids)
+    function isGroupDMAdmin(docData, uid) {
+      return docData.createdBy == uid
+        || (docData.adminUids is list && uid in docData.adminUids);
+    }
+
+    // Validate group settings update - participants can update name, icon, description
+    // More sensitive fields like adminUids require admin privileges
+    function isValidGroupSettingsUpdate() {
+      let allowedFields = ['name', 'iconURL', 'description', 'updatedAt', 'pinnedMessageId', 'allowMemberInvites'];
+      let adminOnlyFields = ['adminUids', 'createdBy'];
+      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
+      
+      // If changing admin-only fields, must be an admin
+      let hasAdminOnlyChanges = changedKeys.hasAny(adminOnlyFields.toSet());
+      
+      return !hasAdminOnlyChanges || isGroupDMAdmin(resource.data, request.auth.uid);
+    }
+
+    // Validate mute update - user can only update their own mute status
+    function isValidMuteUpdate() {
+      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
+      // Only allow mutedBy changes along with updatedAt
+      return changedKeys.hasOnly(['mutedBy', 'updatedAt']);
+    }
+
+    function newDMIsValidCreate(d) {
+      return isSignedIn() && (
+        (d.participants is list &&
+         d.participants.size() >= 2 &&
+         (request.auth.uid in d.participants)) ||
+        (d.participantUids is list &&
+         d.participantUids.size() >= 2 &&
+         (request.auth.uid in d.participantUids)) ||
+        (d.participantsMap is map &&
+         d.participantsMap.size() >= 2 &&
+         (d.participantsMap[request.auth.uid] != null &&
+          d.participantsMap[request.auth.uid] != false))
+      );
+    }
+
+    function keyContainsUid(key, uid) {
+      return (key is string) && key.matches('(^|_)' + uid + '(_|$)');
+    }
+
+    function dmHasParticipantOrKey_resource(uid) {
+      return isSignedIn()
+        && resource != null
+        && (
+          docHasParticipant(resource.data, uid) ||
+          keyContainsUid(resource.data.key, uid)
+        );
+    }
+
+    function dmHasParticipantOrKey_byId(threadId, uid) {
+      return isSignedIn()
+        && (
+          (
+            exists(/databases/$(database)/documents/dms/$(threadId)) &&
+            (
+              docHasParticipant(
+                get(/databases/$(database)/documents/dms/$(threadId)).data, uid
+              ) ||
+              keyContainsUid(
+                get(/databases/$(database)/documents/dms/$(threadId)).data.key, uid
+              )
+            )
+          )
+          ||
+          (
+            !exists(/databases/$(database)/documents/dms/$(threadId)) &&
+            keyContainsUid(threadId, uid)
+          )
+        );
+    }
+
+    /* ---------------- Profiles ---------------- */
+    match /profiles/{uid} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
+      allow delete: if false;
+
+      match /servers/{serverId} {
+        allow read, write: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
+        allow delete: if isSignedIn()
+          && (
+            request.auth.uid == uid ||
+            isServerOwner(serverId) ||
+            isServerAdmin(serverId) ||
+            isSuperAdminUser()
+          );
+      }
+
+      match /dms/{threadId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /reads/{readId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /presence/{presenceId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /devices/{deviceId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /notificationSettings/{docId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /activity/{activityId} {
+        allow read, write, delete: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /notes/{noteId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /threadMembership/{threadId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // Check if user has a pending invite to the server (global invites collection)
+    // Invite ID format: serverId__toUid
+    function hasPendingInviteToServer(serverId, uid) {
+      let inviteDocId = serverId + '__' + uid;
+      let invitePath = /databases/$(database)/documents/invites/$(inviteDocId);
+      return exists(invitePath) && get(invitePath).data.status == 'pending';
+    }
+
+    /* ---------------- Servers tree ---------------- */
+    match /servers/{serverId} {
+      // Server metadata is readable by any signed-in user.
+      // Sensitive operations (channels, members, messages) have their own permission rules.
+      allow read: if isSignedIn();
+      allow create: if isSuperAdminUser()
+        || (isSignedIn()
+        && (request.resource.data.ownerId == request.auth.uid || request.resource.data.owner == request.auth.uid));
+      allow update: if isServerOwner(serverId)
+        || (
+          isServerAdmin(serverId)
+          && isDefaultRoleChangeOnly()
+          && isValidDefaultRole(serverId)
+        );
+      allow delete: if isServerOwner(serverId);
+
+      match /roles/{roleId} {
+        allow read: if true;
+        allow create, update, delete: if isServerAdmin(serverId);
+      }
+
+      match /categories/{categoryId} {
+        // Members can read categories; admins/manageChannels can manage them
+        allow read: if isMember(serverId) || serverIsPublic(serverId);
+        allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
+      }
+
+      match /members/{uid} {
+        // Read: members can see other members, users can always read their own doc (even if it doesn't exist)
+        allow read: if isSignedIn() && (request.auth.uid == uid || canViewMembers(serverId));
+        // Create/Update own membership: user can join a server if they're signed in
+        // Super admins can force-add any user to any server
+        allow create: if isSignedIn() && (request.auth.uid == uid || isSuperAdminUser());
+        allow update: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId) || isSuperAdminUser());
+        allow delete: if isServerAdmin(serverId) || isSuperAdminUser();
+      }
+
+      match /presence/{uid} {
+        allow read: if isSignedIn()
+          && (
+            uid == request.auth.uid
+            || isMember(serverId)
+            || serverIsPublic(serverId)
+          );
+        allow create, update: if isSignedIn()
+          && request.auth.uid == uid
+          && (isMember(serverId) || serverIsPublic(serverId));
+        allow delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
+      }
+
+      match /channels/{channelId} {
+        // Members/admins always; anyone signed-in can read public channels.
+        allow read: if isMember(serverId)
+                    || isServerAdmin(serverId)
+                    || (isSignedIn() && channelIsPublic(serverId, channelId));
+        allow create, update, delete: if isServerAdmin(serverId) || hasPerm(serverId, "manageChannels");
+
+        match /messages/{messageId} {
+          // TEMP: Super permissive for debugging - any signed in user can read/write
+          allow read: if isSignedIn();
+          
+          allow create: if isSignedIn()
+            && (
+              request.resource.data.uid == request.auth.uid
+              || request.resource.data.authorId == request.auth.uid
+            );
+          allow update: if isSuperAdminUser()
+            // Allow reactions from any server member who can access the channel
+            // For private channels: member must have their role in channel's allowedRoleIds
+            // Simplified: if user is a member and the update is only reactions, allow it
+            || (isSignedIn() && isMember(serverId) && isReactionOnlyUpdate())
+            // Allow message author to edit their own message
+            || (isSignedIn()
+              && canViewChannel(serverId, channelId)
+              && request.auth.uid == resource.data.uid)
+            || (isSignedIn() && hasPerm(serverId, "manageMessages"));
+          allow delete: if isSuperAdminUser()
+            || (isSignedIn() && hasPerm(serverId, "manageMessages"))
+            || (isSignedIn() && request.auth.uid == resource.data.uid);
+        }
+
+        match /pinned/{pinId} {
+          // Pinned items are visible to anyone who can view the channel
+          allow read: if isSignedIn() && canViewChannel(serverId, channelId);
+          // Only server owners and admins can pin/unpin
+          allow create, update, delete: if isServerOwner(serverId) || isServerAdmin(serverId);
+        }
+
+        match /members/{uid} {
+          allow read: if canViewChannel(serverId, channelId)
+            || (isMember(serverId) && hasPerm(serverId, "viewChannels"));
+          allow create: if isSignedIn() && request.auth.uid == uid;
+          allow update, delete: if (isSignedIn() && request.auth.uid == uid) || isServerAdmin(serverId);
+        }
+
+        match /threads/{threadId} {
+          // Allow read for any signed-in user (thread access is controlled at UI level)
+          allow read: if isSignedIn();
+          // Any signed-in user can create a thread if they set themselves as creator
+          allow create: if isSignedIn()
+            && request.resource.data.createdBy == request.auth.uid;
+          // Allow update for any signed-in user (needed for batch message operations)
+          allow update: if isSignedIn();
+          allow delete: if isServerAdmin(serverId);
+
+          match /messages/{messageId} {
+            // Allow read/create for any signed-in user
+            allow read: if isSignedIn();
+            allow create: if isSignedIn();
+            allow update, delete: if false;
+          }
+
+          match /permissions/{uid} {
+            allow read: if isSignedIn() && (request.auth.uid == uid || isServerAdmin(serverId));
+            // Any signed-in user can create/update thread permissions
+            allow create, update: if isSignedIn();
+            allow delete: if isServerAdmin(serverId);
+          }
+
+          // Typing indicators for thread messages
+          match /typing/{uid} {
+            allow read: if isSignedIn();
+            allow create, update: if isSignedIn() && request.auth.uid == uid;
+            allow delete: if isSignedIn() && request.auth.uid == uid;
+          }
+        }
+
+        // Typing indicators for channel messages
+        match /typing/{uid} {
+          allow read: if isSignedIn() && canViewChannel(serverId, channelId);
+          allow create, update: if isSignedIn() && request.auth.uid == uid && canViewChannel(serverId, channelId);
+          allow delete: if isSignedIn() && request.auth.uid == uid;
+        }
+
+        match /calls/{callId} {
+          // Allow any signed-in user to participate in calls (public voice access).
+          allow read: if isSignedIn();
+          allow create, update: if isSignedIn();
+          allow delete: if isSignedIn() || isServerAdmin(serverId);
+
+          match /offerCandidates/{candidateId} {
+            allow read: if isSignedIn();
+            allow create, delete: if isSignedIn();
+            allow update: if false;
+          }
+
+          match /answerCandidates/{candidateId} {
+            allow read: if isSignedIn();
+            allow create, delete: if isSignedIn();
+            allow update: if false;
+          }
+
+          match /revisions/{revisionId} {
+            allow read: if isSignedIn();
+            allow create, update, delete: if isSignedIn();
+
+            match /offerCandidates/{candidateId} {
+              allow read: if isSignedIn();
+              allow create, delete: if isSignedIn();
+              allow update: if false;
+            }
+
+            match /answerCandidates/{candidateId} {
+              allow read: if isSignedIn();
+              allow create, delete: if isSignedIn();
+              allow update: if false;
+            }
+          }
+
+          match /descriptions/{descriptionId} {
+            allow read: if isSignedIn();
+            allow create, update, delete: if isSignedIn();
+          }
+
+          match /participants/{uid} {
+            allow read: if isSignedIn();
+            allow create, update: if isSignedIn() && request.auth.uid == uid;
+            allow delete: if isSignedIn() && request.auth.uid == uid || isServerAdmin(serverId);
+          }
+
+          // Thumbnails for lobby preview - participants publish video snapshots
+          match /thumbnails/{uid} {
+            allow read: if isSignedIn();
+            allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
+          }
+        }
+      }
+
+      // Ticket AI (Issue analytics)
+      match /ticketAiSettings/{settingsId} {
+        allow read: if canViewTicketAi(serverId);
+        allow create, update: if canManageTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
+      }
+
+      match /ticketAiIssues/{issueId} {
+        allow read: if canViewTicketAi(serverId);
+        // Staff members who can view can also claim/update issues
+        // Creates are handled by backend triggers, but updates are allowed for staff
+        allow create: if isSuperAdminUser();
+        allow update: if canViewTicketAi(serverId);
+        allow delete: if isSuperAdminUser();
+      }
+
+      match /ticketAiAnalytics/{timeRangeKey} {
+        allow read: if canViewTicketAi(serverId);
+        // Allow users who can view to also cache analytics
+        allow create, update: if canViewTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
+      }
+
+      match /ticketAiReports/{reportId} {
+        allow read: if canViewTicketAi(serverId);
+        allow create, update: if canManageTicketAi(serverId);
+        allow delete: if isSuperAdminUser() || isServerOwner(serverId);
+      }
+
+      // Per-server Slack integration config
+      match /integrations/slack {
+        // Server admins/owners can read/write Slack config
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
+
+      // Per-server Slack workspaces (contains tokens)
+      match /integrations/slack/workspaces/{workspaceId} {
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
+
+      // Per-server Slack bridges
+      match /integrations/slack/bridges/{bridgeId} {
+        allow read: if isServerAdmin(serverId) || isServerOwner(serverId);
+        allow write: if isServerAdmin(serverId) || isServerOwner(serverId);
+      }
+    }
+
+    /* ---------------- Direct Messages (deterministic id tolerant) ---------------- */
+    match /dms/{threadId} {
+      allow read, update: if isSuperAdminUser()
+        || dmHasParticipantOrKey_resource(request.auth.uid)
+        || (
+          !exists(/databases/$(database)/documents/dms/$(threadId)) &&
+          keyContainsUid(threadId, request.auth.uid)
+        );
+
+      allow create: if isSuperAdminUser() || newDMIsValidCreate(request.resource.data);
+
+      allow delete: if isSuperAdminUser();
+
+      match /messages/{messageId} {
+        allow read: if isSuperAdminUser() || dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow create: if isSuperAdminUser()
+          || (isSignedIn()
+          && request.resource.data.uid == request.auth.uid
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
+        allow update: if isSuperAdminUser()
+          || (isSignedIn()
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid)
+          && (isReactionOnlyUpdate() || isDmTextEdit()));
+        allow delete: if isSuperAdminUser();
+      }
+
+      match /reads/{uid} {
+        allow read, write: if isSuperAdminUser()
+          || (isSignedIn()
+          && uid == request.auth.uid
+          && dmHasParticipantOrKey_byId(threadId, request.auth.uid));
+      }
+
+      // Typing indicators for DM threads
+      match /typing/{uid} {
+        allow read: if isSuperAdminUser() || dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow create, update: if isSignedIn() && request.auth.uid == uid && dmHasParticipantOrKey_byId(threadId, request.auth.uid);
+        allow delete: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    /* ---------------- Joins ---------------- */
+    match /joins/{joinId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    /* ---------------- User settings (slackAvatarUrl, etc.) ---------------- */
+    match /users/{uid}/settings/{settingDoc} {
+      // Users can read and write their own settings
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    /* ---------------- User mailbox invites ---------------- */
+    match /users/{uid} {
+      match /invites/{inviteId} {
+        allow read: if isSignedIn() && request.auth.uid == uid;
+
+        allow create: if isSignedIn()
+          && request.resource.data.type == 'channel'
+          && request.resource.data.serverId is string
+          && request.resource.data.channelId is string
+          && request.resource.data.serverName is string
+          && request.resource.data.channelName is string
+          && request.resource.data.invitedBy == request.auth.uid
+          && request.resource.data.status == 'pending'
+          && (isServerOwner(request.resource.data.serverId) || isServerAdmin(request.resource.data.serverId));
+
+        allow update: if isSignedIn()
+          && request.auth.uid == uid
+          && resource.data.type == 'channel'
+          && request.resource.data.type == resource.data.type
+          && request.resource.data.serverId == resource.data.serverId
+          && request.resource.data.channelId == resource.data.channelId
+          && request.resource.data.serverName == resource.data.serverName
+          && request.resource.data.channelName == resource.data.channelName
+          && request.resource.data.invitedBy == resource.data.invitedBy
+          && request.resource.data.status in ['pending','accepted','declined'];
+
+        allow delete: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    /* ---------------- Optional global invites index ---------------- */
+    match /invites/{inviteId} {
+      allow read: if isSignedIn()
+        && (
+          resource.data.toUid == request.auth.uid ||
+          isServerOwner(resource.data.serverId) ||
+          isServerAdmin(resource.data.serverId)
+        );
+
+      allow create: if isSignedIn()
+        && request.resource.data.serverId is string
+        && request.resource.data.toUid   is string
+        && request.resource.data.status  == 'pending'
+        && inviteId == (request.resource.data.serverId + '__' + request.resource.data.toUid)
+        && (isServerOwner(request.resource.data.serverId) || isServerAdmin(request.resource.data.serverId))
+        && !exists(/databases/$(database)/documents/invites/$(inviteId));
+
+      // Allow recipient to accept/decline their invite (may include acceptedAt timestamp)
+      allow update: if isSignedIn()
+        && resource.data.toUid == request.auth.uid
+        && request.resource.data.serverId == resource.data.serverId
+        && request.resource.data.toUid == resource.data.toUid
+        && request.resource.data.status in ['accepted','declined']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt']);
+
+      allow update: if isSignedIn()
+        && (isServerOwner(resource.data.serverId) || isServerAdmin(resource.data.serverId))
+        && request.resource.data.serverId == resource.data.serverId
+        && request.resource.data.toUid == resource.data.toUid
+        && resource.data.status in ['accepted','declined']
+        && request.resource.data.status == 'pending';
+
+      allow delete: if isSignedIn()
+        && (resource.data.toUid == request.auth.uid
+            || isServerOwner(resource.data.serverId)
+            || isServerAdmin(resource.data.serverId));
+    }
+
+    /* ---------------- Optional top-level presence ---------------- */
+    match /presence/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create, update, delete: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    /* ---------------- Voice debug sandbox ---------------- */
+    match /debugCalls/{sessionId} {
+      allow read, create, update, delete: if isSignedIn();
+
+      match /{document=**} {
+        allow read, create, update, delete: if isSignedIn();
+      }
+    }
+
+    /* ---------------- App Config / Super Admin ---------------- */
+    match /appConfig/{configId} {
+      // Allow all signed-in users to read customization (themes, splash) and featureFlags so they apply globally
+      allow read: if isSignedIn() && (configId == "superAdmins" || configId == "customization" || configId == "featureFlags" || isSuperAdminUser());
+      allow write: if isSuperAdminUser();
+
+      // User Groups subcollection for bulk server assignments
+      match /groups/{groupId} {
+        allow read, write: if isSuperAdminUser();
+      }
+    }
+
+    /* ---------------- Announcements ---------------- */
+    match /announcements/{announcementId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isSuperAdminUser();
+
+      match /views/{uid} {
+        allow read: if isSuperAdminUser();
+        allow create, update: if isSignedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.seenAt is timestamp
+          && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'seenAt']);
+        allow delete: if isSuperAdminUser();
+      }
+    }
+
+    /* ---------------- Admin telemetry ---------------- */
+    match /logs/{logId} {
+      allow read, write: if isSuperAdminUser();
+    }
+
+    match /clientErrors/{logId} {
+      allow create: if isSignedIn();
+      allow read: if isSuperAdminUser();
+      allow update, delete: if false;
+    }
+
+    /* ---------------- Archive collections ---------------- */
+    match /archivedServers/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedChannels/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedMessages/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedDMs/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+    match /archivedAttachments/{docId} {
+      allow read, write: if isSuperAdminUser();
+    }
+
+    /* ---------------- Integrations ---------------- */
+    // Slack integration config - server owners/admins can manage
+    match /integrations/slack {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdminUser();
+    }
+    
+    // Slack workspaces - only super admins can manage (contains tokens)
+    match /integrations/slack/workspaces/{workspaceId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdminUser();
+    }
+    
+    // Slack bridges - server owners can manage bridges for their servers
+    match /integrations/slack/bridges/{bridgeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() 
+        && request.resource.data.hconnectServerId is string
+        && isServerOwner(request.resource.data.hconnectServerId);
+      allow update, delete: if isSignedIn()
+        && resource.data.hconnectServerId is string
+        && isServerOwner(resource.data.hconnectServerId);
+    }
+
+    /* ---------------- Agile Boards ---------------- */
+    // Main board documents
+    match /agileBoards/{boardId} {
+      // Members can read boards they're part of
+      allow read: if isSignedIn() 
+        && (isSuperAdminUser() || request.auth.uid in resource.data.memberIds);
+      // Anyone signed in can create a board (they become owner)
+      allow create: if isSignedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.auth.uid in request.resource.data.memberIds;
+      // Owner or super admin can update/delete
+      allow update: if isSignedIn()
+        && (isSuperAdminUser() || resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.memberIds);
+      allow delete: if isSignedIn()
+        && (isSuperAdminUser() || resource.data.ownerId == request.auth.uid);
+
+      // Board items (stories, bugs, tasks, etc.)
+      match /items/{itemId} {
+        allow read, write: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+      }
+
+      // Sprints
+      match /sprints/{sprintId} {
+        allow read, write: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+      }
+
+      // Epics
+      match /epics/{epicId} {
+        allow read, write: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+      }
+
+      // Meta (counters, settings)
+      match /meta/{metaId} {
+        allow read, write: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+      }
+
+      // Activity log
+      match /activity/{activityId} {
+        allow read: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+        allow create: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+        allow update, delete: if isSuperAdminUser();
+      }
+
+      // Item comments
+      match /items/{itemId}/comments/{commentId} {
+        allow read: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+        allow create: if isSignedIn()
+          && (isSuperAdminUser() || request.auth.uid in get(/databases/$(database)/documents/agileBoards/$(boardId)).data.memberIds);
+        allow update, delete: if isSignedIn()
+          && (isSuperAdminUser() || resource.data.authorId == request.auth.uid);
+      }
+    }
+
+  } // /documents
+} // service

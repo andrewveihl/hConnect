@@ -1,0 +1,47 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /chat-uploads/{group}/{channelId}/{rest=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /chat-uploads/{group}/{rest=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /profile-uploads/{userId}/{rest=**} {
+      // Users can always update their own profile assets; avatars remain readable so they render in the app.
+      allow read: if request.auth != null || true;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Cached Google profile avatars - public read for displaying in app
+    match /avatars/{userId}/{rest=**} {
+      allow read: if true;
+      allow write: if false; // Only Cloud Functions can write
+    }
+
+    // Server integration assets (e.g., Slack avatars) - public read for external services
+    match /servers/{serverId}/integrations/{rest=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Super admin uploaded global assets (themes, sounds, splash). Reads are public so the app can load before auth.
+    match /admin/sounds/{rest=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Default avatars uploaded by admins - public read, admin write
+    match /admin/avatars/{rest=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    match /{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+  }
+}

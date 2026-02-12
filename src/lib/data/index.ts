@@ -1,4 +1,5 @@
 export * from './channels.svelte'
+export * from './dms.svelte'
 export * from './messages.svelte'
 export * from './profile.svelte'
 export * from './servers.svelte'

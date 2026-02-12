@@ -1,6 +1,6 @@
 <script lang="ts">
 	import favicon from '$lib/assets/ServerRailIcon/Healthspaceslogo.png'
-	import { profile } from '$lib/data'
+	import { profile, dms } from '$lib/data'
 	import { page } from '$app/state'
 
 	let activeServerId = $derived(page.params?.server_id)
@@ -17,7 +17,43 @@
 		</a>
 	</li>
 	<li class="mx-auto mb-1 h-px w-8 bg-(--rail-divider)"></li>
-	{#each profile.servers as server (server.id)}
+
+	<!-- Unread DM conversations-->
+	{#each dms.channels as dm (dm.id)}
+		{@const other = dms.getOtherParticipant(dm)}
+		{#if other}
+			<li class="relative">
+				<a
+					href="/dms/{dm.threadId}"
+					class="group flex h-12 w-12 items-center justify-center overflow-hidden rounded-full bg-(--rail-icon-bg) ring-[3px] transition-all duration-200 hover:bg-(--rail-icon-hover) {page.url?.pathname === '/dms/' + dm.threadId
+						? 'ring-(--accent)'
+						: 'ring-transparent'}"
+					title={other.displayName}
+				>
+					{#if other.photoURL}
+						<img
+							class="h-full w-full object-cover transition-opacity duration-200 group-hover:opacity-80"
+							src={other.photoURL}
+							alt={other.displayName}
+						/>
+					{:else}
+						<span class="text-sm font-semibold text-(--rail-text)">{other.displayName.slice(0, 2).toUpperCase()}</span>
+					{/if}
+				</a>
+				{#if dm.unreadCount > 0}
+					<span class="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-xs font-bold text-white">
+						{dm.unreadCount > 99 ? '99+' : dm.unreadCount}
+					</span>
+				{/if}
+			</li>
+		{/if}
+	{/each}
+
+	{#if dms.channels.length > 0}
+		<li class="mx-auto mb-1 h-px w-8 bg-(--rail-divider)"></li>
+	{/if}
+
+	{#each profile.servers ?? [] as server (server.id)}
 		<li class="relative">
 			<a
 				href="/{server.id}"
