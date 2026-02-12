@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { browser } from '$app/environment'
-
 	const themes = [
 		{
 			id: 'light',
@@ -28,14 +26,12 @@
 		}
 	] as const
 
-	let selected = $state(
-		(browser && localStorage.getItem('hconnect-theme')) || 'dark'
-	)
+	let selected = $state(localStorage.getItem('hconnect-theme') || 'dark')
 
 	function applyTheme(themeId: string) {
 		selected = themeId
 		const theme = themes.find((t) => t.id === themeId)
-		if (!theme || !browser) return
+		if (!theme) return
 
 		const root = document.documentElement
 		// Remove all theme classes, then add the selected one
