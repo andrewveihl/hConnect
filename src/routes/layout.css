@@ -10,6 +10,14 @@
 	--rail-divider: rgba(0, 0, 0, 0.1);
 	--rail-text: #2e3338;
 	--rail-add-text: #33c8bf;
+
+	/* User panel */
+	--user-panel-bg: #d4d7dc;
+	--user-panel-text: #2e3338;
+	--user-panel-subtext: #6a6e73;
+	--user-panel-icon: #4f5660;
+	--user-panel-icon-hover-bg: rgba(0, 0, 0, 0.08);
+	--user-panel-status: #3ba55c;
 }
 
 .dark {
@@ -20,4 +28,12 @@
 	--rail-divider: rgba(255, 255, 255, 0.1);
 	--rail-text: #ffffff;
 	--rail-add-text: #33c8bf;
+
+	/* User panel */
+	--user-panel-bg: #232428;
+	--user-panel-text: #f2f3f5;
+	--user-panel-subtext: #b5bac1;
+	--user-panel-icon: #b5bac1;
+	--user-panel-icon-hover-bg: rgba(255, 255, 255, 0.08);
+	--user-panel-status: #3ba55c;
 }

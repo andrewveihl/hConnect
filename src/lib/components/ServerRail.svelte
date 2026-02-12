@@ -6,7 +6,7 @@
 	let activeServerId = $derived(page.params?.server_id)
 </script>
 
-<ul class="flex w-[72px] flex-shrink-0 flex-col items-center gap-2 bg-(--rail-bg) py-3">
+<ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 bg-(--rail-bg) py-3">
 	<!-- App logo -->
 	<li class="mb-1">
 		<a href="/dms" class="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover)">

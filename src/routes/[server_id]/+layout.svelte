@@ -42,28 +42,6 @@
 				{/each}
 			</ul>
 		</div>
-
-		<!-- Direct Messages Section -->
-		<div class="px-4">
-			<div class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-white/60 uppercase">
-				<span>Direct Messages</span>
-				<span class="cursor-pointer text-lg">+</span>
-			</div>
-			<ul class="space-y-1">
-				<li class="flex cursor-pointer items-center rounded px-2 py-1 hover:bg-white/10">
-					<span class="mr-2 h-2 w-2 rounded-full bg-green-500"></span>
-					<span>Jane Doe (you)</span>
-				</li>
-				<li class="flex cursor-pointer items-center rounded px-2 py-1 hover:bg-white/10">
-					<span class="mr-2 h-2 w-2 rounded-full bg-green-500"></span>
-					<span>John Smith</span>
-				</li>
-				<li class="flex cursor-pointer items-center rounded px-2 py-1 hover:bg-white/10">
-					<span class="mr-2 h-2 w-2 rounded-full border border-white/40"></span>
-					<span class="opacity-70">Alex Rivera</span>
-				</li>
-			</ul>
-		</div>
 	</div>
 </div>
 
