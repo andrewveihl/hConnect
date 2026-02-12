@@ -1,1 +1,23 @@
 @import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+	/* Server rail */
+	--rail-bg: #e3e5e8;
+	--rail-icon-bg: #ffffff;
+	--rail-icon-hover: #33c8bf;
+	--rail-divider: rgba(0, 0, 0, 0.1);
+	--rail-text: #2e3338;
+	--rail-add-text: #33c8bf;
+}
+
+.dark {
+	/* Server rail */
+	--rail-bg: #1e1f22;
+	--rail-icon-bg: #2b2d31;
+	--rail-icon-hover: #33c8bf;
+	--rail-divider: rgba(255, 255, 255, 0.1);
+	--rail-text: #ffffff;
+	--rail-add-text: #33c8bf;
+}
