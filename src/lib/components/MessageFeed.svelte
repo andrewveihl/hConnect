@@ -351,6 +351,10 @@
 <style>
 	main {
 		scrollbar-width: none;
+		user-select: none;
+	}
+	main, main :global(*:not(a):not(button):not(.cursor-pointer)) {
+		cursor: default;
 	}
 	main::-webkit-scrollbar {
 		display: none;
