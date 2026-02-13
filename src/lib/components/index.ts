@@ -1,4 +1,5 @@
 export { default as Auth } from './Auth.svelte'
+export { default as ChatInput } from './ChatInput.svelte'
 export { default as ServerRail } from './ServerRail.svelte'
 export { default as UserPanel } from './UserPanel.svelte'
 export { UserSettings } from './UserSettings'
