@@ -41,7 +41,7 @@
 							? 'bg-(--channel-active) text-(--channel-text-active)'
 							: 'hover:bg-(--border-subtle)'}"
 					>
-						<a class="block h-full w-full" href="/{page.params.server_id}/{channel.id}">
+						<a class="block h-full w-full" href="/servers/{page.params.server_id}/{channel.id}">
 							# {channel.name}
 						</a>
 					</li>

@@ -56,7 +56,7 @@
 	{#each profile.servers ?? [] as server (server.id)}
 		<li class="relative">
 			<a
-				href="/{server.id}"
+				href="/servers/{server.id}"
 				class="group flex h-12 w-12 items-center justify-center overflow-hidden rounded-full bg-(--rail-icon-bg) ring-[3px] transition-all duration-200 hover:bg-(--rail-icon-hover) {activeServerId ===
 				server.id
 					? 'ring-(--accent)'
