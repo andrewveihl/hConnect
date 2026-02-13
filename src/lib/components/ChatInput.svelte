@@ -1,5 +1,8 @@
 <script lang="ts">
-	let { placeholder = 'Message' }: { placeholder?: string } = $props()
+	let {
+		placeholder = 'Message',
+		onsend,
+	}: { placeholder?: string; onsend?: (text: string) => void } = $props()
 
 	let textareaEl: HTMLTextAreaElement | undefined = $state()
 
@@ -9,9 +12,19 @@
 		textareaEl.style.height = Math.min(textareaEl.scrollHeight, 200) + 'px'
 	}
 
+	function submit() {
+		if (!textareaEl) return
+		const text = textareaEl.value.trim()
+		if (!text) return
+		onsend?.(text)
+		textareaEl.value = ''
+		textareaEl.style.height = 'auto'
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault()
+			submit()
 		}
 	}
 </script>

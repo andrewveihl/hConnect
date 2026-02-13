@@ -4,6 +4,11 @@
 	import { page } from '$app/state'
 
 	let activeServerId = $derived(page.params?.server_id)
+	let activeThreadId = $derived(page.params?.thread_id)
+
+	// Hide the DM we're currently viewing — avoids the flash caused by
+	// the async markRead race with the unread-count subscription.
+	let railDMs = $derived(dms.channels.filter((dm) => dm.threadId !== activeThreadId))
 </script>
 
 <ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 border-r border-(--border-subtle) bg-(--rail-bg) py-3">
@@ -19,7 +24,7 @@
 	<li class="mx-auto mb-1 h-px w-8 bg-(--rail-divider)"></li>
 
 	<!-- Unread DM conversations-->
-	{#each dms.channels as dm (dm.id)}
+	{#each railDMs as dm (dm.id)}
 		{@const other = dms.getOtherParticipant(dm)}
 		{#if other}
 			<li class="relative">
@@ -49,7 +54,7 @@
 		{/if}
 	{/each}
 
-	{#if dms.channels.length > 0}
+	{#if railDMs.length > 0}
 		<li class="mx-auto mb-1 h-px w-8 bg-(--rail-divider)"></li>
 	{/if}
 

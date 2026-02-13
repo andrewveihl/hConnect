@@ -1,11 +1,16 @@
 <script lang="ts">
 	import { page } from '$app/state'
-	import { dms } from '$lib/data'
+	import { dms, DMMessagesState } from '$lib/data'
 	import { ChatInput, MessageFeed } from '$lib/components'
 
 	const threadId = $derived(page.params.thread_id!)
-	const dmEntry = $derived(dms.channels.find((dm) => dm.threadId === threadId))
+
+	// Look up entry from the full DM list (not just unread)
+	const dmEntry = $derived((dms.all ?? []).find((dm) => dm.threadId === threadId))
 	const other = $derived(dmEntry ? dms.getOtherParticipant(dmEntry) : undefined)
+
+	// Subscribe to actual DM messages
+	const dmMessages = $derived(new DMMessagesState(threadId))
 
 	// Mark as read when viewing
 	$effect(() => {
@@ -21,30 +26,78 @@
 	<header class="flex h-14 flex-shrink-0 items-center border-b border-(--border-default) px-6">
 		<div class="flex items-center gap-3">
 			{#if other?.photoURL}
-				<img class="h-8 w-8 rounded-full object-cover" src={other.photoURL} alt={other.displayName} />
+				<img
+					class="h-8 w-8 rounded-full object-cover"
+					src={other.photoURL}
+					alt={other.displayName}
+					onerror={(e: Event) => {
+						const img = e.currentTarget as HTMLImageElement
+						img.style.display = 'none'
+						const fb = img.nextElementSibling as HTMLElement
+						if (fb) fb.style.display = 'flex'
+					}}
+				/>
+				<div
+					class="hidden h-8 w-8 items-center justify-center rounded-full bg-(--rail-icon-bg)"
+				>
+					<span class="text-xs font-semibold text-(--rail-text)"
+						>{other.displayName.slice(0, 2).toUpperCase()}</span
+					>
+				</div>
 			{:else if other}
-				<div class="flex h-8 w-8 items-center justify-center rounded-full bg-(--rail-icon-bg)">
-					<span class="text-xs font-semibold text-(--rail-text)">{other.displayName.slice(0, 2).toUpperCase()}</span>
+				<div
+					class="flex h-8 w-8 items-center justify-center rounded-full bg-(--rail-icon-bg)"
+				>
+					<span class="text-xs font-semibold text-(--rail-text)"
+						>{other.displayName.slice(0, 2).toUpperCase()}</span
+					>
 				</div>
 			{/if}
-			<span class="text-lg font-bold text-(--text-primary)">{other?.displayName ?? 'Direct Message'}</span>
+			<span class="text-base font-semibold text-(--text-primary)"
+				>{other?.displayName ?? 'Direct Message'}</span
+			>
 		</div>
 	</header>
 
-	<!-- Messages Area (wire up with DM messages data class) -->
-	<MessageFeed messages={undefined}>
+	<!-- Messages Area -->
+	<MessageFeed messages={dmMessages.current}>
 		{#snippet hero()}
 			<div class="flex flex-col items-center justify-center py-12 text-(--text-muted)">
 				{#if other}
 					{#if other.photoURL}
-						<img class="mb-4 h-20 w-20 rounded-full object-cover" src={other.photoURL} alt={other.displayName} />
+						<img
+							class="mb-4 h-20 w-20 rounded-full object-cover"
+							src={other.photoURL}
+							alt={other.displayName}
+							onerror={(e: Event) => {
+								const img = e.currentTarget as HTMLImageElement
+								img.style.display = 'none'
+								const fb = img.nextElementSibling as HTMLElement
+								if (fb) fb.style.display = 'flex'
+							}}
+						/>
+						<div
+							class="mb-4 hidden h-20 w-20 items-center justify-center rounded-full bg-(--rail-icon-bg)"
+						>
+							<span class="text-2xl font-semibold text-(--rail-text)"
+								>{other.displayName.slice(0, 2).toUpperCase()}</span
+							>
+						</div>
 					{:else}
-						<div class="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-(--rail-icon-bg)">
-							<span class="text-2xl font-semibold text-(--rail-text)">{other.displayName.slice(0, 2).toUpperCase()}</span>
+						<div
+							class="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-(--rail-icon-bg)"
+						>
+							<span class="text-2xl font-semibold text-(--rail-text)"
+								>{other.displayName.slice(0, 2).toUpperCase()}</span
+							>
 						</div>
 					{/if}
 					<h2 class="text-xl font-bold text-(--text-primary)">{other.displayName}</h2>
-					<p class="mt-1 text-sm">This is the beginning of your direct message history with <strong class="text-(--text-primary)">{other.displayName}</strong>.</p>
+					<p class="mt-1 text-sm">
+						This is the beginning of your direct message history with <strong
+							class="text-(--text-primary)">{other.displayName}</strong
+						>.
+					</p>
 				{/if}
 			</div>
 		{/snippet}
@@ -52,6 +105,9 @@
 
 	<!-- Message Input -->
 	<footer class="px-4 pb-3">
-		<ChatInput placeholder="Message {other?.displayName ?? ''}" />
+		<ChatInput
+			placeholder="Message {other?.displayName ?? ''}"
+			onsend={(text) => dms.sendMessage(threadId, text)}
+		/>
 	</footer>
 </div>

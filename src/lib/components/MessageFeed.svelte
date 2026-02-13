@@ -252,10 +252,8 @@
 
 						<!-- Continuation messages -->
 						{#each group.messages.slice(1) as msg (msg.id)}
-							<div class="group/line flex items-start gap-4 py-0.5">
-								<div class="flex w-10 flex-shrink-0 items-center justify-end">
-									<span class="hidden text-[10px] text-(--text-muted) group-hover/line:inline">{timeStr(msg.timestamp)}</span>
-								</div>
+							<div class="flex items-start gap-4 py-0.5">
+								<div class="w-10 flex-shrink-0"></div>
 								<div class="min-w-0 flex-1">
 									{@render msgContent(msg)}
 								</div>
