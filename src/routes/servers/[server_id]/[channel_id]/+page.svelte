@@ -52,7 +52,7 @@
 	</main>
 
 	<!-- Message Input -->
-	<footer class="p-6 pt-0">
+	<footer class="px-4 pb-3">
 		<ChatInput placeholder="Message #{channel?.name ?? ''}" />
 	</footer>
 </div>

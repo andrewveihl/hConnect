@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state'
 	import { dms } from '$lib/data'
+	import { ChatInput } from '$lib/components'
 
 	const threadId = $derived(page.params.thread_id!)
 	const dmEntry = $derived(dms.channels.find((dm) => dm.threadId === threadId))
@@ -47,13 +48,8 @@
 		</div>
 	</main>
 
-	<!-- Message Input (placeholder) -->
-	<footer class="p-6 pt-0">
-		<div class="overflow-hidden rounded-lg border-2 border-(--border-input) transition-colors focus-within:border-(--border-input-focus)">
-			<textarea
-				placeholder="Message {other?.displayName ?? ''}"
-				class="min-h-[80px] w-full resize-none bg-(--surface-input) p-3 text-(--text-primary) placeholder:text-(--text-muted) focus:outline-none"
-			></textarea>
-		</div>
+	<!-- Message Input -->
+	<footer class="px-4 pb-3">
+		<ChatInput placeholder="Message {other?.displayName ?? ''}" />
 	</footer>
 </div>

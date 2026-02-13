@@ -1,48 +1,80 @@
 <script lang="ts">
 	let { placeholder = 'Message' }: { placeholder?: string } = $props()
+
+	let textareaEl: HTMLTextAreaElement | undefined = $state()
+
+	function autoResize() {
+		if (!textareaEl) return
+		textareaEl.style.height = 'auto'
+		textareaEl.style.height = Math.min(textareaEl.scrollHeight, 200) + 'px'
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault()
+		}
+	}
 </script>
 
-<div
-	class="overflow-hidden rounded-lg border-2 border-(--border-input) transition-colors focus-within:border-(--border-input-focus)"
->
-	<div class="flex gap-2 border-b border-(--border-subtle) bg-(--surface-toolbar) px-3 py-2 text-(--text-muted)">
-		<button class="size-6 hover:text-(--text-primary)"><b>B</b></button>
-		<button class="size-6 hover:text-(--text-primary)"><i>I</i></button>
-		<button class="size-6 hover:text-(--text-primary)"><s>S</s></button>
-		<div class="h-4 self-center border-l border-(--border-subtle)"></div>
-		<button class="font-mono hover:text-(--text-primary)">&lt;/&gt;</button>
-	</div>
+<div class="flex items-center gap-0 rounded-lg bg-(--surface-input) ring-1 ring-(--border-subtle)">
+	<!-- Attach button -->
+	<button
+		class="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-l-lg text-(--text-muted) transition-colors hover:text-(--text-primary)"
+		aria-label="Attach file"
+	>
+		<svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+		</svg>
+	</button>
+
+	<!-- Input area -->
 	<textarea
+		bind:this={textareaEl}
 		{placeholder}
-		class="min-h-[80px] w-full resize-none bg-(--surface-input) p-3 text-(--text-primary) placeholder:text-(--text-muted) focus:outline-none"
+		rows="1"
+		oninput={autoResize}
+		onkeydown={handleKeydown}
+		class="max-h-[300px] min-h-[44px] flex-1 resize-none bg-transparent py-2.5 text-base leading-6 text-(--text-primary) placeholder:text-(--text-muted) focus:outline-none"
 	></textarea>
-	<div class="flex items-center justify-between bg-(--surface-input) px-3 py-2">
-		<div class="flex space-x-3 text-(--text-muted)">
-			<button class="hover:text-(--text-secondary)" aria-label="Add">
-				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-					><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg
-				>
-			</button>
-			<button class="hover:text-(--text-secondary)" aria-label="Emoji">
-				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-					><path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-					></path></svg
-				>
-			</button>
-		</div>
+
+	<!-- Right-side icons -->
+	<div class="flex flex-shrink-0 items-center gap-0.5 px-1.5">
+
+		<!-- GIF -->
 		<button
-			class="rounded bg-(--send-bg) px-3 py-1 font-bold text-(--text-on-accent) transition-colors hover:bg-(--send-hover)"
-			aria-label="Post"
+			class="flex h-8 w-8 items-center justify-center rounded text-(--text-muted) transition-colors hover:text-(--text-primary)"
+			aria-label="GIF"
 		>
-			<svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20"
-				><path
-					d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"
-				></path></svg
-			>
+			<svg class="h-6 w-6" viewBox="0 0 24 24" fill="none">
+				<rect x="2" y="5" width="20" height="14" rx="3" stroke="currentColor" stroke-width="1.5" />
+				<text x="12" y="16" text-anchor="middle" font-size="8" font-weight="bold" fill="currentColor">GIF</text>
+			</svg>
+		</button>
+
+		<!-- Emoji -->
+		<button
+			class="flex h-8 w-8 items-center justify-center rounded text-(--text-muted) transition-colors hover:text-(--text-primary)"
+			aria-label="Emoji"
+		>
+			<svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+				<circle cx="12" cy="12" r="10" />
+				<path stroke-linecap="round" d="M8 14s1.5 2 4 2 4-2 4-2" />
+				<circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
+				<circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
+			</svg>
+		</button>
+
+		<!-- Apps -->
+		<button
+			class="flex h-8 w-8 items-center justify-center rounded text-(--text-muted) transition-colors hover:text-(--text-primary)"
+			aria-label="Apps"
+		>
+			<svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+				<rect x="3" y="3" width="7" height="7" rx="1.5" />
+				<rect x="14" y="3" width="7" height="7" rx="1.5" />
+				<rect x="3" y="14" width="7" height="7" rx="1.5" />
+				<rect x="14" y="14" width="7" height="7" rx="1.5" />
+			</svg>
 		</button>
 	</div>
 </div>
