@@ -43,7 +43,7 @@
 
 		<!-- Message Input -->
 		<footer class="relative z-10 bg-(--surface-base) px-4 pb-3">
-			<ChatInput placeholder="Message #{channel?.name ?? ''}" />
+			<ChatInput placeholder="Message #{channel?.name ?? ''}" onsend={(text) => messages.sendMessage(text)} />
 		</footer>
 	</div>
 

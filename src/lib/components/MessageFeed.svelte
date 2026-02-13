@@ -9,7 +9,7 @@
 
 	let { messages, hero, class: className = '' }: Props = $props()
 
-	const GROUP_THRESHOLD = 7 * 60 * 1000
+	const GROUP_THRESHOLD = 7 * 60 * 1000 // 7 minutes
 	const IMAGE_RE = /\.(gif|png|jpe?g|webp|svg)(\?.*)?$/i
 
 	interface ReplyReference {
@@ -70,10 +70,12 @@
 				groups.push({ authorName, authorPhoto, firstTimestamp: ts, messages: [entry] })
 			}
 		}
+
 		return groups
 	})
 
-	// Formatting helpers
+	// --- Formatting helpers ---
+
 	function timeStr(date: Date): string {
 		const h = date.getHours()
 		return `${h % 12 || 12}:${date.getMinutes().toString().padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`
@@ -92,7 +94,8 @@
 		return name.charAt(0).toUpperCase()
 	}
 
-	// Text parsing
+	// --- Text parsing (mentions, links, inline images) ---
+
 	type TextSegment =
 		| { type: 'text'; value: string }
 		| { type: 'mention'; value: string }
@@ -106,22 +109,16 @@
 		let lastIndex = 0
 		let match: RegExpExecArray | null
 		while ((match = regex.exec(text)) !== null) {
-			if (match.index > lastIndex) {
+			if (match.index > lastIndex)
 				segments.push({ type: 'text', value: text.slice(lastIndex, match.index) })
-			}
 			const val = match[0]
-			if (val.startsWith('@')) {
-				segments.push({ type: 'mention', value: val })
-			} else if (IMAGE_RE.test(val) || val.includes('tenor.com') || val.includes('giphy.com')) {
+			if (val.startsWith('@')) segments.push({ type: 'mention', value: val })
+			else if (IMAGE_RE.test(val) || val.includes('tenor.com') || val.includes('giphy.com'))
 				segments.push({ type: 'image', value: val })
-			} else {
-				segments.push({ type: 'link', value: val })
-			}
+			else segments.push({ type: 'link', value: val })
 			lastIndex = regex.lastIndex
 		}
-		if (lastIndex < text.length) {
-			segments.push({ type: 'text', value: text.slice(lastIndex) })
-		}
+		if (lastIndex < text.length) segments.push({ type: 'text', value: text.slice(lastIndex) })
 		return segments
 	}
 
@@ -130,7 +127,8 @@
 		return meaningful.length === 1 && meaningful[0].type === 'image'
 	}
 
-	// Avatar loading
+	// --- Avatar fade / error fallback ---
+
 	function fade(img: HTMLImageElement) {
 		img.onload = () => (img.style.opacity = '1')
 		img.onerror = () => {
@@ -140,7 +138,8 @@
 		}
 	}
 
-	// Custom scrollbar
+	// --- Scrolling ---
+
 	let scrollContainer: HTMLElement | undefined = $state()
 	let thumbHeight = $state(0)
 	let thumbTop = $state(0)
@@ -148,14 +147,12 @@
 	function updateThumb() {
 		if (!scrollContainer) return
 		const { scrollTop, scrollHeight, clientHeight } = scrollContainer
-		if (scrollHeight <= clientHeight) {
-			thumbHeight = 0
-			return
-		}
+		if (scrollHeight <= clientHeight) { thumbHeight = 0; return }
 		thumbHeight = (clientHeight / scrollHeight) * 100
 		thumbTop = (scrollTop / scrollHeight) * 100
 	}
 
+	// Auto-scroll + recalc thumb when messages change
 	$effect(() => {
 		void messages
 		if (!scrollContainer) return
@@ -165,6 +162,7 @@
 		})
 	})
 
+	// Recalc on resize
 	$effect(() => {
 		if (!scrollContainer) return
 		const ro = new ResizeObserver(updateThumb)
@@ -183,10 +181,7 @@
 			const delta = (dy / scrollContainer!.getBoundingClientRect().height) * scrollContainer!.scrollHeight
 			scrollContainer!.scrollTop = Math.max(0, Math.min(maxScroll, startScrollTop + delta))
 		}
-		const onUp = () => {
-			window.removeEventListener('mousemove', onMove)
-			window.removeEventListener('mouseup', onUp)
-		}
+		const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
 		window.addEventListener('mousemove', onMove)
 		window.addEventListener('mouseup', onUp)
 	}
@@ -239,7 +234,7 @@
 	{:else}
 		{@const segs = parseText(msg.text)}
 		{#if !isOnlyImage(segs)}
-			<p class="mt-0.5 text-sm leading-relaxed text-(--text-secondary) wrap-break-word">
+			<p class="mt-0.5 text-sm leading-relaxed text-(--text-secondary) break-words">
 				{#each segs as seg}
 					{#if seg.type === 'mention'}
 						<span class="mention">{seg.value}</span>
@@ -259,21 +254,6 @@
 	{/if}
 {/snippet}
 
-{#snippet avatar(photo: string | null, name: string)}
-	{#if photo}
-		<img
-			class="size-10 cursor-pointer rounded-full object-cover opacity-0 transition-opacity duration-300 hover:opacity-80"
-			src={photo}
-			alt={name}
-			use:fade
-		/>
-	{:else}
-		<div class="flex size-10 cursor-pointer items-center justify-center rounded-full bg-(--accent)">
-			<span class="text-sm font-bold text-(--text-on-accent)">{initial(name)}</span>
-		</div>
-	{/if}
-{/snippet}
-
 <div class="relative flex-1 min-h-0 {className}">
 	<main class="absolute inset-0 overflow-y-scroll" bind:this={scrollContainer} onscroll={updateThumb}>
 		{#if !messages}
@@ -290,12 +270,27 @@
 				{#if hero}{@render hero()}{/if}
 				{#each grouped as group, gi}
 					<div class="group/msg mt-4 first:mt-0 px-4 py-0.5 hover:bg-(--surface-hover)/50">
+						<!-- Reply reference for lead message -->
 						{#if group.messages[0].replyTo}
-							<div class="ml-14">{@render replyPreview(group.messages[0].replyTo)}</div>
+							<div class="ml-14">
+								{@render replyPreview(group.messages[0].replyTo)}
+							</div>
 						{/if}
+						<!-- Lead message -->
 						<div class="flex items-start gap-4">
 							<div class="mt-0.5 w-10 shrink-0">
-								{@render avatar(group.authorPhoto, group.authorName)}
+								{#if group.authorPhoto}
+									<img
+										class="size-10 cursor-pointer rounded-full object-cover opacity-0 transition-opacity duration-300 hover:opacity-80"
+										src={group.authorPhoto}
+										alt={group.authorName}
+										use:fade
+									/>
+								{:else}
+									<div class="flex size-10 cursor-pointer items-center justify-center rounded-full bg-(--accent)">
+										<span class="text-sm font-bold text-(--text-on-accent)">{initial(group.authorName)}</span>
+									</div>
+								{/if}
 							</div>
 							<div class="min-w-0 flex-1">
 								<div class="flex items-baseline gap-2">
@@ -306,17 +301,24 @@
 							</div>
 						</div>
 
+						<!-- Continuation messages -->
 						{#each group.messages.slice(1) as msg (msg.id)}
+							<!-- Reply reference for continuation message -->
 							{#if msg.replyTo}
-								<div class="ml-14">{@render replyPreview(msg.replyTo)}</div>
+								<div class="ml-14">
+									{@render replyPreview(msg.replyTo)}
+								</div>
 							{/if}
 							<div class="flex items-start gap-4 py-0.5">
 								<div class="w-10 shrink-0"></div>
-								<div class="min-w-0 flex-1">{@render msgContent(msg)}</div>
+								<div class="min-w-0 flex-1">
+									{@render msgContent(msg)}
+								</div>
 							</div>
 						{/each}
 					</div>
 
+					<!-- Date separator -->
 					{#if gi < grouped.length - 1}
 						{@const nextTs = grouped[gi + 1].firstTimestamp}
 						{#if group.firstTimestamp.toDateString() !== nextTs.toDateString()}
@@ -343,7 +345,7 @@
 				class="scrollbar-thumb"
 				style:height="{thumbHeight}%"
 				style:top="{thumbTop}%"
-				onmousedown={(e) => { e.stopPropagation(); onThumbMouseDown(e) }}
+				onmousedown={(e) => { e.stopPropagation(); onThumbMouseDown(e); }}
 			></div>
 		</div>
 	{/if}
