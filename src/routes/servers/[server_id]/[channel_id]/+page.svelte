@@ -42,7 +42,7 @@
 		<MessageFeed messages={messages.current} />
 
 		<!-- Message Input -->
-		<footer class="px-4 pb-3">
+		<footer class="relative z-10 bg-(--surface-base) px-4 pb-3">
 			<ChatInput placeholder="Message #{channel?.name ?? ''}" />
 		</footer>
 	</div>
