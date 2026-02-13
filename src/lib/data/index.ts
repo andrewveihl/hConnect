@@ -1,3 +1,4 @@
+export * from './categories.svelte'
 export * from './channels.svelte'
 export * from './dms.svelte'
 export * from './messages.svelte'

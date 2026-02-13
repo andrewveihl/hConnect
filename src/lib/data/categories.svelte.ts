@@ -2,16 +2,16 @@ import { createSubscriber } from 'svelte/reactivity'
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore'
 import { firestore } from '../firebase/firestore'
 
-export class ChannelsState {
-	#channels?: any[]
+export class CategoriesState {
+	#categories?: any[]
 	#subscribe: VoidFunction
 
 	constructor(server_id: string) {
 		this.#subscribe = createSubscriber((update) => {
-			const col = collection(firestore, 'servers', server_id, 'channels')
+			const col = collection(firestore, 'servers', server_id, 'categories')
 			const q = query(col, orderBy('position'))
 			return onSnapshot(q, (snap) => {
-				this.#channels = snap.docs.map((doc) => {
+				this.#categories = snap.docs.map((doc) => {
 					return { ...doc.data(), id: doc.id }
 				})
 				update()
@@ -21,6 +21,6 @@ export class ChannelsState {
 
 	get current() {
 		this.#subscribe()
-		return this.#channels
+		return this.#categories
 	}
 }
