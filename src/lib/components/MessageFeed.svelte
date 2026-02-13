@@ -12,6 +12,13 @@
 	const GROUP_THRESHOLD = 7 * 60 * 1000 // 7 minutes
 	const IMAGE_RE = /\.(gif|png|jpe?g|webp|svg)(\?.*)?$/i
 
+	interface ReplyReference {
+		messageId: string
+		authorName: string
+		authorPhoto?: string | null
+		text: string
+	}
+
 	interface Msg {
 		id: string
 		text: string
@@ -19,6 +26,7 @@
 		file?: any
 		type?: string
 		timestamp: Date
+		replyTo?: ReplyReference
 	}
 
 	interface MessageGroup {
@@ -42,7 +50,15 @@
 				url: msg.url,
 				file: msg.file,
 				type: msg.type,
-				timestamp: ts
+				timestamp: ts,
+				replyTo: msg.replyTo
+					? {
+							messageId: msg.replyTo.messageId,
+							authorName: msg.replyTo.authorName ?? 'Unknown',
+							authorPhoto: msg.replyTo.authorPhoto ?? null,
+							text: msg.replyTo.text ?? ''
+						}
+					: undefined
 			}
 
 			const last = groups.at(-1)
@@ -178,6 +194,32 @@
 	}
 </script>
 
+<!-- Snippet for rendering reply reference (Discord-style) -->
+{#snippet replyPreview(reply: ReplyReference)}
+	<div class="reply-reference group/reply mb-0.5 flex items-center gap-2 text-xs">
+		<!-- Curved connector line -->
+		<div class="reply-connector"></div>
+		<!-- Reply content -->
+		<div class="flex min-w-0 flex-1 items-center gap-1.5">
+			{#if reply.authorPhoto}
+				<img
+					class="h-4 w-4 rounded-full object-cover flex-shrink-0"
+					src={reply.authorPhoto}
+					alt={reply.authorName}
+				/>
+			{:else}
+				<div class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-(--accent)">
+					<span class="text-[8px] font-bold text-(--text-on-accent)">{initial(reply.authorName)}</span>
+				</div>
+			{/if}
+			<span class="font-medium text-(--text-primary) hover:underline cursor-pointer flex-shrink-0">{reply.authorName}</span>
+			<span class="truncate text-(--text-muted) group-hover/reply:text-(--text-secondary) cursor-pointer">
+				{reply.text || 'Click to see attachment'}
+			</span>
+		</div>
+	</div>
+{/snippet}
+
 <!-- Shared snippet for rendering a single message's content (gif / file / rich text) -->
 {#snippet msgContent(msg: Msg)}
 	{#if msg.type === 'gif' && msg.url}
@@ -225,6 +267,12 @@
 				{#if hero}{@render hero()}{/if}
 				{#each grouped as group, gi}
 					<div class="group/msg mt-4 first:mt-0 px-4 py-0.5 hover:bg-(--surface-hover)/50">
+						<!-- Reply reference for lead message -->
+						{#if group.messages[0].replyTo}
+							<div class="ml-14">
+								{@render replyPreview(group.messages[0].replyTo)}
+							</div>
+						{/if}
 						<!-- Lead message -->
 						<div class="flex items-start gap-4">
 							<div class="mt-0.5 w-10 flex-shrink-0">
@@ -252,6 +300,12 @@
 
 						<!-- Continuation messages -->
 						{#each group.messages.slice(1) as msg (msg.id)}
+							<!-- Reply reference for continuation message -->
+							{#if msg.replyTo}
+								<div class="ml-14">
+									{@render replyPreview(msg.replyTo)}
+								</div>
+							{/if}
 							<div class="flex items-start gap-4 py-0.5">
 								<div class="w-10 flex-shrink-0"></div>
 								<div class="min-w-0 flex-1">
@@ -340,5 +394,29 @@
 		max-height: 300px;
 		object-fit: contain;
 		border-radius: 8px;
+	}
+	/* Discord-style reply connector */
+	.reply-reference {
+		position: relative;
+		padding-left: 36px;
+	}
+	.reply-connector {
+		position: absolute;
+		left: 20px;
+		top: 50%;
+		width: 33px;
+		height: 13px;
+		border-left: 2px solid var(--border-subtle);
+		border-top: 2px solid var(--border-subtle);
+		border-top-left-radius: 6px;
+		pointer-events: none;
+		z-index: 0;
+	}
+	.reply-reference > div:last-child {
+		position: relative;
+		z-index: 1;
+	}
+	.reply-reference:hover .reply-connector {
+		border-color: var(--text-muted);
 	}
 </style>
