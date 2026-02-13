@@ -1,8 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state'
 	import { profile, ChannelsState, CategoriesState } from '$lib/data'
+	import { ServerSettings } from '$lib/components'
 
 	let { children } = $props()
+
+	let showServerSettings = $state(false)
 
 	const server = $derived(profile.servers?.find((server) => server.id === page.params.server_id))
 	const channels = $derived(new ChannelsState(page.params.server_id!))
@@ -85,8 +88,9 @@
 	class="flex w-64 flex-shrink-0 flex-col border-r border-l border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)"
 >
 	<!-- Server Header -->
-	<div
-		class="flex h-14 flex-shrink-0 cursor-pointer items-center gap-3 border-b border-(--border-default) px-4 hover:bg-(--surface-hover)"
+	<button
+		class="flex h-14 w-full flex-shrink-0 cursor-pointer items-center gap-3 border-b border-(--border-default) px-4 hover:bg-(--surface-hover)"
+		onclick={() => (showServerSettings = true)}
 	>
 		{#if server?.icon}
 			<img
@@ -99,8 +103,8 @@
 				<span class="text-xs font-bold text-(--text-on-accent)">{server?.name?.slice(0, 2).toUpperCase()}</span>
 			</div>
 		{/if}
-		<h1 class="truncate text-lg font-bold text-(--text-primary)">{server?.name}</h1>
-	</div>
+		<h1 class="truncate text-sm font-bold leading-tight text-(--text-primary)">{server?.name}</h1>
+	</button>
 
 	<!-- Content Scrollable -->
 	<div class="hide-scrollbar flex-1 overflow-y-auto py-3">
@@ -159,6 +163,10 @@
 </div>
 
 {@render children()}
+
+{#if showServerSettings}
+	<ServerSettings {server} onclose={() => (showServerSettings = false)} />
+{/if}
 
 <style>
 	.hide-scrollbar {
