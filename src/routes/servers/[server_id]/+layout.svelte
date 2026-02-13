@@ -41,8 +41,17 @@
 							? 'bg-(--channel-active) text-(--channel-text-active)'
 							: 'hover:bg-(--border-subtle)'}"
 					>
-						<a class="block h-full w-full" href="/servers/{page.params.server_id}/{channel.id}">
-							# {channel.name}
+						<a class="flex items-center gap-1 h-full w-full" href="/servers/{page.params.server_id}/{channel.id}">
+							<span class="relative inline-block">
+								<span>#</span>
+								{#if channel.isPrivate}
+									<svg class="absolute -right-0.5 bottom-1 h-[8px] w-[8px] text-teal-400 drop-shadow-[0_0_1px_rgba(0,0,0,0.8)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+										<rect x="5" y="11" width="14" height="11" rx="2" />
+										<path d="M8 11V7a4 4 0 1 1 8 0v4" />
+									</svg>
+								{/if}
+							</span>
+							<span class="truncate">{channel.name}</span>
 						</a>
 					</li>
 				{/each}
