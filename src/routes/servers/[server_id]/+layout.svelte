@@ -32,7 +32,6 @@
 				class="mb-2 flex items-center justify-between text-xs font-semibold tracking-wider text-(--channel-section-text) uppercase"
 			>
 				<span>Channels</span>
-				<span class="cursor-pointer text-lg">+</span>
 			</div>
 			<ul class="space-y-1">
 				{#each channels.current as channel (channel.id)}
