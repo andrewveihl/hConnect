@@ -36,12 +36,14 @@
 			</div>
 			<ul class="space-y-1">
 				{#each channels.current as channel (channel.id)}
-					<li
-						class="cursor-pointer rounded px-2 py-1 {channel.id === page.params.channel_id
-							? 'bg-(--channel-active) text-(--channel-text-active)'
-							: 'hover:bg-(--border-subtle)'}"
-					>
-						<a class="flex items-center gap-1 h-full w-full" href="/servers/{page.params.server_id}/{channel.id}">
+					<li>
+						<a
+							class="flex items-center gap-1 select-none rounded px-2 py-1 {channel.id === page.params.channel_id
+								? 'bg-(--channel-active) text-(--channel-text-active)'
+								: 'hover:bg-(--border-subtle)'}"
+							href="/servers/{page.params.server_id}/{channel.id}"
+							draggable="false"
+						>
 							<span class="relative inline-block">
 								<span>#</span>
 								{#if channel.isPrivate}
