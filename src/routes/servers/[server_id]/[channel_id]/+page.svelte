@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ChatInput, MembersPane } from '$lib/components'
+	import { ChatInput, MembersPane, MessageFeed } from '$lib/components'
 	import { ChannelsState, MessagesState, MembersState, RolesState } from '$lib/data'
 	import { page } from '$app/state'
 
@@ -11,11 +11,6 @@
 	const roles = $derived(new RolesState(page.params.server_id!))
 
 	let showMembers = $state(true)
-
-	function fade(img: HTMLImageElement) {
-		const completed = () => (img.style.opacity = '1')
-		img.onload = completed
-	}
 </script>
 
 <!-- Flex row: chat area + optional members pane -->
@@ -44,29 +39,7 @@
 		</header>
 
 		<!-- Messages Area -->
-		<main class="flex-1 space-y-6 overflow-y-auto p-6">
-			{#each messages.current as message (message.id)}
-				<div class="group flex items-start">
-					<img
-						class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md font-bold opacity-0 transition-opacity duration-300 ease-in"
-						src={message.author.photoURL}
-						alt=""
-						use:fade
-					/>
-					<div class="ml-3">
-						<div class="flex items-baseline space-x-2">
-							<span class="cursor-pointer font-bold text-(--text-primary) hover:underline"
-								>{message.author.displayName}</span
-							>
-							<span class="text-xs text-(--text-timestamp)">{message.createdAt.toDate().toISOString()}</span>
-						</div>
-						<p class="text-(--text-secondary)">
-							{message.text}
-						</p>
-					</div>
-				</div>
-			{/each}
-		</main>
+		<MessageFeed messages={messages.current} />
 
 		<!-- Message Input -->
 		<footer class="px-4 pb-3">

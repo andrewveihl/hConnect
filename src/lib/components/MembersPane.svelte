@@ -43,6 +43,11 @@
 
 	function fade(img: HTMLImageElement) {
 		img.onload = () => (img.style.opacity = '1')
+		img.onerror = () => {
+			img.style.display = 'none'
+			const fallback = img.nextElementSibling as HTMLElement | null
+			if (fallback) fallback.style.display = 'flex'
+		}
 	}
 </script>
 
@@ -81,6 +86,9 @@
 								alt=""
 								use:fade
 							/>
+							<div class="flex h-8 w-8 items-center justify-center rounded-full bg-(--accent)" style="display:none">
+								<span class="text-xs font-bold text-(--text-on-accent)">{memberInitial(member)}</span>
+							</div>
 						{:else}
 							<div class="flex h-8 w-8 items-center justify-center rounded-full bg-(--accent)">
 								<span class="text-xs font-bold text-(--text-on-accent)">{memberInitial(member)}</span>

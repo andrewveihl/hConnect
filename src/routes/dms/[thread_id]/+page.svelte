@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state'
 	import { dms } from '$lib/data'
-	import { ChatInput } from '$lib/components'
+	import { ChatInput, MessageFeed } from '$lib/components'
 
 	const threadId = $derived(page.params.thread_id!)
 	const dmEntry = $derived(dms.channels.find((dm) => dm.threadId === threadId))
@@ -31,22 +31,24 @@
 		</div>
 	</header>
 
-	<!-- Messages Area (placeholder — wire up with DM messages data class) -->
-	<main class="flex-1 overflow-y-auto p-6">
-		<div class="flex flex-col items-center justify-center py-12 text-(--text-muted)">
-			{#if other}
-				{#if other.photoURL}
-					<img class="mb-4 h-20 w-20 rounded-full object-cover" src={other.photoURL} alt={other.displayName} />
-				{:else}
-					<div class="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-(--rail-icon-bg)">
-						<span class="text-2xl font-semibold text-(--rail-text)">{other.displayName.slice(0, 2).toUpperCase()}</span>
-					</div>
+	<!-- Messages Area (wire up with DM messages data class) -->
+	<MessageFeed messages={undefined}>
+		{#snippet hero()}
+			<div class="flex flex-col items-center justify-center py-12 text-(--text-muted)">
+				{#if other}
+					{#if other.photoURL}
+						<img class="mb-4 h-20 w-20 rounded-full object-cover" src={other.photoURL} alt={other.displayName} />
+					{:else}
+						<div class="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-(--rail-icon-bg)">
+							<span class="text-2xl font-semibold text-(--rail-text)">{other.displayName.slice(0, 2).toUpperCase()}</span>
+						</div>
+					{/if}
+					<h2 class="text-xl font-bold text-(--text-primary)">{other.displayName}</h2>
+					<p class="mt-1 text-sm">This is the beginning of your direct message history with <strong class="text-(--text-primary)">{other.displayName}</strong>.</p>
 				{/if}
-				<h2 class="text-xl font-bold text-(--text-primary)">{other.displayName}</h2>
-				<p class="mt-1 text-sm">This is the beginning of your direct message history with <strong class="text-(--text-primary)">{other.displayName}</strong>.</p>
-			{/if}
-		</div>
-	</main>
+			</div>
+		{/snippet}
+	</MessageFeed>
 
 	<!-- Message Input -->
 	<footer class="px-4 pb-3">
