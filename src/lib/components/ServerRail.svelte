@@ -11,7 +11,7 @@
 	<li class="mb-1">
 		<a
 			href="/dms"
-			class="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover)"
+			class="flex h-12 w-12 items-center justify-center rounded-2xl border border-(--border-subtle) bg-(--rail-icon-bg) transition-all duration-200 hover:bg-(--rail-icon-hover)"
 		>
 			<img src={favicon} alt="Home" class="h-10 w-10" />
 		</a>
