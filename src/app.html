@@ -2,7 +2,10 @@
 <html lang="en" class="dark">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+		<meta name="theme-color" content="#1e1f22" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<script>
 			;(function () {
 				var theme = localStorage.getItem('hconnect-theme') || 'dark'
@@ -10,6 +13,9 @@
 				root.classList.remove('dark', 'midnight')
 				if (theme === 'dark') root.classList.add('dark')
 				else if (theme === 'midnight') root.classList.add('midnight')
+				var colors = { light: '#c8e4e1', dark: '#1e1f22', midnight: '#000000' }
+				var meta = document.querySelector('meta[name="theme-color"]')
+				if (meta) meta.setAttribute('content', colors[theme] || colors.dark)
 			})()
 		</script>
 		<link rel="preconnect" href="https://firestore.googleapis.com" />

@@ -8,4 +8,7 @@ export default defineConfig({
 	define: {
 		'process.env.NODE_ENV': '"production"',
 	},
+	server: {
+		host: '0.0.0.0',
+	},
 })

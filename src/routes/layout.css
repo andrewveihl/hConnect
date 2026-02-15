@@ -2,6 +2,18 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ── Mobile: safe-area + viewport ── */
+:root {
+	--sat: env(safe-area-inset-top, 0px);
+	--sar: env(safe-area-inset-right, 0px);
+	--sab: env(safe-area-inset-bottom, 0px);
+	--sal: env(safe-area-inset-left, 0px);
+	--app-height: 100vh;
+	--chat-keyboard-offset: 0px;
+	--dock-height: 4.5rem; /* base dock, padding added via safe-area */
+	--mobile-header-height: 3.5rem;
+}
+
 :root {
 	/* Accent */
 	--accent: #0d9e94;
@@ -32,6 +44,10 @@
 	--border-default: rgba(13, 120, 112, 0.18);
 	--border-input: #b3d4d1;
 	--border-input-focus: #0d9e94;
+
+	/* Dock */
+	--dock-bg: #e6f3f2;
+	--dock-border: rgba(13, 120, 112, 0.2);
 
 	/* Status */
 	--status-online: #23a55a;
@@ -107,6 +123,10 @@
 	--border-input: #3f4147;
 	--border-input-focus: #33c8bf;
 
+	/* Dock */
+	--dock-bg: #1e1f22;
+	--dock-border: rgba(255, 255, 255, 0.12);
+
 	/* Status */
 	--status-online: #23a55a;
 	--status-dot-border: var(--surface-panel);
@@ -181,6 +201,10 @@
 	--border-input: rgba(41, 224, 200, 0.3);
 	--border-input-focus: #29e0c8;
 
+	/* Dock */
+	--dock-bg: #050505;
+	--dock-border: rgba(41, 224, 200, 0.25);
+
 	/* Status */
 	--status-online: #23a55a;
 	--status-dot-border: #000000;
@@ -222,4 +246,37 @@
 	--user-panel-icon: #8a9e9c;
 	--user-panel-icon-hover-bg: rgba(41, 224, 200, 0.1);
 	--user-panel-status: #23a55a;
+}
+
+/* ── Mobile utilities ── */
+
+/* Prevent iOS URL-bar jumping */
+html,
+body {
+	overflow: hidden;
+	overscroll-behavior: none;
+}
+
+/* iOS safe-area background — fills the status bar notch with rail color */
+html {
+	background: var(--rail-bg);
+}
+
+/* Hide scrollbars utility */
+.hide-scrollbar {
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+	display: none;
+}
+
+/* Ensure touch targets on mobile */
+@media (max-width: 767px) {
+	button,
+	a,
+	[role='button'] {
+		min-height: 44px;
+		min-width: 44px;
+	}
 }

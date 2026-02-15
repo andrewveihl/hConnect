@@ -40,6 +40,10 @@
 			root.classList.add(theme.className)
 		}
 		localStorage.setItem('hconnect-theme', themeId)
+
+		const colors: Record<string, string> = { light: '#c8e4e1', dark: '#1e1f22', midnight: '#000000' }
+		const meta = document.querySelector('meta[name="theme-color"]')
+		if (meta) meta.setAttribute('content', colors[themeId] || colors.dark)
 	}
 </script>
 

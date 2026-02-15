@@ -51,9 +51,19 @@
 	}
 </script>
 
-<aside class="flex h-full w-60 flex-shrink-0 flex-col border-l border-(--border-subtle) bg-(--surface-channel-sidebar)">
+<aside class="flex h-full flex-col border-l border-(--border-subtle) bg-(--surface-channel-sidebar) md:w-60 md:flex-shrink-0 w-full">
 	<!-- Header -->
-	<div class="flex h-14 flex-shrink-0 items-center gap-3 border-b border-(--border-default) px-4">
+	<div class="flex h-14 flex-shrink-0 items-center gap-3 border-b border-(--border-default) px-4"
+		style="padding-top: env(safe-area-inset-top, 0px);">
+		<button
+			class="flex h-10 w-10 items-center justify-center rounded-lg text-(--text-muted) transition-colors hover:bg-(--surface-hover) md:hidden"
+			onclick={onclose}
+			aria-label="Close members"
+		>
+			<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+			</svg>
+		</button>
 		<span class="text-sm font-semibold text-(--text-primary)">Members</span>
 		<span class="ml-auto text-sm text-(--text-muted)">{totalCount}</span>
 	</div>
@@ -124,13 +134,3 @@
 		{/if}
 	</div>
 </aside>
-
-<style>
-	.hide-scrollbar {
-		-ms-overflow-style: none;
-		scrollbar-width: none;
-	}
-	.hide-scrollbar::-webkit-scrollbar {
-		display: none;
-	}
-</style>

@@ -1,9 +1,139 @@
 <script lang="ts">
 	import { page } from '$app/state'
-	import { dms } from '$lib/data'
+	import { goto } from '$app/navigation'
+	import { dms, mobile } from '$lib/data'
 	import type { DMRailEntry } from '$lib/data'
 
 	let { children } = $props()
+
+	const isMobile = $derived(mobile.isMobile)
+	const hasThread = $derived(!!page.params.thread_id)
+
+	// ── Mobile chat-panel slide state (mirrors server layout pattern) ──
+	let panelX = $state(0)
+	let panelAnimating = $state(false)
+	let panelVisible = $state(false)
+	let chatPanelEl: HTMLDivElement | undefined = $state(undefined)
+
+	$effect(() => {
+		if (!isMobile) return
+		if (hasThread) {
+			panelX = window.innerWidth
+			panelVisible = true
+			chatPanelEl?.getBoundingClientRect()
+			requestAnimationFrame(() => {
+				panelAnimating = true
+				panelX = 0
+			})
+		} else {
+			panelVisible = false
+			panelAnimating = false
+			panelX = 0
+		}
+	})
+
+	// ── Touch handling for the DM chat overlay ──
+	const LOCK_DIST = 10
+	const DISMISS_FRAC = 0.30
+	const VEL_THRESH = 0.5
+	const EDGE_ZONE = 15
+
+	let touchStartX = 0
+	let touchStartY = 0
+	let touchActive = false
+	let touchLocked = false
+	let touchHorizontal = false
+	let touchSamples: { x: number; t: number }[] = []
+
+	function onPanelTouchStart(e: TouchEvent) {
+		const touch = e.touches[0]
+		if (touch.clientX < EDGE_ZONE || touch.clientX > window.innerWidth - EDGE_ZONE) return
+		touchStartX = touch.clientX
+		touchStartY = touch.clientY
+		touchActive = true
+		touchLocked = false
+		touchHorizontal = false
+		touchSamples = [{ x: touch.clientX, t: Date.now() }]
+		panelAnimating = false
+	}
+
+	function onPanelTouchMove(e: TouchEvent) {
+		if (!touchActive) return
+		const touch = e.touches[0]
+		const dx = touch.clientX - touchStartX
+		const dy = touch.clientY - touchStartY
+
+		if (!touchLocked) {
+			if (Math.abs(dx) > LOCK_DIST || Math.abs(dy) > LOCK_DIST) {
+				touchLocked = true
+				touchHorizontal = Math.abs(dx) > Math.abs(dy)
+			}
+			return
+		}
+
+		if (!touchHorizontal) return
+		if (dx < 0) return // only allow swiping right
+
+		e.preventDefault()
+
+		touchSamples.push({ x: touch.clientX, t: Date.now() })
+		if (touchSamples.length > 5) touchSamples.shift()
+
+		panelX = dx
+	}
+
+	function onPanelTouchEnd() {
+		if (!touchActive) return
+		touchActive = false
+
+		if (!touchHorizontal) {
+			panelX = 0
+			return
+		}
+
+		const progress = panelX / window.innerWidth
+		let velocity = 0
+		if (touchSamples.length >= 2) {
+			const first = touchSamples[0]
+			const last = touchSamples[touchSamples.length - 1]
+			const dt = last.t - first.t
+			if (dt > 0) velocity = Math.abs(last.x - first.x) / dt
+		}
+
+		if (progress > DISMISS_FRAC || velocity > VEL_THRESH) {
+			panelAnimating = true
+			panelX = window.innerWidth
+			setTimeout(() => {
+				goto('/dms')
+			}, 280)
+		} else {
+			panelAnimating = true
+			panelX = 0
+		}
+	}
+
+	function onPanelTouchCancel() {
+		if (!touchActive) return
+		touchActive = false
+		panelAnimating = true
+		panelX = 0
+	}
+
+	// Attach non-passive listeners to the chat panel
+	$effect(() => {
+		const el = chatPanelEl
+		if (!el || !isMobile) return
+		el.addEventListener('touchstart', onPanelTouchStart, { passive: true })
+		el.addEventListener('touchmove', onPanelTouchMove, { passive: false })
+		el.addEventListener('touchend', onPanelTouchEnd, { passive: true })
+		el.addEventListener('touchcancel', onPanelTouchCancel, { passive: true })
+		return () => {
+			el.removeEventListener('touchstart', onPanelTouchStart)
+			el.removeEventListener('touchmove', onPanelTouchMove)
+			el.removeEventListener('touchend', onPanelTouchEnd)
+			el.removeEventListener('touchcancel', onPanelTouchCancel)
+		}
+	})
 
 	/* ── Search & filter state ── */
 	let searchQuery = $state('')
@@ -53,21 +183,22 @@
 	}
 </script>
 
-<!-- DM Sidebar -->
-<div
-	class="flex w-64 flex-shrink-0 flex-col border-r border-l border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)"
->
+<!-- DM Sidebar Content (shared snippet) -->
+{#snippet dmSidebar()}
 	<!-- Header -->
-	<div class="flex items-center justify-between border-b border-(--border-subtle) px-4 py-3">
+	<div class="flex items-center justify-between border-b border-(--border-subtle) px-4 py-3"
+		style={isMobile ? `padding-top: var(--sat, 0px);` : ''}>
 		<h1 class="text-base font-semibold text-(--text-primary)">Messages</h1>
-		<button
-			class="flex h-7 w-7 items-center justify-center rounded text-(--text-muted) transition-colors hover:bg-(--surface-hover) hover:text-(--text-primary)"
-			aria-label="New Message"
-		>
-			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-				<path d="M12 5v14m-7-7h14" />
-			</svg>
-		</button>
+		<div class="flex items-center gap-1">
+			<button
+				class="flex h-7 w-7 items-center justify-center rounded text-(--text-muted) transition-colors hover:bg-(--surface-hover) hover:text-(--text-primary)"
+				aria-label="New Message"
+			>
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path d="M12 5v14m-7-7h14" />
+				</svg>
+			</button>
+		</div>
 	</div>
 
 	<!-- Search -->
@@ -106,7 +237,7 @@
 		{/each}
 	</div>
 	<!-- DM List -->
-	<div class="hide-scrollbar flex-1 overflow-y-auto px-2 py-1">
+	<div class="hide-scrollbar flex-1 overflow-y-auto px-2 py-1" style="touch-action: pan-y;">
 		{#if dms.all === undefined}
 			<!-- Loading skeleton -->
 			{#each { length: 6 } as _}
@@ -186,16 +317,35 @@
 			{/each}
 		{/if}
 	</div>
-</div>
+{/snippet}
 
-{@render children()}
+<!-- MOBILE: DM sidebar always visible, thread slides over as overlay -->
+{#if isMobile}
+	<div class="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
+		<!-- Background: DM sidebar (always visible) -->
+		<div class="absolute inset-0 flex flex-col bg-(--surface-channel-sidebar) text-(--channel-text)"
+			style="padding-bottom: calc(var(--dock-height) + var(--sab, 0px));">
+			{@render dmSidebar()}
+		</div>
 
-<style>
-	.hide-scrollbar {
-		-ms-overflow-style: none;
-		scrollbar-width: none;
-	}
-	.hide-scrollbar::-webkit-scrollbar {
-		display: none;
-	}
-</style>
+		<!-- Foreground: DM thread overlay -->
+		{#if panelVisible}
+			<div
+				bind:this={chatPanelEl}
+				class="fixed inset-0 z-50 flex flex-col"
+				style="transform: translate3d({panelX}px, 0, 0); {panelAnimating ? 'transition: transform 280ms cubic-bezier(0.2, 0.8, 0.4, 1);' : ''} will-change: transform;"
+				ontransitionend={() => { panelAnimating = false }}
+			>
+				{@render children()}
+			</div>
+		{/if}
+	</div>
+{:else}
+	<!-- DESKTOP: inline DM sidebar + children side by side -->
+	<div
+		class="flex w-64 flex-shrink-0 flex-col border-r border-l border-(--border-subtle) bg-(--surface-channel-sidebar) text-(--channel-text)"
+	>
+		{@render dmSidebar()}
+	</div>
+	{@render children()}
+{/if}

@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state'
-	import { dms, DMMessagesState } from '$lib/data'
+	import { dms, DMMessagesState, mobile } from '$lib/data'
 	import { ChatInput, MessageFeed } from '$lib/components'
+	import { goto } from '$app/navigation'
 
 	const threadId = $derived(page.params.thread_id!)
+	const isMobile = $derived(mobile.isMobile)
 
 	// Look up entry from the full DM list (not just unread)
 	const dmEntry = $derived((dms.all ?? []).find((dm) => dm.threadId === threadId))
@@ -21,9 +23,25 @@
 </script>
 
 <!-- DM Thread Content -->
-<div class="flex flex-1 flex-col bg-(--surface-base)">
+<div
+	class="flex flex-1 flex-col bg-(--surface-base)"
+>
 	<!-- Chat Header -->
-	<header class="flex h-14 flex-shrink-0 items-center border-b border-(--border-default) px-6">
+	<header
+		class="flex flex-shrink-0 items-center border-b border-(--border-default) px-4"
+		style="height: {isMobile ? 'calc(var(--mobile-header-height) + var(--sat, 0px))' : '3.5rem'}; padding-top: {isMobile ? 'var(--sat, 0px)' : '0'};"
+	>
+		{#if isMobile}
+			<button
+				class="mr-2 flex h-10 w-10 items-center justify-center rounded-lg text-(--text-muted) transition-colors hover:bg-(--surface-hover)"
+				onclick={() => goto('/dms')}
+				aria-label="Back to DMs"
+			>
+				<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+				</svg>
+			</button>
+		{/if}
 		<div class="flex items-center gap-3">
 			{#if other?.photoURL}
 				<img
@@ -104,7 +122,8 @@
 	</MessageFeed>
 
 	<!-- Message Input -->
-	<footer class="px-4 pb-3">
+	<footer class="px-4 pb-3"
+		style={isMobile ? `padding-bottom: calc(0.75rem + var(--sab, 0px) + var(--chat-keyboard-offset, 0px));` : ''}>
 		<ChatInput
 			placeholder="Message {other?.displayName ?? ''}"
 			onsend={(text) => dms.sendMessage(threadId, text)}

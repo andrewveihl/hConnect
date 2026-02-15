@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte'
+	import { mobile } from '$lib/data'
 
 	interface Props {
 		messages?: any[]
@@ -9,15 +10,10 @@
 
 	let { messages, hero, class: className = '' }: Props = $props()
 
+	const isMobile = $derived(mobile.isMobile)
+
 	const GROUP_THRESHOLD = 7 * 60 * 1000 // 7 minutes
 	const IMAGE_RE = /\.(gif|png|jpe?g|webp|svg)(\?.*)?$/i
-
-	interface ReplyReference {
-		messageId: string
-		authorName: string
-		authorPhoto?: string | null
-		text: string
-	}
 
 	interface Msg {
 		id: string
@@ -26,7 +22,6 @@
 		file?: any
 		type?: string
 		timestamp: Date
-		replyTo?: ReplyReference
 	}
 
 	interface MessageGroup {
@@ -50,15 +45,7 @@
 				url: msg.url,
 				file: msg.file,
 				type: msg.type,
-				timestamp: ts,
-				replyTo: msg.replyTo
-					? {
-							messageId: msg.replyTo.messageId,
-							authorName: msg.replyTo.authorName ?? 'Unknown',
-							authorPhoto: msg.replyTo.authorPhoto ?? null,
-							text: msg.replyTo.text ?? ''
-						}
-					: undefined
+				timestamp: ts
 			}
 
 			const last = groups.at(-1)
@@ -194,68 +181,44 @@
 	}
 </script>
 
-{#snippet replyPreview(reply: ReplyReference)}
-	<div class="reply-reference group/reply mb-0.5 flex items-center gap-2 text-xs">
-		<div class="reply-connector"></div>
-		<div class="reply-content flex min-w-0 flex-1 items-center gap-1.5">
-			{#if reply.authorPhoto}
-				<img class="size-4 shrink-0 rounded-full object-cover" src={reply.authorPhoto} alt={reply.authorName} />
-			{:else}
-				<div class="flex size-4 shrink-0 items-center justify-center rounded-full bg-(--accent)">
-					<span class="text-[8px] font-bold text-(--text-on-accent)">{initial(reply.authorName)}</span>
-				</div>
-			{/if}
-			<span class="shrink-0 cursor-pointer font-medium text-(--text-primary) hover:underline">{reply.authorName}</span>
-			<span class="cursor-pointer truncate text-(--text-muted) group-hover/reply:text-(--text-secondary)">
-				{reply.text || 'Click to see attachment'}
-			</span>
-		</div>
-	</div>
-{/snippet}
-
+<!-- Shared snippet for rendering a single message's content (gif / file / rich text) -->
 {#snippet msgContent(msg: Msg)}
 	{#if msg.type === 'gif' && msg.url}
 		<div class="mt-1">
-			<img src={msg.url} alt="GIF" class="media-embed" loading="lazy" />
+			<img src={msg.url} alt="GIF" class="media-embed rounded-lg" loading="lazy" />
 		</div>
 	{:else if msg.type === 'file' && msg.file}
 		{#if IMAGE_RE.test(msg.file.name ?? '') || msg.file.contentType?.startsWith('image/')}
 			<div class="mt-1">
-				<img src={msg.file.url ?? msg.file.downloadURL} alt={msg.file.name ?? 'Image'} class="media-embed" loading="lazy" />
+				<img src={msg.file.url ?? msg.file.downloadURL} alt={msg.file.name ?? 'Image'} class="media-embed rounded-lg" loading="lazy" />
 			</div>
 		{:else}
 			<div class="mt-1 flex items-center gap-2 rounded-lg bg-(--surface-hover) px-3 py-2">
-				<svg class="size-5 shrink-0 text-(--text-muted)" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-				</svg>
+				<svg class="h-5 w-5 flex-shrink-0 text-(--text-muted)" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
 				<span class="text-sm text-(--accent) hover:underline">{msg.file?.name ?? msg.text ?? 'File'}</span>
 			</div>
 		{/if}
 	{:else}
-		{@const segs = parseText(msg.text)}
-		{#if !isOnlyImage(segs)}
-			<p class="mt-0.5 text-sm leading-relaxed text-(--text-secondary) break-words">
-				{#each segs as seg}
-					{#if seg.type === 'mention'}
-						<span class="mention">{seg.value}</span>
-					{:else if seg.type === 'link'}
-						<a href={seg.value} target="_blank" rel="noopener noreferrer" class="text-(--accent) hover:underline">{seg.value}</a>
-					{:else if seg.type !== 'image'}
-						{seg.value}
-					{/if}
-				{/each}
-			</p>
-		{/if}
-		{#each segs.filter((s) => s.type === 'image') as img}
-			<div class="mt-1">
-				<img src={img.value} alt="" class="media-embed" loading="lazy" />
-			</div>
+		{#each [parseText(msg.text)] as segs}
+			{#if !isOnlyImage(segs)}
+				<p class="mt-0.5 text-sm leading-relaxed text-(--text-secondary) break-words">{#each segs as seg}{#if seg.type === 'mention'}<span class="mention">{seg.value}</span>{:else if seg.type === 'link'}<a href={seg.value} target="_blank" rel="noopener noreferrer" class="text-(--accent) hover:underline">{seg.value}</a>{:else if seg.type === 'image'}{:else}{seg.value}{/if}{/each}</p>
+			{/if}
+			{#each segs.filter((s) => s.type === 'image') as img}
+				<div class="mt-1">
+					<img src={img.value} alt="" class="media-embed rounded-lg" loading="lazy" />
+				</div>
+			{/each}
 		{/each}
 	{/if}
 {/snippet}
 
 <div class="relative flex-1 min-h-0 {className}">
-	<main class="absolute inset-0 overflow-y-scroll" bind:this={scrollContainer} onscroll={updateThumb}>
+	<main
+		class="absolute inset-0 overflow-y-scroll"
+		style="touch-action: pan-y; {isMobile ? `padding-left: var(--sal, 0px); padding-right: var(--sar, 0px);` : ''}"
+		bind:this={scrollContainer}
+		onscroll={updateThumb}
+	>
 		{#if !messages}
 			<div class="flex h-full items-center justify-center text-(--text-muted)">Loading…</div>
 		{:else if messages.length === 0}
@@ -269,25 +232,19 @@
 			<div class="flex flex-col justify-end min-h-full">
 				{#if hero}{@render hero()}{/if}
 				{#each grouped as group, gi}
-					<div class="group/msg mt-4 first:mt-0 px-4 py-0.5 hover:bg-(--surface-hover)/50">
-						<!-- Reply reference for lead message -->
-						{#if group.messages[0].replyTo}
-							<div class="ml-14">
-								{@render replyPreview(group.messages[0].replyTo)}
-							</div>
-						{/if}
+					<div class="group/msg first:mt-0 px-4 py-0.5 hover:bg-(--surface-hover)/50 {isMobile ? 'mt-2' : 'mt-4'}">
 						<!-- Lead message -->
-						<div class="flex items-start gap-4">
-							<div class="mt-0.5 w-10 shrink-0">
+						<div class="flex items-start gap-4 {isMobile ? 'gap-3' : 'gap-4'}">
+							<div class="mt-0.5 flex-shrink-0 {isMobile ? 'w-8' : 'w-10'}">
 								{#if group.authorPhoto}
 									<img
-										class="size-10 cursor-pointer rounded-full object-cover opacity-0 transition-opacity duration-300 hover:opacity-80"
+										class="cursor-pointer rounded-full object-cover opacity-0 transition-opacity duration-300 hover:opacity-80 {isMobile ? 'h-8 w-8' : 'h-10 w-10'}"
 										src={group.authorPhoto}
 										alt={group.authorName}
 										use:fade
 									/>
 								{:else}
-									<div class="flex size-10 cursor-pointer items-center justify-center rounded-full bg-(--accent)">
+									<div class="flex cursor-pointer items-center justify-center rounded-full bg-(--accent) {isMobile ? 'h-8 w-8' : 'h-10 w-10'}">
 										<span class="text-sm font-bold text-(--text-on-accent)">{initial(group.authorName)}</span>
 									</div>
 								{/if}
@@ -303,14 +260,8 @@
 
 						<!-- Continuation messages -->
 						{#each group.messages.slice(1) as msg (msg.id)}
-							<!-- Reply reference for continuation message -->
-							{#if msg.replyTo}
-								<div class="ml-14">
-									{@render replyPreview(msg.replyTo)}
-								</div>
-							{/if}
-							<div class="flex items-start gap-4 py-0.5">
-								<div class="w-10 shrink-0"></div>
+							<div class="flex items-start py-0.5 {isMobile ? 'gap-3' : 'gap-4'}">
+								<div class="flex-shrink-0 {isMobile ? 'w-8' : 'w-10'}"></div>
 								<div class="min-w-0 flex-1">
 									{@render msgContent(msg)}
 								</div>
@@ -354,20 +305,16 @@
 <style>
 	main {
 		scrollbar-width: none;
-		user-select: none;
-		cursor: default;
-	}
-	main :global(*:not(a):not(button):not(.cursor-pointer)) {
-		cursor: default;
 	}
 	main::-webkit-scrollbar {
 		display: none;
 	}
-
 	.scrollbar-track {
 		position: absolute;
-		inset: 0 0 0 auto;
+		top: 0;
+		right: 0;
 		width: 6px;
+		height: 100%;
 		z-index: 10;
 	}
 	.scrollbar-thumb {
@@ -377,52 +324,29 @@
 		border-radius: 3px;
 		background: var(--border-subtle);
 		transition: background 0.15s;
+		cursor: default;
 	}
 	.scrollbar-thumb:hover,
 	.scrollbar-thumb:active {
 		background: var(--scrollbar-thumb);
 	}
-
 	.mention {
 		color: var(--accent);
-		background: rgb(13 158 148 / 0.2);
+		background: rgba(13, 158, 148, 0.2);
 		padding: 0 4px;
 		border-radius: 4px;
 		cursor: pointer;
 		font-weight: 600;
 	}
 	.mention:hover {
-		background: rgb(13 158 148 / 0.35);
+		background: rgba(13, 158, 148, 0.35);
+		color: var(--accent);
 		text-decoration: underline;
 	}
-
 	.media-embed {
 		max-width: 400px;
 		max-height: 300px;
 		object-fit: contain;
 		border-radius: 8px;
-	}
-
-	.reply-reference {
-		position: relative;
-		padding-left: 36px;
-	}
-	.reply-connector {
-		position: absolute;
-		left: 20px;
-		top: 50%;
-		width: 33px;
-		height: 13px;
-		border-left: 2px solid var(--border-subtle);
-		border-top: 2px solid var(--border-subtle);
-		border-top-left-radius: 6px;
-		pointer-events: none;
-	}
-	.reply-content {
-		position: relative;
-		z-index: 1;
-	}
-	.reply-reference:hover .reply-connector {
-		border-color: var(--text-muted);
 	}
 </style>

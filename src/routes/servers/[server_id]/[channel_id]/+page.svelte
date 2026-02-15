@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { ChatInput, MembersPane, MessageFeed } from '$lib/components'
-	import { ChannelsState, MessagesState, MembersState, RolesState } from '$lib/data'
+	import { ChatInput, MembersPane, MessageFeed, MobileChannelHeader } from '$lib/components'
+	import { ChannelsState, MessagesState, MembersState, RolesState, mobile } from '$lib/data'
 	import { page } from '$app/state'
+	import { goto } from '$app/navigation'
 
 	const messages = $derived(new MessagesState(page.params.server_id!, page.params.channel_id!))
 	const channels = $derived(new ChannelsState(page.params.server_id!))
@@ -11,44 +12,64 @@
 	const roles = $derived(new RolesState(page.params.server_id!))
 
 	let showMembers = $state(true)
+	const isMobile = $derived(mobile.isMobile)
+
+	// On mobile, hide members by default (members handled by layout swipe)
+	$effect(() => {
+		if (isMobile) showMembers = false
+	})
 </script>
 
 <!-- Flex row: chat area + optional members pane -->
-<div class="flex flex-1 min-h-0">
+<div
+	class="flex flex-1 min-h-0"
+>
 	<!-- Chat Column -->
 	<div class="flex flex-1 flex-col bg-(--surface-base) min-w-0">
-		<!-- Chat Header -->
-		<header class="flex h-14 flex-shrink-0 items-center justify-between border-b border-(--border-default) px-6">
-			<div class="flex items-center space-x-2">
-				<span class="text-lg font-bold text-(--text-primary)"># {channel?.name}</span>
-				<span class="text-(--text-muted)">
-				</span>
-			</div>
-			<div class="flex items-center space-x-4 text-(--text-muted)">
-				<button
-					class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors {showMembers ? 'bg-(--accent)/20 text-(--accent)' : 'hover:bg-(--surface-hover) hover:text-(--text-primary)'}"
-					onclick={() => (showMembers = !showMembers)}
-					aria-label={showMembers ? 'Hide members' : 'Show members'}
-					title={showMembers ? 'Hide members' : 'Show members'}
-				>
-					<svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-						<path d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
-					</svg>
-				</button>
-			</div>
-		</header>
+		<!-- Mobile Header -->
+		{#if isMobile}
+			<MobileChannelHeader
+				channelName={channel?.name}
+				showBackButton={true}
+				onback={() => goto(`/servers/${page.params.server_id}`)}
+			/>
+		{:else}
+			<!-- Desktop Header -->
+			<header class="flex h-14 flex-shrink-0 items-center justify-between border-b border-(--border-default) px-6">
+				<div class="flex items-center space-x-2">
+					<span class="text-lg font-bold text-(--text-primary)"># {channel?.name}</span>
+					<span class="text-(--text-muted)">
+					</span>
+				</div>
+				<div class="flex items-center space-x-4 text-(--text-muted)">
+					<button
+						class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors {showMembers ? 'bg-(--accent)/20 text-(--accent)' : 'hover:bg-(--surface-hover) hover:text-(--text-primary)'}"
+						onclick={() => (showMembers = !showMembers)}
+						aria-label={showMembers ? 'Hide members' : 'Show members'}
+						title={showMembers ? 'Hide members' : 'Show members'}
+					>
+						<svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+							<path d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+						</svg>
+					</button>
+				</div>
+			</header>
+		{/if}
 
 		<!-- Messages Area -->
 		<MessageFeed messages={messages.current} />
 
 		<!-- Message Input -->
-		<footer class="relative z-10 bg-(--surface-base) px-4 pb-3">
-			<ChatInput placeholder="Message #{channel?.name ?? ''}" onsend={(text) => messages.sendMessage(text)} />
-		</footer>
+		{#if !mobile.hasOverlay}
+			<footer class="relative z-10 bg-(--surface-base) px-4 pb-3"
+				style={isMobile ? `padding-bottom: calc(0.75rem + var(--sab, 0px) + var(--chat-keyboard-offset, 0px));` : ''}>
+				<ChatInput placeholder="Message #{channel?.name ?? ''}" onsend={(text) => messages.sendMessage(text)} />
+			</footer>
+		{/if}
 	</div>
 
-	<!-- Members Pane (closeable) -->
-	{#if showMembers}
+	<!-- Desktop Members Pane -->
+	{#if !isMobile && showMembers}
 		<MembersPane
 			members={members.current}
 			roles={roles.current}

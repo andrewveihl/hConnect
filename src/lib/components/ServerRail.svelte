@@ -11,7 +11,7 @@
 	let railDMs = $derived(dms.channels.filter((dm) => dm.threadId !== activeThreadId))
 </script>
 
-<ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 border-r border-(--border-subtle) bg-(--rail-bg) py-3">
+<ul class="flex w-[72px] shrink-0 flex-col items-center gap-2 border-r border-(--border-subtle) bg-(--rail-bg) py-3" style="padding-top: calc(0.75rem + env(safe-area-inset-top, 0px))">
 	<!-- App logo -->
 	<li class="mb-1">
 		<a

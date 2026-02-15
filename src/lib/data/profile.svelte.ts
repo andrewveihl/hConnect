@@ -14,14 +14,14 @@ class ServersState {
 
 			let unsub_inner: VoidFunction | undefined
 
-			const col = collection(firestore, 'profiles', user?.uid, 'servers')
+			const col = collection(firestore, 'profiles', user.uid, 'servers')
 			const ubsub_outer = onSnapshot(col, (snap) => {
 				unsub_inner?.()
 				unsub_inner = undefined
 
 				const server_ids = snap.docs.map((doc) => doc.id)
 
-				if (server_ids) {
+				if (server_ids.length > 0) {
 					const col = collection(firestore, 'servers')
 					const q = query(col, where('__name__', 'in', server_ids))
 					unsub_inner = onSnapshot(q, (snap) => {

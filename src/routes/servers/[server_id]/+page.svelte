@@ -1,16 +1,5 @@
-<!-- 3. MAIN CONTENT AREA -->
-<div class="flex flex-1 flex-col bg-(--surface-base)">
-	<!-- Chat Header -->
-	<header class="flex h-14 flex-shrink-0 items-center justify-between border-b border-(--border-default) px-6">
-		<div class="flex items-center space-x-2">
-			<span class="text-lg font-bold text-(--text-primary)"></span>
-			<span class="text-(--text-muted)"> </span>
-		</div>
-		<div class="flex items-center space-x-4 text-(--text-muted)">
-			<div class="relative"></div>
-		</div>
-	</header>
-
-	<!-- Messages Area -->
-	<main class="flex-1 space-y-6 overflow-y-auto p-6"></main>
+<!-- Server landing — no channel selected. On mobile, the channel sidebar is visible behind this. -->
+<!-- On desktop, show a placeholder. On mobile this page is never really visible (sidebar is shown). -->
+<div class="flex flex-1 flex-col items-center justify-center bg-(--surface-base)">
+	<p class="hidden md:block text-(--text-muted) text-sm">Select a channel to start chatting</p>
 </div>
